@@ -1,0 +1,491 @@
+//#include <napi/native_api.h>
+//  #include <hilog/log.h>
+//  #include <string>
+//  #include <sstream>
+//  #include <mutex>
+//  #include <cstdlib>
+//
+//  #include "llm/llm.hpp"
+//
+//  #define LOG_TAG "MnnLlm"
+//  #define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+//  #define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+//
+//  using namespace MNN::Transformer;
+//
+//  static std::unique_ptr<Llm> g_llm = nullptr;
+//  static std::mutex g_mutex;
+//  static ChatMessages g_messages;
+//
+//  // ========== 1. 拷贝模型到沙箱 ==========
+//  // copyModel(src: string, dst: string): string
+//  static napi_value CopyModel(napi_env env, napi_callback_info info) {
+//      size_t argc = 2;
+//      napi_value args[2];
+//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+//
+//      char src[1024], dst[1024];
+//      size_t len;
+//      napi_get_value_string_utf8(env, args[0], src, sizeof(src), &len);
+//      napi_get_value_string_utf8(env, args[1], dst, sizeof(dst), &len);
+//
+//      LOGI("CopyModel: %{public}s -> %{public}s", src, dst);
+//
+//      std::string cmd = "cp -r ";
+//      cmd += src;
+//      cmd += " ";
+//      cmd += dst;
+//      int ret = system(cmd.c_str());
+//
+//      LOGI("CopyModel result: %{public}d", ret);
+//
+//      napi_value result;
+//      napi_create_string_utf8(env, ret == 0 ? "ok" : "copy failed", NAPI_AUTO_LENGTH, &result);
+//      return result;
+//  }
+//
+//  // ========== 2. 加载模型 ==========
+//  // loadModel(configPath: string): string
+//  static napi_value LoadModel(napi_env env, napi_callback_info info) {
+//      size_t argc = 1;
+//      napi_value args[1];
+//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+//
+//      char configPath[1024];
+//      size_t len;
+//      napi_get_value_string_utf8(env, args[0], configPath, sizeof(configPath), &len);
+//
+//      LOGI("Loading model from: %{public}s", configPath);
+//
+//      std::lock_guard<std::mutex> lock(g_mutex);
+//      g_llm.reset(Llm::createLLM(configPath));
+//      if (!g_llm) {
+//          LOGE("createLLM failed");
+//          napi_value result;
+//          napi_create_string_utf8(env, "error: create LLM failed", NAPI_AUTO_LENGTH, &result);
+//          return result;
+//      }
+//
+//      // tmp_path 设置为模型所在目录的 tmp 子目录
+//      std::string configStr(configPath);
+//      std::string modelDir = configStr.substr(0, configStr.rfind('/'));
+//      std::string tmpPath = modelDir + "/tmp";
+//      std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
+//      g_llm->set_config(tmpConfig);
+//
+//      bool res = g_llm->load();
+//
+//      napi_value result;
+//      if (res) {
+//          LOGI("Model loaded successfully");
+//          napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
+//      } else {
+//          LOGE("Model load failed");
+//          g_llm.reset();
+//          napi_create_string_utf8(env, "error: load failed", NAPI_AUTO_LENGTH, &result);
+//      }
+//      return result;
+//  }
+//
+//  // ========== 3. 单轮推理 ==========
+//  // generate(prompt: string): string
+//  static napi_value Generate(napi_env env, napi_callback_info info) {
+//      size_t argc = 1;
+//      napi_value args[1];
+//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+//
+//      char prompt[4096];
+//      size_t len;
+//      napi_get_value_string_utf8(env, args[0], prompt, sizeof(prompt), &len);
+//
+//      LOGI("Prompt: %{public}s", prompt);
+//
+//      std::lock_guard<std::mutex> lock(g_mutex);
+//      if (!g_llm) {
+//          napi_value result;
+//          napi_create_string_utf8(env, "error: model not loaded", NAPI_AUTO_LENGTH, &result);
+//          return result;
+//      }
+//
+//      std::ostringstream oss;
+//      g_llm->response(std::string(prompt), &oss);
+//      std::string output = oss.str();
+//
+//      auto context = g_llm->getContext();
+//      float prefill_s = context->prefill_us / 1e6;
+//      float decode_s = context->decode_us / 1e6;
+//      char perf[512];
+//      snprintf(perf, sizeof(perf),
+//          "\n\n--- perf ---\nprompt tokens: %d\ndecode tokens: %d\nprefill: %.2f tok/s\ndecode:%.2f tok/s",
+//          context->prompt_len, context->gen_seq_len,
+//          prefill_s > 0 ? context->prompt_len / prefill_s : 0,
+//          decode_s > 0 ? context->gen_seq_len / decode_s : 0);
+//      output += perf;
+//
+//      LOGI("Response length: %{public}zu", output.size());
+//
+//      napi_value result;
+//      napi_create_string_utf8(env, output.c_str(), output.size(), &result);
+//      return result;
+//  }
+//
+//  // ========== 4. 多轮对话 ==========
+//  // chat(userMessage: string): string
+//  static napi_value Chat(napi_env env, napi_callback_info info) {
+//      size_t argc = 1;
+//      napi_value args[1];
+//      napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+//
+//      char userMsg[4096];
+//      size_t len;
+//      napi_get_value_string_utf8(env, args[0], userMsg, sizeof(userMsg), &len);
+//
+//      std::lock_guard<std::mutex> lock(g_mutex);
+//      if (!g_llm) {
+//          napi_value result;
+//          napi_create_string_utf8(env, "error: model not loaded", NAPI_AUTO_LENGTH, &result);
+//          return result;
+//      }
+//
+//      std::string user_str(userMsg);
+//
+//      if (user_str == "/reset") {
+//          g_llm->reset();
+//          g_messages.clear();
+//          g_messages.emplace_back("system", "You are a helpful assistant.");
+//          napi_value result;
+//          napi_create_string_utf8(env, "reset done", NAPI_AUTO_LENGTH, &result);
+//          return result;
+//      }
+//
+//      if (g_messages.empty()) {
+//          g_messages.emplace_back("system", "You are a helpful assistant.");
+//      }
+//      g_messages.emplace_back("user", user_str);
+//
+//      g_llm->response(g_messages);
+//      auto context = g_llm->getContext();
+//      std::string assistant_str = context->generate_str;
+//      g_messages.emplace_back("assistant", assistant_str);
+//
+//      napi_value result;
+//      napi_create_string_utf8(env, assistant_str.c_str(), assistant_str.size(), &result);
+//      return result;
+//  }
+//
+//  // ========== 5. 重置对话 ==========
+//  // reset(): string
+//  static napi_value Reset(napi_env env, napi_callback_info info) {
+//      std::lock_guard<std::mutex> lock(g_mutex);
+//      if (g_llm) {
+//          g_llm->reset();
+//      }
+//      g_messages.clear();
+//      g_messages.emplace_back("system", "You are a helpful assistant.");
+//
+//      napi_value result;
+//      napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
+//      return result;
+//  }
+//
+//  // ========== N-API 模块注册 ==========
+//  EXTERN_C_START
+//  static napi_value Init(napi_env env, napi_value exports) {
+//      napi_property_descriptor desc[] = {
+//          {"copyModel", nullptr, CopyModel, nullptr, nullptr, nullptr, napi_default, nullptr},
+//          {"loadModel", nullptr, LoadModel, nullptr, nullptr, nullptr, napi_default, nullptr},
+//          {"generate",  nullptr, Generate,  nullptr, nullptr, nullptr, napi_default, nullptr},
+//          {"chat",      nullptr, Chat,      nullptr, nullptr, nullptr, napi_default, nullptr},
+//          {"reset",     nullptr, Reset,     nullptr, nullptr, nullptr, napi_default, nullptr},
+//      };
+//      napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+//      return exports;
+//  }
+//  EXTERN_C_END
+//
+//  static napi_module mnnModule = {
+//      .nm_version = 1,
+//      .nm_flags = 0,
+//      .nm_filename = nullptr,
+//      .nm_register_func = Init,
+//      .nm_modname = "entry",
+//      .nm_priv = nullptr,
+//      .reserved = {0},
+//  };
+//
+//  extern "C" __attribute__((constructor)) void RegisterModule(void) {
+//      napi_module_register(&mnnModule);
+//  }
+
+
+#include <napi/native_api.h>
+#include <hilog/log.h>
+#include <string>
+#include <sstream>
+#include <mutex>
+#include <cstdlib>
+
+#include "llm/llm.hpp"
+
+#define LOG_TAG "MnnLlm"
+#define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+
+using namespace MNN::Transformer;
+
+static std::unique_ptr<Llm> g_llm = nullptr;
+static std::mutex g_mutex;
+static ChatMessages g_messages;
+
+// ======================= 基础工具函数 =======================
+
+struct AsyncData {
+    napi_async_work work;
+    napi_deferred deferred;
+    std::string inputStr;
+    std::string outputStr;
+    bool success;
+};
+
+// ========== 1. 拷贝模型到沙箱 (不耗时太多，可保留同步) ==========
+static napi_value CopyModel(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char src[1024] = {0}, dst[1024] = {0};
+    size_t len;
+    napi_get_value_string_utf8(env, args[0], src, sizeof(src), &len);
+    napi_get_value_string_utf8(env, args[1], dst, sizeof(dst), &len);
+
+    std::string cmd = "cp -r ";
+    cmd += src;
+    cmd += " ";
+    cmd += dst;
+    int ret = system(cmd.c_str());
+
+    napi_value result;
+    napi_create_string_utf8(env, ret == 0 ? "ok" : "copy failed", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
+// ========== 2. 异步加载模型 ==========
+static void LoadModelExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    LOGI("Loading model from: %{public}s", asyncData->inputStr.c_str());
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_llm.reset(Llm::createLLM(asyncData->inputStr));
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: create LLM failed";
+        return;
+    }
+
+    std::string modelDir = asyncData->inputStr.substr(0, asyncData->inputStr.rfind('/'));
+    std::string tmpPath = modelDir + "/tmp";
+    std::string tmpConfig = "{\"tmp_path\":\"" + tmpPath + "\"}";
+    g_llm->set_config(tmpConfig);
+
+    bool res = g_llm->load();
+    if (res) {
+        asyncData->success = true;
+        asyncData->outputStr = "ok";
+    } else {
+        g_llm.reset();
+        asyncData->success = false;
+        asyncData->outputStr = "error: load failed";
+    }
+}
+
+static void AsyncComplete(napi_env env, napi_status status, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    napi_value result;
+    napi_create_string_utf8(env, asyncData->outputStr.c_str(), asyncData->outputStr.size(), &result);
+
+    if (asyncData->success) {
+        napi_resolve_deferred(env, asyncData->deferred, result);
+    } else {
+        napi_reject_deferred(env, asyncData->deferred, result);
+    }
+
+    napi_delete_async_work(env, asyncData->work);
+    delete asyncData;
+}
+
+static napi_value LoadModelAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char configPath[1024] = {0};
+    size_t len;
+    napi_get_value_string_utf8(env, args[0], configPath, sizeof(configPath), &len);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = configPath;
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "LoadModelAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, LoadModelExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 3. 异步单轮推理 ==========
+static void GenerateExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    std::ostringstream oss;
+    g_llm->response(asyncData->inputStr, &oss);
+    asyncData->outputStr = oss.str();
+
+    auto context = g_llm->getContext();
+    if(context) {
+        float prefill_s = context->prefill_us / 1e6;
+        float decode_s = context->decode_us / 1e6;
+        char perf[512];
+        snprintf(perf, sizeof(perf),
+            "\n\n--- perf ---\nprompt tokens: %d\ndecode tokens: %d\nprefill: %.2f tok/s\ndecode:%.2f tok/s",
+            context->prompt_len, context->gen_seq_len,
+            prefill_s > 0 ? context->prompt_len / prefill_s : 0,
+            decode_s > 0 ? context->gen_seq_len / decode_s : 0);
+        asyncData->outputStr += perf;
+    }
+    asyncData->success = true;
+}
+
+static napi_value GenerateAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char prompt[4096] = {0};
+    size_t len;
+    napi_get_value_string_utf8(env, args[0], prompt, sizeof(prompt), &len);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = prompt;
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "GenerateAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, GenerateExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 4. 异步多轮对话 ==========
+static void ChatExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    if (asyncData->inputStr == "/reset") {
+        g_llm->reset();
+        g_messages.clear();
+        g_messages.emplace_back("system", "You are a helpful assistant.");
+        asyncData->success = true;
+        asyncData->outputStr = "reset done";
+        return;
+    }
+
+    if (g_messages.empty()) {
+        g_messages.emplace_back("system", "You are a helpful assistant.");
+    }
+    g_messages.emplace_back("user", asyncData->inputStr);
+
+    g_llm->response(g_messages);
+    auto context = g_llm->getContext();
+    if (context) {
+        std::string assistant_str = context->generate_str;
+        g_messages.emplace_back("assistant", assistant_str);
+        asyncData->outputStr = assistant_str;
+    }
+    asyncData->success = true;
+}
+
+static napi_value ChatAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char userMsg[4096] = {0};
+    size_t len;
+    napi_get_value_string_utf8(env, args[0], userMsg, sizeof(userMsg), &len);
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = userMsg;
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "ChatAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, ChatExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+// ========== 5. 重置对话 ==========
+static napi_value Reset(napi_env env, napi_callback_info info) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_llm) {
+        g_llm->reset();
+    }
+    g_messages.clear();
+    g_messages.emplace_back("system", "You are a helpful assistant.");
+
+    napi_value result;
+    napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
+// ========== N-API 模块注册 ==========
+EXTERN_C_START
+static napi_value Init(napi_env env, napi_value exports) {
+    napi_property_descriptor desc[] = {
+        {"copyModel", nullptr, CopyModel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"loadModel", nullptr, LoadModelAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"generate",  nullptr, GenerateAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"chat",      nullptr, ChatAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"reset",     nullptr, Reset,     nullptr, nullptr, nullptr, napi_default, nullptr},
+    };
+    napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    return exports;
+}
+EXTERN_C_END
+
+static napi_module mnnModule = {
+    .nm_version = 1,
+    .nm_flags = 0,
+    .nm_filename = nullptr,
+    .nm_register_func = Init,
+    .nm_modname = "entry",
+    .nm_priv = nullptr,
+    .reserved = {0},
+};
+
+extern "C" __attribute__((constructor)) void RegisterModule(void) {
+    napi_module_register(&mnnModule);
+}

@@ -1,0 +1,57 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B9D555B5B5D00B7C17143AD101A4CCD3F37FD5D7074498E5DF991A0E88442E8E2505E033BA95A8C",
+          "profile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p12",
+          "storePassword": "0000001B68B8C4BEF57D912E063EA82025EC75211C096C21649533741440C1702345DD0FE9052EDC167248"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.0.2(22)",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

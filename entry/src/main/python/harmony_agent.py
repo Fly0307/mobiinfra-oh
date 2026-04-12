@@ -7,6 +7,7 @@ import subprocess
 from PIL import Image
 import io
 import re
+import sys
 
 PORT = 9126
 HOST = '127.0.0.1'
@@ -93,6 +94,11 @@ def step(goal):
         "height": h
     })
     print(f">> MNN VLM 返回:\n{res}")
+    
+    # 等待一会，确保 print 输出完全并且让用户能看清结果
+    
+    sys.stdout.flush()
+    time.sleep(0.1)
     
     action = execute_action(res)
     return action

@@ -320,6 +320,7 @@ struct Index {
   @State downloading: boolean = false;
   @State modelLoaded: boolean = false;
   @State connected: boolean = false;
+  @State autoConfirm: boolean = false;
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -667,6 +668,9 @@ struct Index {
             this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
               this.output = msg;
               }, async (response: string) => {
+                 if (this.autoConfirm) {
+                   return true;
+                 }
                  return new Promise<boolean>((resolve) => {
                      promptAction.showDialog({
                          title: '大模型返回确认',
@@ -683,6 +687,15 @@ struct Index {
                   });
                 }); // close llmServer.start
           }).margin(5).backgroundColor(Color.Gray)
+
+        Row() {
+          Checkbox({ name: 'autoConfirm', group: 'settings' })
+            .select(this.autoConfirm)
+            .onChange((value: boolean) => {
+              this.autoConfirm = value;
+            })
+          Text('自动同意').fontSize(14)
+        }.margin({ left: 10 })
       }.margin(5)
     }.width('100%').height('100%').padding(10)
   }

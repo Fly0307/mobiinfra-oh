@@ -50,7 +50,10 @@ export class LlmServer {
             } else if (reqType === "clear") {
                // PC 端要求清除任务（达到步数或手动终止）
                this.currentTask = "";
-               onLog(`>> [任务被PC端终止] 当前任务已清空。`);
+               if (mnnllm && typeof mnnllm['reset'] === 'function') {
+                 mnnllm['reset']();
+               }
+               onLog(`>> [任务被PC端终止] 当前任务已清空，并已重置大模型上下文。`);
                client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
                return;
             } else if (reqType === "action") {

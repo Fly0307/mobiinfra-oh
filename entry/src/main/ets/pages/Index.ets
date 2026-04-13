@@ -321,6 +321,7 @@ struct Index {
   @State modelLoaded: boolean = false;
   @State connected: boolean = false;
   @State autoConfirm: boolean = false;
+  @State debugImagePath: string = '';
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -348,14 +349,48 @@ struct Index {
       let files = fs.listFileSync(this.filesDir);
       let count = 0;
       for (let f of files) {
-        if (f.startsWith('agent_step_') || f.startsWith('agent_cur_screen')) {
-          fs.unlinkSync(`${this.filesDir}/${f}`);
+        if (f.startsWith('agent_') || f.toLowerCase().endsWith('.jpg') || f.toLowerCase().endsWith('.jpeg')) {
+          try { fs.unlinkSync(`${this.filesDir}/${f}`); } catch(e) {}
           count++;
         }
       }
       this.output = `清理成功！删除了 ${count} 张缓存截图。`;
+      this.debugImagePath = '';
     } catch(e) {
       this.output = `清理截图失败: ${e}`;
+    }
+  }
+
+  listScreenshots() {
+    try {
+      let files = fs.listFileSync(this.filesDir);
+      let screenshots = files.filter(f => f.toLowerCase().endsWith('.jpg') || f.toLowerCase().endsWith('.jpeg') || f.startsWith('agent_'));
+      if (screenshots.length > 0) {
+        this.output = `====== 沙箱内截图文件列表 ======\n${screenshots.join('\n')}`;
+      } else {
+        this.output = `沙箱内当前没有截图文件。`;
+      }
+    } catch (e) {
+      this.output = `列出截图失败: ${e}`;
+    }
+  }
+
+  deleteModelFiles() {
+    try {
+      if (!fs.accessSync(this.modelDir)) {
+        this.output = `模型文件夹不存在，无需删除。`;
+        return;
+      }
+      let files = fs.listFileSync(this.modelDir);
+      let count = 0;
+      for (let f of files) {
+        fs.unlinkSync(`${this.modelDir}/${f}`);
+        count++;
+      }
+      this.modelLoaded = false;
+      this.output = `成功删除了 ${count} 个模型文件，\n现在可以重新下载了。`;
+    } catch (e) {
+      this.output = `删除模型文件失败: ${e}`;
     }
   }
 
@@ -567,7 +602,17 @@ struct Index {
       Scroll() {
         Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
       }
-      .height('30%').width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
+      .height('20%').width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
+
+      if (this.debugImagePath !== '') {
+        Row() {
+          Text('Debug 截图预览:').fontSize(12).fontColor(Color.Gray)
+          Image(this.debugImagePath)
+            .width(100).height(150).objectFit(ImageFit.Contain).margin({left: 10})
+            .backgroundColor(Color.Black)
+            .onClick(() => { this.debugImagePath = ''; })
+        }.margin(5)
+      }
 
       Row() {
         Button('检查连接')
@@ -576,6 +621,9 @@ struct Index {
         Button('下载全部')
           .onClick(() => { this.downloadAll(); })
           .enabled(!this.downloading && this.connected).margin(5)
+        Button('删除模型')
+          .onClick(() => { this.deleteModelFiles(); })
+          .enabled(!this.downloading).margin(5)
         Button('加载模型')
           .onClick(async () => {
             let cfg = this.modelDir + '/config.json';
@@ -667,10 +715,19 @@ struct Index {
             }
             this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
               this.output = msg;
-              }, async (response: string) => {
+              
+              // 自动检测日志中的 <img> 标签，若包含路径且有 jpg，则提取给 debugImagePath
+              let match = msg.match(/<img>(.*?)<hw>/);
+              if (match && match[1]) {
+                // ArkTS 中加载沙箱沙盘文件可以直接使用 file:// 路径
+                this.debugImagePath = 'file://' + match[1];
+              }
+
+            }, async (response: string) => {
                  if (this.autoConfirm) {
                    return true;
                  }
+                 // If backgrounded, promptAction might not be allowed to show. In future can check foreground state.
                  return new Promise<boolean>((resolve) => {
                      promptAction.showDialog({
                          title: '大模型返回确认',
@@ -696,6 +753,18 @@ struct Index {
             })
           Text('自动同意').fontSize(14)
         }.margin({ left: 10 })
+      }.margin(5)
+      
+      Row() {
+        Button('列出沙箱图片名称')
+          .onClick(() => {
+            this.listScreenshots();
+          }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
+          
+        Button('清理截图')
+          .onClick(() => {
+            this.clearScreenshots();
+          }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
       }.margin(5)
     }.width('100%').height('100%').padding(10)
   }

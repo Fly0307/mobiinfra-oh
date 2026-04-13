@@ -1,6 +1,8 @@
 import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { wantAgent } from '@kit.AbilityKit';
 
 export class LlmServer {
   private server: socket.TCPSocketServer | null = null;
@@ -60,16 +62,29 @@ export class LlmServer {
               // PC 端发来截图，要求推理
               let prompt = req['prompt'] as string;
               if (req['image_b64']) {
-                let imgPath = filesDir + '/agent_snapshot.jpg';
+                // 先清理之前的缓存截图，避免占满存储
+                try {
+                  let fList = fs.listFileSync(filesDir);
+                  for (let f of fList) {
+                    if (f.startsWith('agent_snapshot_')) {
+                      fs.unlinkSync(filesDir + '/' + f);
+                    }
+                  }
+                } catch(e) {}
+                
+                // 生成带有时间戳的文件名，防止 C++ 模型底层因路径相同而缓存不刷新图片
+                let ts = new Date().getTime()
+                let imgPath = filesDir + `/agent_snapshot_${ts}.jpg`;
                 let base64Helper = new util.Base64Helper();
                 let imgBuffer = base64Helper.decodeSync(req['image_b64'] as string);
+                
                 let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
                 fs.writeSync(file.fd, imgBuffer.buffer);
                 fs.closeSync(file);
                 
                 let w = req['width'];
                 let h = req['height'];
-                onLog(`>> [Debug] req['width']: ${w}, req['height']: ${h}`);
+                onLog(`>> [Debug] req['width']: ${w}, req['height']: ${h}, imgPath: ${imgPath}`);
                 prompt = `<img>${imgPath}<hw>${h},${w}</hw></img>\n` + prompt;
               }
               

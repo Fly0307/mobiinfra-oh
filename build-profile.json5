@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.cer",
+          "certpath": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_MyYcV7jwZ4s-PSPcy4f9rH5ix91qpA1_W3y9Ts4EaRE=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B9D555B5B5D00B7C17143AD101A4CCD3F37FD5D7074498E5DF991A0E88442E8E2505E033BA95A8C",
-          "profile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p7b",
+          "keyPassword": "0000001B0562B5DD66D1AD3801DAC831B549109F2D69213DFE64DAE0AF11CE9F32F3CF884B414536EAB247",
+          "profile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_MyYcV7jwZ4s-PSPcy4f9rH5ix91qpA1_W3y9Ts4EaRE=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p12",
-          "storePassword": "0000001B68B8C4BEF57D912E063EA82025EC75211C096C21649533741440C1702345DD0FE9052EDC167248"
+          "storeFile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_MyYcV7jwZ4s-PSPcy4f9rH5ix91qpA1_W3y9Ts4EaRE=.p12",
+          "storePassword": "0000001BCF411CC1A7777A6681C516A9A41BDAC3D7E9E4BBB3097BF6AD4DEE9672A36BF7339FF723AF9A25"
         }
       }
     ],

@@ -305,8 +305,6 @@ import mnnllm from 'libentry.so';
 import { LlmServer } from '../utils/LlmServer';
 import { promptAction } from '@kit.ArkUI';
 
-const SERVER: string = 'http://166.111.53.96:9123';
-
 interface ServerFile {
   name: string;
   size: number;
@@ -325,6 +323,9 @@ struct Index {
   @State debugImagePath: string = '';
   @State isModelV2: boolean = false;
   @State threadNumInput: string = '4';
+  @State serverIp: string = 'http://166.111.53.96:9123';
+  @State hdcServerIp: string = 'http://166.111.53.96:9124';
+  @State wirelessIp: string = '101.5.155.98:35729';
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -462,13 +463,40 @@ struct Index {
     }
   }
 
+  async testAndConnectHdc() {
+    this.output = `正在请求远端服务执行 HDC 连接测试: ${this.wirelessIp}...`;
+    let httpReq = http.createHttp();
+    try {
+      let resp = await httpReq.request(`${this.hdcServerIp}/api/run_cmd`, {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: JSON.stringify({
+          cmd: `hdc list targets | grep -q ${this.wirelessIp} || (hdc tconn ${this.wirelessIp})`
+        }),
+        connectTimeout: 5000,
+        readTimeout: 10000,
+        expectDataType: http.HttpDataType.STRING,
+      });
+      if (resp.responseCode === 200) {
+        this.output = `远端连接测试请求成功!\n${resp.result}`;
+      } else {
+        this.output = `请求失败: HTTP ${resp.responseCode}`;
+      }
+    } catch(err) {
+      let e = err as BusinessError;
+      this.output = `HDC 请求出错: ${e.message}\n请确保远端服务端点(${this.hdcServerIp}/api/run_cmd) 已运行。`;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
   // ========== Step 1: Check connection, list files ==========
   async checkServer() {
-    this.output = `正在连接 ${SERVER} ...`;
+    this.output = `正在连接 ${this.serverIp} ...`;
     // 每一个httpRequest对应一个HTTP请求任务，不可复用
     let httpReq = http.createHttp();
     try {
-      let resp = await httpReq.request(`${SERVER}/api/files`, {
+      let resp = await httpReq.request(`${this.serverIp}/api/files`, {
         method: http.RequestMethod.GET,
         connectTimeout: 5000,
         readTimeout: 10000,
@@ -508,7 +536,7 @@ struct Index {
   // ========== Step 2: Stream-download one file ==========
   private downloadOneFile(file: ServerFile, index: number, fileCount: number,
     completedBytes: number): Promise<number> {
-    const url = `${SERVER}/${file.name}`;
+    const url = `${this.serverIp}/${file.name}`;
     const savePath = `${this.modelDir}/${file.name}`;
 
     // Skip if exists with correct size
@@ -664,204 +692,225 @@ struct Index {
 
   // ========== UI ==========
   build() {
-    Column() {
-      Text('MNN LLM Chat').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
+    Tabs({ barPosition: BarPosition.End }) {
+      TabContent() {
+        Scroll() {
+          Column() {
+            Text('MobiInfer LLM Chat').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
 
-      Scroll() {
-        Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
-      }
-      .height('20%').width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
-
-      if (this.debugImagePath !== '') {
-        Row() {
-          Text('Debug 截图预览:').fontSize(12).fontColor(Color.Gray)
-          Image(this.debugImagePath)
-            .width(100).height(150).objectFit(ImageFit.Contain).margin({left: 10})
-            .backgroundColor(Color.Black)
-            .onClick(() => { this.debugImagePath = ''; })
-        }.margin(5)
-      }
-
-      Row() {
-        Checkbox({ name: 'modelV2', group: 'modelVersion' })
-          .select(this.isModelV2)
-          .onChange((value: boolean) => {
-            this.isModelV2 = value;
-            this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
-            this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
-            this.modelLoaded = false;
-          })
-        Text('使用 modelv2 文件夹隔离模型').fontSize(14).fontColor(Color.Gray)
-      }.margin(2)
-
-      Row() {
-        Text('线程数:').fontSize(14).fontColor(Color.Gray)
-        TextInput({ text: this.threadNumInput })
-          .type(InputType.Number)
-          .width(50)
-          .height(30)
-          .margin({left: 5, right: 5})
-          .onChange((val: string) => { this.threadNumInput = val; })
-        Button('修改Config')
-          .onClick(() => { this.updateConfigThreadNum(); })
-          .height(30)
-        Button('查看Config')
-          .onClick(() => { this.showConfigJson(); })
-          .height(30).margin({left: 5})
-      }.margin(2)
-
-      Row() {
-        Button('检查连接')
-          .onClick(() => { this.checkServer(); })
-          .enabled(!this.downloading).margin(5)
-        Button('下载全部')
-          .onClick(() => { this.downloadAll(); })
-          .enabled(!this.downloading && this.connected).margin(5)
-        Button('删除模型')
-          .onClick(() => { this.deleteModelFiles(); })
-          .enabled(!this.downloading).margin(5)
-        Button('加载模型')
-          .onClick(async () => {
-            let cfg = this.modelDir + '/config.json';
-            this.output = '加载中，请稍候...';
-            try {
-              // 变为异步调用，界面不再卡死
-              this.output = await mnnllm.loadModel(cfg);
-              // 修复 Bug：C++ 侧返回的是 "ok"，不是 "success"
-              if (this.output === 'ok') {
-                this.modelLoaded = true;
-              }
-            } catch(err) {
-              this.output = '加载失败: ' + err;
+            Scroll() {
+              Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
             }
-          })
-          .enabled(!this.downloading).margin(5)
-      }.margin(5)
+            .constraintSize({ minHeight: 100, maxHeight: 200 })
+            .width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
 
-      Scroll() {
-        Text(this.chatHistory).fontSize(14).width('100%').padding(10)
-      }
-      .height('25%').width('95%').backgroundColor('#fafafa').borderRadius(8).margin(5)
-
-      Row() {
-        TextInput({ placeholder: '输入消息...', text: this.userInput })
-          .onChange((val: string) => { this.userInput = val; })
-          .layoutWeight(1).margin(5)
-        Button('发送')
-          .onClick(async () => {
-            if (!this.modelLoaded || this.userInput.length === 0) return;
-            let msg = this.userInput;
-            this.userInput = '';
-            this.chatHistory += `\nUser: ${msg}\nAssistant:思考中...`;
-
-            try {
-              // 异步请求对话
-              let reply = await mnnllm.chat(msg);
-              // 清除掉 "思考中..." 替换为真实回复
-              this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: ${reply}\n`);
-            } catch(err) {
-              this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: [错误] ${err}\n`);
+            if (this.debugImagePath !== '') {
+              Row() {
+                Text('Debug 截图预览:').fontSize(12).fontColor(Color.Gray)
+                Image(this.debugImagePath)
+                  .width(100).height(150).objectFit(ImageFit.Contain).margin({left: 10})
+                  .backgroundColor(Color.Black)
+                  .onClick(() => { this.debugImagePath = ''; })
+              }.margin(5).width('95%')
             }
-          }).margin(5)
-      }.width('95%')
 
-      Row() {
-        Button('单轮推理')
-          .onClick(async () => {
-            if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
-            this.output = '推理中...';
-            try {
-              this.output = await mnnllm.generate('你好');
-            } catch(err) {
-              this.output = '推理错误: ' + err;
+            Scroll() {
+              Text(this.chatHistory).fontSize(14).width('100%').padding(10)
             }
-          }).margin(5)
-        Button('重置')
-          .onClick(() => {
-            this.output = mnnllm.reset();
-            this.chatHistory = '';
-          }).margin(5)
-      }.margin(5)
+            .constraintSize({ minHeight: 150, maxHeight: 300 })
+            .width('95%').backgroundColor('#fafafa').borderRadius(8).margin(5)
 
-      Row() {
-        Button('开始智能体执行 (输入框为任务)')
-          .onClick(async () => {
-            if (!this.modelLoaded) {
-              this.output = "请先加载模型后再运行智能体！";
-              return;
+            Row() {
+              TextInput({ placeholder: '输入消息...', text: this.userInput })
+                .onChange((val: string) => { this.userInput = val; })
+                .layoutWeight(1).margin(5)
+              Button('发送')
+                .onClick(async () => {
+                  if (!this.modelLoaded || this.userInput.length === 0) return;
+                  let msg = this.userInput;
+                  this.userInput = '';
+                  this.chatHistory += `\nUser: ${msg}\nAssistant:思考中...`;
+
+                  try {
+                    let reply = await mnnllm.chat(msg);
+                    this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: ${reply}\n`);
+                  } catch(err) {
+                    this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: [错误] ${err}\n`);
+                  }
+                }).margin(5)
+            }.width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              Button('加载模型')
+                .onClick(async () => {
+                  let cfg = this.modelDir + '/config.json';
+                  this.output = '加载中，请稍候...';
+                  try {
+                    this.output = await mnnllm.loadModel(cfg);
+                    if (this.output === 'ok') {
+                      this.modelLoaded = true;
+                    }
+                  } catch(err) {
+                    this.output = '加载失败: ' + err;
+                  }
+                })
+                .enabled(!this.downloading).margin(5)
+                
+              Button('单轮推理')
+                .onClick(async () => {
+                  if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
+                  this.output = '推理中...';
+                  try {
+                    this.output = await mnnllm.generate('你好');
+                  } catch(err) {
+                    this.output = '推理错误: ' + err;
+                  }
+                }).margin(5)
+                
+              Button('重置')
+                .onClick(() => {
+                  this.output = mnnllm.reset();
+                  this.chatHistory = '';
+                }).margin(5)
+            }.width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              Button('开始智能体执行 (输入框为任务)')
+                .onClick(async () => {
+                  if (!this.modelLoaded) {
+                    this.output = "请先加载模型后再运行智能体！";
+                    return;
+                  }
+                  if (this.userInput.length === 0) {
+                    this.output = "请在上方文本框输入任务目标，比如: '去淘宝买手机'";
+                    return;
+                  }
+                  this.llmServer.currentTask = this.userInput;
+                  this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
+                }).margin(5).backgroundColor(Color.Orange)
+            }.width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start, alignItems: ItemAlign.Center }) {
+              Button('启动 PC 控制后端(HDC)')
+                .onClick(() => {
+                  if (!this.modelLoaded) {
+                    this.output = "请先加载模型！";
+                    return;
+                  }
+                  this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
+                    this.output = msg;
+                    let match = msg.match(/<img>(.*?)<hw>/);
+                    if (match && match[1]) {
+                      this.debugImagePath = 'file://' + match[1];
+                    }
+                  }, async (response: string) => {
+                       if (this.autoConfirm) {
+                         return true;
+                       }
+                       return new Promise<boolean>((resolve) => {
+                           promptAction.showDialog({
+                               title: '大模型返回确认',
+                               message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+                               buttons: [
+                                   { text: '拒绝', color: '#ff0000' },
+                                   { text: '同意', color: '#00cc00' }
+                               ]
+                           }).then((data) => {
+                               resolve(data.index === 1);
+                           }).catch(() => {
+                               resolve(false);
+                           });
+                        });
+                      }); 
+                }).margin(5).backgroundColor(Color.Gray)
+
+              Row() {
+                Checkbox({ name: 'autoConfirm', group: 'settings' })
+                  .select(this.autoConfirm)
+                  .onChange((value: boolean) => {
+                    this.autoConfirm = value;
+                  })
+                Text('自动同意').fontSize(14)
+              }.margin({ left: 10 })
+            }.width('95%')
+
+            Blank().height(30)
+          }.width('100%')
+        }.width('100%').height('100%')
+      }.tabBar('首页')
+
+      TabContent() {
+        Scroll() {
+          Column() {
+            Text('配置管理').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
+
+            Scroll() {
+              Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
             }
-            if (this.userInput.length === 0) {
-              this.output = "请在上方文本框输入任务目标，比如: '去淘宝买手机'";
-              return;
-            }
-            
-            // 仅仅在这里设定 Task，后续的事情由 PC python 轮询接管
-            this.llmServer.currentTask = this.userInput;
-            this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
+            .constraintSize({ minHeight: 100, maxHeight: 200 })
+            .width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
 
-          }).margin(5).backgroundColor(Color.Orange)
-      }.margin(5)
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Checkbox({ name: 'modelV2', group: 'modelVersion' })
+                .select(this.isModelV2)
+                .onChange((value: boolean) => {
+                  this.isModelV2 = value;
+                  this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
+                  this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
+                  this.modelLoaded = false;
+                })
+              Text('使用 modelv2 文件夹隔离模型').fontSize(14).fontColor(Color.Gray)
+            }.margin(5).width('95%')
 
-      Row() {
-        Button('启动 PC 控制后端(HDC)')
-          .onClick(() => {
-            if (!this.modelLoaded) {
-              this.output = "请先加载模型！";
-              return;
-            }
-            this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
-              this.output = msg;
-              
-              // 自动检测日志中的 <img> 标签，若包含路径且有 jpg，则提取给 debugImagePath
-              let match = msg.match(/<img>(.*?)<hw>/);
-              if (match && match[1]) {
-                // ArkTS 中加载沙箱沙盘文件可以直接使用 file:// 路径
-                this.debugImagePath = 'file://' + match[1];
-              }
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Text('模型下载 IP:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
+              TextInput({ text: this.serverIp })
+                .layoutWeight(1).height(30)
+                .onChange((val: string) => { this.serverIp = val; })
+            }.margin(5).width('95%')
 
-            }, async (response: string) => {
-                 if (this.autoConfirm) {
-                   return true;
-                 }
-                 // If backgrounded, promptAction might not be allowed to show. In future can check foreground state.
-                 return new Promise<boolean>((resolve) => {
-                     promptAction.showDialog({
-                         title: '大模型返回确认',
-                         message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-                         buttons: [
-                             { text: '拒绝', color: '#ff0000' },
-                             { text: '同意', color: '#00cc00' }
-                         ]
-                     }).then((data) => {
-                         resolve(data.index === 1);
-                     }).catch(() => {
-                         resolve(false);
-                     });
-                  });
-                }); // close llmServer.start
-          }).margin(5).backgroundColor(Color.Gray)
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Text('HDC远控 IP:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
+              TextInput({ text: this.hdcServerIp })
+                .layoutWeight(1).height(30)
+                .onChange((val: string) => { this.hdcServerIp = val; })
+            }.margin(5).width('95%')
 
-        Row() {
-          Checkbox({ name: 'autoConfirm', group: 'settings' })
-            .select(this.autoConfirm)
-            .onChange((value: boolean) => {
-              this.autoConfirm = value;
-            })
-          Text('自动同意').fontSize(14)
-        }.margin({ left: 10 })
-      }.margin(5)
-      
-      Row() {
-        Button('列出沙箱图片名称')
-          .onClick(() => {
-            this.listScreenshots();
-          }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
-          
-        Button('清理截图')
-          .onClick(() => {
-            this.clearScreenshots();
-          }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
-      }.margin(5)
-    }.width('100%').height('100%').padding(10)
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Text('无线调试 IP:Port:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
+              TextInput({ text: this.wirelessIp })
+                .layoutWeight(1).height(30)
+                .onChange((val: string) => { this.wirelessIp = val; })
+            }.margin(5).width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Button('测试远端HDC连接').onClick(() => { this.testAndConnectHdc(); }).height(30).margin(2).backgroundColor(Color.Orange)
+            }.margin(5).width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              Text('线程数:').fontSize(14).fontColor(Color.Gray)
+              TextInput({ text: this.threadNumInput })
+                .type(InputType.Number).width(50).height(30).margin({left: 5, right: 5})
+                .onChange((val: string) => { this.threadNumInput = val; })
+              Button('修改Config').onClick(() => { this.updateConfigThreadNum(); }).height(30).margin(2)
+              Button('查看Config').onClick(() => { this.showConfigJson(); }).height(30).margin(2)
+            }.margin(5).width('95%')
+
+            Flex({ wrap: FlexWrap.Wrap }) {
+              Button('检查连接').onClick(() => { this.checkServer(); }).enabled(!this.downloading).margin(5)
+              Button('下载全部').onClick(() => { this.downloadAll(); }).enabled(!this.downloading && this.connected).margin(5)
+              Button('删除模型').onClick(() => { this.deleteModelFiles(); }).enabled(!this.downloading).margin(5)
+            }.width('95%').margin(5)
+
+            Flex({ wrap: FlexWrap.Wrap }) {
+              Button('列出沙箱图片名称').onClick(() => { this.listScreenshots(); }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
+              Button('清理截图').onClick(() => { this.clearScreenshots(); }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
+            }.width('95%').margin(5)
+
+            Blank().height(30)
+          }.width('100%')
+        }.width('100%').height('100%')
+      }.tabBar('配置页')
+    }.width('100%').height('100%')
   }
 }

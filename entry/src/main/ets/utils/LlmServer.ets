@@ -58,6 +58,12 @@ export class LlmServer {
                onLog(`>> [任务被PC端终止] 当前任务已清空，并已重置大模型上下文。`);
                client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
                return;
+            } else if (reqType === "error") {
+               this.currentTask = "";
+               let errMsg = req['message'] as string || "未知错误";
+               onLog(`>> [PC端执行异常] ${errMsg}`);
+               client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
+               return;
             } else if (reqType === "action") {
               // PC 端发来截图，要求推理
               let prompt = req['prompt'] as string;

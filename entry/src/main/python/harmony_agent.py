@@ -158,7 +158,9 @@ def send_request(req):
     try:
         s.connect((HOST, PORT))
     except Exception as e:
-        print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作")
+        # 当轮询（poll）未连上时保持静默，只有其他核心请求断开时才打印错误，防止刷屏。
+        if req.get("type") != "poll":
+            print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
         raise e
         
     s.sendall(payload.encode('utf-8'))
@@ -446,7 +448,7 @@ def run_planner(task):
         template = load_prompt("planner.md")
         
     # 组装纯文本 Prompt (替换可能存在的占位符，或者直接拼接)
-    prompt = template.replace("{task}", task).replace("<task>", task)
+    prompt = template.replace("{task_description}", task).replace("<task_description>", task)
     if task not in prompt:
         prompt += f"\n\n用户任务: {task}"
         
@@ -553,6 +555,8 @@ def run_task_in_app(task):
 # ===================== Main Loop =====================
 if __name__ == "__main__":
     print("初始化 HDC 端口转发...")
+    # 由于该脚本可能被多次重启或前置 HDC 挂载占用，先强制清理端口再映射，防止冲突
+    os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
     os.system(f"hdc fport tcp:{PORT} tcp:{PORT}")
     
     print(">> 监听模式已启动。等待手机 APP 端派发任务...")
@@ -560,40 +564,52 @@ if __name__ == "__main__":
     active_task = ""
     
     while True:
-        task = poll_task()
-        if not task:
-            # 清理无任务时的状态
-            if active_task:
-                print(">> 任务已被重置或结束。")
+        try:
+            task = poll_task()
+            if not task:
+                # 清理无任务时的状态
+                if active_task:
+                    print(">> 任务已被重置或结束。")
+                    active_task = ""
+                time.sleep(2)
+                continue
+                
+            if task != active_task:
+                print(f"\n>>>>>>>> 开始新任务: {task} <<<<<<<<")
+                active_task = task
+                
+                # 1. 确保环境干净
+                send_request({"type": "clear"})
+                
+                # 2. Stage 1: Planner 解析意图并启动 App
+                app_name = run_planner(task)
+                if app_name:
+                    success = launch_app(app_name)
+                    if success:
+                        print(">> 等待 App 启动加载完成...")
+                        time.sleep(5)
+                
+                # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
+                send_request({"type": "clear"})
+                
+                # 4. Stage 2: 任务在 App 内循环执行
+                run_task_in_app(task)
+                bring_llm_app_to_foreground()
+                
+                # 6. 任务全部结束，清除手机端状态
+                print(">> 当前任务流程已全部结束，清理状态并等待下一个任务...")
+                send_request({"type": "clear"})
                 active_task = ""
-            time.sleep(2)
-            continue
-            
-        if task != active_task:
-            print(f"\n>>>>>>>> 开始新任务: {task} <<<<<<<<")
-            active_task = task
-            
-            # 1. 确保环境干净
-            send_request({"type": "clear"})
-            
-            # 2. Stage 1: Planner 解析意图并启动 App
-            app_name = run_planner(task)
-            if app_name:
-                success = launch_app(app_name)
-                if success:
-                    print(">> 等待 App 启动加载完成...")
-                    time.sleep(5)
-            
-            # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
-            send_request({"type": "clear"})
-            
-            # 4. Stage 2: 任务在 App 内循环执行
-            run_task_in_app(task)
-            bring_llm_app_to_foreground()
-            
-            # 6. 任务全部结束，清除手机端状态
-            print(">> 当前任务流程已全部结束，清理状态并等待下一个任务...")
-            send_request({"type": "clear"})
+                
+        except Exception as e:
+            print(f"\n>> [错误重启] 任务执行过程中发生异常: {e}")
+            try:
+                # 尝试把界面回到应用, 并在 app 中显示异常
+                bring_llm_app_to_foreground()
+                send_request({"type": "error", "message": f"任务执行出错: {str(e)}"})
+            except:
+                pass
             active_task = ""
+            print(">> 状态已清理，将避免服务完全退出，准备继续接收后续任务。")
             
         time.sleep(2)

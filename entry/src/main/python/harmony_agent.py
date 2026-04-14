@@ -178,37 +178,33 @@ def send_request(req):
     res = buffer.split("<<EOF>>")[0]
     return res
 
-poll_fail_count = 0
+def reset_driver():
+    """触发式重置：清理并重新初始化 Driver，丢弃无用的轮询阈值逻辑"""
+    global d
+    try:
+        import sys
+        # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
+        modules_to_remove = [m for m in list(sys.modules.keys()) if m.startswith('hmdriver2')]
+        for m in modules_to_remove:
+            del sys.modules[m]
+            
+        from hmdriver2.driver import Driver
+        d = Driver()
+        print(">> [系统] 驱动对象 (Driver) 初始化/重置成功！")
+    except Exception as ex:
+        print(f">> [系统警告] hmdriver2 驱动重置失败: {ex}")
+        d = None
+
 def poll_task():
-    global poll_fail_count
     try:
         res = send_request({"type": "poll"})
         data = json.loads(res)
-        poll_fail_count = 0
         return data.get("task", "")
     except:
-        poll_fail_count += 1
-        if poll_fail_count >= 5:
-            # 尝试自愈：当连续 5 次(约 10 秒)连接不上手机端时，往往是因为设备断开、拔插了 USB 或更换了设备
-            print(">> [自愈] 连续无法连接手机 App，正在重新映射 HDC 端口及重置设备对象...")
-            os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
-            os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
-            try:
-                global d
-                import sys
-                import importlib
-                
-                # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
-                modules_to_remove = [m for m in sys.modules if m.startswith('hmdriver2')]
-                for m in modules_to_remove:
-                    del sys.modules[m]
-                    
-                from hmdriver2.driver import Driver
-                d = Driver()
-                print(">> [自愈] 驱动重置成功！")
-            except Exception as ex:
-                print(f">> [自愈] 驱动重置失败: {ex}")
-            poll_fail_count = 0
+        # 轮询失败（例如设备被刚刚切换，9126 通道断开），仅在此处轻量补发一次端口映射
+        # 不连带重置 hmdriver2 驱动（避免没任务时的后台严重卡顿）
+        os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
+        os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
         return ""
 
 def extract_json_payload(raw_text):
@@ -368,6 +364,10 @@ def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
     to absolute pixel coordinates [x1, y1, x2, y2].
     """
     x1, y1, x2, y2 = bbox
+    x1 = min(x1, 1000)
+    y1 = min(y1, 1000)
+    x2 = min(x2, 1000)
+    y2 = min(y2, 1000)
     abs_x1 = int(x1 * width / 1000)
     abs_y1 = int(y1 * height / 1000)
     abs_x2 = int(x2 * width / 1000)
@@ -577,7 +577,9 @@ def run_task_in_app(task):
             break
             
         # 将本次操作追加到历史记录中，供下一步使用
-        history_list.append(f"Step {step_idx+1}: Action={action}, Params={params}")
+        history_list.append(f"Step {step_idx+1}: Action={action}")
+
+        # history_list.append(f"Step {step_idx+1}: Action={action}, Params={params}")
         
         time.sleep(1.7)
 
@@ -607,6 +609,12 @@ if __name__ == "__main__":
                 print(f"\n>>>>>>>> 开始新任务: {task} <<<<<<<<")
                 active_task = task
                 
+                # 【触发式逻辑】在执行真正的新任务开始前，确保设备端口及驱动是健康状态
+                print(">> [环境就绪准备] 刷新 HDC 端口并初始化 hmdriver2 驱动...")
+                os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
+                os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
+                reset_driver()
+                
                 # 1. 确保环境干净
                 send_request({"type": "clear"})
                 
@@ -634,18 +642,10 @@ if __name__ == "__main__":
             err_msg = str(e)
             print(f"\n>> [错误重启] 任务执行过程中发生异常: {err_msg}")
             
-            # 如果是底层的管道破裂（手机换了，socket断开），则主动触发重启
+            # 如果中间执行阶段底层管道破裂（手机刚刚拔下等），主动重置以便不卡死
             if "broken pipe" in err_msg.lower() or "104" in err_msg or "32" in err_msg:
-                print(">> [自愈] 检测到设备切换或底座掉线，强制重置 hmdriver2 模块...")
-                import sys
-                try:
-                    for m in list(sys.modules.keys()):
-                        if m.startswith('hmdriver2'):
-                            del sys.modules[m]
-                    from hmdriver2.driver import Driver
-                    d = Driver()
-                except Exception as ex:
-                    print(f">> [自愈] hmdriver2 重置失败: {ex}")
+                print(">> [自愈] 检测到设备掉线(Broken Pipe)！")
+                reset_driver()
                     
             try:
                 # 尝试把界面回到应用, 并在 app 中显示异常

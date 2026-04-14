@@ -178,12 +178,28 @@ def send_request(req):
     res = buffer.split("<<EOF>>")[0]
     return res
 
+poll_fail_count = 0
 def poll_task():
+    global poll_fail_count
     try:
         res = send_request({"type": "poll"})
         data = json.loads(res)
+        poll_fail_count = 0
         return data.get("task", "")
     except:
+        poll_fail_count += 1
+        if poll_fail_count >= 5:
+            # 尝试自愈：当连续 5 次(约 10 秒)连接不上手机端时，往往是因为设备断开、拔插了 USB 或更换了设备
+            print(">> [自愈] 连续无法连接手机 App，正在重新映射 HDC 端口及重置设备对象...")
+            os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
+            os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
+            try:
+                global d
+                from hmdriver2.driver import Driver
+                d = Driver()
+            except:
+                pass
+            poll_fail_count = 0
         return ""
 
 def extract_json_payload(raw_text):
@@ -215,6 +231,10 @@ def extract_json_payload(raw_text):
         candidate = candidate.strip()
         if not candidate:
             return None
+        
+        # 针对外层包含双大括号的情况进行修复
+        if candidate.startswith("{{") and candidate.endswith("}}"):
+            candidate = "{" + candidate[2:-2] + "}"
 
         # # 直接解析
         # try:
@@ -587,7 +607,7 @@ if __name__ == "__main__":
                     success = launch_app(app_name)
                     if success:
                         print(">> 等待 App 启动加载完成...")
-                        time.sleep(5)
+                        time.sleep(1.3)
                 
                 # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
                 send_request({"type": "clear"})

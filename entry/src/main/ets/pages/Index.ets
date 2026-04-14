@@ -326,6 +326,8 @@ struct Index {
   @State serverIp: string = 'http://166.111.53.96:9123';
   @State hdcServerIp: string = 'http://166.111.53.96:9124';
   @State wirelessIp: string = '101.5.155.98:35729';
+  @State isThinking: boolean = false;
+  @State buttonScale: number = 1.0;
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -467,11 +469,16 @@ struct Index {
     this.output = `正在请求远端服务执行 HDC 连接测试: ${this.wirelessIp}...`;
     let httpReq = http.createHttp();
     try {
+      // 构造 Python 脚本：获取 targets 列表，如果发现其他设备，则使用 hdc tconn IP -rm 断开（或做 hdc kill 清理），随后连接我们指定的 IP
+      let pyScript = `import os; targets = os.popen('hdc list targets').read().split(); ` + 
+                     `[os.system('hdc kill ' + t) for t in targets if t and t != '${this.wirelessIp}' and '[Empty]' not in t]; ` +
+                     `os.system('hdc tconn ${this.wirelessIp}')`;
+
       let resp = await httpReq.request(`${this.hdcServerIp}/api/run_cmd`, {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json' },
         extraData: JSON.stringify({
-          cmd: `hdc list targets | grep -q ${this.wirelessIp} || (hdc tconn ${this.wirelessIp})`
+          cmd: `python -c "${pyScript}"`
         }),
         connectTimeout: 5000,
         readTimeout: 10000,
@@ -696,52 +703,107 @@ struct Index {
       TabContent() {
         Scroll() {
           Column() {
-            Text('MobiInfer LLM Chat').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
+            Text('MobiInfer LLM Chat')
+              .fontSize(26)
+              .fontWeight(FontWeight.Bolder)
+              .fontColor('#0A59F7')
+              .margin({ top: 20, bottom: 20 })
+              .textShadow({ radius: 5, color: '#A0B9F7', offsetX: 2, offsetY: 2 })
 
             Scroll() {
-              Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
+              Text(this.output)
+                .fontSize(14)
+                .fontFamily('monospace')
+                .fontColor('#333333')
+                .width('100%')
+                .padding(15)
             }
-            .constraintSize({ minHeight: 100, maxHeight: 200 })
-            .width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
+            .constraintSize({ minHeight: 120, maxHeight: 200 })
+            .width('95%')
+            .backgroundColor('#E6F0FF')
+            .borderRadius(12)
+            .margin(10)
+            .border({ width: 1, color: '#B3CFFF', style: BorderStyle.Solid })
 
             if (this.debugImagePath !== '') {
               Row() {
-                Text('Debug 截图预览:').fontSize(12).fontColor(Color.Gray)
+                Text('Debug 截图预览:')
+                  .fontSize(12)
+                  .fontColor('#555555')
+                  .margin({ right: 10 })
                 Image(this.debugImagePath)
-                  .width(100).height(150).objectFit(ImageFit.Contain).margin({left: 10})
+                  .width(120).height(180).objectFit(ImageFit.Contain)
                   .backgroundColor(Color.Black)
+                  .borderRadius(8)
                   .onClick(() => { this.debugImagePath = ''; })
-              }.margin(5).width('95%')
+              }
+              .margin({ top: 10, bottom: 10 })
+              .width('95%')
+              .padding(10)
+              .backgroundColor('#FFFFFF')
+              .borderRadius(12)
+              .shadow({ radius: 8, color: '#22000000', offsetX: 0, offsetY: 4 })
             }
 
             Scroll() {
-              Text(this.chatHistory).fontSize(14).width('100%').padding(10)
+              Text(this.chatHistory)
+                .fontSize(15)
+                .width('100%')
+                .padding(15)
+                .lineHeight(22)
+                .opacity(this.isThinking ? 0.7 : 1)
+                .animation({ duration: 500, curve: Curve.EaseInOut })
             }
-            .constraintSize({ minHeight: 150, maxHeight: 300 })
-            .width('95%').backgroundColor('#fafafa').borderRadius(8).margin(5)
+            .constraintSize({ minHeight: 200, maxHeight: 350 })
+            .width('95%')
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .margin(10)
+            .shadow({ radius: 10, color: '#1A0A59F7', offsetX: 0, offsetY: 5 })
 
             Row() {
               TextInput({ placeholder: '输入消息...', text: this.userInput })
                 .onChange((val: string) => { this.userInput = val; })
-                .layoutWeight(1).margin(5)
+                .layoutWeight(1)
+                .height(45)
+                .backgroundColor('#F0F5FF')
+                .borderRadius(22)
+                .margin({ right: 10 })
+                .padding({ left: 15, right: 15 })
+
               Button('发送')
+                .height(45)
+                .width(80)
+                .backgroundColor(this.isThinking ? '#A0B9F7' : '#0A59F7')
+                .borderRadius(22)
+                .scale({ x: this.buttonScale, y: this.buttonScale })
+                .animation({ duration: 200, curve: Curve.FastOutSlowIn })
+                .onTouch((event) => {
+                  if (event.type === TouchType.Down) this.buttonScale = 0.95;
+                  if (event.type === TouchType.Up) this.buttonScale = 1.0;
+                })
                 .onClick(async () => {
-                  if (!this.modelLoaded || this.userInput.length === 0) return;
+                  if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) return;
                   let msg = this.userInput;
                   this.userInput = '';
-                  this.chatHistory += `\nUser: ${msg}\nAssistant:思考中...`;
+                  this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+                  this.isThinking = true;
 
                   try {
                     let reply = await mnnllm.chat(msg);
-                    this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: ${reply}\n`);
+                    this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
                   } catch(err) {
-                    this.chatHistory = this.chatHistory.replace('Assistant:思考中...', `Assistant: [错误] ${err}\n`);
+                    this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${err}\n`);
+                  } finally {
+                    this.isThinking = false;
                   }
-                }).margin(5)
-            }.width('95%')
+                })
+            }
+            .width('95%')
+            .margin({ bottom: 20 })
 
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              Button('加载模型')
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+              Button('加载大模型')
                 .onClick(async () => {
                   let cfg = this.modelDir + '/config.json';
                   this.output = '加载中，请稍候...';
@@ -754,7 +816,12 @@ struct Index {
                     this.output = '加载失败: ' + err;
                   }
                 })
-                .enabled(!this.downloading).margin(5)
+                .enabled(!this.downloading)
+                .height(40)
+                .width('30%')
+                .backgroundColor(this.modelLoaded ? '#E0E0E0' : '#4CAF50')
+                .fontColor(this.modelLoaded ? '#999999' : '#FFFFFF')
+                .borderRadius(8)
                 
               Button('单轮推理')
                 .onClick(async () => {
@@ -765,33 +832,54 @@ struct Index {
                   } catch(err) {
                     this.output = '推理错误: ' + err;
                   }
-                }).margin(5)
+                })
+                .height(40)
+                .width('30%')
+                .backgroundColor('#2196F3')
+                .borderRadius(8)
                 
-              Button('重置')
+              Button('重置会话')
                 .onClick(() => {
                   this.output = mnnllm.reset();
                   this.chatHistory = '';
-                }).margin(5)
-            }.width('95%')
+                })
+                .height(40)
+                .width('30%')
+                .backgroundColor('#FF5722')
+                .borderRadius(8)
+            }
+            .width('95%')
+            .margin({ bottom: 15 })
 
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              Button('开始智能体执行 (输入框为任务)')
-                .onClick(async () => {
-                  if (!this.modelLoaded) {
-                    this.output = "请先加载模型后再运行智能体！";
-                    return;
-                  }
-                  if (this.userInput.length === 0) {
-                    this.output = "请在上方文本框输入任务目标，比如: '去淘宝买手机'";
-                    return;
-                  }
-                  this.llmServer.currentTask = this.userInput;
-                  this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
-                }).margin(5).backgroundColor(Color.Orange)
-            }.width('95%')
+            Button('开始智能体执行 (输入框为任务)')
+              .width('95%')
+              .height(50)
+              .backgroundColor('#FF9800')
+              .borderRadius(10)
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .margin({ bottom: 15 })
+              .shadow({ radius: 8, color: '#4DFF9800', offsetX: 0, offsetY: 4 })
+              .onClick(async () => {
+                if (!this.modelLoaded) {
+                  this.output = "请先加载模型后再运行智能体！";
+                  return;
+                }
+                if (this.userInput.length === 0) {
+                  this.output = "请在上方文本框输入任务目标，比如: '去淘宝买手机'";
+                  return;
+                }
+                this.llmServer.currentTask = this.userInput;
+                this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
+              })
 
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start, alignItems: ItemAlign.Center }) {
-              Button('启动 PC 控制后端(HDC)')
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center }) {
+              Button('启动 PC 控制后端 (HDC)')
+                .height(45)
+                .backgroundColor('#607D8B')
+                .borderRadius(10)
+                .margin({ right: 10 })
+                .layoutWeight(1)
                 .onClick(() => {
                   if (!this.modelLoaded) {
                     this.output = "请先加载模型！";
@@ -822,95 +910,175 @@ struct Index {
                            });
                         });
                       }); 
-                }).margin(5).backgroundColor(Color.Gray)
+                })
 
               Row() {
                 Checkbox({ name: 'autoConfirm', group: 'settings' })
                   .select(this.autoConfirm)
+                  .selectedColor('#0A59F7')
                   .onChange((value: boolean) => {
                     this.autoConfirm = value;
                   })
-                Text('自动同意').fontSize(14)
-              }.margin({ left: 10 })
-            }.width('95%')
+                Text('自动同意').fontSize(14).fontColor('#333')
+              }
+              .backgroundColor('#F5F5F5')
+              .padding(8)
+              .borderRadius(8)
+            }
+            .width('95%')
 
-            Blank().height(30)
-          }.width('100%')
+            Blank().height(40)
+          }
+          .width('100%')
+          .backgroundColor('#F7F9FC')
         }.width('100%').height('100%')
-      }.tabBar('首页')
+      }.tabBar('控制台')
 
       TabContent() {
         Scroll() {
           Column() {
-            Text('配置管理').fontSize(20).fontWeight(FontWeight.Bold).margin(10)
+            Text('高级配置')
+              .fontSize(22)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#333333')
+              .margin({ top: 20, bottom: 15 })
 
             Scroll() {
-              Text(this.output).fontSize(13).fontFamily('monospace').width('100%').padding(10)
+              Text(this.output)
+                .fontSize(13)
+                .fontFamily('monospace')
+                .fontColor('#444')
+                .width('100%')
+                .padding(15)
             }
-            .constraintSize({ minHeight: 100, maxHeight: 200 })
-            .width('95%').backgroundColor('#f5f5f5').borderRadius(8).margin(5)
+            .constraintSize({ minHeight: 120, maxHeight: 200 })
+            .width('95%')
+            .backgroundColor('#E6F0FF')
+            .borderRadius(12)
+            .margin({ bottom: 20 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Checkbox({ name: 'modelV2', group: 'modelVersion' })
-                .select(this.isModelV2)
-                .onChange((value: boolean) => {
-                  this.isModelV2 = value;
-                  this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
-                  this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
-                  this.modelLoaded = false;
-                })
-              Text('使用 modelv2 文件夹隔离模型').fontSize(14).fontColor(Color.Gray)
-            }.margin(5).width('95%')
+            Column() {
+              Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                Checkbox({ name: 'modelV2', group: 'modelVersion' })
+                  .select(this.isModelV2)
+                  .selectedColor('#0A59F7')
+                  .onChange((value: boolean) => {
+                    this.isModelV2 = value;
+                    this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
+                    this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
+                    this.modelLoaded = false;
+                  })
+                Text('使用 modelv2 文件夹隔离模型').fontSize(15).fontColor('#333')
+              }.width('100%').margin({ bottom: 15 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Text('模型下载 IP:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
-              TextInput({ text: this.serverIp })
-                .layoutWeight(1).height(30)
-                .onChange((val: string) => { this.serverIp = val; })
-            }.margin(5).width('95%')
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('模型下载 IP:').fontSize(14).fontColor('#666').width(95)
+                TextInput({ text: this.serverIp })
+                  .layoutWeight(1).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .onChange((val: string) => { this.serverIp = val; })
+              }.width('100%').margin({ bottom: 10 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Text('HDC远控 IP:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
-              TextInput({ text: this.hdcServerIp })
-                .layoutWeight(1).height(30)
-                .onChange((val: string) => { this.hdcServerIp = val; })
-            }.margin(5).width('95%')
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('HDC远控 IP:').fontSize(14).fontColor('#666').width(95)
+                TextInput({ text: this.hdcServerIp })
+                  .layoutWeight(1).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .onChange((val: string) => { this.hdcServerIp = val; })
+              }.width('100%').margin({ bottom: 10 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Text('无线调试 IP:Port:').fontSize(14).fontColor(Color.Gray).margin({left: 5, right: 5})
-              TextInput({ text: this.wirelessIp })
-                .layoutWeight(1).height(30)
-                .onChange((val: string) => { this.wirelessIp = val; })
-            }.margin(5).width('95%')
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('无线调试 IP:').fontSize(14).fontColor('#666').width(95)
+                TextInput({ text: this.wirelessIp })
+                  .layoutWeight(1).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .onChange((val: string) => { this.wirelessIp = val; })
+              }.width('100%').margin({ bottom: 15 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Button('测试远端HDC连接').onClick(() => { this.testAndConnectHdc(); }).height(30).margin(2).backgroundColor(Color.Orange)
-            }.margin(5).width('95%')
+              Button('测试远端 HDC 连接')
+                .onClick(() => { this.testAndConnectHdc(); })
+                .height(45)
+                .width('100%')
+                .backgroundColor('#FF9800')
+                .borderRadius(8)
+                .margin({ bottom: 15 })
 
-            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-              Text('线程数:').fontSize(14).fontColor(Color.Gray)
-              TextInput({ text: this.threadNumInput })
-                .type(InputType.Number).width(50).height(30).margin({left: 5, right: 5})
-                .onChange((val: string) => { this.threadNumInput = val; })
-              Button('修改Config').onClick(() => { this.updateConfigThreadNum(); }).height(30).margin(2)
-              Button('查看Config').onClick(() => { this.showConfigJson(); }).height(30).margin(2)
-            }.margin(5).width('95%')
+              Flex({ wrap: FlexWrap.NoWrap, alignItems: ItemAlign.Center }) {
+                Text('线程数:').fontSize(14).fontColor('#666').width(60)
+                TextInput({ text: this.threadNumInput })
+                  .type(InputType.Number)
+                  .width(80).height(40).backgroundColor('#F0F5FF').borderRadius(8)
+                  .margin({ right: 10 })
+                  .onChange((val: string) => { this.threadNumInput = val; })
+                
+                Button('修改 Config')
+                  .onClick(() => { this.updateConfigThreadNum(); })
+                  .height(40).layoutWeight(1).margin({ right: 10 }).backgroundColor('#2196F3').borderRadius(8)
+                
+                Button('查看 Config')
+                  .onClick(() => { this.showConfigJson(); })
+                  .height(40).layoutWeight(1).backgroundColor('#607D8B').borderRadius(8)
+              }.width('100%')
+            }
+            .width('95%')
+            .padding(15)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .shadow({ radius: 8, color: '#1A000000', offsetX: 0, offsetY: 2 })
+            .margin({ bottom: 20 })
 
-            Flex({ wrap: FlexWrap.Wrap }) {
-              Button('检查连接').onClick(() => { this.checkServer(); }).enabled(!this.downloading).margin(5)
-              Button('下载全部').onClick(() => { this.downloadAll(); }).enabled(!this.downloading && this.connected).margin(5)
-              Button('删除模型').onClick(() => { this.deleteModelFiles(); }).enabled(!this.downloading).margin(5)
-            }.width('95%').margin(5)
+            Column() {
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                Button('检查连接')
+                  .onClick(() => { this.checkServer(); })
+                  .enabled(!this.downloading)
+                  .height(40)
+                  .width('30%')
+                  .backgroundColor('#4CAF50')
+                  .borderRadius(8)
+                
+                Button('下载全部')
+                  .onClick(() => { this.downloadAll(); })
+                  .enabled(!this.downloading && this.connected)
+                  .height(40)
+                  .width('30%')
+                  .backgroundColor('#FF5722')
+                  .borderRadius(8)
+                  
+                Button('删除模型')
+                  .onClick(() => { this.deleteModelFiles(); })
+                  .enabled(!this.downloading)
+                  .height(40)
+                  .width('30%')
+                  .backgroundColor('#F44336')
+                  .borderRadius(8)
+              }.width('100%').margin({ bottom: 15 })
 
-            Flex({ wrap: FlexWrap.Wrap }) {
-              Button('列出沙箱图片名称').onClick(() => { this.listScreenshots(); }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
-              Button('清理截图').onClick(() => { this.clearScreenshots(); }).margin(5).backgroundColor(Color.Pink).fontColor(Color.Black)
-            }.width('95%').margin(5)
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+                Button('列出沙箱图片')
+                  .onClick(() => { this.listScreenshots(); })
+                  .height(40)
+                  .width('48%')
+                  .backgroundColor('#E91E63')
+                  .borderRadius(8)
+                  
+                Button('清理截图缓存')
+                  .onClick(() => { this.clearScreenshots(); })
+                  .height(40)
+                  .width('48%')
+                  .backgroundColor('#9C27B0')
+                  .borderRadius(8)
+              }.width('100%')
+            }
+            .width('95%')
+            .padding(15)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .shadow({ radius: 8, color: '#1A000000', offsetX: 0, offsetY: 2 })
 
-            Blank().height(30)
-          }.width('100%')
+            Blank().height(40)
+          }
+          .width('100%')
+          .backgroundColor('#F7F9FC')
         }.width('100%').height('100%')
-      }.tabBar('配置页')
+      }.tabBar('网络与设置')
     }.width('100%').height('100%')
   }
 }

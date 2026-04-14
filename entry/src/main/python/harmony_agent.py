@@ -8,6 +8,7 @@ from PIL import Image
 import io
 import re
 import sys
+import logging
 
 try:
     from hmdriver2.driver import Driver
@@ -187,7 +188,11 @@ def extract_json_payload(raw_text):
     if not raw_text:
         return None
 
-    raw_text = re.sub(r'^\{"\}\s*', '', raw_text.strip())
+    raw_text = raw_text.strip()
+    # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
+    raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
+    # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
+    raw_text = re.sub(r'^\{\s*"\s*(?=")', '', raw_text)
 
     text = raw_text.strip()
 
@@ -374,7 +379,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             if d:
                 print(f">> [Agent] Clicking at {px}, {py}")
                 d.click(px, py)
-                time.sleep(0.5)
+                time.sleep(DEVICE_WAIT_TIME)
                 # Input logic
                 d.shell("uitest uiInput keyEvent 2072 2017")
                 d.press_key(2071)
@@ -386,7 +391,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
                     d.press_key(2054)
             else:
                 os.system(f"hdc shell uitest uiInput click {px} {py}")
-                time.sleep(0.5)
+                time.sleep(DEVICE_WAIT_TIME)
                 os.system(f"hdc shell uitest uiInput inputText '{text}'")
             
             params["abs_bbox"] = abs_bbox # For history tracking
@@ -526,7 +531,7 @@ def run_task_in_app(task):
         
         print(f">> MNN VLM 返回:\n{res}")
         sys.stdout.flush()
-        time.sleep(3)
+        time.sleep(0.3)
         w = w * 4
         h = h * 4
         # Pass current screenshot size for coordinate conversion
@@ -543,7 +548,7 @@ def run_task_in_app(task):
         # 将本次操作追加到历史记录中，供下一步使用
         history_list.append(f"Step {step_idx+1}: Action={action}, Params={params}")
         
-        time.sleep(3)
+        time.sleep(1.7)
 
 # ===================== Main Loop =====================
 if __name__ == "__main__":

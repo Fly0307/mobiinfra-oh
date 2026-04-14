@@ -19,6 +19,8 @@ Your output should be a JSON object with the following format:
 ### Action History
 The sequence of actions you have already taken:
 {history}
+
+<image_placeholder>
   
 ### Constraints
 - If the screen has not changed after your last action, do not repeat the exact same action. Try a different method or slightly adjust coordinates.

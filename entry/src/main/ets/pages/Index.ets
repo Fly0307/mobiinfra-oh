@@ -299,6 +299,7 @@ import entry from 'libentry.so';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { LlmServer } from '../utils/LlmServer';
@@ -322,6 +323,8 @@ struct Index {
   @State connected: boolean = false;
   @State autoConfirm: boolean = false;
   @State debugImagePath: string = '';
+  @State isModelV2: boolean = false;
+  @State threadNumInput: string = '4';
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -391,6 +394,71 @@ struct Index {
       this.output = `成功删除了 ${count} 个模型文件，\n现在可以重新下载了。`;
     } catch (e) {
       this.output = `删除模型文件失败: ${e}`;
+    }
+  }
+
+  showConfigJson() {
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(cfgPath)) {
+        this.output = `文件不存在: ${cfgPath}\n请先下载模型`;
+        return;
+      }
+      let file = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(cfgPath);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      fs.closeSync(file);
+      let textDecoder = util.TextDecoder.create('utf-8');
+      let content = textDecoder.decodeWithStream(new Uint8Array(buf));
+      this.output = `====== ${this.isModelV2 ? 'modelv2' : 'model'}/config.json ======\n${content}`;
+    } catch (e) {
+      this.output = `读取 config.json 失败: ${e}`;
+    }
+  }
+
+  updateConfigThreadNum() {
+    let num = parseInt(this.threadNumInput);
+    if (isNaN(num) || num <= 0) {
+      this.output = '请输入有效的线程数 (正整数)';
+      return;
+    }
+    
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(cfgPath)) {
+        this.output = `文件不存在: ${cfgPath}`;
+        return;
+      }
+      
+      // 读取文件
+      let fileRead = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(cfgPath);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(fileRead.fd, buf);
+      fs.closeSync(fileRead);
+      
+      let textDecoder = util.TextDecoder.create('utf-8');
+      let content = textDecoder.decodeWithStream(new Uint8Array(buf));
+      
+      // 修改 JSON (ArkTS 强制类型严谨)
+      let configObj = JSON.parse(content) as Record<string, Object>;
+      configObj['thread_num'] = num;
+      if (configObj['mllm']) {
+        let mllmObj = configObj['mllm'] as Record<string, Object>;
+        mllmObj['thread_num'] = num;
+      }
+      
+      // 写入文件
+      let newStr = JSON.stringify(configObj, null, 4);
+      let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
+      let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      fs.writeSync(fileWrite.fd, byteStr.buffer);
+      fs.closeSync(fileWrite);
+      
+      this.output = `更新线程数成功: ${num}\n====== 新配置 ======\n${newStr}`;
+    } catch (e) {
+      this.output = `更新 config.json 失败: ${e}`;
     }
   }
 
@@ -613,6 +681,34 @@ struct Index {
             .onClick(() => { this.debugImagePath = ''; })
         }.margin(5)
       }
+
+      Row() {
+        Checkbox({ name: 'modelV2', group: 'modelVersion' })
+          .select(this.isModelV2)
+          .onChange((value: boolean) => {
+            this.isModelV2 = value;
+            this.modelDir = this.filesDir + (value ? '/modelv2' : '/model');
+            this.output = `模型路径已切换至: ${value ? 'modelv2' : 'model'}`;
+            this.modelLoaded = false;
+          })
+        Text('使用 modelv2 文件夹隔离模型').fontSize(14).fontColor(Color.Gray)
+      }.margin(2)
+
+      Row() {
+        Text('线程数:').fontSize(14).fontColor(Color.Gray)
+        TextInput({ text: this.threadNumInput })
+          .type(InputType.Number)
+          .width(50)
+          .height(30)
+          .margin({left: 5, right: 5})
+          .onChange((val: string) => { this.threadNumInput = val; })
+        Button('修改Config')
+          .onClick(() => { this.updateConfigThreadNum(); })
+          .height(30)
+        Button('查看Config')
+          .onClick(() => { this.showConfigJson(); })
+          .height(30).margin({left: 5})
+      }.margin(2)
 
       Row() {
         Button('检查连接')

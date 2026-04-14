@@ -84,8 +84,15 @@ export class LlmServer {
                 
                 let w = req['width'];
                 let h = req['height'];
+                let imgTag = `<img>${imgPath}<hw>${h},${w}</hw></img>`;
                 onLog(`>> [Debug] req['width']: ${w}, req['height']: ${h}, imgPath: ${imgPath}`);
-                prompt = `<img>${imgPath}<hw>${h},${w}</hw></img>\n` + prompt;
+                
+                if (prompt.indexOf('<image_placeholder>') !== -1) {
+                  prompt = prompt.replace('<image_placeholder>', imgTag);
+                } else {
+                  // 如果 prompt 中没有占位符，作为兜底依然加在最前面
+                  prompt = imgTag + '\n' + prompt;
+                }
               }
               
               onLog(`>> [接收到 PC 发来的推理请求(含图片)]\n原始文本任务: ${req['prompt'] as string}\n构造给大模型的完整 Prompt:\n${prompt}`);

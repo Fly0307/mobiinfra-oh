@@ -195,10 +195,19 @@ def poll_task():
             os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
             try:
                 global d
+                import sys
+                import importlib
+                
+                # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
+                modules_to_remove = [m for m in sys.modules if m.startswith('hmdriver2')]
+                for m in modules_to_remove:
+                    del sys.modules[m]
+                    
                 from hmdriver2.driver import Driver
                 d = Driver()
-            except:
-                pass
+                print(">> [自愈] 驱动重置成功！")
+            except Exception as ex:
+                print(f">> [自愈] 驱动重置失败: {ex}")
             poll_fail_count = 0
         return ""
 
@@ -622,11 +631,26 @@ if __name__ == "__main__":
                 active_task = ""
                 
         except Exception as e:
-            print(f"\n>> [错误重启] 任务执行过程中发生异常: {e}")
+            err_msg = str(e)
+            print(f"\n>> [错误重启] 任务执行过程中发生异常: {err_msg}")
+            
+            # 如果是底层的管道破裂（手机换了，socket断开），则主动触发重启
+            if "broken pipe" in err_msg.lower() or "104" in err_msg or "32" in err_msg:
+                print(">> [自愈] 检测到设备切换或底座掉线，强制重置 hmdriver2 模块...")
+                import sys
+                try:
+                    for m in list(sys.modules.keys()):
+                        if m.startswith('hmdriver2'):
+                            del sys.modules[m]
+                    from hmdriver2.driver import Driver
+                    d = Driver()
+                except Exception as ex:
+                    print(f">> [自愈] hmdriver2 重置失败: {ex}")
+                    
             try:
                 # 尝试把界面回到应用, 并在 app 中显示异常
                 bring_llm_app_to_foreground()
-                send_request({"type": "error", "message": f"任务执行出错: {str(e)}"})
+                send_request({"type": "error", "message": f"任务执行出错: {err_msg}"})
             except:
                 pass
             active_task = ""

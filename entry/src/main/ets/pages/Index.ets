@@ -46,6 +46,7 @@ struct Index {
   @State currentTab: number = 0;
   @State collectionModule: number = 1;
   @State taskScene: number = 0;
+  @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
   @StorageLink('hdcServerIp') hdcServerIp: string = 'http://166.111.53.96:9124';
   @StorageLink('wirelessIp') wirelessIp: string = '101.5.155.98:35729';
@@ -660,7 +661,10 @@ struct Index {
   @Builder AssistantPage() {
     Scroll() {
       Column() {
-        AppHeader({ title: '本地推理', subtitle: '端侧模型控制台' })
+        AppHeader({ title: '本地推理', subtitle: this.assistantSettingsOpen ? '模型与网络设置' : '端侧模型控制台' })
+        if (this.assistantSettingsOpen) {
+          this.NetworkSettingsPage()
+        } else {
         Scroll() {
           Text(this.output).fontSize(13).fontFamily('monospace').fontColor('#333333').width('100%').padding(16)
         }.constraintSize({ minHeight: 110, maxHeight: 190 }).width('92%').backgroundColor('#EEF4FF').borderRadius(18).margin({ top: 16 }).border({ width: 1, color: '#D9E5FF' })
@@ -798,27 +802,243 @@ struct Index {
           }.height(48).padding({ left: 12, right: 12 }).backgroundColor(Color.White).borderRadius(14).margin({ left: 10 })
         }.width('92%').margin({ top: 14 })
 
-        Column() {
-          Text('模型与网络设置').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%').margin({ bottom: 14 })
-          Row() {
-            Button('检查连接').onClick(() => { this.checkServer(); }).enabled(!this.downloading).height(40).layoutWeight(1).backgroundColor('#38BE8B').borderRadius(12)
-            Button('下载全部').onClick(() => { this.downloadAll(); }).enabled(!this.downloading && this.connected).height(40).layoutWeight(1).backgroundColor('#FF7043').borderRadius(12).margin({ left: 10 })
-            Button('删除模型').onClick(() => { this.deleteModelFiles(); }).enabled(!this.downloading).height(40).layoutWeight(1).backgroundColor('#F44336').borderRadius(12).margin({ left: 10 })
-          }.width('100%').margin({ bottom: 12 })
-          Row() {
-            Text('线程数').fontSize(14).fontColor('#666666').width(58)
-            TextInput({ text: this.threadNumInput }).type(InputType.Number).width(76).height(40).backgroundColor('#F2F5FC').borderRadius(12).onChange((val: string) => { this.threadNumInput = val; })
-            Button('修改 Config').onClick(() => { this.updateConfigThreadNum(); }).height(40).layoutWeight(1).backgroundColor('#4B8BFF').borderRadius(12).margin({ left: 10 })
-            Button('查看 Config').onClick(() => { this.showConfigJson(); }).height(40).layoutWeight(1).backgroundColor('#607D8B').borderRadius(12).margin({ left: 10 })
-          }.width('100%')
-          Row() {
-            Button('Op Precision Test').height(42).layoutWeight(1).backgroundColor('#FF9800').borderRadius(12).onClick(() => { router.pushUrl({ url: 'pages/OpTest' }) })
-            Button('Runtime Logs').height(42).layoutWeight(1).backgroundColor('#607D8B').borderRadius(12).margin({ left: 10 }).onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
-          }.width('100%').margin({ top: 12 })
-        }.width('92%').padding(20).backgroundColor(Color.White).borderRadius(20).margin({ top: 18 })
+        Button('网络设置')
+          .width('92%')
+          .height(46)
+          .backgroundColor(Color.White)
+          .fontColor('#4F68FF')
+          .borderRadius(14)
+          .margin({ top: 14 })
+          .border({ width: 1, color: '#DDE5FF' })
+          .onClick(() => { this.assistantSettingsOpen = true; })
         Blank().height(110)
+        }
       }.width('100%')
     }.width('100%').height('100%').backgroundColor('#F4F8FF')
+  }
+
+  @Builder NetworkSettingsPage() {
+    Column() {
+      Row() {
+        Text('<')
+          .fontSize(18)
+          .fontColor('#4F68FF')
+          .width(34)
+          .height(34)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#EEF3FF')
+          .borderRadius(17)
+        Column() {
+          Text('网络与设置')
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+          Text('配置模型下载、运行参数和调试入口')
+            .fontSize(13)
+            .fontColor('#7B8290')
+            .margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .margin({ left: 10 })
+        .layoutWeight(1)
+      }
+      .width('92%')
+      .margin({ top: 16 })
+      .onClick(() => { this.assistantSettingsOpen = false; })
+
+      Scroll() {
+        Text(this.output)
+          .fontSize(13)
+          .fontFamily('monospace')
+          .fontColor('#333333')
+          .width('100%')
+          .padding(16)
+      }
+      .constraintSize({ minHeight: 100, maxHeight: 170 })
+      .width('92%')
+      .backgroundColor('#EEF4FF')
+      .borderRadius(18)
+      .margin({ top: 14 })
+      .border({ width: 1, color: '#D9E5FF' })
+
+      Column() {
+        Text('服务地址')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+          .margin({ bottom: 12 })
+        Text('模型下载服务')
+          .fontSize(13)
+          .fontColor('#6F7684')
+          .width('100%')
+        TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:9123', text: this.serverIp })
+          .height(42)
+          .width('100%')
+          .fontSize(13)
+          .backgroundColor('#F2F5FC')
+          .borderRadius(12)
+          .padding({ left: 12, right: 12 })
+          .margin({ top: 6, bottom: 12 })
+          .onChange((val: string) => {
+            this.serverIp = val;
+            this.connected = false;
+          })
+        Text('HDC Server')
+          .fontSize(13)
+          .fontColor('#6F7684')
+          .width('100%')
+        TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:9124', text: this.hdcServerIp })
+          .height(42)
+          .width('100%')
+          .fontSize(13)
+          .backgroundColor('#F2F5FC')
+          .borderRadius(12)
+          .padding({ left: 12, right: 12 })
+          .margin({ top: 6, bottom: 12 })
+          .onChange((val: string) => { this.hdcServerIp = val; })
+        Text('无线 HDC 目标')
+          .fontSize(13)
+          .fontColor('#6F7684')
+          .width('100%')
+        Row() {
+          TextInput({ placeholder: '手机无线调试地址，例如 101.5.155.98:35729', text: this.wirelessIp })
+            .height(42)
+            .layoutWeight(1)
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.wirelessIp = val; })
+          Button('连接测试')
+            .height(42)
+            .width(92)
+            .fontSize(13)
+            .backgroundColor('#765BFF')
+            .borderRadius(12)
+            .margin({ left: 10 })
+            .onClick(() => { this.testAndConnectHdc(); })
+        }
+        .width('100%')
+        .margin({ top: 6 })
+      }
+      .width('92%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ top: 16 })
+
+      Column() {
+        Text('模型文件')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+          .margin({ bottom: 12 })
+        Row() {
+          Button('检查连接')
+            .onClick(() => { this.checkServer(); })
+            .enabled(!this.downloading)
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#38BE8B')
+            .borderRadius(12)
+          Button('下载全部')
+            .onClick(() => { this.downloadAll(); })
+            .enabled(!this.downloading && this.connected)
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#FF7043')
+            .borderRadius(12)
+            .margin({ left: 10 })
+          Button('删除模型')
+            .onClick(() => { this.deleteModelFiles(); })
+            .enabled(!this.downloading)
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#F44336')
+            .borderRadius(12)
+            .margin({ left: 10 })
+        }.width('100%')
+      }
+      .width('92%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ top: 16 })
+
+      Column() {
+        Text('运行参数')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+          .margin({ bottom: 12 })
+        Row() {
+          Text('线程数')
+            .fontSize(14)
+            .fontColor('#666666')
+            .width(58)
+          TextInput({ text: this.threadNumInput })
+            .type(InputType.Number)
+            .width(76)
+            .height(40)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .onChange((val: string) => { this.threadNumInput = val; })
+          Button('修改 Config')
+            .onClick(() => { this.updateConfigThreadNum(); })
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#4B8BFF')
+            .borderRadius(12)
+            .margin({ left: 10 })
+          Button('查看 Config')
+            .onClick(() => { this.showConfigJson(); })
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#607D8B')
+            .borderRadius(12)
+            .margin({ left: 10 })
+        }.width('100%')
+      }
+      .width('92%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ top: 14 })
+
+      Row() {
+        Button('Op Precision Test')
+          .height(42)
+          .layoutWeight(1)
+          .backgroundColor('#FF9800')
+          .borderRadius(12)
+          .onClick(() => { router.pushUrl({ url: 'pages/OpTest' }) })
+        Button('Runtime Logs')
+          .height(42)
+          .layoutWeight(1)
+          .backgroundColor('#607D8B')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
+      }
+      .width('92%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ top: 14 })
+
+      Button('返回助手')
+        .width('92%')
+        .height(46)
+        .fontColor('#4F68FF')
+        .backgroundColor('#EEF3FF')
+        .borderRadius(14)
+        .margin({ top: 14 })
+        .onClick(() => { this.assistantSettingsOpen = false; })
+      Blank().height(110)
+    }.width('100%')
   }
 
   @Builder TabItem(icon: string, label: string, index: number) {

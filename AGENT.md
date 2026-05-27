@@ -1,15 +1,21 @@
 # AGENT.md
 
-This project is a HarmonyOS NEXT ArkTS app. The main page currently lives at:
+This project is a HarmonyOS NEXT ArkTS app. The entry page currently lives at:
 
 - `entry/src/main/ets/pages/Index.ets`
+- Shared header component: `entry/src/main/ets/components/AppHeader.ets`
+- Main tab UI components:
+  - `entry/src/main/ets/pages/home/HomePage.ets`
+  - `entry/src/main/ets/pages/collection/CollectionPage.ets`
+  - `entry/src/main/ets/pages/task/TaskPage.ets`
 
 The app started as a local model inference demo. It is being redesigned into a "数据归家" app, but the existing local inference logic must be preserved unless the user explicitly asks to change it.
 
 ## Project Context
 
 - DevEco Studio is installed at `D:\download\deveco\DevEco Studio`.
-- The main UI page is `entry/src/main/ets/pages/Index.ets`.
+- `Index.ets` owns app-level state, bottom tabs, and the local inference/assistant logic.
+- Home, collection, and task UI should stay in their own component files.
 - Current added media assets:
   - `entry/src/main/resources/base/media/digital_avatar.png`
   - `entry/src/main/resources/base/media/rec_food.png`
@@ -103,4 +109,3 @@ When changing the "数据归家" UI, do not change the local inference behavior 
 - navigation to `pages/OpTest` and `pages/LogView`
 
 UI can be restyled, but core calls and data paths should remain intact.
-

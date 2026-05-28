@@ -11,6 +11,9 @@ import sys
 import logging
 import argparse
 
+class TaskCompletedConnectionClosed(Exception):
+    pass
+
 try:
     from hmdriver2.driver import Driver
     # Some common hmdriver2 setups
@@ -22,6 +25,9 @@ except ImportError:
 PORT = 9126
 HOST = '127.0.0.1'
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
+HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
+LAST_TASK_COMPLETED = False
 
 # Agent mode toggle: True = prefix KV cache reuse, False = original chat-based flow
 USE_AGENT_MODE = True
@@ -48,12 +54,46 @@ SWIPE_H_END = 0.7
 LLM_APP_BUNDLE = "com.example.mnnllmchat"
 LLM_APP_ABILITY = "EntryAbility"
 
+def quiet_system(cmd):
+    return os.system(f"{cmd} >{NULL_DEVICE} 2>&1")
+
+def get_hdc_target():
+    global HDC_TARGET
+    if HDC_TARGET:
+        return HDC_TARGET
+    try:
+        output = subprocess.check_output("hdc list targets", shell=True, text=True).strip()
+        targets = [line.strip() for line in output.splitlines()
+                   if line.strip() and "[Empty]" not in line]
+        if not targets:
+            return ""
+        wireless_targets = [target for target in targets if ":" in target]
+        HDC_TARGET = wireless_targets[0] if wireless_targets else targets[0]
+        print(f">> [HDC] 使用目标设备: {HDC_TARGET}")
+        return HDC_TARGET
+    except Exception as ex:
+        print(f">> [HDC警告] 获取目标设备失败: {ex}")
+        return ""
+
+def hdc_prefix():
+    target = get_hdc_target()
+    if target:
+        return f"hdc -t {target}"
+    return "hdc"
+
+def refresh_hdc_forwarding(verbose=False):
+    prefix = hdc_prefix()
+    quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
+    if verbose:
+        return os.system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
+    return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
+
 def bring_llm_app_to_foreground():
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
     if d:
         d.force_start_app(LLM_APP_BUNDLE)
     else:
-        os.system(f"hdc shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
+        os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
     time.sleep(1)
 APP_MAPPING = {
     "携程": "com.ctrip.harmonynext",
@@ -109,12 +149,13 @@ def load_prompt(filename):
 def run_cmd(cmd):
     return subprocess.check_output(cmd, shell=True, text=True)
 
-def capture_screen():
+def capture_screen(factor=0.25):
     print(">> Capturing screen via hdc...")
-    local_path = "screen.jpeg"
+    local_path = os.path.join(os.path.dirname(__file__), "screen.jpeg")
+    prefix = hdc_prefix()
     
     # 截取屏幕并提取鸿蒙实际为你随机生成的文件名 (忽略大小写)
-    output = subprocess.check_output("hdc shell snapshot_display", shell=True, text=True)
+    output = subprocess.check_output(f"{prefix} shell snapshot_display", shell=True, text=True, stderr=subprocess.STDOUT)
     match = re.search(r'(?i)write to\s+(/\S+\.jpeg)', output)
     
     if match:
@@ -127,29 +168,35 @@ def capture_screen():
         if match_fallback:
             device_path = match_fallback.group(1)
         else:
-            device_path = "/data/local/tmp/screen.jpeg"
-            os.system(f"hdc shell snapshot_display {device_path}")
+            raise RuntimeError("snapshot_display did not report a device jpeg path")
     print(f">> 使用截图路径: {device_path}")     
     # 先删除电脑端旧文件，防止拉取失败时继续读取旧图片
     if os.path.exists(local_path):
         os.remove(local_path)
         
     # 下拉截图到电脑（使用跨平台无输出模式，解决 Linux/zsh/win 下的 >nul 问题）
-    subprocess.run(f"hdc file recv {device_path} {local_path}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    recv_result = subprocess.run(
+        f"{prefix} file recv {device_path} \"{local_path}\"",
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    if recv_result.returncode != 0:
+        raise RuntimeError(
+            "hdc file recv failed: " +
+            (recv_result.stderr.strip() or recv_result.stdout.strip() or f"returncode={recv_result.returncode}")
+        )
     
     if not os.path.exists(local_path):
-        print(f">> [致命错误] 从手机拉取截图失败! 无法找到 {local_path}。HDC可能卡死了，手机路径为: {device_path}")
-        time.sleep(2)
-        # 兜底返回空或者抛出异常都可以
+        raise FileNotFoundError(f"local screenshot not found after recv: {local_path}; device path: {device_path}")
     
     # 拉取后顺手把手机里的临时文件删掉，防止手机空间爆满
-    subprocess.run(f"hdc shell rm \"{device_path}\"", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(f"{prefix} shell rm \"{device_path}\"", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     img = Image.open(local_path)
     w, h = img.size
     
     # 为了减少网络传输压力和内存占用，进行缩小
-    factor = 0.25
     new_w, new_h = int(w * factor), int(h * factor)
     img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     
@@ -164,26 +211,54 @@ def send_request(req):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.connect((HOST, PORT))
+        s.sendall(payload.encode('utf-8'))
+
+        buffer = ""
+        while True:
+            data = s.recv(4096)
+            if not data:
+                break
+            buffer += data.decode('utf-8')
+            if "<<EOF>>" in buffer:
+                break
+
+        res = buffer.split("<<EOF>>")[0]
+        try:
+            parsed_res = json.loads(res)
+            if isinstance(parsed_res, dict) and "__cloud_debug_prompt" in parsed_res and "response" in parsed_res:
+                print("\n========== Cloud Decider Input Prompt ==========")
+                print(parsed_res["__cloud_debug_prompt"])
+                print("========== End Cloud Decider Input Prompt ==========\n")
+                return parsed_res["response"]
+        except Exception:
+            pass
+        return res
     except Exception as e:
         # 当轮询（poll）未连上时保持静默，只有其他核心请求断开时才打印错误，防止刷屏。
         if req.get("type") != "poll":
             print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
         raise e
-        
-    s.sendall(payload.encode('utf-8'))
-    
-    buffer = ""
-    while True:
-        data = s.recv(4096)
-        if not data:
-            break
-        buffer += data.decode('utf-8')
-        if "<<EOF>>" in buffer:
-            break
-            
-    s.close()
-    res = buffer.split("<<EOF>>")[0]
-    return res
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+def send_request_best_effort(req, context="request"):
+    try:
+        return send_request(req)
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as ex:
+        print(f">> [提示] {context} 未完成，连接已关闭：{ex}")
+        return ""
+
+def is_connection_closed_error(err_msg):
+    lower = err_msg.lower()
+    return (
+        "10054" in err_msg or
+        "forcibly closed" in lower or
+        "connection reset" in lower or
+        "远程主机强迫关闭" in err_msg
+    )
 
 def reset_driver():
     """触发式重置：清理并重新初始化 Driver，丢弃无用的轮询阈值逻辑"""
@@ -210,8 +285,7 @@ def poll_task():
     except:
         # 轮询失败（例如设备被刚刚切换，9126 通道断开），仅在此处轻量补发一次端口映射
         # 不连带重置 hmdriver2 驱动（避免没任务时的后台严重卡顿）
-        os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
-        os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
+        refresh_hdc_forwarding()
         return ""
 
 def extract_json_payload(raw_text):
@@ -413,7 +487,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         if d:
             d.click(int(x), int(y))
         else:
-            os.system(f"hdc shell uitest uiInput click {int(x)} {int(y)}")
+            os.system(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
         time.sleep(DEVICE_WAIT_TIME)
         
     elif action == "click_input":
@@ -438,9 +512,9 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
                 except:
                     d.press_key(2054)
             else:
-                os.system(f"hdc shell uitest uiInput click {px} {py}")
+                os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
                 time.sleep(DEVICE_WAIT_TIME)
-                os.system(f"hdc shell uitest uiInput inputText '{text}'")
+                os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
             
             params["abs_bbox"] = abs_bbox # For history tracking
         
@@ -466,7 +540,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             if d:
                 d.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000)
             else:
-                os.system(f"hdc shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
             
     elif action == "input":
         text = params.get("text", "")
@@ -483,7 +557,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
                 # fallback to hardcoded ENTER key event or 2054
                 d.press_key(2054)
         else:
-            os.system(f"hdc shell uitest uiInput inputText '{text}'")
+            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
 
     return action, params
 
@@ -514,7 +588,12 @@ def run_planner(task):
             raise ValueError("planner output is not a JSON object")
         # 兼容多种常见的键名
         app_name = data.get("app") or data.get("target_app") or data.get("app_name")
-        return app_name
+        package_name = data.get("package_name") or data.get("bundle") or data.get("bundle_name")
+        if app_name:
+            return app_name
+        if package_name:
+            print(f">> [Planner] 未返回 App 名称，直接使用包名: {package_name}")
+            return package_name
     except:
         print(">> [Planner] 解析目标 App 名称失败，使用原界面进行 fallback。")
         return None
@@ -525,6 +604,8 @@ def launch_app(app_name):
         
     print(f">> [Planner] 准备拉起目标 App: {app_name}")
     bundle = APP_MAPPING.get(app_name)
+    if not bundle and isinstance(app_name, str) and "." in app_name:
+        bundle = app_name
     
     if bundle:
         if d:
@@ -533,9 +614,9 @@ def launch_app(app_name):
         else:
             # 兼容旧的 HDC 启动方式作为 Fallback
             if bundle == "com.taobao.taobao4hmos":
-                cmd = f"hdc shell aa start -b {bundle} -a Taobao_mainAbility"
+                cmd = f"{hdc_prefix()} shell aa start -b {bundle} -a Taobao_mainAbility"
             else:
-                cmd = f"hdc shell aa start -b {bundle}"
+                cmd = f"{hdc_prefix()} shell aa start -b {bundle}"
             print(f">> 执行启动命令 (hdc): {cmd}")
             os.system(cmd)
             
@@ -549,6 +630,8 @@ def launch_app(app_name):
 def run_task_in_app_agent(task):
     """Agent mode with prefix KV cache reuse. Fixed prefix is prefilled once,
     each step only prefills the variable part (action history + screenshot)."""
+    global LAST_TASK_COMPLETED
+    LAST_TASK_COMPLETED = False
     history_list = []
 
     # 1. Build and send prefix (fixed across all steps)
@@ -562,19 +645,22 @@ def run_task_in_app_agent(task):
     print(f">> [Agent] Prefilling prefix ({len(prefix)} chars)...")
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
     print(f">> [Agent] Prefill result: {prefill_res}")
+    screenshot_factor = 0.5 if "cloud qwen prompt mode" in prefill_res else 0.25
+    inverse_screenshot_factor = int(round(1 / screenshot_factor))
+    print(f">> [Agent] Screenshot resize factor: {screenshot_factor}")
 
     variable_file = "e2e_v2_agent_variable_noreason.md" if NO_REASON_MODE else "e2e_v2_agent_variable.md"
     variable_template = load_prompt(variable_file)
     if not variable_template:
         print(">> [Agent] 找不到 variable 模板，回退到普通模式")
-        send_request({"type": "agent_reset"})
+        send_request_best_effort({"type": "agent_reset"}, "Agent fallback reset")
         return run_task_in_app(task)
 
     # 2. Step loop
     for step_idx in range(MAX_STEPS):
         print(f"\n--- [Agent Step {step_idx+1}/{MAX_STEPS}] ---")
 
-        b64, w, h = capture_screen()
+        b64, w, h = capture_screen(screenshot_factor)
         history_str = "  ".join(history_list) if history_list else "(No history)"
 
         variable = variable_template.replace("{history}", history_str)
@@ -592,13 +678,14 @@ def run_task_in_app_agent(task):
         sys.stdout.flush()
         time.sleep(0.3)
 
-        w_full = w * 4
-        h_full = h * 4
+        w_full = w * inverse_screenshot_factor
+        h_full = h * inverse_screenshot_factor
         img_size = (w_full, h_full)
         action, params = execute_action_and_get_details(res, img_size=img_size)
 
         if action in ["done", "stop", "terminate"]:
             print(">> [Agent] Task completed!")
+            LAST_TASK_COMPLETED = True
             break
         elif action == "error":
             print(">> [Agent] Parse error, aborting.")
@@ -618,10 +705,12 @@ def run_task_in_app_agent(task):
 
     # 3. Cleanup agent mode
     print(">> [Agent] Resetting agent mode...")
-    send_request({"type": "agent_reset"})
+    send_request_best_effort({"type": "agent_reset"}, "Agent 模式收尾重置")
 
 
 def run_task_in_app(task):
+    global LAST_TASK_COMPLETED
+    LAST_TASK_COMPLETED = False
     history_list = []
 
     template = load_prompt("e2e_v2.md")
@@ -692,14 +781,14 @@ if __name__ == "__main__":
 
     print("初始化 HDC 端口转发...")
     # 由于该脚本可能被多次重启或前置 HDC 挂载占用，先强制清理端口再映射，防止冲突
-    os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
-    os.system(f"hdc fport tcp:{PORT} tcp:{PORT}")
+    refresh_hdc_forwarding(verbose=True)
     
     print(">> 监听模式已启动。等待手机 APP 端派发任务...")
     
     active_task = ""
     
     while True:
+        task_finished = False
         try:
             task = poll_task()
             if not task:
@@ -716,12 +805,11 @@ if __name__ == "__main__":
                 
                 # 【触发式逻辑】在执行真正的新任务开始前，确保设备端口及驱动是健康状态
                 print(">> [环境就绪准备] 刷新 HDC 端口并初始化 hmdriver2 驱动...")
-                os.system(f"hdc fport rm tcp:{PORT} tcp:{PORT} 2>/dev/null")
-                os.system(f"hdc fport tcp:{PORT} tcp:{PORT} >/dev/null 2>&1")
+                refresh_hdc_forwarding()
                 reset_driver()
                 
                 # 1. 确保环境干净
-                send_request({"type": "clear"})
+                send_request_best_effort({"type": "clear"}, "任务开始前清理状态")
                 
                 # 2. Stage 1: Planner 解析意图并启动 App
                 app_name = run_planner(task)
@@ -732,22 +820,28 @@ if __name__ == "__main__":
                         time.sleep(1.3)
                 
                 # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
-                send_request({"type": "clear"})
+                send_request_best_effort({"type": "clear"}, "Planner 后清理上下文")
 
                 # 4. Stage 2: 任务在 App 内循环执行
                 if USE_AGENT_MODE:
                     run_task_in_app_agent(task)
                 else:
                     run_task_in_app(task)
+                task_finished = True
                 bring_llm_app_to_foreground()
                 
                 # 6. 任务全部结束，清除手机端状态
                 print(">> 当前任务流程已全部结束，清理状态并等待下一个任务...")
-                send_request({"type": "clear"})
+                send_request_best_effort({"type": "clear"}, "任务结束后清理状态")
                 active_task = ""
                 
         except Exception as e:
             err_msg = str(e)
+            if (task_finished or LAST_TASK_COMPLETED) and is_connection_closed_error(err_msg):
+                print(f"\n>> [提示] 任务已完成，收尾连接被 App/HDC 关闭：{err_msg}")
+                active_task = ""
+                LAST_TASK_COMPLETED = False
+                continue
             print(f"\n>> [错误重启] 任务执行过程中发生异常: {err_msg}")
             
             # 如果中间执行阶段底层管道破裂（手机刚刚拔下等），主动重置以便不卡死
@@ -758,7 +852,7 @@ if __name__ == "__main__":
             try:
                 # 尝试把界面回到应用, 并在 app 中显示异常
                 bring_llm_app_to_foreground()
-                send_request({"type": "error", "message": f"任务执行出错: {err_msg}"})
+                send_request_best_effort({"type": "error", "message": f"任务执行出错: {err_msg}"}, "错误状态上报")
             except:
                 pass
             active_task = ""

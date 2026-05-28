@@ -6,7 +6,8 @@ import { promptAction } from '@kit.ArkUI';
 @Entry
 @Component
 struct LogView {
-  @State logs: string = '(no logs yet — tap Refresh)'
+  @State logs: string = '(no logs yet - tap Refresh)'
+  @State logSource: number = 1
   @State autoRefresh: boolean = true
   @State autoScroll: boolean = true
   private timerId: number = -1
@@ -37,8 +38,13 @@ struct LogView {
 
   reload() {
     try {
-      const text = native.getLogs() || '(empty)'
-      this.logs = text
+      if (this.logSource === 0) {
+        const text = native.getLogs() || '(empty native runtime logs)'
+        this.logs = text
+      } else {
+        const text = AppStorage.get('cloudAgentLogs') as string
+        this.logs = text && text.length > 0 ? text : '(empty cloud agent logs)'
+      }
       if (this.autoScroll) {
         this.scroller.scrollEdge(Edge.Bottom)
       }
@@ -49,13 +55,12 @@ struct LogView {
 
   build() {
     Column() {
-      // Title bar
       Row() {
         Button('Back')
           .fontSize(14).height(36)
           .onClick(() => router.back())
         Blank()
-        Text('Runtime Logs')
+        Text(this.logSource === 0 ? 'Runtime Logs' : 'Cloud Agent Logs')
           .fontSize(18).fontWeight(FontWeight.Bold)
         Blank()
         Button(this.autoRefresh ? 'Auto ON' : 'Auto OFF')
@@ -65,11 +70,28 @@ struct LogView {
       }
       .width('100%').padding(10)
 
-      // Action bar
+      Row() {
+        Button('Native')
+          .fontSize(12).height(34).flexGrow(1)
+          .backgroundColor(this.logSource === 0 ? '#5B68FF' : '#888888')
+          .onClick(() => {
+            this.logSource = 0
+            this.reload()
+          })
+        Button('Cloud')
+          .fontSize(12).height(34).flexGrow(1).margin({ left: 8 })
+          .backgroundColor(this.logSource === 1 ? '#5B68FF' : '#888888')
+          .onClick(() => {
+            this.logSource = 1
+            this.reload()
+          })
+      }
+      .width('95%').margin({ bottom: 8 })
+
       Row() {
         Button('Refresh').fontSize(14).height(36).flexGrow(1)
           .onClick(() => this.reload())
-        Button(this.autoScroll ? 'Scroll↓ ON' : 'Scroll↓ OFF')
+        Button(this.autoScroll ? 'Scroll ON' : 'Scroll OFF')
           .fontSize(12).height(36).flexGrow(1).margin({ left: 8 })
           .backgroundColor(this.autoScroll ? '#2196F3' : '#888888')
           .onClick(() => {
@@ -88,7 +110,11 @@ struct LogView {
           .backgroundColor('#F44336')
           .onClick(() => {
             try {
-              native.clearLogs()
+              if (this.logSource === 0) {
+                native.clearLogs()
+              } else {
+                AppStorage.setOrCreate('cloudAgentLogs', '')
+              }
               this.logs = '(cleared)'
             } catch (e) {
               this.logs = 'clearLogs error: ' + JSON.stringify(e)
@@ -97,7 +123,6 @@ struct LogView {
       }
       .width('95%').margin({ bottom: 8 })
 
-      // Log area — dark terminal style
       Scroll(this.scroller) {
         Text(this.logs)
           .fontSize(11)

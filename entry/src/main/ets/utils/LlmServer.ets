@@ -1,232 +1,538 @@
 import { socket } from '@kit.NetworkKit';
-import { util } from '@kit.ArkTS';
+import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
-import { wantAgent } from '@kit.AbilityKit';
+import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 
+type NativeApi = Record<string, Function>;
+type RequestMap = Record<string, Object>;
+
+interface TaskResponse {
+  task: string;
+}
+
+interface StatusResponse {
+  status: string;
+  result?: string;
+  message?: string;
+}
+
+interface ActionErrorResponse {
+  action: string;
+  reason: string;
+}
+
+interface ErrorResponse {
+  error: string;
+}
+
+interface CloudDebugResponse {
+  __cloud_debug_prompt: string;
+  response: string;
+}
 
 export class LlmServer {
   private server: socket.TCPSocketServer | null = null;
   private isRunning: boolean = false;
-  public currentTask: string = "";
+  private cloudConnectLogged: boolean = false;
+  private cloudActionHistory: string[] = [];
+  private cloudTask: string = '';
+  public currentTask: string = '';
 
-  start(port: number, filesDir: string, mnnllm: Record<string, Function>, onLog: (msg: string) => void, onRequireApproval?: (response: string) => Promise<boolean>) {
+  private extractCloudTask(prefix: string): string {
+    let marker = '### Current Task';
+    let start = prefix.indexOf(marker);
+    if (start < 0) {
+      return this.currentTask;
+    }
+    let rest = prefix.substring(start + marker.length).trim();
+    let nextSection = rest.indexOf('\n### ');
+    if (nextSection >= 0) {
+      rest = rest.substring(0, nextSection).trim();
+    }
+    return rest.length > 0 ? rest : this.currentTask;
+  }
+
+  private cleanupSnapshots(filesDir: string): void {
+    try {
+      let files = fs.listFileSync(filesDir);
+      for (let fileName of files) {
+        if (fileName.startsWith('agent_snapshot_')) {
+          fs.unlinkSync(filesDir + '/' + fileName);
+        }
+      }
+    } catch (e) {
+    }
+  }
+
+  private saveSnapshot(filesDir: string, imageBase64: string): string {
+    this.cleanupSnapshots(filesDir);
+    let ts = new Date().getTime();
+    let imgPath = filesDir + '/agent_snapshot_' + ts + '.jpg';
+    let base64Helper = new util.Base64Helper();
+    let imgBuffer = base64Helper.decodeSync(imageBase64);
+    let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    fs.writeSync(file.fd, imgBuffer.buffer);
+    fs.closeSync(file);
+    return imgPath;
+  }
+
+  private getString(req: RequestMap, key: string): string {
+    let value = req[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  private sendJson(client: socket.TCPSocketConnection, payload: string): void {
+    let sendOptions: socket.TCPSendOptions = {
+      data: payload + '<<EOF>>'
+    };
+    client.send(sendOptions);
+  }
+
+  private sendStatus(client: socket.TCPSocketConnection, status: string, result?: string, message?: string): void {
+    let response: StatusResponse = {
+      status: status,
+      result: result,
+      message: message
+    };
+    this.sendJson(client, ArkJSON.stringify(response));
+  }
+
+  private sendTask(client: socket.TCPSocketConnection): void {
+    let response: TaskResponse = {
+      task: this.currentTask
+    };
+    this.sendJson(client, ArkJSON.stringify(response));
+  }
+
+  private sendActionError(client: socket.TCPSocketConnection, reason: string): void {
+    let response: ActionErrorResponse = {
+      action: 'error',
+      reason: reason
+    };
+    this.sendJson(client, ArkJSON.stringify(response));
+  }
+
+  private sendError(client: socket.TCPSocketConnection, error: string): void {
+    let response: ErrorResponse = {
+      error: error
+    };
+    this.sendJson(client, ArkJSON.stringify(response));
+  }
+
+  private sendCloudDebugResponse(client: socket.TCPSocketConnection, debugPrompt: string, modelResponse: string): void {
+    let response: CloudDebugResponse = {
+      __cloud_debug_prompt: debugPrompt,
+      response: modelResponse
+    };
+    this.sendJson(client, ArkJSON.stringify(response));
+  }
+
+  private normalizeCloudHistoryItem(response: string): string {
+    let text = response.trim();
+    let jsonStart = text.indexOf('{');
+    let jsonEnd = text.lastIndexOf('}');
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      text = text.substring(jsonStart, jsonEnd + 1);
+    }
+
+    try {
+      let parsed = ArkJSON.parse(text) as Object;
+      return ArkJSON.stringify(parsed);
+    } catch (e) {
+      return response;
+    }
+  }
+
+  start(port: number, filesDir: string, mnnllm: NativeApi, onLog: (msg: string) => void,
+    onRequireApproval?: (response: string) => Promise<boolean>): void {
     if (this.isRunning) {
-      onLog("服务已经运行中");
+      onLog('Server is already running.');
       return;
     }
 
     this.server = socket.constructTCPSocketServerInstance();
     let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
-    
+
     this.server.listen(ipAddress, (err) => {
       if (err) {
-        onLog(`【ERROR】服务启动失败，请检查端口是否被占用: ${JSON.stringify(err)}`);
+        onLog('[ERROR] Local TCP server failed to start: ' + ArkJSON.stringify(err));
         return;
       }
       this.isRunning = true;
-      onLog(`====== PC 投屏控制端后台开启 ======\n监听端口：TCP ${port}，可使用 hdc fport 打通！\n现在可以在 APP 端输入任务并开始了。`);
+      onLog('====== Local PC control backend started ======\nTCP port: ' + port +
+        '\nYou can now submit an Agent task in the app.');
     });
 
     this.server.on('connect', (client: socket.TCPSocketConnection) => {
-      let bufferStr = "";
-      
+      let bufferStr = '';
+
       client.on('message', async (data) => {
         let textDecoder = util.TextDecoder.create('utf-8');
         let str = textDecoder.decodeWithStream(new Uint8Array(data.message));
         bufferStr += str;
-        
-        // 我们以 <<EOF>> 作为通信帧截断符
-        let eofIdx = bufferStr.indexOf("<<EOF>>");
-        if (eofIdx !== -1) {
-          let payload = bufferStr.substring(0, eofIdx);
-          bufferStr = bufferStr.substring(eofIdx + 7);
-          
-          try {
-            let req: Record<string, Object> = JSON.parse(payload);
-            let reqType = req['type'] as string;
 
-            if (reqType === "poll") {
-              // PC 端轮询获取任务
-              client.send({ data: JSON.stringify({ task: this.currentTask }) + "<<EOF>>" });
-              return;
-            } else if (reqType === "clear") {
-               // PC 端要求清除任务（达到步数或手动终止）
-               this.currentTask = "";
-               // Reset agent mode if active, then normal reset
-               if (mnnllm && typeof mnnllm['agentReset'] === 'function') {
-                 try { await mnnllm.agentReset(); } catch(e) {}
-               } else if (mnnllm && typeof mnnllm['reset'] === 'function') {
-                 mnnllm['reset']();
-               }
-               onLog(`>> [任务被PC端终止] 当前任务已清空，并已重置大模型上下文。`);
-               client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
-               return;
-            } else if (reqType === "error") {
-               this.currentTask = "";
-               let errMsg = req['message'] as string || "未知错误";
-               onLog(`>> [PC端执行异常] ${errMsg}`);
-               client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
-               return;
-            } else if (reqType === "agent_prefill") {
-              // Agent mode: prefill fixed prefix for KV cache reuse
-              let prefix = req['prefix'] as string;
-              onLog(`>> [Agent Prefill] 固定前缀 Prompt (${prefix.length} chars):\n${prefix}`);
-              AppStorage.set('floatText', 'Prefill 中...');
+        let eofIdx = bufferStr.indexOf('<<EOF>>');
+        if (eofIdx === -1) {
+          return;
+        }
+
+        let payload = bufferStr.substring(0, eofIdx);
+        bufferStr = bufferStr.substring(eofIdx + 7);
+
+        try {
+          let req = ArkJSON.parse(payload) as RequestMap;
+          let reqType = this.getString(req, 'type');
+
+          if (reqType === 'poll') {
+            this.sendTask(client);
+            return;
+          }
+
+          if (reqType === 'clear') {
+            this.currentTask = '';
+            let agentReset = mnnllm['agentReset'];
+            let reset = mnnllm['reset'];
+            if (typeof agentReset === 'function') {
               try {
-                let result = await mnnllm.agentPrefill(prefix) as string;
-                AppStorage.set('floatText', 'AI Agent 运行中...');
-                onLog(`>> [Agent Prefill 完成] ${result}`);
-                client.send({ data: JSON.stringify({ status: "ok", result: result }) + "<<EOF>>" });
-              } catch(e) {
-                onLog(`>> [Agent Prefill ERROR] ${e}`);
-                client.send({ data: JSON.stringify({ status: "error", message: String(e) }) + "<<EOF>>" });
+                await agentReset();
+              } catch (e) {
               }
-            } else if (reqType === "agent_step") {
-              // Agent mode: erase previous step, prefill variable, generate
-              let variable = req['variable'] as string;
-              if (req['image_b64']) {
-                // Clean up previous snapshots
-                try {
-                  let fList = fs.listFileSync(filesDir);
-                  for (let f of fList) {
-                    if (f.startsWith('agent_snapshot_')) {
-                      fs.unlinkSync(filesDir + '/' + f);
-                    }
-                  }
-                } catch(e) {}
+            } else if (typeof reset === 'function') {
+              reset();
+            }
+            onLog('>> [Local Clear] Task cleared and model context reset.');
+            this.sendStatus(client, 'ok');
+            return;
+          }
 
-                let ts = new Date().getTime();
-                let imgPath = filesDir + `/agent_snapshot_${ts}.jpg`;
-                let base64Helper = new util.Base64Helper();
-                let imgBuffer = base64Helper.decodeSync(req['image_b64'] as string);
+          if (reqType === 'error') {
+            this.currentTask = '';
+            onLog('>> [PC Error] ' + this.getString(req, 'message'));
+            this.sendStatus(client, 'ok');
+            return;
+          }
 
-                let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-                fs.writeSync(file.fd, imgBuffer.buffer);
-                fs.closeSync(file);
+          if (reqType === 'agent_prefill') {
+            let prefix = this.getString(req, 'prefix');
+            onLog('>> [Agent Prefill] prompt chars=' + prefix.length + '\n' + prefix);
+            AppStorage.set('floatText', 'Prefill...');
+            try {
+              let agentPrefill = mnnllm['agentPrefill'];
+              let result = await agentPrefill(prefix) as string;
+              AppStorage.set('floatText', 'AI Agent running...');
+              onLog('>> [Agent Prefill Done] ' + result);
+              this.sendStatus(client, 'ok', result);
+            } catch (e) {
+              let message = String(e);
+              onLog('>> [Agent Prefill ERROR] ' + message);
+              this.sendStatus(client, 'error', '', message);
+            }
+            return;
+          }
 
-                let w = req['width'];
-                let h = req['height'];
-                let imgTag = `<img>${imgPath}<hw>${h},${w}</hw></img>`;
-                onLog(`>> [Agent Step] image saved: ${imgPath} (${w}x${h})`);
-
-                if (variable.indexOf('<image_placeholder>') !== -1) {
-                  variable = variable.replace('<image_placeholder>', imgTag);
-                } else {
-                  variable = imgTag + variable;
-                }
+          if (reqType === 'agent_step') {
+            let variable = this.getString(req, 'variable');
+            let imageBase64 = this.getString(req, 'image_b64');
+            if (imageBase64.length > 0) {
+              let imgPath = this.saveSnapshot(filesDir, imageBase64);
+              let w = req['width'];
+              let h = req['height'];
+              let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
+              onLog('>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+              if (variable.indexOf('<image_placeholder>') !== -1) {
+                variable = variable.replace('<image_placeholder>', imgTag);
+              } else {
+                variable = imgTag + variable;
               }
+            }
 
-              onLog(`>> [Agent Step] 本步变量 Prompt:\n${variable}`);
-              AppStorage.set('floatText', '思考中...');
-              let streamedText = '';
-              try {
-                let response = await mnnllm.agentStep(variable, (token: string) => {
-                  streamedText += token;
-                  AppStorage.set('floatText', streamedText);
-                }) as string;
-                AppStorage.set('floatText', 'AI Agent 运行中...');
-                onLog(`>> [Agent Step] 模型推理返回结果:\n${response}`);
-
-                if (onRequireApproval) {
-                  let isApproved = await onRequireApproval(response);
-                  if (!isApproved) {
-                    onLog(`>> [Agent Step] User rejected action.`);
-                    this.currentTask = "";
-                    client.send({ data: `{"action": "error", "reason": "User rejected"}` + "<<EOF>>" });
-                    return;
-                  }
-                }
-
-                if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
-                  this.currentTask = "";
-                  onLog(`>> [Agent] Task completed.`);
-                }
-
-                client.send({ data: response + "<<EOF>>" });
-              } catch(e) {
-                onLog(`>> [Agent Step ERROR] ${e}`);
-                client.send({ data: JSON.stringify({ action: "error", reason: String(e) }) + "<<EOF>>" });
-              }
-            } else if (reqType === "agent_reset") {
-              // Agent mode: exit and restore LLM defaults
-              try {
-                if (mnnllm && typeof mnnllm['agentReset'] === 'function') {
-                  await mnnllm.agentReset();
-                }
-              } catch(e) {}
-              this.currentTask = "";
-              AppStorage.set('floatText', 'AI Agent 运行中...');
-              onLog(`>> [Agent Reset] Agent mode disabled, LLM restored.`);
-              client.send({ data: `{"status": "ok"}` + "<<EOF>>" });
-            } else if (reqType === "action") {
-              // PC 端发来截图，要求推理（原有 chat 模式）
-              let prompt = req['prompt'] as string;
-              if (req['image_b64']) {
-                // 先清理之前的缓存截图，避免占满存储
-                try {
-                  let fList = fs.listFileSync(filesDir);
-                  for (let f of fList) {
-                    if (f.startsWith('agent_snapshot_')) {
-                      fs.unlinkSync(filesDir + '/' + f);
-                    }
-                  }
-                } catch(e) {}
-
-                // 生成带有时间戳的文件名，防止 C++ 模型底层因路径相同而缓存不刷新图片
-                let ts = new Date().getTime()
-                let imgPath = filesDir + `/agent_snapshot_${ts}.jpg`;
-                let base64Helper = new util.Base64Helper();
-                let imgBuffer = base64Helper.decodeSync(req['image_b64'] as string);
-
-                let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-                fs.writeSync(file.fd, imgBuffer.buffer);
-                fs.closeSync(file);
-
-                let w = req['width'];
-                let h = req['height'];
-                let imgTag = `<img>${imgPath}<hw>${h},${w}</hw></img>`;
-                onLog(`>> [Debug] req['width']: ${w}, req['height']: ${h}, imgPath: ${imgPath}`);
-
-                if (prompt.indexOf('<image_placeholder>') !== -1) {
-                  prompt = prompt.replace('<image_placeholder>', imgTag);
-                } else {
-                  // 如果 prompt 中没有占位符，作为兜底依然加在最前面
-                  prompt = imgTag + '\n' + prompt;
-                }
-              }
-
-              onLog(`>> [接收到 PC 发来的推理请求(含图片)]\n原始文本任务: ${req['prompt'] as string}\n构造给大模型的完整 Prompt:\n${prompt}`);
-              AppStorage.set('floatText', '正在推理...');
-              let response = await mnnllm.chat(prompt) as string;
-              AppStorage.set('floatText', 'AI Agent 运行中...');
-              onLog(`>> [模型推理返回结果]: \n${response}`);
+            onLog('>> [Agent Step] variable prompt:\n' + variable);
+            AppStorage.set('floatText', 'Thinking...');
+            let streamedText = '';
+            try {
+              let agentStep = mnnllm['agentStep'];
+              let response = await agentStep(variable, (token: string) => {
+                streamedText += token;
+                AppStorage.set('floatText', streamedText);
+              }) as string;
+              AppStorage.set('floatText', 'AI Agent running...');
+              onLog('>> [Agent Step] model response:\n' + response);
 
               if (onRequireApproval) {
-                 onLog(`>> [等待用户确认] 弹窗已展现...`);
-                 let isApproved = await onRequireApproval(response);
-                 if (!isApproved) {
-                    onLog(`>> [用户拒绝] 已丢弃该动作并通知 PC 端终止。`);
-                    this.currentTask = "";
-                    client.send({ data: `{"action": "error", "reason": "User rejected"}` + "<<EOF>>" });
-                    return;
-                 }
-                 onLog(`>> [用户同意] 动作已放行。`);
+                let isApproved = await onRequireApproval(response);
+                if (!isApproved) {
+                  this.currentTask = '';
+                  this.sendActionError(client, 'User rejected');
+                  return;
+                }
               }
 
-              // 简单的正则检查，如果是 done 或者 stop，就自动清空任务停止
               if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
-                 this.currentTask = "";
-                 onLog(`>> [任务完成] Agent 停止。`);
+                this.currentTask = '';
+                onLog('>> [Agent] Task completed.');
               }
 
-              onLog(`>> [下发至 PC]: \n${response}`);
-              client.send({ data: response + "<<EOF>>" });
+              this.sendJson(client, response);
+            } catch (e) {
+              let message = String(e);
+              onLog('>> [Agent Step ERROR] ' + message);
+              this.sendActionError(client, message);
             }
-          } catch(e) {
-            onLog(`【ERROR】处理请求失败: ${e}`);
-            client.send({ data: `{"error": "Failed"}` + "<<EOF>>" });
+            return;
           }
+
+          if (reqType === 'agent_reset') {
+            try {
+              let agentReset = mnnllm['agentReset'];
+              if (typeof agentReset === 'function') {
+                await agentReset();
+              }
+            } catch (e) {
+            }
+            this.currentTask = '';
+            AppStorage.set('floatText', 'AI Agent running...');
+            onLog('>> [Agent Reset] Local Agent context reset.');
+            this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (reqType === 'action') {
+            let prompt = this.getString(req, 'prompt');
+            let imageBase64 = this.getString(req, 'image_b64');
+            if (imageBase64.length > 0) {
+              let imgPath = this.saveSnapshot(filesDir, imageBase64);
+              let w = req['width'];
+              let h = req['height'];
+              let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
+              onLog('>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+              if (prompt.indexOf('<image_placeholder>') !== -1) {
+                prompt = prompt.replace('<image_placeholder>', imgTag);
+              } else {
+                prompt = imgTag + '\n' + prompt;
+              }
+            }
+
+            onLog('>> [Action] full prompt:\n' + prompt);
+            AppStorage.set('floatText', 'Inferencing...');
+            let chat = mnnllm['chat'];
+            let response = await chat(prompt) as string;
+            AppStorage.set('floatText', 'AI Agent running...');
+            onLog('>> [Action] model response:\n' + response);
+
+            if (onRequireApproval) {
+              let isApproved = await onRequireApproval(response);
+              if (!isApproved) {
+                this.currentTask = '';
+                this.sendActionError(client, 'User rejected');
+                return;
+              }
+            }
+
+            if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
+              this.currentTask = '';
+              onLog('>> [Action] Task completed.');
+            }
+
+            this.sendJson(client, response);
+            return;
+          }
+
+          this.sendError(client, 'Unsupported request type: ' + reqType);
+        } catch (e) {
+          let message = String(e);
+          onLog('[ERROR] Request handling failed: ' + message);
+          this.sendError(client, 'Failed');
+        }
+      });
+    });
+  }
+
+  startCloud(port: number, filesDir: string, cloudClient: CloudModelClient, cloudConfig: CloudModelConfig,
+    onLog: (msg: string) => void, onRequireApproval?: (response: string) => Promise<boolean>): void {
+    if (this.isRunning) {
+      onLog('Server is already running.');
+      return;
+    }
+
+    this.cloudConnectLogged = false;
+    this.cloudActionHistory = [];
+    this.cloudTask = '';
+    this.server = socket.constructTCPSocketServerInstance();
+    let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
+
+    this.server.listen(ipAddress, (err) => {
+      if (err) {
+        onLog('[ERROR] Cloud TCP server failed to start: ' + ArkJSON.stringify(err));
+        return;
+      }
+      this.isRunning = true;
+      onLog('====== Cloud PC control backend started ======\nTCP port: ' + port +
+        '\nPlanner: ' + cloudConfig.plannerBaseUrl +
+        '\nDecider: ' + cloudConfig.deciderBaseUrl +
+        '\nYou can now submit a cloud Agent task.');
+    });
+
+    this.server.on('connect', (client: socket.TCPSocketConnection) => {
+      let bufferStr = '';
+      if (!this.cloudConnectLogged) {
+        this.cloudConnectLogged = true;
+        onLog('>> [Cloud Connect] PC client connected to App TCP server.');
+      }
+
+      client.on('message', async (data) => {
+        let textDecoder = util.TextDecoder.create('utf-8');
+        let str = textDecoder.decodeWithStream(new Uint8Array(data.message));
+        bufferStr += str;
+
+        let eofIdx = bufferStr.indexOf('<<EOF>>');
+        if (eofIdx === -1) {
+          return;
+        }
+
+        let payload = bufferStr.substring(0, eofIdx);
+        bufferStr = bufferStr.substring(eofIdx + 7);
+
+        try {
+          let req = ArkJSON.parse(payload) as RequestMap;
+          let reqType = this.getString(req, 'type');
+          if (reqType !== 'poll') {
+            onLog('>> [Cloud Request] type=' + reqType);
+          }
+
+          if (reqType === 'poll') {
+            if (this.currentTask.length > 0) {
+              onLog('>> [Cloud Poll] PC fetched task: ' + this.currentTask);
+            }
+            this.sendTask(client);
+            return;
+          }
+
+          if (reqType === 'clear') {
+            this.currentTask = '';
+            this.cloudActionHistory = [];
+            this.cloudTask = '';
+            onLog('>> [Cloud Clear] Task and cloud history cleared.');
+            this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (reqType === 'error') {
+            this.currentTask = '';
+            onLog('>> [PC Error] ' + this.getString(req, 'message'));
+            this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (reqType === 'agent_prefill') {
+            let prefix = this.getString(req, 'prefix');
+            this.cloudActionHistory = [];
+            this.cloudTask = this.extractCloudTask(prefix);
+            onLog('>> [Cloud Agent Prefill] Qwen prompt mode, task=' + this.cloudTask);
+            this.sendStatus(client, 'ok', 'cloud qwen prompt mode');
+            return;
+          }
+
+          if (reqType === 'agent_step') {
+            let prompt = this.getString(req, 'variable');
+            let imageBase64 = this.getString(req, 'image_b64');
+            if (imageBase64.length > 0) {
+              let imgPath = this.saveSnapshot(filesDir, imageBase64);
+              onLog('>> [Cloud Agent Step] image saved: ' + imgPath);
+            }
+
+            AppStorage.set('floatText', 'Cloud thinking...');
+            if (imageBase64.length > 0) {
+              onLog('>> [Cloud Decider] sending Qwen messages, history=' + this.cloudActionHistory.length);
+            } else {
+              onLog('>> [Cloud Planner] sending agent_step text...');
+            }
+
+            let qwenTask = this.cloudTask.length > 0 ? this.cloudTask : this.currentTask;
+            let debugPrompt = '';
+            if (imageBase64.length > 0) {
+              debugPrompt = cloudClient.formatQwenDeciderPromptForLog(qwenTask, this.cloudActionHistory, imageBase64);
+              onLog('>> [Cloud Decider Prompt]\n' + debugPrompt);
+            }
+            let response = imageBase64.length > 0 ?
+              await cloudClient.chatQwenDecider(qwenTask, this.cloudActionHistory, imageBase64, cloudConfig) :
+              await cloudClient.chatPlanner(prompt, cloudConfig);
+            AppStorage.set('floatText', 'AI Agent running...');
+            onLog('>> [Cloud Agent Step] model response:\n' + response);
+
+            if (onRequireApproval) {
+              let isApproved = await onRequireApproval(response);
+              if (!isApproved) {
+                this.currentTask = '';
+                this.sendActionError(client, 'User rejected');
+                return;
+              }
+            }
+
+            if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
+              this.currentTask = '';
+              onLog('>> [Cloud Agent] Task completed.');
+            } else if (imageBase64.length > 0) {
+              this.cloudActionHistory.push(this.normalizeCloudHistoryItem(response));
+            }
+            if (imageBase64.length > 0) {
+              this.sendCloudDebugResponse(client, debugPrompt, response);
+              return;
+            }
+            this.sendJson(client, response);
+            return;
+          }
+
+          if (reqType === 'agent_reset') {
+            this.currentTask = '';
+            this.cloudActionHistory = [];
+            this.cloudTask = '';
+            AppStorage.set('floatText', 'AI Agent running...');
+            onLog('>> [Cloud Agent Reset] Cloud Agent context reset.');
+            this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (reqType === 'action') {
+            let prompt = this.getString(req, 'prompt');
+            let imageBase64 = this.getString(req, 'image_b64');
+            if (imageBase64.length > 0) {
+              let imgPath = this.saveSnapshot(filesDir, imageBase64);
+              onLog('>> [Cloud Action] image saved: ' + imgPath);
+            }
+
+            AppStorage.set('floatText', 'Cloud inferencing...');
+            if (imageBase64.length > 0) {
+              onLog('>> [Cloud Decider] sending action with screenshot...');
+            } else {
+              onLog('>> [Cloud Planner] sending action text...');
+            }
+            let response = imageBase64.length > 0 ?
+              await cloudClient.chatDecider(prompt, imageBase64, cloudConfig) :
+              await cloudClient.chatPlanner(prompt, cloudConfig);
+            AppStorage.set('floatText', 'AI Agent running...');
+            onLog('>> [Cloud Action] model response:\n' + response);
+
+            if (onRequireApproval) {
+              let isApproved = await onRequireApproval(response);
+              if (!isApproved) {
+                this.currentTask = '';
+                this.sendActionError(client, 'User rejected');
+                return;
+              }
+            }
+
+            if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
+              this.currentTask = '';
+            }
+            this.sendJson(client, response);
+            return;
+          }
+
+          this.sendError(client, 'Unsupported request type: ' + reqType);
+        } catch (e) {
+          let message = String(e);
+          onLog('[ERROR] Cloud request handling failed: ' + message);
+          this.sendError(client, 'Failed');
         }
       });
     });

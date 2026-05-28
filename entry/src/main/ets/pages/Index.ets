@@ -10,6 +10,7 @@ import { CollectionPage } from './collection/CollectionPage';
 import { HomePage } from './home/HomePage';
 import { TaskPage } from './task/TaskPage';
 import { LlmServer } from '../utils/LlmServer';
+import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
 
 interface ServerFile {
   name: string;
@@ -23,9 +24,12 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-PersistentStorage.persistProp('wirelessIp', '101.5.155.98:35729');
+PersistentStorage.persistProp('wirelessIp', '192.168.137.55:33117');
 PersistentStorage.persistProp('serverIp', 'http://166.111.53.96:9123');
-PersistentStorage.persistProp('hdcServerIp', 'http://166.111.53.96:9124');
+PersistentStorage.persistProp('hdcServerIp', 'http://192.168.137.1:9124');
+PersistentStorage.persistProp('cloudPlannerBaseUrl', 'http://166.111.53.96:7003');
+PersistentStorage.persistProp('cloudDeciderBaseUrl', 'http://166.111.53.96:7003');
+PersistentStorage.persistProp('cloudApiKey', 'mobiagent-key');
 
 @Entry
 @Component
@@ -48,9 +52,17 @@ struct Index {
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
-  @StorageLink('hdcServerIp') hdcServerIp: string = 'http://166.111.53.96:9124';
-  @StorageLink('wirelessIp') wirelessIp: string = '101.5.155.98:35729';
+  @StorageLink('hdcServerIp') hdcServerIp: string = 'http://192.168.137.1:9124';
+  @StorageLink('wirelessIp') wirelessIp: string = '192.168.137.55:33117';
+  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = 'http://166.111.53.96:7003';
+  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = 'http://166.111.53.96:7003';
+  @StorageLink('cloudApiKey') cloudApiKey: string = 'mobiagent-key';
   @State isThinking: boolean = false;
+  @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
+  @State cloudUserInput: string = '';
+  @State cloudDebugImagePath: string = '';
+  @State cloudAutoConfirm: boolean = true;
+  @State cloudThinking: boolean = false;
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -59,8 +71,28 @@ struct Index {
   
   // PC 控制服务端单例。
   private llmServer: LlmServer = new LlmServer();
+  private cloudLlmServer: LlmServer = new LlmServer();
+  private cloudClient: CloudModelClient = new CloudModelClient();
+
+  private appendCloudLog(message: string): void {
+    let stamp = new Date().toLocaleTimeString();
+    let line = `[${stamp}] ${message}`;
+    let nextLogs = this.cloudOutput.length > 0 ? this.cloudOutput + '\n' + line : line;
+    if (nextLogs.length > 60000) {
+      nextLogs = nextLogs.substring(nextLogs.length - 60000);
+    }
+    this.cloudOutput = nextLogs;
+    AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
+  }
+
+  private resetCloudLog(message: string): void {
+    let stamp = new Date().toLocaleTimeString();
+    this.cloudOutput = `[${stamp}] ${message}`;
+    AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
+  }
 
   aboutToAppear() {
+    this.migrateDefaultEndpointValues();
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     this.syncModelDir();
@@ -71,6 +103,26 @@ struct Index {
       console.error('initLogFile failed: ' + err.message);
     }
     this.prepareCustomOpp();
+  }
+
+  private migrateDefaultEndpointValues(): void {
+    if (this.hdcServerIp === 'http://166.111.53.96:9124') {
+      this.hdcServerIp = 'http://192.168.137.1:9124';
+    }
+    if (this.wirelessIp.trim().length === 0 ||
+      this.wirelessIp === '101.5.155.98:35729' ||
+      this.wirelessIp === '192.168.137.172:35963') {
+      this.wirelessIp = '192.168.137.55:33117';
+    }
+    if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {
+      this.cloudPlannerBaseUrl = 'http://166.111.53.96:7003';
+    }
+    if (this.cloudDeciderBaseUrl === 'http://166.111.53.96:8000') {
+      this.cloudDeciderBaseUrl = 'http://166.111.53.96:7003';
+    }
+    if (this.cloudApiKey.trim().length === 0) {
+      this.cloudApiKey = 'mobiagent-key';
+    }
   }
 
   private prepareCustomOpp(): boolean {
@@ -131,6 +183,8 @@ struct Index {
       }
       this.output = `清理成功，删除了 ${count} 张缓存截图。`;
       this.debugImagePath = '';
+      this.cloudDebugImagePath = '';
+      this.appendCloudLog(`已删除 App 中保存的截图：${count} 张`);
     } catch(e) {
       this.output = `清理截图失败: ${e}`;
     }
@@ -430,6 +484,10 @@ struct Index {
   }
 
   async testAndConnectHdc() {
+    if (this.wirelessIp.trim().length === 0) {
+      this.output = '请先填写当前手机的无线 HDC 地址，例如 192.168.x.x:端口';
+      return;
+    }
     this.output = `正在请求远程服务执行 HDC 连接测试: ${this.wirelessIp}...`;
     let httpReq = http.createHttp();
     try {
@@ -658,6 +716,99 @@ struct Index {
     }
     this.downloading = false;
   }
+
+  private getCloudConfig(): CloudModelConfig {
+    let config: CloudModelConfig = {
+      plannerBaseUrl: this.cloudPlannerBaseUrl,
+      deciderBaseUrl: this.cloudDeciderBaseUrl,
+      apiKey: this.cloudApiKey
+    };
+    return config;
+  }
+
+  private isCloudConfigReady(): boolean {
+    return this.cloudPlannerBaseUrl.trim().length > 0 &&
+      this.cloudDeciderBaseUrl.trim().length > 0 &&
+      this.cloudApiKey.trim().length > 0;
+  }
+
+  async testCloudPlanner() {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+      return;
+    }
+    this.cloudThinking = true;
+    this.appendCloudLog(`测试 Planner：${this.cloudPlannerBaseUrl}`);
+    try {
+      let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
+      this.appendCloudLog(`Planner 测试返回：\n${response}`);
+    } catch (err) {
+      let e = err as Error;
+      this.appendCloudLog('Planner 连接失败：' + e.message);
+    } finally {
+      this.cloudThinking = false;
+    }
+  }
+
+  async runCloudPlannerOnce() {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+      return;
+    }
+    if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
+      return;
+    }
+    this.cloudThinking = true;
+    this.appendCloudLog(`手动调用 Planner，任务：${this.cloudUserInput}`);
+    try {
+      let response = await this.cloudClient.chatPlanner(this.cloudUserInput, this.getCloudConfig());
+      this.appendCloudLog(`Planner 手动返回：\n${response}`);
+    } catch (err) {
+      let e = err as Error;
+      this.appendCloudLog('云端 Planner 推理失败：' + e.message);
+    } finally {
+      this.cloudThinking = false;
+    }
+  }
+
+  startCloudBackend() {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+      return;
+    }
+    this.appendCloudLog('准备启动云端 PC 控制后端，监听 9126...');
+    this.cloudLlmServer.startCloud(9126, this.filesDir, this.cloudClient, this.getCloudConfig(), (msg: string) => {
+      this.appendCloudLog(msg);
+      let match = msg.match(/agent_snapshot_.*?\.jpg/);
+      if (match && match[0]) {
+        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
+      }
+    }, async (response: string) => {
+      if (this.cloudAutoConfirm) {
+        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
+        return true;
+      }
+      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '云端模型返回确认',
+          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => {
+          let approved = data.index === 1;
+          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
+          resolve(approved);
+        }).catch(() => {
+          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
+          resolve(false);
+        });
+      });
+    });
+  }
+
   @Builder AssistantPage() {
     Scroll() {
       Column() {
@@ -902,7 +1053,7 @@ struct Index {
           .fontColor('#6F7684')
           .width('100%')
         Row() {
-          TextInput({ placeholder: '手机无线调试地址，例如 101.5.155.98:35729', text: this.wirelessIp })
+          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.55:33117', text: this.wirelessIp })
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
@@ -1041,6 +1192,237 @@ struct Index {
     }.width('100%')
   }
 
+  @Builder CloudAssistantPage() {
+    Scroll() {
+      Column() {
+        AppHeader({ title: '云助手', subtitle: 'vLLM 云端推理控制台' })
+
+        Scroll() {
+          Text(this.cloudOutput)
+            .fontSize(13)
+            .fontFamily('monospace')
+            .fontColor('#333333')
+            .width('100%')
+            .padding(16)
+        }
+        .constraintSize({ minHeight: 110, maxHeight: 190 })
+        .width('92%')
+        .backgroundColor('#EEF4FF')
+        .borderRadius(18)
+        .margin({ top: 16 })
+        .border({ width: 1, color: '#D9E5FF' })
+
+        if (this.cloudDebugImagePath !== '') {
+          Row() {
+            Text('Debug 截图预览')
+              .fontSize(14)
+              .fontColor('#555555')
+              .layoutWeight(1)
+            Image(this.cloudDebugImagePath)
+              .width(100)
+              .height(150)
+              .objectFit(ImageFit.Contain)
+              .backgroundColor(Color.Black)
+              .borderRadius(12)
+              .onClick(() => { this.cloudDebugImagePath = ''; })
+          }
+          .width('92%')
+          .padding(14)
+          .backgroundColor(Color.White)
+          .borderRadius(18)
+          .margin({ top: 14 })
+        }
+
+        Column() {
+          Text('云端模型')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+            .margin({ bottom: 12 })
+          Text('Planner 服务')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+          TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:7003', text: this.cloudPlannerBaseUrl })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => { this.cloudPlannerBaseUrl = val; })
+          Text('Decider 服务')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+          TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:7003', text: this.cloudDeciderBaseUrl })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => { this.cloudDeciderBaseUrl = val; })
+          TextInput({ placeholder: 'API Key', text: this.cloudApiKey })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.cloudApiKey = val; })
+        }
+        .width('92%')
+        .padding(18)
+        .backgroundColor(Color.White)
+        .borderRadius(20)
+        .margin({ top: 16 })
+
+        Column() {
+          Text('HDC 控制')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+            .margin({ bottom: 12 })
+          TextInput({ placeholder: 'HDC Server，例如 http://192.168.137.1:9124', text: this.hdcServerIp })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ bottom: 10 })
+            .onChange((val: string) => { this.hdcServerIp = val; })
+          Row() {
+            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.55:33117', text: this.wirelessIp })
+              .height(42)
+              .layoutWeight(1)
+              .fontSize(13)
+              .backgroundColor('#F2F5FC')
+              .borderRadius(12)
+              .padding({ left: 12, right: 12 })
+              .onChange((val: string) => { this.wirelessIp = val; })
+            Button('连接测试')
+              .height(42)
+              .width(92)
+              .fontSize(13)
+              .backgroundColor('#765BFF')
+              .borderRadius(12)
+              .margin({ left: 10 })
+              .onClick(async () => {
+                this.appendCloudLog(`请求 HDC 连接测试：server=${this.hdcServerIp}, target=${this.wirelessIp}`);
+                await this.testAndConnectHdc();
+                this.appendCloudLog(this.output);
+              })
+          }.width('100%')
+        }
+        .width('92%')
+        .padding(18)
+        .backgroundColor(Color.White)
+        .borderRadius(20)
+        .margin({ top: 14 })
+
+        Row() {
+          TextInput({ placeholder: '输入云端 Agent 任务...', text: this.cloudUserInput })
+            .onChange((val: string) => { this.cloudUserInput = val; })
+            .layoutWeight(1)
+            .height(48)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(24)
+            .padding({ left: 18, right: 18 })
+          Button('Planner')
+            .height(48)
+            .width(92)
+            .fontSize(13)
+            .backgroundColor(this.cloudThinking ? '#A9B7E9' : '#5B68FF')
+            .borderRadius(24)
+            .margin({ left: 10 })
+            .onClick(() => { this.runCloudPlannerOnce(); })
+        }.width('92%').margin({ top: 16 })
+
+        Button('开始云端智能体执行（输入框为任务）')
+          .width('92%')
+          .height(52)
+          .backgroundColor('#765BFF')
+          .borderRadius(16)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .margin({ top: 16 })
+          .onClick(() => {
+            if (!this.isCloudConfigReady()) {
+              this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+              return;
+            }
+            if (this.cloudUserInput.trim().length === 0) {
+              this.appendCloudLog('请先输入云端 Agent 任务。');
+              return;
+            }
+            this.cloudLlmServer.currentTask = this.cloudUserInput;
+            this.resetCloudLog(`任务已下发：${this.cloudUserInput}`);
+            this.appendCloudLog('等待 PC 侧 harmony_agent.py 轮询 9126。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。');
+            this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
+          })
+
+        Row() {
+          Button('启动云端 PC 控制后端')
+            .height(48)
+            .layoutWeight(1)
+            .backgroundColor('#607D8B')
+            .borderRadius(14)
+            .onClick(() => { this.startCloudBackend(); })
+          Row() {
+            Checkbox({ name: 'cloudAutoConfirm', group: 'cloudSettings' })
+              .select(this.cloudAutoConfirm)
+              .selectedColor('#5B68FF')
+              .onChange((value: boolean) => { this.cloudAutoConfirm = value; })
+            Text('自动同意')
+              .fontSize(14)
+              .fontColor('#333333')
+          }
+          .height(48)
+          .padding({ left: 12, right: 12 })
+          .backgroundColor(Color.White)
+          .borderRadius(14)
+          .margin({ left: 10 })
+        }.width('92%').margin({ top: 14 })
+
+        Row() {
+          Button('测试 Planner')
+            .height(42)
+            .layoutWeight(1)
+            .fontSize(11)
+            .backgroundColor('#38BE8B')
+            .borderRadius(12)
+            .onClick(() => { this.testCloudPlanner(); })
+          Button('Runtime Logs')
+            .height(42)
+            .layoutWeight(1)
+            .fontSize(11)
+            .backgroundColor('#607D8B')
+            .borderRadius(12)
+            .margin({ left: 10 })
+            .onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
+          Button('删除截图')
+            .height(42)
+            .layoutWeight(1)
+            .fontSize(11)
+            .backgroundColor('#FF6B4A')
+            .borderRadius(12)
+            .margin({ left: 10 })
+            .onClick(() => { this.clearScreenshots(); })
+        }
+        .width('92%')
+        .margin({ top: 14 })
+
+        Blank().height(110)
+      }.width('100%')
+    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+  }
+
   @Builder TabItem(icon: string, label: string, index: number) {
     Column() {
       Text(icon)
@@ -1069,7 +1451,8 @@ struct Index {
       TabContent() { HomePage() }.tabBar(this.TabItem('H', '首页', 0))
       TabContent() { CollectionPage({ collectionModule: $collectionModule }) }.tabBar(this.TabItem('C', '采集', 1))
       TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
-      TabContent() { TaskPage({ taskScene: $taskScene }) }.tabBar(this.TabItem('T', '任务', 3))
+      TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
+      TabContent() { TaskPage({ taskScene: $taskScene }) }.tabBar(this.TabItem('T', '任务', 4))
     }
     .onChange((index: number) => { this.currentTab = index; })
     .width('100%')

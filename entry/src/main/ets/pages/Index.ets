@@ -111,7 +111,8 @@ struct Index {
     }
     if (this.wirelessIp.trim().length === 0 ||
       this.wirelessIp === '101.5.155.98:35729' ||
-      this.wirelessIp === '192.168.137.172:35963') {
+      this.wirelessIp === '192.168.137.172:35963' ||
+      this.wirelessIp === '192.168.137.55:35963') {
       this.wirelessIp = '192.168.137.55:33117';
     }
     if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {

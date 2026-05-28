@@ -16,8 +16,7 @@ class TaskCompletedConnectionClosed(Exception):
 
 try:
     from hmdriver2.driver import Driver
-    # Some common hmdriver2 setups
-    d = Driver()
+    d = None
 except ImportError:
     print(">> [警告] 无法导入 hmdriver2，请确保它已经安装。")
     d = None
@@ -88,12 +87,39 @@ def refresh_hdc_forwarding(verbose=False):
         return os.system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
     return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
 
+def normalize_hmdriver_loggers():
+    logger_names = (
+        "hmdriver2",
+        "hmdriver2.driver",
+        "hmdriver2.hdc",
+        "driver",
+        "hdc",
+    )
+    for logger_name in logger_names:
+        logger = logging.getLogger(logger_name)
+        if not logger.handlers:
+            continue
+
+        unique_handlers = []
+        seen = set()
+        for handler in logger.handlers:
+            key = (
+                type(handler),
+                getattr(handler, "baseFilename", None),
+                id(getattr(handler, "stream", None)),
+                handler.level,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_handlers.append(handler)
+
+        logger.handlers = unique_handlers
+        logger.propagate = False
+
 def bring_llm_app_to_foreground():
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
-    if d:
-        d.force_start_app(LLM_APP_BUNDLE)
-    else:
-        os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
+    os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
     time.sleep(1)
 APP_MAPPING = {
     "携程": "com.ctrip.harmonynext",
@@ -272,6 +298,7 @@ def reset_driver():
             
         from hmdriver2.driver import Driver
         d = Driver()
+        normalize_hmdriver_loggers()
         print(">> [系统] 驱动对象 (Driver) 初始化/重置成功！")
     except Exception as ex:
         print(f">> [系统警告] hmdriver2 驱动重置失败: {ex}")

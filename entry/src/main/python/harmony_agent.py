@@ -92,6 +92,8 @@ def normalize_hmdriver_loggers():
         "hmdriver2",
         "hmdriver2.driver",
         "hmdriver2.hdc",
+        "hmdriver2._client",
+        "_client",
         "driver",
         "hdc",
     )
@@ -291,6 +293,7 @@ def reset_driver():
     global d
     try:
         import sys
+        normalize_hmdriver_loggers()
         # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
         modules_to_remove = [m for m in list(sys.modules.keys()) if m.startswith('hmdriver2')]
         for m in modules_to_remove:
@@ -315,10 +318,19 @@ def poll_task():
         refresh_hdc_forwarding()
         return ""
 
+def format_debug_text_block(label, text):
+    text = "" if text is None else str(text)
+    return (
+        f"{label} (len={len(text)})\n"
+        f"----- BEGIN RAW -----\n{text}\n----- END RAW -----\n"
+        f"{label} repr:\n{text!r}"
+    )
+
 def extract_json_payload(raw_text):
     if not raw_text:
         return None
 
+    raw_text = str(raw_text)
     raw_text = raw_text.strip()
     # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
     raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
@@ -327,7 +339,21 @@ def extract_json_payload(raw_text):
 
     text = raw_text.strip()
 
-    
+    def _log_parse_issue(level, reason, cleaned_text=None, partial_data=None):
+        messages = [reason, format_debug_text_block("原始响应", raw_text)]
+        if cleaned_text is not None and cleaned_text != raw_text:
+            messages.append(format_debug_text_block("清洗后响应", cleaned_text))
+        if partial_data is not None:
+            try:
+                partial_text = json.dumps(partial_data, ensure_ascii=False)
+            except Exception:
+                partial_text = str(partial_data)
+            messages.append(format_debug_text_block("已恢复的部分 JSON", partial_text))
+        message = "\n".join(messages)
+        if level == "warning":
+            logging.warning(message)
+        else:
+            logging.error(message)
 
     # 1) 优先尝试从 ```json ... ``` 代码块中抽取
     block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
@@ -349,6 +375,91 @@ def extract_json_payload(raw_text):
     # 修复数组中数字之间漏掉逗号的问题，如 [818, 119, 96 131]
     text = re.sub(r'(\d+)\s+(\d+)', r'\1, \2', text)
     candidates.append(text)
+
+    def _attempt_close_truncated_json(candidate):
+        candidate = candidate.strip()
+        if not candidate or candidate[0] not in '{[':
+            return None
+
+        stack = []
+        in_str = False
+        escape = False
+        for ch in candidate:
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                stack.append('}')
+            elif ch == '[':
+                stack.append(']')
+            elif ch in '}]':
+                if not stack or stack[-1] != ch:
+                    return None
+                stack.pop()
+
+        repaired = candidate.rstrip()
+        if repaired.endswith(':'):
+            return None
+        if repaired.endswith(','):
+            repaired = repaired[:-1].rstrip()
+        if in_str:
+            if escape:
+                repaired += '\\'
+            repaired += '"'
+        while stack:
+            repaired = re.sub(r',\s*$', '', repaired)
+            repaired += stack.pop()
+        return repaired if repaired != candidate else None
+
+    def _extract_partial_object(candidate):
+        candidate = candidate.strip()
+        if not candidate.startswith('{'):
+            return None
+
+        decoder = json.JSONDecoder()
+        partial = {}
+        idx = 1
+        length = len(candidate)
+
+        while idx < length:
+            while idx < length and candidate[idx] in ' \t\r\n,':
+                idx += 1
+            if idx >= length or candidate[idx] == '}':
+                break
+
+            try:
+                key, idx = decoder.raw_decode(candidate, idx)
+            except json.JSONDecodeError:
+                break
+            if not isinstance(key, str):
+                break
+
+            while idx < length and candidate[idx].isspace():
+                idx += 1
+            if idx >= length or candidate[idx] != ':':
+                break
+            idx += 1
+            while idx < length and candidate[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+
+            try:
+                value, idx = decoder.raw_decode(candidate, idx)
+            except json.JSONDecodeError:
+                break
+
+            partial[key] = value
+
+        return partial or None
 
     def _try_parse(candidate):
         candidate = candidate.strip()
@@ -406,6 +517,13 @@ def extract_json_payload(raw_text):
                     except:
                         pass
 
+            repaired = _attempt_close_truncated_json(s)
+            if repaired and repaired != s:
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    pass
+
 
             # === 修复 2：多余内容（包括多余 }、文字等）===
             if "Extra data" in str(e):
@@ -416,10 +534,6 @@ def extract_json_payload(raw_text):
                     return obj
                 except Exception:
                     pass
-            
-            # 所有修复失败，报错
-            logging.error(f"解析 decider_response_str 失败: {e}\n原始内容: {s}")
-            raise
         
         except Exception as e:
             pass
@@ -474,6 +588,19 @@ def extract_json_payload(raw_text):
                         if parsed is not None:
                             return parsed
 
+    for cand in candidates:
+        partial = _extract_partial_object(cand)
+        if partial is not None:
+            _log_parse_issue(
+                "warning",
+                "模型返回的 JSON 不完整，已恢复可解析字段。",
+                cleaned_text=cand,
+                partial_data=partial,
+            )
+            return partial
+
+    _log_parse_issue("error", "无法在响应中恢复出有效 JSON。", cleaned_text=text)
+
     return None
 
 def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
@@ -501,6 +628,10 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         
     action = data.get("action")
     params = data.get("parameters", data.get("coordinates", {}))
+
+    if not action:
+        print(format_debug_text_block(">> [Agent] 缺少 action 字段，已按解析错误处理", json.dumps(data, ensure_ascii=False)))
+        return "error", data
     
     print(f">> [Agent] Action: {action}, Params: {params}")
     
@@ -606,7 +737,7 @@ def run_planner(task):
         # 注意：这里不传 image_b64，从而让 LlmServer.ets 只作为纯文本推理
     })
     
-    print(f">> [Planner] MNN VLM 返回:\n{res}")
+    print(format_debug_text_block(">> [Planner] MNN VLM 返回", res))
     sys.stdout.flush()
     
     try:
@@ -701,7 +832,7 @@ def run_task_in_app_agent(task):
             "height": h
         })
 
-        print(f">> [Agent] Response:\n{res}")
+        print(format_debug_text_block(">> [Agent] Response", res))
         sys.stdout.flush()
         time.sleep(0.3)
 
@@ -768,7 +899,7 @@ def run_task_in_app(task):
             "height": h
         })
         
-        print(f">> MNN VLM 返回:\n{res}")
+        print(format_debug_text_block(">> MNN VLM 返回", res))
         sys.stdout.flush()
         time.sleep(0.3)
         w = w * 4

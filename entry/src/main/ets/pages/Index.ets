@@ -40,7 +40,7 @@ struct Index {
   @State downloading: boolean = false;
   @State modelLoaded: boolean = false;
   @State connected: boolean = false;
-  @State autoConfirm: boolean = false;
+  @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
   @State customOppReady: boolean = false;

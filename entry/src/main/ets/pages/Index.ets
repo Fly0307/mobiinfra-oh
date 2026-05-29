@@ -16,6 +16,9 @@ import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 
+// 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
+// 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
+// 下沉到 home/collection/task，避免 Index.ets 继续膨胀。
 interface ServerFile {
   name: string;
   size: number;
@@ -87,10 +90,11 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   
-  // PC 控制服务端单例。
+  // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private cloudClient: CloudModelClient = new CloudModelClient();
 
+  // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLog(message: string): void {
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
@@ -109,6 +113,7 @@ struct Index {
   }
 
   aboutToAppear() {
+    // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
@@ -169,6 +174,7 @@ struct Index {
         });
       });
     });
+    // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
       if (this.agentRouter.getRouteMode() !== 'local') {
         return;
@@ -186,6 +192,7 @@ struct Index {
   }
 
   private migrateDefaultEndpointValues(): void {
+    // 兼容历史版本写入 PersistentStorage 的默认地址，避免用户升级后仍连到废弃端口。
     if (this.hdcServerIp === 'http://166.111.53.96:9124') {
       this.hdcServerIp = DEFAULT_HDC_SERVER_URL;
     }
@@ -873,11 +880,13 @@ struct Index {
       return;
     }
     this.appendCloudLog('准备切换到云端 Agent 路由，复用 9126...');
+    // 云端模式仍复用 PC 侧同一套 TCP 协议；区别是 App 通过 AgentRouterServer 转发到云端模型。
     this.agentRouter.useCloud();
     this.agentRouter.start(9126, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
+    // 本地 Agent 启动前自动加载模型，减少用户遗漏“加载大模型”按钮导致的失败。
     if (this.modelLoaded) {
       return true;
     }
@@ -903,6 +912,7 @@ struct Index {
   }
 
   private startLocalBackend(): void {
+    // 本地模式下 9126 请求会进入 libentry.so/MNN，本函数只负责切换路由并启动监听。
     this.agentRouter.useLocal();
     this.agentRouter.start(9126, this.filesDir);
   }
@@ -921,6 +931,7 @@ struct Index {
   }
 
   private ensureCloudAgentBackend(): boolean {
+    // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return false;

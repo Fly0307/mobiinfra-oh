@@ -6,6 +6,8 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 
 const DOMAIN = 0x0000;
 
+// 应用主 Ability：加载 Index 页面，并在 Agent 执行期间协调后台浮窗、
+// 长时任务权限和“从浮窗回到主应用”的能力。
 export default class EntryAbility extends UIAbility {
   private floatWindow: window.Window | null = null;
 
@@ -15,6 +17,7 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
+    // AgentExecutionController 统一管理本地/云端 Agent 的执行态、取消态和浮窗同步。
     AgentExecutionController.initialize();
     AgentExecutionController.setFloatWindowSyncHandler(() => {
       this.syncFloatWindow();
@@ -103,6 +106,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   private syncFloatWindow(): void {
+    // 只有 Agent 正在执行时才保留浮窗；普通后台状态不额外占用屏幕空间。
     if (AgentExecutionController.isExecutionActive()) {
       this.createFloatWindow();
       return;
@@ -111,6 +115,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   private createFloatWindow() {
+    // 后台浮窗只承载实时状态和终止按钮，不负责模型推理或任务调度。
     if (this.floatWindow) {
       this.floatWindow.showWindow();
       return;
@@ -139,6 +144,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   private destroyFloatWindow() {
+    // 回到前台或任务结束后销毁浮窗，防止遮挡主界面。
     if (this.floatWindow) {
       this.floatWindow.destroyWindow().then(() => {
         hilog.info(DOMAIN, 'testTag', 'Float window destroyed');

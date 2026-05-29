@@ -427,6 +427,16 @@ export class LlmServer {
             return;
           }
 
+          if (reqType === 'cloud_history_append') {
+            let response = this.getString(req, 'response');
+            if (response.length > 0) {
+              this.cloudActionHistory.push(this.normalizeCloudHistoryItem(response));
+              onLog('>> [Cloud History] appended after PC execution success, history=' + this.cloudActionHistory.length);
+            }
+            this.sendStatus(client, 'ok');
+            return;
+          }
+
           if (reqType === 'agent_prefill') {
             let prefix = this.getString(req, 'prefix');
             this.cloudActionHistory = [];
@@ -475,8 +485,6 @@ export class LlmServer {
             if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
               this.currentTask = '';
               onLog('>> [Cloud Agent] Task completed.');
-            } else if (imageBase64.length > 0) {
-              this.cloudActionHistory.push(this.normalizeCloudHistoryItem(response));
             }
             if (imageBase64.length > 0) {
               this.sendCloudDebugResponse(client, debugPrompt, response);

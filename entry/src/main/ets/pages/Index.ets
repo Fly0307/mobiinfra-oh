@@ -30,6 +30,7 @@ PersistentStorage.persistProp('hdcServerIp', 'http://192.168.137.1:9124');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', 'http://166.111.53.96:7003');
 PersistentStorage.persistProp('cloudDeciderBaseUrl', 'http://166.111.53.96:7003');
 PersistentStorage.persistProp('cloudApiKey', 'mobiagent-key');
+PersistentStorage.persistProp('cloudDeciderModel', '');
 
 @Entry
 @Component
@@ -57,6 +58,7 @@ struct Index {
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = 'http://166.111.53.96:7003';
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = 'http://166.111.53.96:7003';
   @StorageLink('cloudApiKey') cloudApiKey: string = 'mobiagent-key';
+  @StorageLink('cloudDeciderModel') cloudDeciderModel: string = '';
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -123,6 +125,9 @@ struct Index {
     }
     if (this.cloudApiKey.trim().length === 0) {
       this.cloudApiKey = 'mobiagent-key';
+    }
+    if (this.cloudDeciderModel === 'decider' || this.cloudDeciderModel === 'decider_model') {
+      this.cloudDeciderModel = '';
     }
   }
 
@@ -722,7 +727,8 @@ struct Index {
     let config: CloudModelConfig = {
       plannerBaseUrl: this.cloudPlannerBaseUrl,
       deciderBaseUrl: this.cloudDeciderBaseUrl,
-      apiKey: this.cloudApiKey
+      apiKey: this.cloudApiKey,
+      deciderModel: this.cloudDeciderModel
     };
     return config;
   }
@@ -1324,6 +1330,20 @@ struct Index {
             .borderRadius(12)
             .padding({ left: 12, right: 12 })
             .onChange((val: string) => { this.cloudApiKey = val; })
+          Text('Decider Model')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+            .margin({ top: 10 })
+          TextInput({ placeholder: '留空则不传 model', text: this.cloudDeciderModel })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6 })
+            .onChange((val: string) => { this.cloudDeciderModel = val; })
         }
         .width('92%')
         .padding(18)

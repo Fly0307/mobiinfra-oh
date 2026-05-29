@@ -234,23 +234,43 @@ def capture_screen(factor=0.25):
     
     return b64, new_w, new_h
 
+def capture_screen_mobiagent_style(factor=0.5):
+    """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""
+    if d is None:
+        print(">> [Cloud Screenshot] hmdriver2 Driver unavailable, fallback to hdc snapshot_display.")
+        return capture_screen(factor)
+
+    print(">> [Cloud Screenshot] Capturing screen via hmdriver2 Driver.screenshot...")
+    screenshot_path = "screenshot-Harmony.jpg"
+    d.screenshot(screenshot_path)
+    img = Image.open(screenshot_path)
+    w, h = img.size
+    new_w, new_h = int(w * factor), int(h * factor)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG")
+    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return b64, new_w, new_h
+
 def send_request(req):
     payload = json.dumps(req) + "<<EOF>>"
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    connected = False
     try:
         s.connect((HOST, PORT))
+        connected = True
         s.sendall(payload.encode('utf-8'))
 
-        buffer = ""
+        buffer = b""
         while True:
             data = s.recv(4096)
             if not data:
                 break
-            buffer += data.decode('utf-8')
-            if "<<EOF>>" in buffer:
+            buffer += data
+            if b"<<EOF>>" in buffer:
                 break
 
-        res = buffer.split("<<EOF>>")[0]
+        res = buffer.split(b"<<EOF>>", 1)[0].decode('utf-8')
         try:
             parsed_res = json.loads(res)
             if isinstance(parsed_res, dict) and "__cloud_debug_prompt" in parsed_res and "response" in parsed_res:
@@ -264,7 +284,10 @@ def send_request(req):
     except Exception as e:
         # 当轮询（poll）未连上时保持静默，只有其他核心请求断开时才打印错误，防止刷屏。
         if req.get("type") != "poll":
-            print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
+            if connected:
+                print(">> 【错误】手机 App端响应读取/解码失败:\n" + str(e))
+            else:
+                print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
         raise e
     finally:
         try:
@@ -605,19 +628,36 @@ def extract_json_payload(raw_text):
 
 def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
     """
-    Convert Qwen/MNN VLM normalized coordinates [y1, x1, y2, x2] (0-1000) 
-    to absolute pixel coordinates [x1, y1, x2, y2].
+    Convert Qwen normalized coordinates in 0-1000 range to absolute pixels.
     """
-    x1, y1, x2, y2 = bbox
-    x1 = min(x1, 1000)
-    y1 = min(y1, 1000)
-    x2 = min(x2, 1000)
-    y2 = min(y2, 1000)
-    abs_x1 = int(x1 * width / 1000)
-    abs_y1 = int(y1 * height / 1000)
-    abs_x2 = int(x2 * width / 1000)
-    abs_y2 = int(y2 * height / 1000)
-    return [abs_x1, abs_y1, abs_x2, abs_y2]
+    if is_bbox:
+        x1, y1, x2, y2 = bbox
+        x1 = min(x1, 1000)
+        y1 = min(y1, 1000)
+        x2 = min(x2, 1000)
+        y2 = min(y2, 1000)
+        return [
+            int(x1 * width / 1000),
+            int(y1 * height / 1000),
+            int(x2 * width / 1000),
+            int(y2 * height / 1000),
+        ]
+
+    x, y = bbox
+    x = min(x, 1000)
+    y = min(y, 1000)
+    return [int(x * width / 1000), int(y * height / 1000)]
+
+def press_harmony_key(key_name, fallback_code):
+    if d:
+        try:
+            from hmdriver2.keycode import KeyCode
+            key_code = getattr(KeyCode, key_name, fallback_code)
+            d.press_key(key_code)
+        except Exception:
+            d.press_key(fallback_code)
+    else:
+        os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
     width, height = img_size
@@ -634,10 +674,18 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         return "error", data
     
     print(f">> [Agent] Action: {action}, Params: {params}")
+    action = str(action).lower()
+
+    if action in ["done", "stop", "terminate"]:
+        return action, params
     
     if action == "click":
-        bbox = params.get("bbox")
-        if bbox:
+        if params.get("coords"):
+            x, y = convert_qwen3_coordinates_to_absolute(params["coords"], width, height, is_bbox=False)
+        else:
+            bbox = params.get("bbox")
+            if not bbox:
+                raise ValueError("Click action missing required parameter: 'bbox' or 'coords'")
             abs_bbox = convert_qwen3_coordinates_to_absolute(bbox, width, height)
             x1, y1, x2, y2 = abs_bbox
             x, y = (x1 + x2) // 2, (y1 + y2) // 2
@@ -650,54 +698,67 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         
     elif action == "click_input":
         text = params.get("text", "")
-        bbox = params.get("bbox")
-        if bbox:
+        if params.get("coords"):
+            px, py = convert_qwen3_coordinates_to_absolute(params["coords"], width, height, is_bbox=False)
+        else:
+            bbox = params.get("bbox")
+            if not bbox:
+                raise ValueError("Click_input action missing required parameter: 'bbox' or 'coords'")
             abs_bbox = convert_qwen3_coordinates_to_absolute(bbox, width, height)
             x1, y1, x2, y2 = abs_bbox
             px, py = (x1 + x2) // 2, (y1 + y2) // 2
-            
-            if d:
-                print(f">> [Agent] Clicking at {px}, {py}")
-                d.click(px, py)
-                time.sleep(DEVICE_WAIT_TIME)
-                # Input logic
-                d.shell("uitest uiInput keyEvent 2072 2017")
-                d.press_key(2071)
-                d.input_text(text)
-                try:
-                    from hmdriver2.keycode import KeyCode
-                    d.press_key(KeyCode.ENTER)
-                except:
-                    d.press_key(2054)
-            else:
-                os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
-                time.sleep(DEVICE_WAIT_TIME)
-                os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
-            
             params["abs_bbox"] = abs_bbox # For history tracking
+            
+        if d:
+            print(f">> [Agent] Clicking at {px}, {py}")
+            d.click(px, py)
+            time.sleep(DEVICE_WAIT_TIME)
+            d.shell("uitest uiInput keyEvent 2072 2017")
+            d.press_key(2071)
+            d.input_text(text)
+            press_harmony_key("ENTER", 2054)
+        else:
+            os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
+            time.sleep(DEVICE_WAIT_TIME)
+            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
         
     elif action == "swipe":
-        direction = params.get("direction")
-        if direction:
-            print(f">> Swipe direction: {direction}")
-            if d:
-                # Based on the user provided swipe implementations
-                if direction.lower() == "up":
-                    d.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000)
-                elif direction.lower() == "down":
-                    d.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000)
-                elif direction.lower() == "left":
-                    d.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000)
-                elif direction.lower() == "right":
-                    d.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000)
-            else:
-                print(f"Swipe {direction} 暂未通过 hdc 实现")
-        else:
-            sx, sy = params.get("startX", 0), params.get("startY", 0)
-            ex, ey = params.get("endX", 0), params.get("endY", 0)
+        start_coords = params.get("start_coords")
+        end_coords = params.get("end_coords")
+        if start_coords and end_coords:
+            sx, sy = convert_qwen3_coordinates_to_absolute(start_coords, width, height, is_bbox=False)
+            ex, ey = convert_qwen3_coordinates_to_absolute(end_coords, width, height, is_bbox=False)
+            print(f">> Swipe from [{sx}, {sy}] to [{ex}, {ey}]")
             if d:
                 d.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000)
             else:
+                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+        else:
+            direction = params.get("direction", "UP")
+            print(f">> Swipe direction: {direction}")
+            direction_lower = direction.lower()
+            if d:
+                if direction_lower == "up":
+                    d.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000)
+                elif direction_lower == "down":
+                    d.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000)
+                elif direction_lower == "left":
+                    d.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000)
+                elif direction_lower == "right":
+                    d.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000)
+                else:
+                    raise ValueError(f"Unknown swipe direction: {direction}")
+            else:
+                if direction_lower == "up":
+                    sx, sy, ex, ey = 0.5 * width, SWIPE_V_END * height, 0.5 * width, SWIPE_V_START * height
+                elif direction_lower == "down":
+                    sx, sy, ex, ey = 0.5 * width, SWIPE_V_START * height, 0.5 * width, SWIPE_V_END * height
+                elif direction_lower == "left":
+                    sx, sy, ex, ey = SWIPE_H_END * width, 0.5 * height, SWIPE_H_START * width, 0.5 * height
+                elif direction_lower == "right":
+                    sx, sy, ex, ey = SWIPE_H_START * width, 0.5 * height, SWIPE_H_END * width, 0.5 * height
+                else:
+                    raise ValueError(f"Unknown swipe direction: {direction}")
                 os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
             
     elif action == "input":
@@ -716,6 +777,26 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
                 d.press_key(2054)
         else:
             os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+
+    elif action == "open_app":
+        app_name = params.get("app_name", "")
+        if not app_name:
+            raise ValueError("Open_app action missing required parameter: 'app_name'")
+        launch_app(app_name)
+
+    elif action == "press_home":
+        press_harmony_key("HOME", 1)
+
+    elif action == "press_back":
+        press_harmony_key("BACK", 2)
+
+    elif action == "wait":
+        seconds = float(params.get("seconds", DEVICE_WAIT_TIME * 2))
+        print(f">> Wait for {seconds} seconds")
+        time.sleep(seconds)
+
+    else:
+        raise ValueError(f"Unknown action: {action}")
 
     return action, params
 
@@ -803,7 +884,8 @@ def run_task_in_app_agent(task):
     print(f">> [Agent] Prefilling prefix ({len(prefix)} chars)...")
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
     print(f">> [Agent] Prefill result: {prefill_res}")
-    screenshot_factor = 0.5 if "cloud qwen prompt mode" in prefill_res else 0.25
+    is_cloud_qwen_mode = "cloud qwen prompt mode" in prefill_res
+    screenshot_factor = 0.5 if is_cloud_qwen_mode else 0.25
     inverse_screenshot_factor = int(round(1 / screenshot_factor))
     print(f">> [Agent] Screenshot resize factor: {screenshot_factor}")
 
@@ -818,7 +900,10 @@ def run_task_in_app_agent(task):
     for step_idx in range(MAX_STEPS):
         print(f"\n--- [Agent Step {step_idx+1}/{MAX_STEPS}] ---")
 
-        b64, w, h = capture_screen(screenshot_factor)
+        if is_cloud_qwen_mode:
+            b64, w, h = capture_screen_mobiagent_style(screenshot_factor)
+        else:
+            b64, w, h = capture_screen(screenshot_factor)
         history_str = "  ".join(history_list) if history_list else "(No history)"
 
         variable = variable_template.replace("{history}", history_str)
@@ -849,16 +934,20 @@ def run_task_in_app_agent(task):
             print(">> [Agent] Parse error, aborting.")
             break
 
-        # 把解析到的 JSON 内容也追加到历史，便于后续推理使用
-        parsed_data = extract_json_payload(res)
-        try:
-            data_str = json.dumps(parsed_data, ensure_ascii=False)
-        except Exception:
-            data_str = str(parsed_data)
-        # history_list.append(f"{step_idx+1}. {data_str}\n")
-        history_list.append(f"{step_idx+1}: Action={action}")
+        if is_cloud_qwen_mode:
+            send_request_best_effort({"type": "cloud_history_append", "response": res}, "Cloud history append")
+        else:
+            # 把解析到的 JSON 内容也追加到历史，便于后续推理使用
+            parsed_data = extract_json_payload(res)
+            try:
+                data_str = json.dumps(parsed_data, ensure_ascii=False)
+            except Exception:
+                data_str = str(parsed_data)
+            # history_list.append(f"{step_idx+1}. {data_str}\n")
+            history_list.append(f"{step_idx+1}: Action={action}")
 
-        print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
+        if history_list:
+            print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
         time.sleep(0.7)
 
     # 3. Cleanup agent mode

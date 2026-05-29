@@ -10,6 +10,7 @@ export interface CloudModelConfig {
   plannerBaseUrl: string;
   deciderBaseUrl: string;
   apiKey: string;
+  deciderModel: string;
 }
 
 interface CloudImageUrl {
@@ -38,6 +39,7 @@ interface CloudChatRequest {
   temperature: number;
   stream: boolean;
   max_tokens: number;
+  model?: string;
 }
 
 interface CloudChatMessageResult {
@@ -98,13 +100,17 @@ export class CloudModelClient {
     return url + '/v1/chat/completions';
   }
 
-  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string): Promise<string> {
+  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
+    model?: string, maxTokens: number = 2048): Promise<string> {
     let requestBody: CloudChatRequest = {
       messages: messages,
       temperature: 0,
       stream: false,
-      max_tokens: 2048
+      max_tokens: maxTokens
     };
+    if (model && model.trim().length > 0) {
+      requestBody.model = model.trim();
+    }
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer ' + (apiKey.length > 0 ? apiKey : 'EMPTY')
@@ -162,7 +168,8 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.deciderBaseUrl, [imagePart, textPart], config.apiKey);
+    return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.deciderModel, 256);
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {
@@ -191,6 +198,6 @@ export class CloudModelClient {
       content: [contextPart, imagePart, stepPart]
     };
     let messages: CloudChatMessage[] = [systemMessage, userMessage];
-    return this.chatMessages(config.deciderBaseUrl, messages, config.apiKey);
+    return this.chatMessages(config.deciderBaseUrl, messages, config.apiKey, config.deciderModel, 256);
   }
 }

@@ -29,3 +29,4 @@ struct FloatWindow {
     .borderRadius(10)
   }
 }
+

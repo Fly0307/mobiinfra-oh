@@ -144,3 +144,4 @@ struct LogView {
     .backgroundColor('#F0F0F0')
   }
 }
+

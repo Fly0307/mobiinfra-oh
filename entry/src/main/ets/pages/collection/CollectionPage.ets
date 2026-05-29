@@ -1,47 +1,38 @@
 import { AppHeader } from '../../components/AppHeader';
-import { promptAction } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
+import {
+  CollectionGroupViewModel,
+  CollectionInsightViewModel,
+  CollectionViewModel
+} from '../../datamanager/DataManagerTypes';
+import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
+import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 
 @Component
 export struct CollectionPage {
   @Link collectionModule: number;
+  @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
+  @Prop refreshing: boolean = false;
+  onRefresh: () => void = () => {};
+  onRegroup: () => void = () => {};
+
+  private currentView(): CollectionViewModel {
+    if (this.viewModels.length > this.collectionModule) {
+      return this.viewModels[this.collectionModule];
+    }
+    return createEmptyCollectionViewModels()[this.collectionModule];
+  }
 
   private getCollectionTitle(): string {
-    if (this.collectionModule === 0) {
-      return '最近聊天';
-    }
-    if (this.collectionModule === 2) {
-      return '最近通知';
-    }
-    if (this.collectionModule === 3) {
-      return '娱乐记录';
-    }
-    return '最近订单';
+    return this.currentView().title;
   }
 
   private getCollectionCount(): string {
-    if (this.collectionModule === 0) {
-      return '12 条';
-    }
-    if (this.collectionModule === 2) {
-      return '36 条';
-    }
-    if (this.collectionModule === 3) {
-      return '8 条';
-    }
-    return '24 条';
+    return this.currentView().countLabel;
   }
 
   private getCollectionSyncTime(): string {
-    if (this.collectionModule === 0) {
-      return '3 分钟前';
-    }
-    if (this.collectionModule === 2) {
-      return '刚刚';
-    }
-    if (this.collectionModule === 3) {
-      return '昨天 22:10';
-    }
-    return '10 分钟前';
+    return this.currentView().lastUpdatedLabel;
   }
 
   @Builder CollectTab(label: string, icon: string, index: number) {
@@ -59,48 +50,59 @@ export struct CollectionPage {
     })
   }
 
-  @Builder OrderRow(image: Resource, title: string, source: string, time: string, price: string) {
+  private rowImage(domain: string): Resource {
+    if (domain === 'eat') {
+      return $r('app.media.rec_food');
+    }
+    if (domain === 'travel' || domain === 'live') {
+      return $r('app.media.rec_travel');
+    }
+    return $r('app.media.rec_sport');
+  }
+
+  @Builder GroupRow(group: CollectionGroupViewModel) {
     Row() {
-      Image(image).width(58).height(58).objectFit(ImageFit.Cover).borderRadius(11)
+      Image(this.rowImage(group.domain)).width(58).height(58).objectFit(ImageFit.Cover).borderRadius(11)
       Column() {
-        Text(title).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(source).fontSize(12).fontColor('#7C8494').margin({ top: 5 }).maxLines(1)
-        Text(time).fontSize(12).fontColor('#7C8494').margin({ top: 2 }).maxLines(1)
+        Text(group.title).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(group.source).fontSize(12).fontColor('#7C8494').margin({ top: 5 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(group.time).fontSize(12).fontColor('#7C8494').margin({ top: 2 }).maxLines(1)
       }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ left: 12, right: 8 })
       Column() {
-        Text(price).fontSize(13).fontColor('#161B28').maxLines(1)
-        Text('已完成').fontSize(12).fontColor('#35C487').margin({ top: 6 }).maxLines(1)
+        Text(group.meta).fontSize(13).fontColor('#161B28').maxLines(1)
+        Text('详情').fontSize(12).fontColor('#8066FF').margin({ top: 6 }).maxLines(1)
       }.alignItems(HorizontalAlign.End)
-      Text('>').fontSize(18).fontColor('#9AA0AA').margin({ left: 7 })
-    }.width('100%').padding({ top: 10, bottom: 10 })
+    }.width('100%').padding({ top: 10, bottom: 10 }).onClick(() => {
+      router.pushUrl({
+        url: 'pages/collection/CollectionGroupDetailPage',
+        params: {
+          tabIndex: this.collectionModule,
+          groupId: group.id
+        }
+      });
+    })
   }
 
   @Builder CollectionRows() {
-    if (this.collectionModule === 0) {
-      this.OrderRow($r('app.media.rec_food'), '和妈妈的晚餐计划', '微信聊天', '今天 08:12', '12 条')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_travel'), '周末出游讨论', '家庭群', '昨天 21:45', '8 条')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_sport'), '运动打卡提醒', '好友聊天', '昨天 19:30', '5 条')
-    } else if (this.collectionModule === 2) {
-      this.OrderRow($r('app.media.rec_travel'), '航班价格提醒', '系统通知', '今天 09:05', '已收录')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_food'), '外卖配送更新', '生活服务', '今天 08:40', '已收录')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_sport'), '健康步数摘要', '运动健康', '昨天 22:00', '已收录')
-    } else if (this.collectionModule === 3) {
-      this.OrderRow($r('app.media.rec_sport'), '晚间瑜伽课程', '视频记录', '昨天 20:30', '42 分钟')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_travel'), '露营路线收藏', '短视频收藏', '周六 10:12', '3 条')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_food'), '轻食探店视频', '兴趣推荐', '周五 18:20', '6 条')
+    if (this.currentView().groups.length === 0) {
+      Column() {
+        Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#151A28')
+        Text('导入 daily-log 后点击同步即可生成索引').fontSize(12).fontColor('#7C8494').margin({ top: 6 })
+      }.width('100%').height(92).justifyContent(FlexAlign.Center)
     } else {
-      this.OrderRow($r('app.media.rec_sport'), '无线耳机 Pro 2', '京东商城', '05-20 10:23', '¥ 1299.00')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_food'), '馥芮白咖啡 12瓶装', '天猫超市', '05-19 16:45', '¥ 59.90')
-      Divider().color('#EEF0F5')
-      this.OrderRow($r('app.media.rec_travel'), '纯棉基础T恤', '优衣库官方旗舰店', '05-18 09:12', '¥ 99.00')
+      ForEach(this.currentView().groups, (group: CollectionGroupViewModel) => {
+        this.GroupRow(group)
+        Divider().color('#EEF0F5')
+      }, (group: CollectionGroupViewModel) => group.id)
     }
+  }
+
+  private safeInsight(index: number): CollectionInsightViewModel {
+    let insights = this.currentView().insights;
+    if (insights.length > index) {
+      return insights[index];
+    }
+    return { color: '#8B93A4', name: '-', value: '0%', widthValue: '0%' };
   }
 
   @Builder PreferenceLine(color: string, name: string, value: string, widthValue: string) {
@@ -144,7 +146,7 @@ export struct CollectionPage {
             Text('最近同步').fontSize(12).fontColor('#737987').maxLines(1)
             Text(this.getCollectionSyncTime()).fontSize(16).fontColor('#151A28').margin({ top: 5 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           }.alignItems(HorizontalAlign.Start).layoutWeight(1).padding({ left: 18, right: 10 })
-          Text('同步')
+          Text(this.refreshing ? '整理中' : '同步')
             .fontSize(12)
             .fontColor('#8066FF')
             .width(44)
@@ -153,7 +155,27 @@ export struct CollectionPage {
             .backgroundColor('#F0ECFF')
             .borderRadius(22)
             .onClick(() => {
-              promptAction.showToast({ message: '已刷新采集数据', duration: 1200 });
+              dataManagerInfo(`Collection sync tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
+              if (this.refreshing) {
+                return;
+              }
+              this.onRefresh();
+            })
+          Text('重分组')
+            .fontSize(12)
+            .fontColor('#8066FF')
+            .width(56)
+            .height(44)
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#F0ECFF')
+            .borderRadius(22)
+            .margin({ left: 8 })
+            .onClick(() => {
+              dataManagerInfo(`Collection regroup tapped: refreshing=${this.refreshing}, tab=${this.collectionModule}`);
+              if (this.refreshing) {
+                return;
+              }
+              this.onRegroup();
             })
         }
         .width('86%')
@@ -165,8 +187,8 @@ export struct CollectionPage {
 
         Column() {
           Row() {
-            Text(this.getCollectionTitle()).fontSize(20).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1)
-            Text('查看全部 >').fontSize(13).fontColor('#7F8592')
+            Text(this.getCollectionTitle()).fontSize(20).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(`${this.currentView().groups.length} 组`).fontSize(13).fontColor('#7F8592')
           }.width('100%').margin({ bottom: 8 })
           this.CollectionRows()
         }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: 22 })
@@ -178,23 +200,23 @@ export struct CollectionPage {
           }.width('100%')
           Row() {
             Stack() {
-              Progress({ value: 72, total: 100, type: ProgressType.Ring }).width(112).height(112).color('#8066FF').backgroundColor('#EDF0F8')
+              Progress({ value: this.currentView().empty ? 0 : 72, total: 100, type: ProgressType.Ring }).width(112).height(112).color('#8066FF').backgroundColor('#EDF0F8')
               Column() {
                 Text('主要品类').fontSize(12).fontColor('#4C5260')
                 Text('分布').fontSize(12).fontColor('#4C5260').margin({ top: 3 })
               }
             }.width(120).height(132)
             Column() {
-              this.PreferenceLine('#8066FF', '数码家电', '42%', '78%')
-              this.PreferenceLine('#5B8DFF', '食品饮料', '28%', '60%')
-              this.PreferenceLine('#FFB14B', '服饰鞋包', '18%', '42%')
-              this.PreferenceLine('#42C995', '美妆个护', '12%', '28%')
+              this.PreferenceLine(this.safeInsight(0).color, this.safeInsight(0).name, this.safeInsight(0).value, this.safeInsight(0).widthValue)
+              this.PreferenceLine(this.safeInsight(1).color, this.safeInsight(1).name, this.safeInsight(1).value, this.safeInsight(1).widthValue)
+              this.PreferenceLine(this.safeInsight(2).color, this.safeInsight(2).name, this.safeInsight(2).value, this.safeInsight(2).widthValue)
+              this.PreferenceLine(this.safeInsight(3).color, this.safeInsight(3).name, this.safeInsight(3).value, this.safeInsight(3).widthValue)
             }.layoutWeight(1).margin({ left: 12 })
           }.width('100%').margin({ top: 16 })
           Row() {
             Text('AI').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#8066FF')
-            Text('你在数码和食品品类的消费较多').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#6D62F5').layoutWeight(1).margin({ left: 10 })
-            Text('>').fontSize(18).fontColor('#9AA0AA')
+            Text(this.currentView().insightSummary).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#6D62F5').layoutWeight(1).margin({ left: 10 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text('详情').fontSize(12).fontColor('#9AA0AA')
           }.width('100%').height(46).padding({ left: 16, right: 12 }).backgroundColor('#F2EEFF').borderRadius(12)
         }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: 22 })
 
@@ -214,3 +236,4 @@ export struct CollectionPage {
     }.width('100%').height('100%').backgroundColor('#F4F8FF')
   }
 }
+

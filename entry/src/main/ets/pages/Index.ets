@@ -810,6 +810,76 @@ struct Index {
     });
   }
 
+  private async ensureLocalModelLoaded(): Promise<boolean> {
+    if (this.modelLoaded) {
+      return true;
+    }
+
+    let cfg = this.modelDir + '/config.json';
+    if (!this.prepareCustomOpp()) {
+      return false;
+    }
+
+    this.output = '未检测到已加载模型，正在自动加载大模型...';
+    try {
+      this.output = await mnnllm.loadModel(cfg);
+      this.modelLoaded = this.output === 'ok';
+      if (!this.modelLoaded) {
+        this.output = `自动加载模型失败: ${this.output}`;
+      }
+      return this.modelLoaded;
+    } catch (err) {
+      let e = err as Error;
+      this.output = '自动加载模型失败: ' + e.message;
+      return false;
+    }
+  }
+
+  private startLocalBackend(): void {
+    this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
+      this.output = msg;
+      let match = msg.match(/<img>(.*?)<hw>/);
+      if (match && match[1]) { this.debugImagePath = 'file://' + match[1]; }
+    }, async (response: string) => {
+      if (this.autoConfirm) { return true; }
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '大模型返回确认',
+          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
+      });
+    });
+  }
+
+  private async ensureLocalAgentReady(): Promise<boolean> {
+    if (!await this.ensureLocalModelLoaded()) {
+      return false;
+    }
+
+    if (!this.llmServer.running()) {
+      this.output = '未检测到本地 PC 控制后端，正在自动启动...';
+      this.startLocalBackend();
+    }
+    return true;
+  }
+
+  private ensureCloudAgentBackend(): boolean {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+      return false;
+    }
+
+    if (!this.cloudLlmServer.running()) {
+      this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
+      this.startCloudBackend();
+    }
+    return true;
+  }
+
   @Builder AssistantPage() {
     Scroll() {
       Column() {
@@ -872,13 +942,8 @@ struct Index {
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
           Button('加载大模型')
             .onClick(async () => {
-              let cfg = this.modelDir + '/config.json';
-              if (!this.prepareCustomOpp()) { return; }
               this.output = '加载中，请稍候...';
-              try {
-                this.output = await mnnllm.loadModel(cfg);
-                if (this.output === 'ok') { this.modelLoaded = true; }
-              } catch(err) { let e = err as Error; this.output = '加载失败: ' + e.message; }
+              await this.ensureLocalModelLoaded();
             })
             .enabled(!this.downloading)
             .height(42)
@@ -913,8 +978,8 @@ struct Index {
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
           .onClick(async () => {
-            if (!this.modelLoaded) { this.output = '请先加载模型后再运行智能体'; return; }
             if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
+            if (!await this.ensureLocalAgentReady()) { return; }
             this.llmServer.currentTask = this.userInput;
             this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
           })
@@ -925,25 +990,9 @@ struct Index {
             .backgroundColor('#607D8B')
             .borderRadius(14)
             .layoutWeight(1)
-            .onClick(() => {
-              if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
-              this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
-                this.output = msg;
-                let match = msg.match(/<img>(.*?)<hw>/);
-                if (match && match[1]) { this.debugImagePath = 'file://' + match[1]; }
-              }, async (response: string) => {
-                if (this.autoConfirm) { return true; }
-                return new Promise<boolean>((resolve) => {
-                  promptAction.showDialog({
-                    title: '大模型返回确认',
-                    message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-                    buttons: [
-                      { text: '拒绝', color: '#ff0000' },
-                      { text: '同意', color: '#00cc00' }
-                    ]
-                  }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
-                });
-              });
+            .onClick(async () => {
+              if (!await this.ensureLocalModelLoaded()) { return; }
+              this.startLocalBackend();
             })
           Row() {
             Checkbox({ name: 'autoConfirm', group: 'settings' })
@@ -1354,12 +1403,11 @@ struct Index {
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
           .onClick(() => {
-            if (!this.isCloudConfigReady()) {
-              this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
-              return;
-            }
             if (this.cloudUserInput.trim().length === 0) {
               this.appendCloudLog('请先输入云端 Agent 任务。');
+              return;
+            }
+            if (!this.ensureCloudAgentBackend()) {
               return;
             }
             this.cloudLlmServer.currentTask = this.cloudUserInput;

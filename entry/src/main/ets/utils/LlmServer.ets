@@ -38,6 +38,10 @@ export class LlmServer {
   private cloudTask: string = '';
   public currentTask: string = '';
 
+  public running(): boolean {
+    return this.isRunning;
+  }
+
   private extractCloudTask(prefix: string): string {
     let marker = '### Current Task';
     let start = prefix.indexOf(marker);

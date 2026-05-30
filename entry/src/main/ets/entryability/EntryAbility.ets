@@ -2,6 +2,7 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } fr
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { AgentExecutionController } from '../utils/AgentExecutionController';
 
 const DOMAIN = 0x0000;
 
@@ -14,12 +15,25 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
-    // Initialize floating window text for @StorageLink binding
-    AppStorage.setOrCreate('floatText', 'AI Agent 运行中...');
+    AgentExecutionController.initialize();
+    AgentExecutionController.setFloatWindowSyncHandler(() => {
+      this.syncFloatWindow();
+    });
+    AgentExecutionController.setReturnToAppHandler(() => {
+      let wantInfo: Want = {
+        bundleName: 'com.example.mnnllmchat',
+        abilityName: 'EntryAbility'
+      };
+      this.context.startAbility(wantInfo).catch((err: Error) => {
+        hilog.error(DOMAIN, 'testTag', 'Failed to bring app to foreground. Cause: %{public}s', JSON.stringify(err));
+      });
+    });
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 
   onDestroy(): void {
+    AgentExecutionController.setFloatWindowSyncHandler(null);
+    AgentExecutionController.setReturnToAppHandler(null);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 
@@ -56,7 +70,10 @@ export default class EntryAbility extends UIAbility {
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
-    this.createFloatWindow();
+    this.syncFloatWindow();
+    if (!AgentExecutionController.isExecutionActive()) {
+      return;
+    }
     try {
       // 配置 WantAgent，用于在通知栏显示后台任务并能点击回到应用
       let wantAgentInfo: wantAgent.WantAgentInfo = {
@@ -85,6 +102,14 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
+  private syncFloatWindow(): void {
+    if (AgentExecutionController.isExecutionActive()) {
+      this.createFloatWindow();
+      return;
+    }
+    this.destroyFloatWindow();
+  }
+
   private createFloatWindow() {
     if (this.floatWindow) {
       this.floatWindow.showWindow();
@@ -98,8 +123,8 @@ export default class EntryAbility extends UIAbility {
 
     window.createWindow(config).then((win: window.Window) => {
       this.floatWindow = win;
-      win.resize(300, 100);
-      win.moveWindowTo(100, 100);
+      win.resize(430, 96);
+      win.moveWindowTo(620, 1570);
       win.setUIContent('pages/FloatWindow', (err) => {
         if (err.code) {
           hilog.error(DOMAIN, 'testTag', 'Failed to load float window content. Cause: %{public}s', JSON.stringify(err));

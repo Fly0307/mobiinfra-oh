@@ -694,22 +694,26 @@ static void ChatExecute(napi_env env, void* data) {
         g_messages.emplace_back("system", "You are a helpful assistant.");
     }
     g_messages.emplace_back("user", asyncData->inputStr);
-    auto context = g_llm->getContext();
     std::ostringstream oss;
     g_llm->response(g_messages, &oss);
+    auto context = g_llm->getContext();
     
-    if (context) {
-        std::string assistant_str = oss.str();
-        // printf("Assistant: %s\n", context->generate_str.c_str());
-        if (assistant_str.empty()) {
-            assistant_str = context->generate_str;
-        } else {
-            // context->generate_str = assistant_str;
-            printf("Assistant: %s\n", context->generate_str.c_str());
-        }
-        g_messages.emplace_back("assistant", assistant_str);
-        asyncData->outputStr = assistant_str;
+    std::string assistant_str = oss.str();
+    if (assistant_str.empty() && context) {
+        assistant_str = context->generate_str;
     }
+
+    if (assistant_str.empty()) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: empty chat response";
+        return;
+    }
+
+    if (context) {
+        printf("Assistant: %s\n", context->generate_str.c_str());
+    }
+    g_messages.emplace_back("assistant", assistant_str);
+    asyncData->outputStr = assistant_str;
     asyncData->success = true;
 }
 
@@ -829,6 +833,16 @@ static void AgentStepExecute(napi_env env, void* data) {
     }
     g_agent_step++;
     auto context = g_llm->getContext();
+    if (response.empty() && context) {
+        response = context->generate_str;
+    }
+
+    if (response.empty()) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: empty agent response";
+        return;
+    }
+
     if (context) {
         float prefill_s = context->prefill_us / 1e6;
         float decode_s = context->decode_us / 1e6;

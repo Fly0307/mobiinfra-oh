@@ -302,6 +302,15 @@ def send_request_best_effort(req, context="request"):
         print(f">> [提示] {context} 未完成，连接已关闭：{ex}")
         return ""
 
+def is_cancelled_status_response(response_text):
+    if not response_text:
+        return False
+    try:
+        parsed = json.loads(response_text)
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and parsed.get("status") == "cancelled"
+
 def is_connection_closed_error(err_msg):
     lower = err_msg.lower()
     return (
@@ -825,6 +834,10 @@ def run_planner(task):
         data = extract_json_payload(res)
         if not isinstance(data, dict):
             raise ValueError("planner output is not a JSON object")
+        action = str(data.get("action", "")).lower()
+        if action in ["terminate", "stop"]:
+            print(">> [Planner] Task cancelled by user.")
+            return "__USER_CANCELLED__"
         # 兼容多种常见的键名
         app_name = data.get("app") or data.get("target_app") or data.get("app_name")
         package_name = data.get("package_name") or data.get("bundle") or data.get("bundle_name")
@@ -883,6 +896,9 @@ def run_task_in_app_agent(task):
     prefix = prefix_template.replace("{task}", task)
     print(f">> [Agent] Prefilling prefix ({len(prefix)} chars)...")
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
+    if is_cancelled_status_response(prefill_res):
+        print(">> [Agent] Task cancelled by user during prefill.")
+        return
     print(f">> [Agent] Prefill result: {prefill_res}")
     is_cloud_qwen_mode = "cloud qwen prompt mode" in prefill_res
     screenshot_factor = 0.5 if is_cloud_qwen_mode else 0.25
@@ -932,7 +948,7 @@ def run_task_in_app_agent(task):
             break
         elif action == "error":
             print(">> [Agent] Parse error, aborting.")
-            break
+            raise RuntimeError("Agent response parse failed")
 
         if is_cloud_qwen_mode:
             send_request_best_effort({"type": "cloud_history_append", "response": res}, "Cloud history append")
@@ -1056,24 +1072,25 @@ if __name__ == "__main__":
                 reset_driver()
                 
                 # 1. 确保环境干净
-                send_request_best_effort({"type": "clear"}, "任务开始前清理状态")
+                send_request_best_effort({"type": "clear", "preserve_execution": True}, "任务开始前清理状态")
                 
                 # 2. Stage 1: Planner 解析意图并启动 App
                 app_name = run_planner(task)
-                if app_name:
-                    success = launch_app(app_name)
-                    if success:
-                        print(">> 等待 App 启动加载完成...")
-                        time.sleep(1.3)
-                
-                # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
-                send_request_best_effort({"type": "clear"}, "Planner 后清理上下文")
+                if app_name != "__USER_CANCELLED__":
+                    if app_name:
+                        success = launch_app(app_name)
+                        if success:
+                            print(">> 等待 App 启动加载完成...")
+                            time.sleep(1.3)
+                    
+                    # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
+                    send_request_best_effort({"type": "clear", "preserve_execution": True}, "Planner 后清理上下文")
 
-                # 4. Stage 2: 任务在 App 内循环执行
-                if USE_AGENT_MODE:
-                    run_task_in_app_agent(task)
-                else:
-                    run_task_in_app(task)
+                    # 4. Stage 2: 任务在 App 内循环执行
+                    if USE_AGENT_MODE:
+                        run_task_in_app_agent(task)
+                    else:
+                        run_task_in_app(task)
                 task_finished = True
                 bring_llm_app_to_foreground()
                 

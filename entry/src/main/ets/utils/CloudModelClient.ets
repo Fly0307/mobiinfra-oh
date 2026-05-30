@@ -55,6 +55,27 @@ interface CloudChatResponse {
 }
 
 export class CloudModelClient {
+  private activeRequests: http.HttpRequest[] = [];
+
+  private registerActiveRequest(request: http.HttpRequest): void {
+    this.activeRequests.push(request);
+  }
+
+  private unregisterActiveRequest(request: http.HttpRequest): void {
+    this.activeRequests = this.activeRequests.filter((item: http.HttpRequest) => item !== request);
+  }
+
+  cancelActiveRequests(): void {
+    let pending = this.activeRequests.slice();
+    this.activeRequests = [];
+    for (let i = 0; i < pending.length; i++) {
+      try {
+        pending[i].destroy();
+      } catch (e) {
+      }
+    }
+  }
+
   private buildQwenHistoryText(historyItems: string[]): string {
     if (historyItems.length === 0) {
       return '(No history)';
@@ -125,6 +146,7 @@ export class CloudModelClient {
     };
 
     let httpReq = http.createHttp();
+    this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeChatUrl(baseUrl), requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
@@ -136,6 +158,7 @@ export class CloudModelClient {
       }
       return parsed.choices[0].message.content;
     } finally {
+      this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
     }
   }

@@ -2,9 +2,11 @@ import { socket } from '@kit.NetworkKit';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
+import { AgentExecutionController } from './AgentExecutionController';
 
 type NativeApi = Record<string, Function>;
-type RequestMap = Record<string, Object>;
+type RequestValue = Object | string | number | boolean | null;
+type RequestMap = Record<string, RequestValue>;
 
 interface TaskResponse {
   task: string;
@@ -36,10 +38,69 @@ export class LlmServer {
   private cloudConnectLogged: boolean = false;
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
+  private cancellationRequested: boolean = false;
+  private localApi: NativeApi | null = null;
+  private cloudClientRef: CloudModelClient | null = null;
+  private onLogHandler: ((msg: string) => void) | null = null;
   public currentTask: string = '';
 
   public running(): boolean {
     return this.isRunning;
+  }
+
+  public async requestTaskCancellation(): Promise<void> {
+    this.cancellationRequested = true;
+    this.currentTask = '';
+    this.cloudActionHistory = [];
+    this.cloudTask = '';
+    this.onLogHandler?.('>> [Cancel] 用户点击悬浮窗，请求终止当前任务。');
+
+    try {
+      this.cloudClientRef?.cancelActiveRequests();
+    } catch (e) {
+    }
+
+    if (this.localApi) {
+      try {
+        let agentReset = this.localApi['agentReset'];
+        if (typeof agentReset === 'function') {
+          await agentReset();
+        }
+      } catch (e) {
+      }
+
+      try {
+        let reset = this.localApi['reset'];
+        if (typeof reset === 'function') {
+          reset();
+        }
+      } catch (e) {
+      }
+    }
+  }
+
+  private isCancellationRequested(): boolean {
+    return this.cancellationRequested || AgentExecutionController.isCancelRequested();
+  }
+
+  private clearCancellationState(): void {
+    this.cancellationRequested = false;
+  }
+
+  private sendTerminate(client: socket.TCPSocketConnection, reason: string): void {
+    this.sendJson(client, ArkJSON.stringify({
+      action: 'terminate',
+      reasoning: reason,
+      parameters: {
+        status: 'cancelled',
+        message: reason
+      }
+    }));
+  }
+
+  private finishExecution(reason?: string): void {
+    this.clearCancellationState();
+    AgentExecutionController.finishExecution(reason ?? 'AI Agent running...');
   }
 
   private extractCloudTask(prefix: string): string {
@@ -154,6 +215,10 @@ export class LlmServer {
       return;
     }
 
+    this.localApi = mnnllm;
+    this.cloudClientRef = null;
+    this.onLogHandler = onLog;
+    this.cancellationRequested = false;
     this.server = socket.constructTCPSocketServerInstance();
     let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
 
@@ -193,6 +258,7 @@ export class LlmServer {
           }
 
           if (reqType === 'clear') {
+            let preserveExecution = req['preserve_execution'] === true;
             this.currentTask = '';
             let agentReset = mnnllm['agentReset'];
             let reset = mnnllm['reset'];
@@ -205,14 +271,24 @@ export class LlmServer {
               reset();
             }
             onLog('>> [Local Clear] Task cleared and model context reset.');
+            if (!preserveExecution) {
+              this.finishExecution();
+            }
             this.sendStatus(client, 'ok');
             return;
           }
 
           if (reqType === 'error') {
             this.currentTask = '';
+            this.finishExecution();
             onLog('>> [PC Error] ' + this.getString(req, 'message'));
             this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (this.isCancellationRequested()) {
+            onLog('>> [Local Cancel] cancellation intercepted before handling request: ' + reqType);
+            this.sendTerminate(client, 'Task cancelled by user');
             return;
           }
 
@@ -223,11 +299,21 @@ export class LlmServer {
             try {
               let agentPrefill = mnnllm['agentPrefill'];
               let result = await agentPrefill(prefix) as string;
+              if (this.isCancellationRequested()) {
+                onLog('>> [Agent Prefill] cancelled by user.');
+                this.sendStatus(client, 'cancelled', '', 'Task cancelled by user');
+                return;
+              }
               AppStorage.set('floatText', 'AI Agent running...');
               onLog('>> [Agent Prefill Done] ' + result);
               this.sendStatus(client, 'ok', result);
             } catch (e) {
               let message = String(e);
+              if (this.isCancellationRequested()) {
+                onLog('>> [Agent Prefill] cancelled while running.');
+                this.sendStatus(client, 'cancelled', '', 'Task cancelled by user');
+                return;
+              }
               onLog('>> [Agent Prefill ERROR] ' + message);
               this.sendStatus(client, 'error', '', message);
             }
@@ -256,16 +342,30 @@ export class LlmServer {
             try {
               let agentStep = mnnllm['agentStep'];
               let response = await agentStep(variable, (token: string) => {
+                if (this.isCancellationRequested()) {
+                  throw new Error('__agent_cancelled__');
+                }
                 streamedText += token;
                 AppStorage.set('floatText', streamedText);
               }) as string;
+              if (this.isCancellationRequested()) {
+                onLog('>> [Agent Step] cancelled after inferencing.');
+                this.sendTerminate(client, 'Task cancelled by user');
+                return;
+              }
               AppStorage.set('floatText', 'AI Agent running...');
               onLog('>> [Agent Step] model response:\n' + response);
 
               if (onRequireApproval) {
                 let isApproved = await onRequireApproval(response);
+                if (this.isCancellationRequested()) {
+                  onLog('>> [Agent Step] cancelled while waiting for approval.');
+                  this.sendTerminate(client, 'Task cancelled by user');
+                  return;
+                }
                 if (!isApproved) {
                   this.currentTask = '';
+                  this.finishExecution();
                   this.sendActionError(client, 'User rejected');
                   return;
                 }
@@ -273,12 +373,18 @@ export class LlmServer {
 
               if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
                 this.currentTask = '';
+                this.finishExecution();
                 onLog('>> [Agent] Task completed.');
               }
 
               this.sendJson(client, response);
             } catch (e) {
               let message = String(e);
+              if (this.isCancellationRequested() || message.indexOf('__agent_cancelled__') !== -1) {
+                onLog('>> [Agent Step] cancelled during inferencing.');
+                this.sendTerminate(client, 'Task cancelled by user');
+                return;
+              }
               onLog('>> [Agent Step ERROR] ' + message);
               this.sendActionError(client, message);
             }
@@ -320,13 +426,24 @@ export class LlmServer {
             AppStorage.set('floatText', 'Inferencing...');
             let chat = mnnllm['chat'];
             let response = await chat(prompt) as string;
+            if (this.isCancellationRequested()) {
+              onLog('>> [Action] cancelled after inferencing.');
+              this.sendTerminate(client, 'Task cancelled by user');
+              return;
+            }
             AppStorage.set('floatText', 'AI Agent running...');
             onLog('>> [Action] model response:\n' + response);
 
             if (onRequireApproval) {
               let isApproved = await onRequireApproval(response);
+              if (this.isCancellationRequested()) {
+                onLog('>> [Action] cancelled while waiting for approval.');
+                this.sendTerminate(client, 'Task cancelled by user');
+                return;
+              }
               if (!isApproved) {
                 this.currentTask = '';
+                this.finishExecution();
                 this.sendActionError(client, 'User rejected');
                 return;
               }
@@ -334,6 +451,7 @@ export class LlmServer {
 
             if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
               this.currentTask = '';
+              this.finishExecution();
               onLog('>> [Action] Task completed.');
             }
 
@@ -344,6 +462,11 @@ export class LlmServer {
           this.sendError(client, 'Unsupported request type: ' + reqType);
         } catch (e) {
           let message = String(e);
+          if (this.isCancellationRequested()) {
+            onLog('>> [Local Request] cancelled during in-flight request.');
+            this.sendTerminate(client, 'Task cancelled by user');
+            return;
+          }
           onLog('[ERROR] Request handling failed: ' + message);
           this.sendError(client, 'Failed');
         }
@@ -361,6 +484,10 @@ export class LlmServer {
     this.cloudConnectLogged = false;
     this.cloudActionHistory = [];
     this.cloudTask = '';
+    this.localApi = null;
+    this.cloudClientRef = cloudClient;
+    this.onLogHandler = onLog;
+    this.cancellationRequested = false;
     this.server = socket.constructTCPSocketServerInstance();
     let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
 
@@ -412,18 +539,29 @@ export class LlmServer {
           }
 
           if (reqType === 'clear') {
+            let preserveExecution = req['preserve_execution'] === true;
             this.currentTask = '';
             this.cloudActionHistory = [];
             this.cloudTask = '';
             onLog('>> [Cloud Clear] Task and cloud history cleared.');
+            if (!preserveExecution) {
+              this.finishExecution();
+            }
             this.sendStatus(client, 'ok');
             return;
           }
 
           if (reqType === 'error') {
             this.currentTask = '';
+            this.finishExecution();
             onLog('>> [PC Error] ' + this.getString(req, 'message'));
             this.sendStatus(client, 'ok');
+            return;
+          }
+
+          if (this.isCancellationRequested()) {
+            onLog('>> [Cloud Cancel] cancellation intercepted before handling request: ' + reqType);
+            this.sendTerminate(client, 'Task cancelled by user');
             return;
           }
 
@@ -442,6 +580,10 @@ export class LlmServer {
             this.cloudActionHistory = [];
             this.cloudTask = this.extractCloudTask(prefix);
             onLog('>> [Cloud Agent Prefill] Qwen prompt mode, task=' + this.cloudTask);
+            if (this.isCancellationRequested()) {
+              this.sendStatus(client, 'cancelled', '', 'Task cancelled by user');
+              return;
+            }
             this.sendStatus(client, 'ok', 'cloud qwen prompt mode');
             return;
           }
@@ -470,13 +612,24 @@ export class LlmServer {
             let response = imageBase64.length > 0 ?
               await cloudClient.chatQwenDecider(qwenTask, this.cloudActionHistory, imageBase64, cloudConfig) :
               await cloudClient.chatPlanner(prompt, cloudConfig);
+            if (this.isCancellationRequested()) {
+              onLog('>> [Cloud Agent Step] cancelled after inferencing.');
+              this.sendTerminate(client, 'Task cancelled by user');
+              return;
+            }
             AppStorage.set('floatText', 'AI Agent running...');
             onLog('>> [Cloud Agent Step] model response:\n' + response);
 
             if (onRequireApproval) {
               let isApproved = await onRequireApproval(response);
+              if (this.isCancellationRequested()) {
+                onLog('>> [Cloud Agent Step] cancelled while waiting for approval.');
+                this.sendTerminate(client, 'Task cancelled by user');
+                return;
+              }
               if (!isApproved) {
                 this.currentTask = '';
+                this.finishExecution();
                 this.sendActionError(client, 'User rejected');
                 return;
               }
@@ -484,6 +637,7 @@ export class LlmServer {
 
             if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
               this.currentTask = '';
+              this.finishExecution();
               onLog('>> [Cloud Agent] Task completed.');
             }
             if (imageBase64.length > 0) {
@@ -521,13 +675,24 @@ export class LlmServer {
             let response = imageBase64.length > 0 ?
               await cloudClient.chatDecider(prompt, imageBase64, cloudConfig) :
               await cloudClient.chatPlanner(prompt, cloudConfig);
+            if (this.isCancellationRequested()) {
+              onLog('>> [Cloud Action] cancelled after inferencing.');
+              this.sendTerminate(client, 'Task cancelled by user');
+              return;
+            }
             AppStorage.set('floatText', 'AI Agent running...');
             onLog('>> [Cloud Action] model response:\n' + response);
 
             if (onRequireApproval) {
               let isApproved = await onRequireApproval(response);
+              if (this.isCancellationRequested()) {
+                onLog('>> [Cloud Action] cancelled while waiting for approval.');
+                this.sendTerminate(client, 'Task cancelled by user');
+                return;
+              }
               if (!isApproved) {
                 this.currentTask = '';
+                this.finishExecution();
                 this.sendActionError(client, 'User rejected');
                 return;
               }
@@ -535,6 +700,7 @@ export class LlmServer {
 
             if (response.indexOf('"done"') !== -1 || response.indexOf('"stop"') !== -1) {
               this.currentTask = '';
+              this.finishExecution();
             }
             this.sendJson(client, response);
             return;
@@ -543,6 +709,11 @@ export class LlmServer {
           this.sendError(client, 'Unsupported request type: ' + reqType);
         } catch (e) {
           let message = String(e);
+          if (this.isCancellationRequested()) {
+            onLog('>> [Cloud Request] cancelled during in-flight request.');
+            this.sendTerminate(client, 'Task cancelled by user');
+            return;
+          }
           onLog('[ERROR] Cloud request handling failed: ' + message);
           this.sendError(client, 'Failed');
         }

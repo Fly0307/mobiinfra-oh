@@ -9,8 +9,9 @@ import { AppHeader } from '../components/AppHeader';
 import { CollectionPage } from './collection/CollectionPage';
 import { HomePage } from './home/HomePage';
 import { TaskPage } from './task/TaskPage';
-import { LlmServer } from '../utils/LlmServer';
+import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
+import { AgentExecutionController } from '../utils/AgentExecutionController';
 
 interface ServerFile {
   name: string;
@@ -72,8 +73,7 @@ struct Index {
   private totalBytesAll: number = 0;
   
   // PC 控制服务端单例。
-  private llmServer: LlmServer = new LlmServer();
-  private cloudLlmServer: LlmServer = new LlmServer();
+  private agentRouter: AgentRouterServer = new AgentRouterServer();
   private cloudClient: CloudModelClient = new CloudModelClient();
 
   private appendCloudLog(message: string): void {
@@ -105,6 +105,69 @@ struct Index {
       console.error('initLogFile failed: ' + err.message);
     }
     this.prepareCustomOpp();
+    this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
+      this.output = msg;
+      let match = msg.match(/<img>(.*?)<hw>/);
+      if (match && match[1]) {
+        this.debugImagePath = 'file://' + match[1];
+      }
+    }, async (response: string) => {
+      if (this.autoConfirm) { return true; }
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '大模型返回确认',
+          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
+      });
+    });
+    this.agentRouter.configureCloud(this.cloudClient, () => this.getCloudConfig(), (msg: string) => {
+      this.appendCloudLog(msg);
+      let match = msg.match(/agent_snapshot_.*?\.jpg/);
+      if (match && match[0]) {
+        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
+      }
+    }, async (response: string) => {
+      if (this.cloudAutoConfirm) {
+        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
+        return true;
+      }
+      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '云端模型返回确认',
+          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => {
+          let approved = data.index === 1;
+          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
+          resolve(approved);
+        }).catch(() => {
+          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
+          resolve(false);
+        });
+      });
+    });
+    AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.agentRouter.getRouteMode() !== 'local') {
+        return;
+      }
+      await this.agentRouter.requestTaskCancellation();
+      this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+    });
+    AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.agentRouter.getRouteMode() !== 'cloud') {
+        return;
+      }
+      await this.agentRouter.requestTaskCancellation();
+      this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
+    });
   }
 
   private migrateDefaultEndpointValues(): void {
@@ -783,37 +846,9 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    this.appendCloudLog('准备启动云端 PC 控制后端，监听 9126...');
-    this.cloudLlmServer.startCloud(9126, this.filesDir, this.cloudClient, this.getCloudConfig(), (msg: string) => {
-      this.appendCloudLog(msg);
-      let match = msg.match(/agent_snapshot_.*?\.jpg/);
-      if (match && match[0]) {
-        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
-      }
-    }, async (response: string) => {
-      if (this.cloudAutoConfirm) {
-        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
-        return true;
-      }
-      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
-      return new Promise<boolean>((resolve) => {
-        promptAction.showDialog({
-          title: '云端模型返回确认',
-          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
-          buttons: [
-            { text: '拒绝', color: '#ff0000' },
-            { text: '同意', color: '#00cc00' }
-          ]
-        }).then((data: promptAction.ShowDialogSuccessResponse) => {
-          let approved = data.index === 1;
-          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
-          resolve(approved);
-        }).catch(() => {
-          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
-          resolve(false);
-        });
-      });
-    });
+    this.appendCloudLog('准备切换到云端 Agent 路由，复用 9126...');
+    this.agentRouter.useCloud();
+    this.agentRouter.start(9126, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
@@ -842,23 +877,8 @@ struct Index {
   }
 
   private startLocalBackend(): void {
-    this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
-      this.output = msg;
-      let match = msg.match(/<img>(.*?)<hw>/);
-      if (match && match[1]) { this.debugImagePath = 'file://' + match[1]; }
-    }, async (response: string) => {
-      if (this.autoConfirm) { return true; }
-      return new Promise<boolean>((resolve) => {
-        promptAction.showDialog({
-          title: '大模型返回确认',
-          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-          buttons: [
-            { text: '拒绝', color: '#ff0000' },
-            { text: '同意', color: '#00cc00' }
-          ]
-        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
-      });
-    });
+    this.agentRouter.useLocal();
+    this.agentRouter.start(9126, this.filesDir);
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -866,7 +886,8 @@ struct Index {
       return false;
     }
 
-    if (!this.llmServer.running()) {
+    this.agentRouter.useLocal();
+    if (!this.agentRouter.running()) {
       this.output = '未检测到本地 PC 控制后端，正在自动启动...';
       this.startLocalBackend();
     }
@@ -879,7 +900,8 @@ struct Index {
       return false;
     }
 
-    if (!this.cloudLlmServer.running()) {
+    this.agentRouter.useCloud();
+    if (!this.agentRouter.running()) {
       this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
       this.startCloudBackend();
     }
@@ -986,7 +1008,8 @@ struct Index {
           .onClick(async () => {
             if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
             if (!await this.ensureLocalAgentReady()) { return; }
-            this.llmServer.currentTask = this.userInput;
+            this.agentRouter.submitLocalTask(this.userInput);
+            AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
             this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
           })
 
@@ -1430,7 +1453,8 @@ struct Index {
             if (!this.ensureCloudAgentBackend()) {
               return;
             }
-            this.cloudLlmServer.currentTask = this.cloudUserInput;
+            this.agentRouter.submitCloudTask(this.cloudUserInput);
+            AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
             this.resetCloudLog(`任务已下发：${this.cloudUserInput}`);
             this.appendCloudLog('等待 PC 侧 harmony_agent.py 轮询 9126。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。');
             this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);

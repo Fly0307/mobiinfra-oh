@@ -104,7 +104,7 @@ When changing the "数据归家" UI, do not change the local inference behavior 
 - `mnnllm.generate`
 - `mnnllm.chat`
 - `mnnllm.reset`
-- `LlmServer.start`
+- `AgentRouterServer.start`
 - model download/config/debug helper functions
 - navigation to `pages/OpTest` and `pages/LogView`
 

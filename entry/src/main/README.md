@@ -58,7 +58,6 @@
 | --- | --- |
 | `utils/AgentExecutionController.ets` | Agent 执行状态控制器。集中维护是否运行、是否取消、悬浮窗同步回调、本地/云端取消回调、回到 App 回调。 |
 | `utils/AgentRouterServer.ets` | 当前主要使用的手机端 TCP 路由服务器。监听 PC 端请求，并根据路由模式分发到本地 MNN Agent 或云端 Agent。处理 `poll`、`clear`、`agent_prefill`、`agent_step`、`agent_reset`、`action` 等协议。 |
-| `utils/LlmServer.ets` | 已软废弃的早期 TCP 服务实现，保留作历史参考。当前主流程不会导入、启动或依赖该文件，实际运行统一走 `AgentRouterServer.ets`。 |
 | `utils/CloudModelClient.ets` | 云端模型客户端。负责构造 OpenAI/Qwen 兼容 Chat Completions 请求、管理请求取消、格式化调试 Prompt、调用 Planner/Decider。 |
 | `utils/CloudDeciderPrompt.ets` | 云端 Qwen Decider 使用的 System/User/Step Prompt 常量。 |
 | `utils/AccessibilityHelper.ts` | Accessibility 动态手势注入辅助封装。通过 `Reflect` 兼容部分系统 API 暴露差异。 |
@@ -83,7 +82,6 @@
 | `python/harmony_agent.py` | HarmonyOS 端到端 Agent 主脚本。负责 HDC 端口转发、任务轮询、截图、Planner、Agent Prefill/Step 请求、JSON 恢复解析、动作执行、任务收尾和自愈。 |
 | `python/hdc_server.py` | PC 端 HTTP 控制服务，默认监听 `9124`。App 可通过它执行 HDC 连接命令，并在检测到设备后自动拉起 `harmony_agent.py`。 |
 | `python/serve_model.py` | PC 端模型文件 HTTP 服务，默认监听 `9123`，提供 `/api/files` 文件列表接口和静态文件下载。 |
-| `python/mobiagent_e2e.py` | MobiAgent/E2E 测试脚本，包含 Android/Harmony 设备抽象、Planner/Decider/Grounder 流程、本地 LLM 调用、XML 辅助匹配、任务数据记录等。 |
 
 ## Prompt 模板
 
@@ -159,9 +157,9 @@ PC 与手机 App TCP 服务之间使用简单文本协议：
 
 ## 维护建议
 
-1. 优先维护 `AgentRouterServer.ets`。当前主流程不会导入、启动或依赖 `LlmServer.ets`；后者仅作为历史参考保留，确认团队调试流程也不再使用后可再删除。
+1. 优先维护 `AgentRouterServer.ets`。当前主流程统一通过它承接手机侧 TCP 请求分发和本地/云端 Agent 路由。
 2. 默认服务器地址已集中为 `Index.ets` 顶部常量，修改部署地址时优先改常量，不要在 UI 逻辑中散落硬编码。
-3. `python/harmony_agent.py` 是 HarmonyOS 任务执行主入口；`mobiagent_e2e.py` 更偏实验和数据采集，请避免把两套流程的状态/包名表悄悄改成不一致。
+3. `python/harmony_agent.py` 是 HarmonyOS 任务执行主入口；调整 Prompt、动作协议或设备控制逻辑时应优先验证它的主链路。
 4. `cpp/include/**` 是第三方依赖目录，业务修改应集中在 `napi_init.cpp`、`HIAIModelManager.*` 和 ArkTS/Python 调用层。
 5. Prompt 文件会直接影响模型输出 JSON 格式，修改后应同步验证 `extract_json_payload()` 和动作执行链路。
 6. 运行中产生的截图、日志、`__pycache__`、模型文件和调试输出不应提交到源码仓库。

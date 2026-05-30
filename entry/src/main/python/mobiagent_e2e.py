@@ -1,7 +1,6 @@
 from openai import OpenAI
 import uiautomator2 as u2
 import base64
-from PIL import Image #pillow已有
 import json
 import io
 import logging
@@ -13,10 +12,7 @@ import shutil
 import argparse
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
-
-from pathlib import Path
 import sys
-
 from pathlib import Path
 import requests
 import tempfile
@@ -531,7 +527,7 @@ def robust_json_loads(s):
             if generic_fixed != s:
                 try:
                     return json.loads(generic_fixed)
-                except:
+                except json.JSONDecodeError:
                     pass
 
 
@@ -658,8 +654,6 @@ def find_best_match_node(root, target_element):
                 if ("搜索栏" in text) and flag == False:
                     flag = True
                     bounds = [x1, y1, x2, y2]
-                    search_bar_node = bounds  # 记录第一个或最后一个均可，通常只有一个
-                    print("11111111111111")
                     return bounds
                 
                 candidates.append({
@@ -676,13 +670,11 @@ def find_best_match_node(root, target_element):
             if not bounds_str:
                 continue
             if ((("搜索栏" in target_clean) or ("搜索框" in target_clean)) and (id == "com.taobao.taobao:id/searchEdit")):
-                print(id)
+                logging.debug("Matched Taobao search input by resource id: %s", id)
                 flag = True
                 coords = bounds_str.strip('[]').replace('][', ',').split(',')
                 x1, y1, x2, y2 = map(int, coords)
                 bounds = [x1, y1, x2, y2]
-                search_bar_node = bounds  # 记录第一个或最后一个均可，通常只有一个
-                print("222222222222")
                 return bounds
             
             
@@ -692,8 +684,7 @@ def find_best_match_node(root, target_element):
 
     # 排序：先按 score 降序，再按 text 长度升序
     candidates.sort(key=lambda x: (-x['score'], x['length']))
-    print("candidates")
-    print(candidates)
+    logging.debug("XML match candidates: %s", candidates)
     flag = False
     return candidates[0]['bounds']
 def task_in_app(app, old_task, task,  device, data_dir, bbox_flag=True, use_qwen3=True, device_type="Android", use_e2e=False, use_e2e_v2=False):
@@ -972,7 +963,7 @@ def task_in_app(app, old_task, task,  device, data_dir, bbox_flag=True, use_qwen
                         bbox = find_best_match_node(root, target_element)
                         bbox = None
                         if bbox is None:
-                            print("gggggggggggggggggggggggggggggggggg")
+                            logging.debug("XML matching did not provide bbox; fallback to grounder")
                             grounder_start_time = time.time()
                             if use_local_llm_grounder:
                                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=".") as tmp_img:
@@ -1583,7 +1574,6 @@ if __name__ == "__main__":
 ]
     
     # print(task_list)
-    print("dddd") 
     for task in task_list:
         existing_dirs = [d for d in os.listdir(data_base_dir) if os.path.isdir(os.path.join(data_base_dir, d)) and d.isdigit()]
         if existing_dirs:

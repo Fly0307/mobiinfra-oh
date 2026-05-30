@@ -360,7 +360,7 @@ def poll_task():
         res = send_request({"type": "poll"})
         data = json.loads(res)
         return data.get("task", "")
-    except:
+    except Exception:
         # 轮询失败（例如设备被刚刚切换，9126 通道断开），仅在此处轻量补发一次端口映射
         # 不连带重置 hmdriver2 驱动（避免没任务时的后台严重卡顿）
         refresh_hdc_forwarding()
@@ -630,7 +630,7 @@ def extract_json_payload(raw_text):
                 if generic_fixed != s:
                     try:
                         return json.loads(generic_fixed)
-                    except:
+                    except json.JSONDecodeError:
                         pass
 
             repaired = _attempt_close_truncated_json(s)
@@ -908,7 +908,7 @@ def run_planner(task):
     res = send_request({
         "type": "action",
         "prompt": prompt
-        # 注意：这里不传 image_b64，从而让 LlmServer.ets 只作为纯文本推理
+        # 注意：这里不传 image_b64，从而让手机侧 AgentRouterServer 走纯文本 planner 路径
     })
     
     print(format_debug_text_block(">> [Planner] MNN VLM 返回", res))
@@ -930,7 +930,7 @@ def run_planner(task):
         if package_name:
             print(f">> [Planner] 未返回 App 名称，直接使用包名: {package_name}")
             return package_name
-    except:
+    except Exception:
         print(">> [Planner] 解析目标 App 名称失败，使用原界面进行 fallback。")
         return None
 
@@ -1202,7 +1202,7 @@ if __name__ == "__main__":
                 # 尝试把界面回到应用, 并在 app 中显示异常
                 bring_llm_app_to_foreground()
                 send_request_best_effort({"type": "error", "message": f"任务执行出错: {err_msg}"}, "错误状态上报")
-            except:
+            except Exception:
                 pass
             active_task = ""
             print(">> 状态已清理，将避免服务完全退出，准备继续接收后续任务。")

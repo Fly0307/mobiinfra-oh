@@ -72,6 +72,7 @@ export class CloudModelClient {
       try {
         pending[i].destroy();
       } catch (e) {
+        console.warn('[CloudModelClient] destroy pending request failed: ' + String(e));
       }
     }
   }

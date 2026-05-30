@@ -9,6 +9,10 @@ export class AgentExecutionController {
   private static floatWindowSyncHandler: VoidHandler | null = null;
   private static returnToAppHandler: VoidHandler | null = null;
 
+  private static warn(message: string, err: Object): void {
+    console.warn(`[AgentExecutionController] ${message}: ${String(err)}`);
+  }
+
   static initialize(): void {
     AppStorage.setOrCreate('floatText', 'AI Agent 运行中...');
     AppStorage.setOrCreate('agentExecutionActive', false);
@@ -55,16 +59,19 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.localCancelHandler?.();
     } catch (e) {
+      AgentExecutionController.warn('local cancel handler failed', e as Object);
     }
 
     try {
       AgentExecutionController.cloudCancelHandler?.();
     } catch (e) {
+      AgentExecutionController.warn('cloud cancel handler failed', e as Object);
     }
 
     try {
       AgentExecutionController.returnToAppHandler?.();
     } catch (e) {
+      AgentExecutionController.warn('return-to-app handler failed', e as Object);
     }
   }
 
@@ -88,6 +95,7 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.floatWindowSyncHandler?.();
     } catch (e) {
+      AgentExecutionController.warn('float window sync handler failed', e as Object);
     }
   }
 }

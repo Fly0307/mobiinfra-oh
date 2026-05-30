@@ -4,6 +4,9 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 
+// Deprecated: the active in-app TCP backend is AgentRouterServer.
+// This file is retained only as historical reference and is not part of the current startup path.
+
 type NativeApi = Record<string, Function>;
 type RequestValue = Object | string | number | boolean | null;
 type RequestMap = Record<string, RequestValue>;

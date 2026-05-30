@@ -25,12 +25,24 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-PersistentStorage.persistProp('wirelessIp', '192.168.137.54:33117');
-PersistentStorage.persistProp('serverIp', 'http://166.111.53.96:9123');
-PersistentStorage.persistProp('hdcServerIp', 'http://192.168.137.1:9124');
-PersistentStorage.persistProp('cloudPlannerBaseUrl', 'http://166.111.53.96:7003');
-PersistentStorage.persistProp('cloudDeciderBaseUrl', 'http://166.111.53.96:7003');
-PersistentStorage.persistProp('cloudApiKey', 'mobiagent-key');
+const DEFAULT_WIRELESS_IP = '192.168.137.54:33117';
+const DEFAULT_MODEL_SERVER_URL = 'http://166.111.53.96:9123';
+const DEFAULT_HDC_SERVER_URL = 'http://192.168.137.1:9124';
+const DEFAULT_CLOUD_BASE_URL = 'http://166.111.53.96:7003';
+const DEFAULT_CLOUD_API_KEY = 'mobiagent-key';
+const LEGACY_WIRELESS_IPS: string[] = [
+  '101.5.155.98:35729',
+  '192.168.137.172:35963',
+  '192.168.137.55:35963',
+  '192.168.137.55:33117'
+];
+
+PersistentStorage.persistProp('wirelessIp', DEFAULT_WIRELESS_IP);
+PersistentStorage.persistProp('serverIp', DEFAULT_MODEL_SERVER_URL);
+PersistentStorage.persistProp('hdcServerIp', DEFAULT_HDC_SERVER_URL);
+PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_CLOUD_BASE_URL);
+PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_CLOUD_BASE_URL);
+PersistentStorage.persistProp('cloudApiKey', DEFAULT_CLOUD_API_KEY);
 PersistentStorage.persistProp('cloudDeciderModel', '');
 
 @Entry
@@ -53,12 +65,12 @@ struct Index {
   @State collectionModule: number = 1;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
-  @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
-  @StorageLink('hdcServerIp') hdcServerIp: string = 'http://192.168.137.1:9124';
-  @StorageLink('wirelessIp') wirelessIp: string = '192.168.137.54:33117';
-  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = 'http://166.111.53.96:7003';
-  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = 'http://166.111.53.96:7003';
-  @StorageLink('cloudApiKey') cloudApiKey: string = 'mobiagent-key';
+  @StorageLink('serverIp') serverIp: string = DEFAULT_MODEL_SERVER_URL;
+  @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_HDC_SERVER_URL;
+  @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_WIRELESS_IP;
+  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
+  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
+  @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_CLOUD_API_KEY;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = '';
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
@@ -172,23 +184,19 @@ struct Index {
 
   private migrateDefaultEndpointValues(): void {
     if (this.hdcServerIp === 'http://166.111.53.96:9124') {
-      this.hdcServerIp = 'http://192.168.137.1:9124';
+      this.hdcServerIp = DEFAULT_HDC_SERVER_URL;
     }
-    if (this.wirelessIp.trim().length === 0 ||
-      this.wirelessIp === '101.5.155.98:35729' ||
-      this.wirelessIp === '192.168.137.172:35963' ||
-      this.wirelessIp === '192.168.137.55:35963' ||
-      this.wirelessIp === '192.168.137.55:33117') {
-      this.wirelessIp = '192.168.137.54:33117';
+    if (this.wirelessIp.trim().length === 0 || LEGACY_WIRELESS_IPS.includes(this.wirelessIp)) {
+      this.wirelessIp = DEFAULT_WIRELESS_IP;
     }
     if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {
-      this.cloudPlannerBaseUrl = 'http://166.111.53.96:7003';
+      this.cloudPlannerBaseUrl = DEFAULT_CLOUD_BASE_URL;
     }
     if (this.cloudDeciderBaseUrl === 'http://166.111.53.96:8000') {
-      this.cloudDeciderBaseUrl = 'http://166.111.53.96:7003';
+      this.cloudDeciderBaseUrl = DEFAULT_CLOUD_BASE_URL;
     }
     if (this.cloudApiKey.trim().length === 0) {
-      this.cloudApiKey = 'mobiagent-key';
+      this.cloudApiKey = DEFAULT_CLOUD_API_KEY;
     }
     if (this.cloudDeciderModel === 'decider' || this.cloudDeciderModel === 'decider_model') {
       this.cloudDeciderModel = '';
@@ -247,8 +255,12 @@ struct Index {
       let count = 0;
       for (let f of files) {
         if (f.startsWith('agent_') || f.toLowerCase().endsWith('.jpg') || f.toLowerCase().endsWith('.jpeg')) {
-          try { fs.unlinkSync(`${this.filesDir}/${f}`); } catch {}
-          count++;
+          try {
+            fs.unlinkSync(`${this.filesDir}/${f}`);
+            count++;
+          } catch (e) {
+            this.appendCloudLog(`删除截图失败：${f}，${String(e)}`);
+          }
         }
       }
       this.output = `清理成功，删除了 ${count} 张缓存截图。`;

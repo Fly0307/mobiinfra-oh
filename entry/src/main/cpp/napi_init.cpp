@@ -709,9 +709,6 @@ static void ChatExecute(napi_env env, void* data) {
         return;
     }
 
-    if (context) {
-        printf("Assistant: %s\n", context->generate_str.c_str());
-    }
     g_messages.emplace_back("assistant", assistant_str);
     asyncData->outputStr = assistant_str;
     asyncData->success = true;

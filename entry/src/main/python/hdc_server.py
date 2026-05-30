@@ -55,7 +55,8 @@ def is_hdc_connected():
         if not output or "[Empty]" in output or "not found" in output:
             return False
         return True
-    except:
+    except Exception as e:
+        print(f">> [警告] 检查 HDC 连接失败: {e}")
         return False
 
 def start_harmony_agent():

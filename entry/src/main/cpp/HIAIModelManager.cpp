@@ -62,6 +62,10 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
         OH_LOG_ERROR(LOG_APP, "executor already initialized");
         return OH_NN_FAILED;
     }
+    if (modelData == nullptr || modelSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "invalid offline model buffer");
+        return OH_NN_FAILED;
+    }
     // (compatibility check skipped — CANNKit header may not be available)
 
     // Build from buffer
@@ -154,6 +158,7 @@ OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
 
 OH_NN_ReturnCode HIAIModelManager::SetInputData(int idx, const float *data, size_t count) {
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return OH_NN_FAILED;
+    if (data == nullptr) return OH_NN_FAILED;
     void *buf = OH_NNTensor_GetDataBuffer(inputTensors_[idx]);
     size_t sz = 0;
     OH_NNTensor_GetSize(inputTensors_[idx], &sz);

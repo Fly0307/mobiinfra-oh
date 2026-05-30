@@ -25,7 +25,7 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-PersistentStorage.persistProp('wirelessIp', '192.168.137.55:33117');
+PersistentStorage.persistProp('wirelessIp', '192.168.137.54:33117');
 PersistentStorage.persistProp('serverIp', 'http://166.111.53.96:9123');
 PersistentStorage.persistProp('hdcServerIp', 'http://192.168.137.1:9124');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', 'http://166.111.53.96:7003');
@@ -55,7 +55,7 @@ struct Index {
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
   @StorageLink('hdcServerIp') hdcServerIp: string = 'http://192.168.137.1:9124';
-  @StorageLink('wirelessIp') wirelessIp: string = '192.168.137.55:33117';
+  @StorageLink('wirelessIp') wirelessIp: string = '192.168.137.54:33117';
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = 'http://166.111.53.96:7003';
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = 'http://166.111.53.96:7003';
   @StorageLink('cloudApiKey') cloudApiKey: string = 'mobiagent-key';
@@ -177,8 +177,9 @@ struct Index {
     if (this.wirelessIp.trim().length === 0 ||
       this.wirelessIp === '101.5.155.98:35729' ||
       this.wirelessIp === '192.168.137.172:35963' ||
-      this.wirelessIp === '192.168.137.55:35963') {
-      this.wirelessIp = '192.168.137.55:33117';
+      this.wirelessIp === '192.168.137.55:35963' ||
+      this.wirelessIp === '192.168.137.55:33117') {
+      this.wirelessIp = '192.168.137.54:33117';
     }
     if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {
       this.cloudPlannerBaseUrl = 'http://166.111.53.96:7003';
@@ -276,19 +277,14 @@ struct Index {
   deleteModelFiles() {
     try {
       if (!fs.accessSync(this.modelDir)) {
-        this.output = '模型文件夹不存在，无需删除。';
+        this.output = '模型目录不存在，无需删除。';
         return;
       }
-      let files = fs.listFileSync(this.modelDir);
-      let count = 0;
-      for (let f of files) {
-        fs.unlinkSync(`${this.modelDir}/${f}`);
-        count++;
-      }
+      let deletedCount = this.deletePathRecursively(this.modelDir);
       this.modelLoaded = false;
-      this.output = `成功删除了 ${count} 个模型文件，\n现在可以重新下载了。`;
+      this.output = `模型删除成功\n已删除 ${this.getCurrentModelFolderName()} 目录及其内容（共 ${deletedCount} 项）。`;
     } catch (e) {
-      this.output = `删除模型文件失败: ${e}`;
+      this.output = `模型删除失败: ${e}`;
     }
   }
 
@@ -308,6 +304,21 @@ struct Index {
       this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载补齐 config.json。`;
     } catch (e) {
       this.output = `删除 config.json 失败: ${e}`;
+    }
+  }
+
+  private deletePathRecursively(path: string): number {
+    try {
+      let children = fs.listFileSync(path);
+      let deleted = 0;
+      for (let name of children) {
+        deleted += this.deletePathRecursively(`${path}/${name}`);
+      }
+      fs.rmdirSync(path);
+      return deleted + 1;
+    } catch {
+      fs.unlinkSync(path);
+      return 1;
     }
   }
 
@@ -1132,7 +1143,7 @@ struct Index {
           .fontColor('#6F7684')
           .width('100%')
         Row() {
-          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.55:33117', text: this.wirelessIp })
+          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.54:33117', text: this.wirelessIp })
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
@@ -1391,7 +1402,7 @@ struct Index {
             .margin({ bottom: 10 })
             .onChange((val: string) => { this.hdcServerIp = val; })
           Row() {
-            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.55:33117', text: this.wirelessIp })
+            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.54:33117', text: this.wirelessIp })
               .height(42)
               .layoutWeight(1)
               .fontSize(13)

@@ -302,6 +302,22 @@ def send_request_best_effort(req, context="request"):
         print(f">> [提示] {context} 未完成，连接已关闭：{ex}")
         return ""
 
+def send_request_retry_empty(req, context="request", max_attempts=3):
+    last_response = ""
+    for attempt in range(1, max_attempts + 1):
+        response = send_request(req)
+        if isinstance(response, str) and response.strip():
+            return response
+        if response and not isinstance(response, str):
+            return response
+
+        last_response = "" if response is None else str(response)
+        print(f">> [提示] {context} 返回空响应，正在重试 ({attempt}/{max_attempts})...")
+        if attempt < max_attempts:
+            time.sleep(0.3)
+
+    return last_response
+
 def is_cancelled_status_response(response_text):
     if not response_text:
         return False
@@ -359,21 +375,11 @@ def format_debug_text_block(label, text):
     )
 
 def extract_json_payload(raw_text):
-    if not raw_text:
-        return None
-
-    raw_text = str(raw_text)
-    raw_text = raw_text.strip()
-    # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
-    raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
-    # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
-    raw_text = re.sub(r'^\{\s*"\s*(?=")', '', raw_text)
-
-    text = raw_text.strip()
+    original_raw_text = "" if raw_text is None else str(raw_text)
 
     def _log_parse_issue(level, reason, cleaned_text=None, partial_data=None):
-        messages = [reason, format_debug_text_block("原始响应", raw_text)]
-        if cleaned_text is not None and cleaned_text != raw_text:
+        messages = [reason, format_debug_text_block("原始响应", original_raw_text)]
+        if cleaned_text is not None and cleaned_text != original_raw_text:
             messages.append(format_debug_text_block("清洗后响应", cleaned_text))
         if partial_data is not None:
             try:
@@ -387,11 +393,74 @@ def extract_json_payload(raw_text):
         else:
             logging.error(message)
 
+    def _append_candidate(candidates, seen_candidates, value):
+        if value is None:
+            return
+        if not isinstance(value, str):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+
+        candidate = value.strip()
+        if not candidate or candidate in seen_candidates:
+            return
+
+        seen_candidates.add(candidate)
+        candidates.append(candidate)
+
+    def _collect_wrapped_candidates(candidates, seen_candidates, value, depth=0):
+        if value is None or depth > 4:
+            return
+        if isinstance(value, str):
+            _append_candidate(candidates, seen_candidates, value)
+            return
+        if isinstance(value, list):
+            for item in value[:8]:
+                _collect_wrapped_candidates(candidates, seen_candidates, item, depth + 1)
+            return
+        if isinstance(value, dict):
+            if "action" in value:
+                _append_candidate(candidates, seen_candidates, value)
+
+            wrapper_keys = {
+                "response",
+                "content",
+                "output",
+                "text",
+                "message",
+                "result",
+                "data",
+                "arguments",
+                "tool_input",
+                "choices",
+                "delta",
+            }
+            for key, nested_value in value.items():
+                if key in wrapper_keys or depth == 0:
+                    _collect_wrapped_candidates(candidates, seen_candidates, nested_value, depth + 1)
+
+    if raw_text is None:
+        return None
+
+    if not original_raw_text.strip():
+        _log_parse_issue("error", "模型返回为空，无法提取 JSON。")
+        return None
+
+    raw_text = original_raw_text.strip()
+    # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
+    raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
+    # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
+    raw_text = re.sub(r'^\{\s*"\s*(?=")', '', raw_text)
+
+    text = raw_text.strip()
+
     # 1) 优先尝试从 ```json ... ``` 代码块中抽取
     block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
     candidates = []
+    seen_candidates = set()
     if block_match:
-        candidates.append(block_match.group(1).strip())
+        _append_candidate(candidates, seen_candidates, block_match.group(1))
     text = text.replace("…", "...").replace("\r", " ").replace("\n", " ")
     
     # 将包含多余非JSON字符的开头清理掉（比如响应开头包含的 "Otherwise ### Response " 等）
@@ -406,7 +475,22 @@ def extract_json_payload(raw_text):
 
     # 修复数组中数字之间漏掉逗号的问题，如 [818, 119, 96 131]
     text = re.sub(r'(\d+)\s+(\d+)', r'\1, \2', text)
-    candidates.append(text)
+
+    wrapped_payload = None
+    try:
+        wrapped_payload = json.loads(text)
+    except Exception:
+        pass
+
+    if isinstance(wrapped_payload, dict):
+        if "action" in wrapped_payload:
+            _append_candidate(candidates, seen_candidates, wrapped_payload)
+        else:
+            _collect_wrapped_candidates(candidates, seen_candidates, wrapped_payload)
+    elif isinstance(wrapped_payload, (list, str)):
+        _collect_wrapped_candidates(candidates, seen_candidates, wrapped_payload)
+
+    _append_candidate(candidates, seen_candidates, text)
 
     def _attempt_close_truncated_json(candidate):
         candidate = candidate.strip()
@@ -925,13 +1009,14 @@ def run_task_in_app_agent(task):
         variable = variable_template.replace("{history}", history_str)
 
         print(f">> [Agent] Sending step request (history: {len(history_list)} entries)...")
-        res = send_request({
+        step_request = {
             "type": "agent_step",
             "variable": variable,
             "image_b64": b64,
             "width": w,
             "height": h
-        })
+        }
+        res = send_request_retry_empty(step_request, context="Agent step")
 
         print(format_debug_text_block(">> [Agent] Response", res))
         sys.stdout.flush()

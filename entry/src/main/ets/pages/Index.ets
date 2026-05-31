@@ -12,6 +12,9 @@ import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { WorkflowRunner } from '../utils/WorkflowRunner';
+import { WorkflowStorage } from '../utils/WorkflowStorage';
+import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 
 interface ServerFile {
   name: string;
@@ -25,7 +28,7 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-const DEFAULT_WIRELESS_IP = '192.168.137.54:33117';
+const DEFAULT_WIRELESS_IP = '192.168.137.195:33117';
 const DEFAULT_MODEL_SERVER_URL = 'http://166.111.53.96:9123';
 const DEFAULT_HDC_SERVER_URL = 'http://192.168.137.1:9124';
 const DEFAULT_CLOUD_BASE_URL = 'http://166.111.53.96:7003';
@@ -931,6 +934,40 @@ struct Index {
     return true;
   }
 
+  private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
+      return;
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      this.appendCloudLog('Workflow 无法启动：请先配置 HDC Server。');
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', 'HDC Server 未配置');
+      return;
+    }
+
+    this.currentTab = 3;
+    this.resetCloudLog('准备执行 Workflow：' + task.title);
+    this.appendCloudLog('Workflow 编排将在 App 沙箱内执行；PC 端仅负责 HDC 截图和动作桥接。');
+    this.appendCloudLog('HDC Server=' + this.hdcServerIp);
+    let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
+      this.hdcServerIp, (msg: string) => { this.appendCloudLog(msg); });
+    try {
+      let result: WorkflowRunResult = await runner.runTask(task);
+      let message = result.message;
+      if (result.dailyLogPath.length > 0) {
+        message += '，daily-log 已生成';
+      }
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, result.status, message);
+      this.appendCloudLog('Workflow 运行摘要：' + result.runDir);
+    } catch (err) {
+      let e = err as Error;
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', e.message);
+      this.appendCloudLog('Workflow 执行异常：' + e.message);
+      AgentExecutionController.finishExecution('Workflow failed');
+    }
+  }
+
   @Builder AssistantPage() {
     Scroll() {
       Column() {
@@ -1155,7 +1192,7 @@ struct Index {
           .fontColor('#6F7684')
           .width('100%')
         Row() {
-          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.54:33117', text: this.wirelessIp })
+          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.195:33117', text: this.wirelessIp })
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
@@ -1414,7 +1451,7 @@ struct Index {
             .margin({ bottom: 10 })
             .onChange((val: string) => { this.hdcServerIp = val; })
           Row() {
-            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.54:33117', text: this.wirelessIp })
+            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.195:33117', text: this.wirelessIp })
               .height(42)
               .layoutWeight(1)
               .fontSize(13)
@@ -1568,7 +1605,7 @@ struct Index {
       TabContent() { CollectionPage({ collectionModule: $collectionModule }) }.tabBar(this.TabItem('C', '采集', 1))
       TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
       TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
-      TabContent() { TaskPage({ taskScene: $taskScene }) }.tabBar(this.TabItem('T', '任务', 4))
+      TabContent() { TaskPage({ taskScene: $taskScene, onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }, onOpenCloudLog: () => { this.currentTab = 3; } }) }.tabBar(this.TabItem('T', '任务', 4))
     }
     .onChange((index: number) => { this.currentTab = index; })
     .width('100%')

@@ -91,6 +91,19 @@ export class AgentExecutionController {
     AgentExecutionController.returnToAppHandler = handler;
   }
 
+  static returnToApp(): boolean {
+    if (!AgentExecutionController.returnToAppHandler) {
+      return false;
+    }
+    try {
+      AgentExecutionController.returnToAppHandler();
+      return true;
+    } catch (e) {
+      AgentExecutionController.warn('return-to-app handler failed', e as Object);
+      return false;
+    }
+  }
+
   private static notifyFloatWindowSync(): void {
     try {
       AgentExecutionController.floatWindowSyncHandler?.();

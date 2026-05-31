@@ -123,7 +123,7 @@ export class CloudModelClient {
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
-    model?: string, maxTokens: number = 2048): Promise<string> {
+    model?: string, maxTokens: number = 2048, readTimeout: number = 120000): Promise<string> {
     let requestBody: CloudChatRequest = {
       messages: messages,
       temperature: 0,
@@ -142,7 +142,7 @@ export class CloudModelClient {
       header: headers,
       extraData: ArkJSON.stringify(requestBody),
       connectTimeout: 10000,
-      readTimeout: 120000,
+      readTimeout: readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
 
@@ -194,6 +194,22 @@ export class CloudModelClient {
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       config.apiKey, config.deciderModel, 256);
+  }
+
+  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+    let imageUrl: CloudImageUrl = {
+      url: 'data:image/jpeg;base64,' + imageBase64
+    };
+    let imagePart: CloudImagePart = {
+      type: 'image_url',
+      image_url: imageUrl
+    };
+    let textPart: CloudTextPart = {
+      type: 'text',
+      text: question
+    };
+    return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.deciderModel, 1024, 60000);
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {

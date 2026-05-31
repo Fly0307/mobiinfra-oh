@@ -163,7 +163,8 @@ APP_MAPPING = {
     "大众点评": "com.sankuai.dianping",
     "美团": "com.sankuai.hmeituan",
     "浏览器": "com.huawei.hmos.browser",
-    "拼多多": "com.xunmeng.pinduoduo.hos"
+    "拼多多": "com.xunmeng.pinduoduo.hos",
+    "支付宝": "com.alipay.mobile.client"
 }
 
 def load_prompt(filename):
@@ -377,6 +378,19 @@ def format_debug_text_block(label, text):
 def extract_json_payload(raw_text):
     original_raw_text = "" if raw_text is None else str(raw_text)
 
+    def _repair_leading_broken_object_quote(value):
+        # 兼容模型偶发输出：```json\n{"\n  "reasoning": ...}\n```
+        # 只删除 { 后面多出来的那个引号；合法的 {"reasoning": ...} 不会命中该规则。
+        return re.sub(r'^(\{\s*)"\s*(?="[^"]+"\s*:)', r'\1', value.strip(), count=1)
+
+    def _normalize_candidate_text(value):
+        text = "" if value is None else str(value)
+        text = text.strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*```$', '', text)
+        text = _repair_leading_broken_object_quote(text)
+        return text
+
     def _log_parse_issue(level, reason, cleaned_text=None, partial_data=None):
         messages = [reason, format_debug_text_block("原始响应", original_raw_text)]
         if cleaned_text is not None and cleaned_text != original_raw_text:
@@ -402,7 +416,7 @@ def extract_json_payload(raw_text):
             except Exception:
                 value = str(value)
 
-        candidate = value.strip()
+        candidate = _normalize_candidate_text(value)
         if not candidate or candidate in seen_candidates:
             return
 
@@ -447,11 +461,11 @@ def extract_json_payload(raw_text):
         _log_parse_issue("error", "模型返回为空，无法提取 JSON。")
         return None
 
-    raw_text = original_raw_text.strip()
+    raw_text = _normalize_candidate_text(original_raw_text)
     # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
     raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
     # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
-    raw_text = re.sub(r'^\{\s*"\s*(?=")', '', raw_text)
+    raw_text = _repair_leading_broken_object_quote(raw_text)
 
     text = raw_text.strip()
 
@@ -578,7 +592,7 @@ def extract_json_payload(raw_text):
         return partial or None
 
     def _try_parse(candidate):
-        candidate = candidate.strip()
+        candidate = _normalize_candidate_text(candidate)
         if not candidate:
             return None
         
@@ -597,7 +611,11 @@ def extract_json_payload(raw_text):
         except json.decoder.JSONDecodeError as e:
             if "Expecting ',' delimiter" in str(e):
                 # 定义我们关心的字段名（按可能出现的顺序）
-                fields = ["reasoning", "thought", "action", "step", "parameters", "target_element"]
+                fields = [
+                    "reasoning", "thought", "action", "step", "parameters", "target_element",
+                    "app", "target_app", "app_name", "package_name", "bundle", "bundle_name",
+                    "final_task_description"
+                ]
                 field_pattern = '|'.join(re.escape(f) for f in fields)
                 
                 # 模式1：字段值未闭合（缺少 "）
@@ -930,9 +948,12 @@ def run_planner(task):
         if package_name:
             print(f">> [Planner] 未返回 App 名称，直接使用包名: {package_name}")
             return package_name
-    except Exception:
-        print(">> [Planner] 解析目标 App 名称失败，使用原界面进行 fallback。")
-        return None
+        raise ValueError("planner output missing app_name/package_name")
+    except Exception as ex:
+        error_message = f"Planner 阶段失败，终止本次任务，不再执行 Decider: {ex}"
+        print(">> [Planner][ERROR] " + error_message)
+        logging.error(error_message)
+        raise RuntimeError(error_message) from ex
 
 def launch_app(app_name):
     if not app_name:
@@ -1161,12 +1182,15 @@ if __name__ == "__main__":
                 
                 # 2. Stage 1: Planner 解析意图并启动 App
                 app_name = run_planner(task)
-                if app_name != "__USER_CANCELLED__":
-                    if app_name:
-                        success = launch_app(app_name)
-                        if success:
-                            print(">> 等待 App 启动加载完成...")
-                            time.sleep(1.3)
+                if app_name == "__USER_CANCELLED__":
+                    print(">> [Planner] 用户取消任务，跳过后续 Decider。")
+                else:
+                    if not app_name:
+                        raise RuntimeError("Planner 未返回目标 App，终止本次任务，不再执行 Decider")
+                    success = launch_app(app_name)
+                    if success:
+                        print(">> 等待 App 启动加载完成...")
+                        time.sleep(1.3)
                     
                     # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
                     send_request_best_effort({"type": "clear", "preserve_execution": True}, "Planner 后清理上下文")

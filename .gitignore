@@ -13,4 +13,5 @@
 /.appanalyzer
 entry/src/main/python/__pycache__/
 entry/src/main/python/*.jpeg
-mobiagent/
+MobiAgent/
+AGENT.md

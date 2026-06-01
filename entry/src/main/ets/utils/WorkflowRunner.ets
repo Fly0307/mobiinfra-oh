@@ -83,6 +83,7 @@ interface ToolOutput {
   question: string;
   response: string;
   daily_log_path?: string;
+  structured_output?: WorkflowJsonMap;
   deferred?: boolean;
 }
 
@@ -588,8 +589,13 @@ export class WorkflowRunner {
     if (question.length === 0 || image.length === 0) {
       throw new Error('vlm_qa requires question and image');
     }
+    let requiresStructuredOutput = inputs.json_schema !== undefined && inputs.json_schema !== null;
     let prompt = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
-    if (mode === 'summary' && inputs.blocking !== true) {
+    if (requiresStructuredOutput) {
+      prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
+        ArkJSON.stringify(inputs.json_schema);
+    }
+    if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
       this.pendingSummaryJobs.push(this.startSummaryJob(actualId, prompt, image));
       let deferredOutput: ToolOutput = {
@@ -612,6 +618,9 @@ export class WorkflowRunner {
       question: question,
       response: response
     };
+    if (requiresStructuredOutput) {
+      output.structured_output = this.extractJsonMap(response);
+    }
     if (mode === 'summary') {
       let dailyLogPath = this.appendDailySummaryLog(response);
       output.daily_log_path = dailyLogPath;

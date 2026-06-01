@@ -502,11 +502,21 @@ export struct TaskPage {
                 Text('JSON 编排').fontSize(11).fontColor('#765BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F0ECFF').borderRadius(10).margin({ left: 10 })
               }
               Text('选择场景，使用 workflow JSON 采集并整理数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
-              Row() {
-                Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
-                Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
-                Text('聊天').fontSize(11).fontColor('#4B8BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFF5FF').borderRadius(10).margin({ left: 8 })
-              }.margin({ top: 12 })
+              Scroll() {
+                Row() {
+                  Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
+                  Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
+                  Text('娱乐').fontSize(11).fontColor('#8066FF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F2EEFF').borderRadius(10).margin({ left: 8 })
+                  Text('聊天').fontSize(11).fontColor('#4B8BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFF5FF').borderRadius(10).margin({ left: 8 })
+                  Text('生活').fontSize(11).fontColor('#D97706').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF7ED').borderRadius(10).margin({ left: 8 })
+                  Text('社交').fontSize(11).fontColor('#D9467D').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF1F5').borderRadius(10).margin({ left: 8 })
+                }
+              }
+              .width('100%')
+              .height(28)
+              .scrollable(ScrollDirection.Horizontal)
+              .scrollBar(BarState.Off)
+              .margin({ top: 12 })
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
             Column() {
               Text('+').fontSize(28).fontColor(Color.White).fontWeight(FontWeight.Regular)
@@ -538,11 +548,16 @@ export struct TaskPage {
             this.TaskSceneTab('娱乐', 2)
             Blank().width(10)
             this.TaskSceneTab('聊天', 3)
+            Blank().width(10)
+            this.TaskSceneTab('生活', 4)
+            Blank().width(10)
+            this.TaskSceneTab('社交', 5)
           }.padding({ left: 24, right: 24 })
         }
         .width('100%')
         .height(46)
         .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
         .margin({ top: 22, bottom: 18 })
 
         this.TaskSceneList()

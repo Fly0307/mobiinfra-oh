@@ -163,7 +163,8 @@ APP_MAPPING = {
     "大众点评": "com.sankuai.dianping",
     "美团": "com.sankuai.hmeituan",
     "浏览器": "com.huawei.hmos.browser",
-    "拼多多": "com.xunmeng.pinduoduo.hos"
+    "拼多多": "com.xunmeng.pinduoduo.hos",
+    "支付宝": "com.alipay.mobile.client"
 }
 
 def load_prompt(filename):
@@ -234,23 +235,43 @@ def capture_screen(factor=0.25):
     
     return b64, new_w, new_h
 
+def capture_screen_mobiagent_style(factor=0.5):
+    """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""
+    if d is None:
+        print(">> [Cloud Screenshot] hmdriver2 Driver unavailable, fallback to hdc snapshot_display.")
+        return capture_screen(factor)
+
+    print(">> [Cloud Screenshot] Capturing screen via hmdriver2 Driver.screenshot...")
+    screenshot_path = "screenshot-Harmony.jpg"
+    d.screenshot(screenshot_path)
+    img = Image.open(screenshot_path)
+    w, h = img.size
+    new_w, new_h = int(w * factor), int(h * factor)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG")
+    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return b64, new_w, new_h
+
 def send_request(req):
     payload = json.dumps(req) + "<<EOF>>"
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    connected = False
     try:
         s.connect((HOST, PORT))
+        connected = True
         s.sendall(payload.encode('utf-8'))
 
-        buffer = ""
+        buffer = b""
         while True:
             data = s.recv(4096)
             if not data:
                 break
-            buffer += data.decode('utf-8')
-            if "<<EOF>>" in buffer:
+            buffer += data
+            if b"<<EOF>>" in buffer:
                 break
 
-        res = buffer.split("<<EOF>>")[0]
+        res = buffer.split(b"<<EOF>>", 1)[0].decode('utf-8')
         try:
             parsed_res = json.loads(res)
             if isinstance(parsed_res, dict) and "__cloud_debug_prompt" in parsed_res and "response" in parsed_res:
@@ -264,7 +285,10 @@ def send_request(req):
     except Exception as e:
         # 当轮询（poll）未连上时保持静默，只有其他核心请求断开时才打印错误，防止刷屏。
         if req.get("type") != "poll":
-            print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
+            if connected:
+                print(">> 【错误】手机 App端响应读取/解码失败:\n" + str(e))
+            else:
+                print(">> 【错误】无法连接到手机 App端，请检查: \n1. 是否在手机App上点击了'启动 PC 控制后端(HDC)'\n2. HDC 是否正常工作\n" + str(e))
         raise e
     finally:
         try:
@@ -278,6 +302,31 @@ def send_request_best_effort(req, context="request"):
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as ex:
         print(f">> [提示] {context} 未完成，连接已关闭：{ex}")
         return ""
+
+def send_request_retry_empty(req, context="request", max_attempts=3):
+    last_response = ""
+    for attempt in range(1, max_attempts + 1):
+        response = send_request(req)
+        if isinstance(response, str) and response.strip():
+            return response
+        if response and not isinstance(response, str):
+            return response
+
+        last_response = "" if response is None else str(response)
+        print(f">> [提示] {context} 返回空响应，正在重试 ({attempt}/{max_attempts})...")
+        if attempt < max_attempts:
+            time.sleep(0.3)
+
+    return last_response
+
+def is_cancelled_status_response(response_text):
+    if not response_text:
+        return False
+    try:
+        parsed = json.loads(response_text)
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and parsed.get("status") == "cancelled"
 
 def is_connection_closed_error(err_msg):
     lower = err_msg.lower()
@@ -312,7 +361,7 @@ def poll_task():
         res = send_request({"type": "poll"})
         data = json.loads(res)
         return data.get("task", "")
-    except:
+    except Exception:
         # 轮询失败（例如设备被刚刚切换，9126 通道断开），仅在此处轻量补发一次端口映射
         # 不连带重置 hmdriver2 驱动（避免没任务时的后台严重卡顿）
         refresh_hdc_forwarding()
@@ -327,21 +376,24 @@ def format_debug_text_block(label, text):
     )
 
 def extract_json_payload(raw_text):
-    if not raw_text:
-        return None
+    original_raw_text = "" if raw_text is None else str(raw_text)
 
-    raw_text = str(raw_text)
-    raw_text = raw_text.strip()
-    # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
-    raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
-    # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
-    raw_text = re.sub(r'^\{\s*"\s*(?=")', '', raw_text)
+    def _repair_leading_broken_object_quote(value):
+        # 兼容模型偶发输出：```json\n{"\n  "reasoning": ...}\n```
+        # 只删除 { 后面多出来的那个引号；合法的 {"reasoning": ...} 不会命中该规则。
+        return re.sub(r'^(\{\s*)"\s*(?="[^"]+"\s*:)', r'\1', value.strip(), count=1)
 
-    text = raw_text.strip()
+    def _normalize_candidate_text(value):
+        text = "" if value is None else str(value)
+        text = text.strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*```$', '', text)
+        text = _repair_leading_broken_object_quote(text)
+        return text
 
     def _log_parse_issue(level, reason, cleaned_text=None, partial_data=None):
-        messages = [reason, format_debug_text_block("原始响应", raw_text)]
-        if cleaned_text is not None and cleaned_text != raw_text:
+        messages = [reason, format_debug_text_block("原始响应", original_raw_text)]
+        if cleaned_text is not None and cleaned_text != original_raw_text:
             messages.append(format_debug_text_block("清洗后响应", cleaned_text))
         if partial_data is not None:
             try:
@@ -355,11 +407,74 @@ def extract_json_payload(raw_text):
         else:
             logging.error(message)
 
+    def _append_candidate(candidates, seen_candidates, value):
+        if value is None:
+            return
+        if not isinstance(value, str):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+
+        candidate = _normalize_candidate_text(value)
+        if not candidate or candidate in seen_candidates:
+            return
+
+        seen_candidates.add(candidate)
+        candidates.append(candidate)
+
+    def _collect_wrapped_candidates(candidates, seen_candidates, value, depth=0):
+        if value is None or depth > 4:
+            return
+        if isinstance(value, str):
+            _append_candidate(candidates, seen_candidates, value)
+            return
+        if isinstance(value, list):
+            for item in value[:8]:
+                _collect_wrapped_candidates(candidates, seen_candidates, item, depth + 1)
+            return
+        if isinstance(value, dict):
+            if "action" in value:
+                _append_candidate(candidates, seen_candidates, value)
+
+            wrapper_keys = {
+                "response",
+                "content",
+                "output",
+                "text",
+                "message",
+                "result",
+                "data",
+                "arguments",
+                "tool_input",
+                "choices",
+                "delta",
+            }
+            for key, nested_value in value.items():
+                if key in wrapper_keys or depth == 0:
+                    _collect_wrapped_candidates(candidates, seen_candidates, nested_value, depth + 1)
+
+    if raw_text is None:
+        return None
+
+    if not original_raw_text.strip():
+        _log_parse_issue("error", "模型返回为空，无法提取 JSON。")
+        return None
+
+    raw_text = _normalize_candidate_text(original_raw_text)
+    # 清理开头多余的类似 `{"\n\n\n{` 或者 `{"} ` 的结构
+    raw_text = re.sub(r'^\{\s*"\s*\}?\s*(?=\{)', '', raw_text)
+    # 处理开头是 `{"reasoning"` 结果前面还有额外 `{` 的情况，比如 `{"\n\n{"reasoning"...}`
+    raw_text = _repair_leading_broken_object_quote(raw_text)
+
+    text = raw_text.strip()
+
     # 1) 优先尝试从 ```json ... ``` 代码块中抽取
     block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
     candidates = []
+    seen_candidates = set()
     if block_match:
-        candidates.append(block_match.group(1).strip())
+        _append_candidate(candidates, seen_candidates, block_match.group(1))
     text = text.replace("…", "...").replace("\r", " ").replace("\n", " ")
     
     # 将包含多余非JSON字符的开头清理掉（比如响应开头包含的 "Otherwise ### Response " 等）
@@ -374,7 +489,22 @@ def extract_json_payload(raw_text):
 
     # 修复数组中数字之间漏掉逗号的问题，如 [818, 119, 96 131]
     text = re.sub(r'(\d+)\s+(\d+)', r'\1, \2', text)
-    candidates.append(text)
+
+    wrapped_payload = None
+    try:
+        wrapped_payload = json.loads(text)
+    except Exception:
+        pass
+
+    if isinstance(wrapped_payload, dict):
+        if "action" in wrapped_payload:
+            _append_candidate(candidates, seen_candidates, wrapped_payload)
+        else:
+            _collect_wrapped_candidates(candidates, seen_candidates, wrapped_payload)
+    elif isinstance(wrapped_payload, (list, str)):
+        _collect_wrapped_candidates(candidates, seen_candidates, wrapped_payload)
+
+    _append_candidate(candidates, seen_candidates, text)
 
     def _attempt_close_truncated_json(candidate):
         candidate = candidate.strip()
@@ -462,7 +592,7 @@ def extract_json_payload(raw_text):
         return partial or None
 
     def _try_parse(candidate):
-        candidate = candidate.strip()
+        candidate = _normalize_candidate_text(candidate)
         if not candidate:
             return None
         
@@ -481,7 +611,11 @@ def extract_json_payload(raw_text):
         except json.decoder.JSONDecodeError as e:
             if "Expecting ',' delimiter" in str(e):
                 # 定义我们关心的字段名（按可能出现的顺序）
-                fields = ["reasoning", "thought", "action", "step", "parameters", "target_element"]
+                fields = [
+                    "reasoning", "thought", "action", "step", "parameters", "target_element",
+                    "app", "target_app", "app_name", "package_name", "bundle", "bundle_name",
+                    "final_task_description"
+                ]
                 field_pattern = '|'.join(re.escape(f) for f in fields)
                 
                 # 模式1：字段值未闭合（缺少 "）
@@ -514,7 +648,7 @@ def extract_json_payload(raw_text):
                 if generic_fixed != s:
                     try:
                         return json.loads(generic_fixed)
-                    except:
+                    except json.JSONDecodeError:
                         pass
 
             repaired = _attempt_close_truncated_json(s)
@@ -605,19 +739,36 @@ def extract_json_payload(raw_text):
 
 def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
     """
-    Convert Qwen/MNN VLM normalized coordinates [y1, x1, y2, x2] (0-1000) 
-    to absolute pixel coordinates [x1, y1, x2, y2].
+    Convert Qwen normalized coordinates in 0-1000 range to absolute pixels.
     """
-    x1, y1, x2, y2 = bbox
-    x1 = min(x1, 1000)
-    y1 = min(y1, 1000)
-    x2 = min(x2, 1000)
-    y2 = min(y2, 1000)
-    abs_x1 = int(x1 * width / 1000)
-    abs_y1 = int(y1 * height / 1000)
-    abs_x2 = int(x2 * width / 1000)
-    abs_y2 = int(y2 * height / 1000)
-    return [abs_x1, abs_y1, abs_x2, abs_y2]
+    if is_bbox:
+        x1, y1, x2, y2 = bbox
+        x1 = min(x1, 1000)
+        y1 = min(y1, 1000)
+        x2 = min(x2, 1000)
+        y2 = min(y2, 1000)
+        return [
+            int(x1 * width / 1000),
+            int(y1 * height / 1000),
+            int(x2 * width / 1000),
+            int(y2 * height / 1000),
+        ]
+
+    x, y = bbox
+    x = min(x, 1000)
+    y = min(y, 1000)
+    return [int(x * width / 1000), int(y * height / 1000)]
+
+def press_harmony_key(key_name, fallback_code):
+    if d:
+        try:
+            from hmdriver2.keycode import KeyCode
+            key_code = getattr(KeyCode, key_name, fallback_code)
+            d.press_key(key_code)
+        except Exception:
+            d.press_key(fallback_code)
+    else:
+        os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
     width, height = img_size
@@ -634,10 +785,18 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         return "error", data
     
     print(f">> [Agent] Action: {action}, Params: {params}")
+    action = str(action).lower()
+
+    if action in ["done", "stop", "terminate"]:
+        return action, params
     
     if action == "click":
-        bbox = params.get("bbox")
-        if bbox:
+        if params.get("coords"):
+            x, y = convert_qwen3_coordinates_to_absolute(params["coords"], width, height, is_bbox=False)
+        else:
+            bbox = params.get("bbox")
+            if not bbox:
+                raise ValueError("Click action missing required parameter: 'bbox' or 'coords'")
             abs_bbox = convert_qwen3_coordinates_to_absolute(bbox, width, height)
             x1, y1, x2, y2 = abs_bbox
             x, y = (x1 + x2) // 2, (y1 + y2) // 2
@@ -650,54 +809,67 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         
     elif action == "click_input":
         text = params.get("text", "")
-        bbox = params.get("bbox")
-        if bbox:
+        if params.get("coords"):
+            px, py = convert_qwen3_coordinates_to_absolute(params["coords"], width, height, is_bbox=False)
+        else:
+            bbox = params.get("bbox")
+            if not bbox:
+                raise ValueError("Click_input action missing required parameter: 'bbox' or 'coords'")
             abs_bbox = convert_qwen3_coordinates_to_absolute(bbox, width, height)
             x1, y1, x2, y2 = abs_bbox
             px, py = (x1 + x2) // 2, (y1 + y2) // 2
-            
-            if d:
-                print(f">> [Agent] Clicking at {px}, {py}")
-                d.click(px, py)
-                time.sleep(DEVICE_WAIT_TIME)
-                # Input logic
-                d.shell("uitest uiInput keyEvent 2072 2017")
-                d.press_key(2071)
-                d.input_text(text)
-                try:
-                    from hmdriver2.keycode import KeyCode
-                    d.press_key(KeyCode.ENTER)
-                except:
-                    d.press_key(2054)
-            else:
-                os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
-                time.sleep(DEVICE_WAIT_TIME)
-                os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
-            
             params["abs_bbox"] = abs_bbox # For history tracking
+            
+        if d:
+            print(f">> [Agent] Clicking at {px}, {py}")
+            d.click(px, py)
+            time.sleep(DEVICE_WAIT_TIME)
+            d.shell("uitest uiInput keyEvent 2072 2017")
+            d.press_key(2071)
+            d.input_text(text)
+            press_harmony_key("ENTER", 2054)
+        else:
+            os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
+            time.sleep(DEVICE_WAIT_TIME)
+            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
         
     elif action == "swipe":
-        direction = params.get("direction")
-        if direction:
-            print(f">> Swipe direction: {direction}")
-            if d:
-                # Based on the user provided swipe implementations
-                if direction.lower() == "up":
-                    d.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000)
-                elif direction.lower() == "down":
-                    d.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000)
-                elif direction.lower() == "left":
-                    d.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000)
-                elif direction.lower() == "right":
-                    d.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000)
-            else:
-                print(f"Swipe {direction} 暂未通过 hdc 实现")
-        else:
-            sx, sy = params.get("startX", 0), params.get("startY", 0)
-            ex, ey = params.get("endX", 0), params.get("endY", 0)
+        start_coords = params.get("start_coords")
+        end_coords = params.get("end_coords")
+        if start_coords and end_coords:
+            sx, sy = convert_qwen3_coordinates_to_absolute(start_coords, width, height, is_bbox=False)
+            ex, ey = convert_qwen3_coordinates_to_absolute(end_coords, width, height, is_bbox=False)
+            print(f">> Swipe from [{sx}, {sy}] to [{ex}, {ey}]")
             if d:
                 d.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000)
             else:
+                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+        else:
+            direction = params.get("direction", "UP")
+            print(f">> Swipe direction: {direction}")
+            direction_lower = direction.lower()
+            if d:
+                if direction_lower == "up":
+                    d.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000)
+                elif direction_lower == "down":
+                    d.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000)
+                elif direction_lower == "left":
+                    d.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000)
+                elif direction_lower == "right":
+                    d.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000)
+                else:
+                    raise ValueError(f"Unknown swipe direction: {direction}")
+            else:
+                if direction_lower == "up":
+                    sx, sy, ex, ey = 0.5 * width, SWIPE_V_END * height, 0.5 * width, SWIPE_V_START * height
+                elif direction_lower == "down":
+                    sx, sy, ex, ey = 0.5 * width, SWIPE_V_START * height, 0.5 * width, SWIPE_V_END * height
+                elif direction_lower == "left":
+                    sx, sy, ex, ey = SWIPE_H_END * width, 0.5 * height, SWIPE_H_START * width, 0.5 * height
+                elif direction_lower == "right":
+                    sx, sy, ex, ey = SWIPE_H_START * width, 0.5 * height, SWIPE_H_END * width, 0.5 * height
+                else:
+                    raise ValueError(f"Unknown swipe direction: {direction}")
                 os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
             
     elif action == "input":
@@ -717,6 +889,26 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         else:
             os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
 
+    elif action == "open_app":
+        app_name = params.get("app_name", "")
+        if not app_name:
+            raise ValueError("Open_app action missing required parameter: 'app_name'")
+        launch_app(app_name)
+
+    elif action == "press_home":
+        press_harmony_key("HOME", 1)
+
+    elif action == "press_back":
+        press_harmony_key("BACK", 2)
+
+    elif action == "wait":
+        seconds = float(params.get("seconds", DEVICE_WAIT_TIME * 2))
+        print(f">> Wait for {seconds} seconds")
+        time.sleep(seconds)
+
+    else:
+        raise ValueError(f"Unknown action: {action}")
+
     return action, params
 
 # ===================== Stage 1: Planner =====================
@@ -734,7 +926,7 @@ def run_planner(task):
     res = send_request({
         "type": "action",
         "prompt": prompt
-        # 注意：这里不传 image_b64，从而让 LlmServer.ets 只作为纯文本推理
+        # 注意：这里不传 image_b64，从而让手机侧 AgentRouterServer 走纯文本 planner 路径
     })
     
     print(format_debug_text_block(">> [Planner] MNN VLM 返回", res))
@@ -744,6 +936,10 @@ def run_planner(task):
         data = extract_json_payload(res)
         if not isinstance(data, dict):
             raise ValueError("planner output is not a JSON object")
+        action = str(data.get("action", "")).lower()
+        if action in ["terminate", "stop"]:
+            print(">> [Planner] Task cancelled by user.")
+            return "__USER_CANCELLED__"
         # 兼容多种常见的键名
         app_name = data.get("app") or data.get("target_app") or data.get("app_name")
         package_name = data.get("package_name") or data.get("bundle") or data.get("bundle_name")
@@ -752,9 +948,12 @@ def run_planner(task):
         if package_name:
             print(f">> [Planner] 未返回 App 名称，直接使用包名: {package_name}")
             return package_name
-    except:
-        print(">> [Planner] 解析目标 App 名称失败，使用原界面进行 fallback。")
-        return None
+        raise ValueError("planner output missing app_name/package_name")
+    except Exception as ex:
+        error_message = f"Planner 阶段失败，终止本次任务，不再执行 Decider: {ex}"
+        print(">> [Planner][ERROR] " + error_message)
+        logging.error(error_message)
+        raise RuntimeError(error_message) from ex
 
 def launch_app(app_name):
     if not app_name:
@@ -802,8 +1001,12 @@ def run_task_in_app_agent(task):
     prefix = prefix_template.replace("{task}", task)
     print(f">> [Agent] Prefilling prefix ({len(prefix)} chars)...")
     prefill_res = send_request({"type": "agent_prefill", "prefix": prefix})
+    if is_cancelled_status_response(prefill_res):
+        print(">> [Agent] Task cancelled by user during prefill.")
+        return
     print(f">> [Agent] Prefill result: {prefill_res}")
-    screenshot_factor = 0.5 if "cloud qwen prompt mode" in prefill_res else 0.25
+    is_cloud_qwen_mode = "cloud qwen prompt mode" in prefill_res
+    screenshot_factor = 0.5 if is_cloud_qwen_mode else 0.25
     inverse_screenshot_factor = int(round(1 / screenshot_factor))
     print(f">> [Agent] Screenshot resize factor: {screenshot_factor}")
 
@@ -818,19 +1021,23 @@ def run_task_in_app_agent(task):
     for step_idx in range(MAX_STEPS):
         print(f"\n--- [Agent Step {step_idx+1}/{MAX_STEPS}] ---")
 
-        b64, w, h = capture_screen(screenshot_factor)
+        if is_cloud_qwen_mode:
+            b64, w, h = capture_screen_mobiagent_style(screenshot_factor)
+        else:
+            b64, w, h = capture_screen(screenshot_factor)
         history_str = "  ".join(history_list) if history_list else "(No history)"
 
         variable = variable_template.replace("{history}", history_str)
 
         print(f">> [Agent] Sending step request (history: {len(history_list)} entries)...")
-        res = send_request({
+        step_request = {
             "type": "agent_step",
             "variable": variable,
             "image_b64": b64,
             "width": w,
             "height": h
-        })
+        }
+        res = send_request_retry_empty(step_request, context="Agent step")
 
         print(format_debug_text_block(">> [Agent] Response", res))
         sys.stdout.flush()
@@ -847,18 +1054,22 @@ def run_task_in_app_agent(task):
             break
         elif action == "error":
             print(">> [Agent] Parse error, aborting.")
-            break
+            raise RuntimeError("Agent response parse failed")
 
-        # 把解析到的 JSON 内容也追加到历史，便于后续推理使用
-        parsed_data = extract_json_payload(res)
-        try:
-            data_str = json.dumps(parsed_data, ensure_ascii=False)
-        except Exception:
-            data_str = str(parsed_data)
-        # history_list.append(f"{step_idx+1}. {data_str}\n")
-        history_list.append(f"{step_idx+1}: Action={action}")
+        if is_cloud_qwen_mode:
+            send_request_best_effort({"type": "cloud_history_append", "response": res}, "Cloud history append")
+        else:
+            # 把解析到的 JSON 内容也追加到历史，便于后续推理使用
+            parsed_data = extract_json_payload(res)
+            try:
+                data_str = json.dumps(parsed_data, ensure_ascii=False)
+            except Exception:
+                data_str = str(parsed_data)
+            # history_list.append(f"{step_idx+1}. {data_str}\n")
+            history_list.append(f"{step_idx+1}: Action={action}")
 
-        print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
+        if history_list:
+            print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
         time.sleep(0.7)
 
     # 3. Cleanup agent mode
@@ -967,24 +1178,28 @@ if __name__ == "__main__":
                 reset_driver()
                 
                 # 1. 确保环境干净
-                send_request_best_effort({"type": "clear"}, "任务开始前清理状态")
+                send_request_best_effort({"type": "clear", "preserve_execution": True}, "任务开始前清理状态")
                 
                 # 2. Stage 1: Planner 解析意图并启动 App
                 app_name = run_planner(task)
-                if app_name:
+                if app_name == "__USER_CANCELLED__":
+                    print(">> [Planner] 用户取消任务，跳过后续 Decider。")
+                else:
+                    if not app_name:
+                        raise RuntimeError("Planner 未返回目标 App，终止本次任务，不再执行 Decider")
                     success = launch_app(app_name)
                     if success:
                         print(">> 等待 App 启动加载完成...")
                         time.sleep(1.3)
-                
-                # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
-                send_request_best_effort({"type": "clear"}, "Planner 后清理上下文")
+                    
+                    # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
+                    send_request_best_effort({"type": "clear", "preserve_execution": True}, "Planner 后清理上下文")
 
-                # 4. Stage 2: 任务在 App 内循环执行
-                if USE_AGENT_MODE:
-                    run_task_in_app_agent(task)
-                else:
-                    run_task_in_app(task)
+                    # 4. Stage 2: 任务在 App 内循环执行
+                    if USE_AGENT_MODE:
+                        run_task_in_app_agent(task)
+                    else:
+                        run_task_in_app(task)
                 task_finished = True
                 bring_llm_app_to_foreground()
                 
@@ -1011,7 +1226,7 @@ if __name__ == "__main__":
                 # 尝试把界面回到应用, 并在 app 中显示异常
                 bring_llm_app_to_foreground()
                 send_request_best_effort({"type": "error", "message": f"任务执行出错: {err_msg}"}, "错误状态上报")
-            except:
+            except Exception:
                 pass
             active_task = ""
             print(">> 状态已清理，将避免服务完全退出，准备继续接收后续任务。")

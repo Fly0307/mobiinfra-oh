@@ -271,9 +271,9 @@ export class IndexService {
 
     let manifest: IndexManifest = {
       generated_at: nowIsoLocal(),
-      input_root: 'data-home/profile-consolidation/outputs',
-      index_dir: 'data-home/profile-consolidation/indexes',
-      run_root: 'data-home/workflow-runs',
+      input_root: 'workflows/profile-consolidation/outputs',
+      index_dir: 'workflows/profile-consolidation/indexes',
+      run_root: 'workflows/runs',
       enrichment: enrichment,
       domains: DOMAIN_KEYS,
       entity_types: ENTITY_TYPE_KEYS,
@@ -629,8 +629,8 @@ export class IndexService {
     if (!previousManifest || !previousManifest.enrichment || !previousManifest.sources) {
       return false;
     }
-    return previousManifest.input_root === 'data-home/profile-consolidation/outputs' &&
-      previousManifest.index_dir === 'data-home/profile-consolidation/indexes' &&
+    return previousManifest.input_root === 'workflows/profile-consolidation/outputs' &&
+      previousManifest.index_dir === 'workflows/profile-consolidation/indexes' &&
       previousManifest.enrichment.mode === enrichment.mode &&
       previousManifest.enrichment.base_url === enrichment.base_url &&
       this.sameStringArrays(previousManifest.entity_types || [], ENTITY_TYPE_KEYS);
@@ -817,12 +817,12 @@ export class IndexService {
     }
     let marker = '/' + runName + '/';
     if (pathText.indexOf(marker) >= 0) {
-      let relative = 'workflow-runs/' + runName + '/' + pathText.split(marker)[1];
+      let relative = 'runs/' + runName + '/' + pathText.split(marker)[1];
       return this.storage.exists(this.paths.fromDataManagerRelative(relative)) ? relative : '';
     }
-    let dataManagerMarker = '/data-home/';
-    if (pathText.indexOf(dataManagerMarker) >= 0) {
-      let relative = pathText.split(dataManagerMarker)[1];
+    let workflowMarker = '/workflows/';
+    if (pathText.indexOf(workflowMarker) >= 0) {
+      let relative = pathText.split(workflowMarker)[1];
       return this.storage.exists(this.paths.fromDataManagerRelative(relative)) ? relative : '';
     }
     return '';

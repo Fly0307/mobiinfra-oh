@@ -1,25 +1,262 @@
+import { common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
+import { WorkflowStorage } from '../../utils/WorkflowStorage';
+import { WorkflowFileStats, WorkflowManagedFile, WorkflowTask } from '../../utils/WorkflowTypes';
 
 @Component
 export struct TaskPage {
   @Link taskScene: number;
+  onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
+  onOpenCloudLog: () => void = () => {};
 
-  @Builder TaskCard(icon: string, iconColor: string, title: string, status: string, nextRun: string, source: string, enabled: boolean) {
+  @State tasks: WorkflowTask[] = [];
+  @State editorOpen: boolean = false;
+  @State editorText: string = '';
+  @State editingTaskId: string = '';
+  @State runningTaskId: string = '';
+  @State fileStatsText: string = '正在统计 workflow 文件...';
+  @State fileViewerOpen: boolean = false;
+  @State fileViewerTitle: string = '';
+  @State fileViewerFiles: WorkflowManagedFile[] = [];
+  @State fileViewerSelectedName: string = '';
+  @State fileViewerText: string = '';
+
+  private filesDir: string = '';
+
+  aboutToAppear(): void {
+    let ctx = getContext(this) as common.UIAbilityContext;
+    this.filesDir = ctx.filesDir;
+    this.reloadTasks();
+  }
+
+  private reloadTasks(): void {
+    if (this.filesDir.length === 0) {
+      return;
+    }
+    this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    this.refreshStatsText();
+  }
+
+  private refreshStatsText(): void {
+    let stats: WorkflowFileStats = WorkflowStorage.getStats(this.filesDir);
+    this.fileStatsText = '配置 ' + stats.configCount + ' 个，daily-log ' + stats.dailyLogCount +
+      ' 个，运行文件 ' + stats.runCount + ' 个，共 ' + WorkflowStorage.formatSize(stats.totalBytes);
+  }
+
+  private sceneTasks(): WorkflowTask[] {
+    let filtered: WorkflowTask[] = [];
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].sceneId === this.taskScene) {
+        filtered.push(this.tasks[i]);
+      }
+    }
+    return filtered;
+  }
+
+  private openCreateEditor(): void {
+    this.editingTaskId = '';
+    this.editorText = WorkflowStorage.defaultWorkflowForScene(this.taskScene);
+    this.editorOpen = true;
+  }
+
+  private openEditEditor(task: WorkflowTask): void {
+    this.editingTaskId = task.id;
+    this.editorText = task.workflowJson;
+    this.editorOpen = true;
+  }
+
+  private saveEditor(): void {
+    try {
+      let task = WorkflowStorage.createTaskFromJson(this.filesDir, this.taskScene, this.editorText, this.editingTaskId);
+      if (this.editingTaskId.length > 0) {
+        let existing = this.findTask(this.editingTaskId);
+        if (existing) {
+          task.enabled = existing.enabled;
+          task.lastStatus = existing.lastStatus;
+          task.lastRun = existing.lastRun;
+          task.lastMessage = existing.lastMessage;
+        }
+      }
+      this.tasks = WorkflowStorage.upsertTask(this.filesDir, task);
+      this.editorOpen = false;
+      promptAction.showToast({ message: 'Workflow 配置已保存', duration: 1500 });
+      this.refreshStatsText();
+    } catch (e) {
+      let err = e as Error;
+      promptAction.showToast({ message: '保存失败：' + err.message, duration: 2500 });
+    }
+  }
+
+  private findTask(taskId: string): WorkflowTask | null {
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].id === taskId) {
+        return this.tasks[i];
+      }
+    }
+    return null;
+  }
+
+  private setTaskEnabled(task: WorkflowTask, enabled: boolean): void {
+    let next: WorkflowTask = task;
+    next.enabled = enabled;
+    this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
+    this.refreshStatsText();
+  }
+
+  private async runTask(task: WorkflowTask): Promise<void> {
+    if (!task.enabled) {
+      promptAction.showToast({ message: '任务已停用，请先打开开关', duration: 1500 });
+      return;
+    }
+    if (this.runningTaskId.length > 0) {
+      promptAction.showToast({ message: '已有 workflow 正在执行', duration: 1500 });
+      return;
+    }
+    this.runningTaskId = task.id;
+    WorkflowStorage.updateTaskRun(this.filesDir, task.id, '运行中', 'Workflow 正在执行');
+    this.reloadTasks();
+    try {
+      await this.onRunWorkflow(task);
+      this.reloadTasks();
+    } finally {
+      this.runningTaskId = '';
+      this.reloadTasks();
+    }
+  }
+
+  private deleteWorkflowConfigs(): void {
+    promptAction.showDialog({
+      title: '删除 workflow 配置',
+      message: '将删除所有沙箱 workflow 配置，并重新生成默认示例任务。',
+      buttons: [
+        { text: '取消', color: '#666666' },
+        { text: '删除', color: '#FF4D4F' }
+      ]
+    }).then((data: promptAction.ShowDialogSuccessResponse) => {
+      if (data.index === 1) {
+        let count = WorkflowStorage.deleteConfigs(this.filesDir);
+        this.reloadTasks();
+        promptAction.showToast({ message: '已删除配置项：' + count, duration: 1500 });
+      }
+    }).catch(() => {});
+  }
+
+  private deleteDailyLogs(): void {
+    promptAction.showDialog({
+      title: '删除 daily-log',
+      message: '将删除 workflow 生成的所有 daily-log Markdown 文件。',
+      buttons: [
+        { text: '取消', color: '#666666' },
+        { text: '删除', color: '#FF4D4F' }
+      ]
+    }).then((data: promptAction.ShowDialogSuccessResponse) => {
+      if (data.index === 1) {
+        let count = WorkflowStorage.deleteDailyLogs(this.filesDir);
+        this.refreshStatsText();
+        promptAction.showToast({ message: '已删除 daily-log 项：' + count, duration: 1500 });
+      }
+    }).catch(() => {});
+  }
+
+  private deleteRunFiles(): void {
+    promptAction.showDialog({
+      title: '删除运行文件',
+      message: '将删除 workflow 生成的所有运行摘要和步骤输出文件。',
+      buttons: [
+        { text: '取消', color: '#666666' },
+        { text: '删除', color: '#FF4D4F' }
+      ]
+    }).then((data: promptAction.ShowDialogSuccessResponse) => {
+      if (data.index === 1) {
+        let count = WorkflowStorage.deleteRunFiles(this.filesDir);
+        this.refreshStatsText();
+        promptAction.showToast({ message: '已删除运行文件项：' + count, duration: 1500 });
+      }
+    }).catch(() => {});
+  }
+
+  private openConfigFileViewer(): void {
+    this.fileViewerTitle = 'Workflow 配置文件';
+    this.fileViewerFiles = WorkflowStorage.listConfigFiles(this.filesDir);
+    this.fileViewerOpen = true;
+    if (this.fileViewerFiles.length > 0) {
+      this.openManagedFile(this.fileViewerFiles[0]);
+    } else {
+      this.fileViewerSelectedName = '';
+      this.fileViewerText = '暂无 workflow 配置文件';
+    }
+  }
+
+  private openDailyLogFileViewer(): void {
+    this.fileViewerTitle = 'daily-log 文件';
+    this.fileViewerFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
+    this.fileViewerOpen = true;
+    if (this.fileViewerFiles.length > 0) {
+      this.openManagedFile(this.fileViewerFiles[0]);
+    } else {
+      this.fileViewerSelectedName = '';
+      this.fileViewerText = '暂无 daily-log 文件';
+    }
+  }
+
+  private openRunFileViewer(): void {
+    this.fileViewerTitle = '运行文件';
+    this.fileViewerFiles = WorkflowStorage.listRunFiles(this.filesDir);
+    this.fileViewerOpen = true;
+    if (this.fileViewerFiles.length > 0) {
+      this.openManagedFile(this.fileViewerFiles[0]);
+    } else {
+      this.fileViewerSelectedName = '';
+      this.fileViewerText = '暂无运行文件';
+    }
+  }
+
+  private openManagedFile(file: WorkflowManagedFile): void {
+    this.fileViewerSelectedName = file.name;
+    try {
+      this.fileViewerText = WorkflowStorage.readText(file.path);
+    } catch (e) {
+      let err = e as Error;
+      this.fileViewerText = '读取失败：' + (err.message || String(e));
+    }
+  }
+
+  @Builder TaskCard(task: WorkflowTask) {
     Column() {
       Row() {
-        Text(icon).fontSize(17).fontColor(iconColor).fontWeight(FontWeight.Bold).width(58).height(58).textAlign(TextAlign.Center).backgroundColor(enabled ? '#F1F5FF' : '#F4F5F8').borderRadius(16)
+        Text(task.icon).fontSize(17).fontColor(task.iconColor).fontWeight(FontWeight.Bold).width(58).height(58).textAlign(TextAlign.Center).backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8').borderRadius(16)
         Column() {
           Row() {
-            Text(title).fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Row().width(7).height(7).backgroundColor(enabled ? '#39BFA3' : '#A8AFBC').borderRadius(4).margin({ left: 8, right: 5 })
-            Text(status).fontSize(12).fontColor(enabled ? '#66707E' : '#8E95A3').maxLines(1)
+            Text(task.title).fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Row().width(7).height(7).backgroundColor(task.enabled ? '#39BFA3' : '#A8AFBC').borderRadius(4).margin({ left: 8, right: 5 })
+            Text(task.enabled ? task.lastStatus : '已暂停').fontSize(12).fontColor(task.enabled ? '#66707E' : '#8E95A3').maxLines(1)
           }.width('100%')
-          Text('下次运行：' + nextRun).fontSize(12).fontColor('#7B8290').margin({ top: 8 }).maxLines(1)
-          Text('来源模块：' + source).fontSize(12).fontColor('#7B8290').margin({ top: 4 }).maxLines(1)
+          Text('最近运行：' + task.lastRun).fontSize(12).fontColor('#7B8290').margin({ top: 8 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text('来源模块：' + task.source).fontSize(12).fontColor('#7B8290').margin({ top: 4 }).maxLines(1)
+          Text(task.lastMessage).fontSize(11).fontColor('#9AA2B1').margin({ top: 4 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ left: 14, right: 8 })
-        Toggle({ type: ToggleType.Switch, isOn: enabled }).selectedColor('#6B5CFF').width(44).height(26)
+        Toggle({ type: ToggleType.Switch, isOn: task.enabled }).selectedColor('#6B5CFF').width(44).height(26)
+          .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
       }.width('100%')
+      Row() {
+        Button(this.runningTaskId === task.id ? '执行中' : '运行')
+          .height(36)
+          .layoutWeight(1)
+          .fontSize(13)
+          .backgroundColor(this.runningTaskId === task.id ? '#A9B7E9' : '#765BFF')
+          .borderRadius(12)
+          .onClick(() => { this.runTask(task); })
+        Button('编辑 JSON')
+          .height(36)
+          .layoutWeight(1)
+          .fontSize(13)
+          .backgroundColor('#EEF4FF')
+          .fontColor('#4F68FF')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.openEditEditor(task); })
+      }.width('100%').margin({ top: 14 })
     }
     .width('86%')
     .padding(20)
@@ -27,7 +264,6 @@ export struct TaskPage {
     .borderRadius(18)
     .shadow({ radius: 12, color: '#10000000', offsetX: 0, offsetY: 6 })
     .margin({ bottom: 18 })
-    .onClick(() => { promptAction.showToast({ message: title + ' 详情暂未接入', duration: 1500 }); })
   }
 
   @Builder TaskSceneTab(label: string, index: number) {
@@ -45,19 +281,212 @@ export struct TaskPage {
       })
   }
 
+  @Builder EditorPanel() {
+    if (this.editorOpen) {
+      Column() {
+        Row() {
+          Text(this.editingTaskId.length > 0 ? '编辑 Workflow JSON' : '新建 Workflow JSON')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(13)
+            .fontColor('#7B8290')
+            .onClick(() => { this.editorOpen = false; })
+        }.width('100%')
+        TextArea({ placeholder: '请输入 workflow JSON', text: this.editorText })
+          .width('100%')
+          .height(280)
+          .fontSize(12)
+          .fontFamily('monospace')
+          .backgroundColor('#F7F9FE')
+          .borderRadius(14)
+          .padding(12)
+          .margin({ top: 12 })
+          .onChange((val: string) => { this.editorText = val; })
+        Row() {
+          Button('保存配置')
+            .height(42)
+            .layoutWeight(1)
+            .backgroundColor('#765BFF')
+            .borderRadius(12)
+            .onClick(() => { this.saveEditor(); })
+          Button('查看日志')
+            .height(42)
+            .layoutWeight(1)
+            .backgroundColor('#607D8B')
+            .borderRadius(12)
+            .margin({ left: 10 })
+            .onClick(() => { this.onOpenCloudLog(); })
+        }.width('100%').margin({ top: 12 })
+      }
+      .width('86%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ bottom: 18 })
+    }
+  }
+
   @Builder TaskSceneList() {
-    if (this.taskScene === 0) {
-      this.TaskCard('Buy', '#4B8BFF', '晚间购物订单同步', '运行中', '今天 20:30', '电商订单', true)
-      this.TaskCard('Cart', '#8066FF', '优惠价格监控', '运行中', '每天 12:00', '商品收藏', true)
-    } else if (this.taskScene === 1) {
-      this.TaskCard('Food', '#39BFA3', '午餐外卖偏好整理', '运行中', '今天 11:20', '外卖订单', true)
-      this.TaskCard('Shop', '#FF9347', '晚餐配送提醒', '运行中', '今天 18:10', '生活服务', true)
-    } else if (this.taskScene === 2) {
-      this.TaskCard('Play', '#8066FF', '周末娱乐记录整理', '已暂停', '周六 10:00', '视频 & 音乐', false)
-      this.TaskCard('Movie', '#4B8BFF', '观影清单同步', '运行中', '周五 21:30', '影音收藏', true)
+    if (this.sceneTasks().length === 0) {
+      Column() {
+        Text('当前场景暂无任务').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#11182F')
+        Text('点击上方新建任务，使用 JSON 配置 workflow。').fontSize(12).fontColor('#7B8290').margin({ top: 8 })
+      }
+      .width('86%')
+      .padding(22)
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .margin({ bottom: 18 })
     } else {
-      this.TaskCard('Chat', '#4B8BFF', '家庭群消息摘要', '运行中', '明天 07:30', '聊天记录', true)
-      this.TaskCard('Bell', '#FF9347', '晨间通知摘要', '运行中', '明天 07:30', '系统通知', true)
+      ForEach(this.sceneTasks(), (task: WorkflowTask) => {
+        this.TaskCard(task)
+      }, (task: WorkflowTask) => task.id)
+    }
+  }
+
+  @Builder FileManagerPanel() {
+    Column() {
+      Text('Workflow 文件管理').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%')
+      Text(this.fileStatsText).fontSize(12).fontColor('#6F7584').margin({ top: 7 }).width('100%')
+      Row() {
+        Button('删除配置')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#FF6B4A')
+          .borderRadius(12)
+          .onClick(() => { this.deleteWorkflowConfigs(); })
+        Button('删除 daily-log')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#F59E0B')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.deleteDailyLogs(); })
+        Button('删除运行文件')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#D97706')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.deleteRunFiles(); })
+      }.width('100%').margin({ top: 14 })
+      Row() {
+        Button('查看配置')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#EEF4FF')
+          .fontColor('#4F68FF')
+          .borderRadius(12)
+          .onClick(() => { this.openConfigFileViewer(); })
+        Button('查看 daily-log')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#EFFBF7')
+          .fontColor('#279C83')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.openDailyLogFileViewer(); })
+        Button('查看运行文件')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#FFF3E8')
+          .fontColor('#C76A00')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.openRunFileViewer(); })
+      }.width('100%').margin({ top: 10 })
+      Row() {
+        Button('刷新')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#607D8B')
+          .borderRadius(12)
+          .onClick(() => { this.reloadTasks(); })
+      }.width('100%').margin({ top: 10 })
+    }
+    .width('86%')
+    .padding(18)
+    .backgroundColor(Color.White)
+    .borderRadius(20)
+    .margin({ bottom: 18 })
+  }
+
+  @Builder FileViewerPanel() {
+    if (this.fileViewerOpen) {
+      Column() {
+        Row() {
+          Text(this.fileViewerTitle)
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(13)
+            .fontColor('#7B8290')
+            .onClick(() => { this.fileViewerOpen = false; })
+        }.width('100%')
+        if (this.fileViewerFiles.length > 0) {
+          Scroll() {
+            Row() {
+              ForEach(this.fileViewerFiles, (file: WorkflowManagedFile) => {
+                Button(file.name + ' (' + WorkflowStorage.formatSize(file.size) + ')')
+                  .height(34)
+                  .fontSize(11)
+                  .backgroundColor(this.fileViewerSelectedName === file.name ? '#765BFF' : '#F3F5FA')
+                  .fontColor(this.fileViewerSelectedName === file.name ? Color.White : '#4E5666')
+                  .borderRadius(11)
+                  .margin({ right: 8 })
+                  .onClick(() => { this.openManagedFile(file); })
+              }, (file: WorkflowManagedFile) => file.path)
+            }
+          }
+          .width('100%')
+          .height(42)
+          .scrollable(ScrollDirection.Horizontal)
+          .margin({ top: 12 })
+          Text('当前文件：' + this.fileViewerSelectedName)
+            .fontSize(12)
+            .fontColor('#6F7584')
+            .margin({ top: 10 })
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Scroll() {
+            Text(this.fileViewerText)
+              .fontSize(11)
+              .fontFamily('monospace')
+              .fontColor('#2F3645')
+              .width('100%')
+          }
+          .width('100%')
+          .height(280)
+          .padding(12)
+          .backgroundColor('#F7F9FE')
+          .borderRadius(14)
+          .margin({ top: 8 })
+        } else {
+          Text(this.fileViewerText)
+            .fontSize(13)
+            .fontColor('#7B8290')
+            .margin({ top: 14 })
+            .width('100%')
+        }
+      }
+      .width('86%')
+      .padding(18)
+      .backgroundColor(Color.White)
+      .borderRadius(20)
+      .margin({ bottom: 18 })
     }
   }
 
@@ -70,9 +499,9 @@ export struct TaskPage {
             Column() {
               Row() {
                 Text('新建任务').fontSize(21).fontWeight(FontWeight.Bold).fontColor('#11182F')
-                Text('AI 编排').fontSize(11).fontColor('#765BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F0ECFF').borderRadius(10).margin({ left: 10 })
+                Text('JSON 编排').fontSize(11).fontColor('#765BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F0ECFF').borderRadius(10).margin({ left: 10 })
               }
-              Text('选择场景，自动采集并整理你的生活数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
+              Text('选择场景，使用 workflow JSON 采集并整理数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
               Row() {
                 Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
                 Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
@@ -96,7 +525,9 @@ export struct TaskPage {
         .backgroundColor('#F3EEFF')
         .borderRadius(20)
         .margin({ top: 24 })
-        .onClick(() => { promptAction.showToast({ message: '新建任务流程后续接入', duration: 1500 }); })
+        .onClick(() => { this.openCreateEditor(); })
+
+        this.EditorPanel()
 
         Scroll() {
           Row() {
@@ -115,6 +546,8 @@ export struct TaskPage {
         .margin({ top: 22, bottom: 18 })
 
         this.TaskSceneList()
+        this.FileManagerPanel()
+        this.FileViewerPanel()
         Blank().height(110)
       }.width('100%')
     }.width('100%').height('100%').backgroundColor('#F4F8FF')

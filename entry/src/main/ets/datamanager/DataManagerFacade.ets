@@ -86,7 +86,7 @@ function defaultHomeDomains(): HomeDomainViewModel[] {
 function defaultRecommendations(): HomeRecommendationViewModel[] {
   let eat: HomeRecommendationViewModel = { id: 'empty-eat', domain: 'eat', tag: '画像待更新', title: '导入 daily-log 后生成画像', desc: '同步后展示真实偏好', meta: '0 条证据', color: '#39C2A2' };
   let travel: HomeRecommendationViewModel = { id: 'empty-travel', domain: 'travel', tag: '采集待整理', title: '采集记录会在这里汇总', desc: '按吃穿住行生成推荐', meta: '本地索引', color: '#4B9BFF' };
-  let work: HomeRecommendationViewModel = { id: 'empty-work', domain: 'work', tag: '隐私本地', title: '数据保存在应用内部空间', desc: '导入导出不依赖绝对路径', meta: 'data-home', color: '#8066FF' };
+  let work: HomeRecommendationViewModel = { id: 'empty-work', domain: 'work', tag: '隐私本地', title: '数据保存在应用内部空间', desc: '导入导出不依赖绝对路径', meta: 'workflows', color: '#8066FF' };
   return [eat, travel, work];
 }
 
@@ -154,7 +154,10 @@ export class DataManagerFacade {
       return;
     }
     dataManagerInfo('DataManagerFacade clear request detected: ' + markerPath);
-    this.storage.removeTree(this.paths.rootDir);
+    this.storage.removeFile(markerPath);
+    this.storage.removeTree(this.paths.dailyLogRoot);
+    this.storage.removeTree(this.paths.consolidationRoot);
+    this.storage.removeTree(this.paths.workflowRunsRoot);
     this.paths.ensureBaseDirs();
     dataManagerInfo('DataManagerFacade clear request applied');
   }
@@ -220,7 +223,7 @@ export class DataManagerFacade {
   private emptyDailyLogSnapshot(): DailyLogSnapshot {
     return {
       generated_at: '',
-      root: 'data-home/daily-log',
+      root: 'workflows/daily-log',
       file_count: 0,
       entry_count: 0,
       tree_hash: '',
@@ -247,7 +250,7 @@ export class DataManagerFacade {
     }).join('\u001e');
     let snapshot: DailyLogSnapshot = {
       generated_at: nowIsoLocal(),
-      root: 'data-home/daily-log',
+      root: 'workflows/daily-log',
       file_count: files.length,
       entry_count: files.reduce((total: number, file: DailyLogSnapshotFile) => total + file.entry_count, 0),
       tree_hash: this.storage.sha256Text(fingerprint),

@@ -9,7 +9,7 @@ import { AppHeader } from '../components/AppHeader';
 import { CollectionPage } from './collection/CollectionPage';
 import { HomePage } from './home/HomePage';
 import { TaskPage } from './task/TaskPage';
-import { LlmServer } from '../utils/LlmServer';
+import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
 import {
   createEmptyCollectionViewModels,
@@ -24,6 +24,10 @@ import {
   HomeProfileViewModel
 } from '../datamanager/DataManagerTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
+import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { WorkflowRunner } from '../utils/WorkflowRunner';
+import { WorkflowStorage } from '../utils/WorkflowStorage';
+import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 
 interface ServerFile {
   name: string;
@@ -37,13 +41,27 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-PersistentStorage.persistProp('wirelessIp', '192.168.137.55:33117');
-PersistentStorage.persistProp('serverIp', 'http://166.111.53.96:9123');
-PersistentStorage.persistProp('hdcServerIp', 'http://192.168.137.1:9124');
-PersistentStorage.persistProp('cloudPlannerBaseUrl', 'http://166.111.53.96:7003');
-PersistentStorage.persistProp('dataManagerGroupingBaseUrl', 'http://123.60.91.241:9003');
-PersistentStorage.persistProp('cloudDeciderBaseUrl', 'http://166.111.53.96:7003');
-PersistentStorage.persistProp('cloudApiKey', 'mobiagent-key');
+const DEFAULT_WIRELESS_IP = '192.168.137.195:33117';
+const DEFAULT_MODEL_SERVER_URL = 'http://166.111.53.96:9123';
+const DEFAULT_HDC_SERVER_URL = 'http://192.168.137.1:9124';
+const DEFAULT_CLOUD_BASE_URL = 'http://166.111.53.96:7003';
+const DEFAULT_DATA_MANAGER_GROUPING_BASE_URL = 'http://123.60.91.241:9003';
+const DEFAULT_CLOUD_API_KEY = 'mobiagent-key';
+const LEGACY_WIRELESS_IPS: string[] = [
+  '101.5.155.98:35729',
+  '192.168.137.172:35963',
+  '192.168.137.55:35963',
+  '192.168.137.55:33117'
+];
+
+PersistentStorage.persistProp('wirelessIp', DEFAULT_WIRELESS_IP);
+PersistentStorage.persistProp('serverIp', DEFAULT_MODEL_SERVER_URL);
+PersistentStorage.persistProp('hdcServerIp', DEFAULT_HDC_SERVER_URL);
+PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_CLOUD_BASE_URL);
+PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_CLOUD_BASE_URL);
+PersistentStorage.persistProp('dataManagerGroupingBaseUrl', DEFAULT_DATA_MANAGER_GROUPING_BASE_URL);
+PersistentStorage.persistProp('cloudApiKey', DEFAULT_CLOUD_API_KEY);
+PersistentStorage.persistProp('cloudDeciderModel', '');
 
 @Entry
 @Component
@@ -65,13 +83,14 @@ struct Index {
   @State collectionModule: number = 1;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
-  @StorageLink('serverIp') serverIp: string = 'http://166.111.53.96:9123';
-  @StorageLink('hdcServerIp') hdcServerIp: string = 'http://192.168.137.1:9124';
-  @StorageLink('wirelessIp') wirelessIp: string = '192.168.137.55:33117';
-  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = 'http://166.111.53.96:7003';
-  @StorageLink('dataManagerGroupingBaseUrl') dataManagerGroupingBaseUrl: string = 'http://123.60.91.241:9003';
-  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = 'http://166.111.53.96:7003';
-  @StorageLink('cloudApiKey') cloudApiKey: string = 'mobiagent-key';
+  @StorageLink('serverIp') serverIp: string = DEFAULT_MODEL_SERVER_URL;
+  @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_HDC_SERVER_URL;
+  @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_WIRELESS_IP;
+  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
+  @StorageLink('dataManagerGroupingBaseUrl') dataManagerGroupingBaseUrl: string = DEFAULT_DATA_MANAGER_GROUPING_BASE_URL;
+  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
+  @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_CLOUD_API_KEY;
+  @StorageLink('cloudDeciderModel') cloudDeciderModel: string = '';
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -92,8 +111,7 @@ struct Index {
   private dataManagerFacade: DataManagerFacade | null = null;
   
   // PC 控制服务端单例。
-  private llmServer: LlmServer = new LlmServer();
-  private cloudLlmServer: LlmServer = new LlmServer();
+  private agentRouter: AgentRouterServer = new AgentRouterServer();
   private cloudClient: CloudModelClient = new CloudModelClient();
 
   private appendCloudLog(message: string): void {
@@ -247,26 +265,89 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
+    this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
+      this.output = msg;
+      let match = msg.match(/<img>(.*?)<hw>/);
+      if (match && match[1]) {
+        this.debugImagePath = 'file://' + match[1];
+      }
+    }, async (response: string) => {
+      if (this.autoConfirm) { return true; }
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '大模型返回确认',
+          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
+      });
+    });
+    this.agentRouter.configureCloud(this.cloudClient, () => this.getCloudConfig(), (msg: string) => {
+      this.appendCloudLog(msg);
+      let match = msg.match(/agent_snapshot_.*?\.jpg/);
+      if (match && match[0]) {
+        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
+      }
+    }, async (response: string) => {
+      if (this.cloudAutoConfirm) {
+        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
+        return true;
+      }
+      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '云端模型返回确认',
+          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => {
+          let approved = data.index === 1;
+          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
+          resolve(approved);
+        }).catch(() => {
+          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
+          resolve(false);
+        });
+      });
+    });
+    AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.agentRouter.getRouteMode() !== 'local') {
+        return;
+      }
+      await this.agentRouter.requestTaskCancellation();
+      this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+    });
+    AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.agentRouter.getRouteMode() !== 'cloud') {
+        return;
+      }
+      await this.agentRouter.requestTaskCancellation();
+      this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
+    });
   }
 
   private migrateDefaultEndpointValues(): void {
     if (this.hdcServerIp === 'http://166.111.53.96:9124') {
-      this.hdcServerIp = 'http://192.168.137.1:9124';
+      this.hdcServerIp = DEFAULT_HDC_SERVER_URL;
     }
-    if (this.wirelessIp.trim().length === 0 ||
-      this.wirelessIp === '101.5.155.98:35729' ||
-      this.wirelessIp === '192.168.137.172:35963' ||
-      this.wirelessIp === '192.168.137.55:35963') {
-      this.wirelessIp = '192.168.137.55:33117';
+    if (this.wirelessIp.trim().length === 0 || LEGACY_WIRELESS_IPS.includes(this.wirelessIp)) {
+      this.wirelessIp = DEFAULT_WIRELESS_IP;
     }
     if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {
-      this.cloudPlannerBaseUrl = 'http://166.111.53.96:7003';
+      this.cloudPlannerBaseUrl = DEFAULT_CLOUD_BASE_URL;
     }
     if (this.cloudDeciderBaseUrl === 'http://166.111.53.96:8000') {
-      this.cloudDeciderBaseUrl = 'http://166.111.53.96:7003';
+      this.cloudDeciderBaseUrl = DEFAULT_CLOUD_BASE_URL;
     }
     if (this.cloudApiKey.trim().length === 0) {
-      this.cloudApiKey = 'mobiagent-key';
+      this.cloudApiKey = DEFAULT_CLOUD_API_KEY;
+    }
+    if (this.cloudDeciderModel === 'decider' || this.cloudDeciderModel === 'decider_model') {
+      this.cloudDeciderModel = '';
     }
   }
 
@@ -322,8 +403,12 @@ struct Index {
       let count = 0;
       for (let f of files) {
         if (f.startsWith('agent_') || f.toLowerCase().endsWith('.jpg') || f.toLowerCase().endsWith('.jpeg')) {
-          try { fs.unlinkSync(`${this.filesDir}/${f}`); } catch {}
-          count++;
+          try {
+            fs.unlinkSync(`${this.filesDir}/${f}`);
+            count++;
+          } catch (e) {
+            this.appendCloudLog(`删除截图失败：${f}，${String(e)}`);
+          }
         }
       }
       this.output = `清理成功，删除了 ${count} 张缓存截图。`;
@@ -352,19 +437,14 @@ struct Index {
   deleteModelFiles() {
     try {
       if (!fs.accessSync(this.modelDir)) {
-        this.output = '模型文件夹不存在，无需删除。';
+        this.output = '模型目录不存在，无需删除。';
         return;
       }
-      let files = fs.listFileSync(this.modelDir);
-      let count = 0;
-      for (let f of files) {
-        fs.unlinkSync(`${this.modelDir}/${f}`);
-        count++;
-      }
+      let deletedCount = this.deletePathRecursively(this.modelDir);
       this.modelLoaded = false;
-      this.output = `成功删除了 ${count} 个模型文件，\n现在可以重新下载了。`;
+      this.output = `模型删除成功\n已删除 ${this.getCurrentModelFolderName()} 目录及其内容（共 ${deletedCount} 项）。`;
     } catch (e) {
-      this.output = `删除模型文件失败: ${e}`;
+      this.output = `模型删除失败: ${e}`;
     }
   }
 
@@ -384,6 +464,21 @@ struct Index {
       this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载补齐 config.json。`;
     } catch (e) {
       this.output = `删除 config.json 失败: ${e}`;
+    }
+  }
+
+  private deletePathRecursively(path: string): number {
+    try {
+      let children = fs.listFileSync(path);
+      let deleted = 0;
+      for (let name of children) {
+        deleted += this.deletePathRecursively(`${path}/${name}`);
+      }
+      fs.rmdirSync(path);
+      return deleted + 1;
+    } catch {
+      fs.unlinkSync(path);
+      return 1;
     }
   }
 
@@ -866,7 +961,8 @@ struct Index {
     let config: CloudModelConfig = {
       plannerBaseUrl: this.cloudPlannerBaseUrl,
       deciderBaseUrl: this.cloudDeciderBaseUrl,
-      apiKey: this.cloudApiKey
+      apiKey: this.cloudApiKey,
+      deciderModel: this.cloudDeciderModel
     };
     return config;
   }
@@ -921,37 +1017,100 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    this.appendCloudLog('准备启动云端 PC 控制后端，监听 9126...');
-    this.cloudLlmServer.startCloud(9126, this.filesDir, this.cloudClient, this.getCloudConfig(), (msg: string) => {
-      this.appendCloudLog(msg);
-      let match = msg.match(/agent_snapshot_.*?\.jpg/);
-      if (match && match[0]) {
-        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
+    this.appendCloudLog('准备切换到云端 Agent 路由，复用 9126...');
+    this.agentRouter.useCloud();
+    this.agentRouter.start(9126, this.filesDir);
+  }
+
+  private async ensureLocalModelLoaded(): Promise<boolean> {
+    if (this.modelLoaded) {
+      return true;
+    }
+
+    let cfg = this.modelDir + '/config.json';
+    if (!this.prepareCustomOpp()) {
+      return false;
+    }
+
+    this.output = '未检测到已加载模型，正在自动加载大模型...';
+    try {
+      this.output = await mnnllm.loadModel(cfg);
+      this.modelLoaded = this.output === 'ok';
+      if (!this.modelLoaded) {
+        this.output = `自动加载模型失败: ${this.output}`;
       }
-    }, async (response: string) => {
-      if (this.cloudAutoConfirm) {
-        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
-        return true;
+      return this.modelLoaded;
+    } catch (err) {
+      let e = err as Error;
+      this.output = '自动加载模型失败: ' + e.message;
+      return false;
+    }
+  }
+
+  private startLocalBackend(): void {
+    this.agentRouter.useLocal();
+    this.agentRouter.start(9126, this.filesDir);
+  }
+
+  private async ensureLocalAgentReady(): Promise<boolean> {
+    if (!await this.ensureLocalModelLoaded()) {
+      return false;
+    }
+
+    this.agentRouter.useLocal();
+    if (!this.agentRouter.running()) {
+      this.output = '未检测到本地 PC 控制后端，正在自动启动...';
+      this.startLocalBackend();
+    }
+    return true;
+  }
+
+  private ensureCloudAgentBackend(): boolean {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+      return false;
+    }
+
+    this.agentRouter.useCloud();
+    if (!this.agentRouter.running()) {
+      this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
+      this.startCloudBackend();
+    }
+    return true;
+  }
+
+  private async runWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.isCloudConfigReady()) {
+      this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
+      return;
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      this.appendCloudLog('Workflow 无法启动：请先配置 HDC Server。');
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', 'HDC Server 未配置');
+      return;
+    }
+
+    this.currentTab = 3;
+    this.resetCloudLog('准备执行 Workflow：' + task.title);
+    this.appendCloudLog('Workflow 编排将在 App 沙箱内执行；PC 端仅负责 HDC 截图和动作桥接。');
+    this.appendCloudLog('HDC Server=' + this.hdcServerIp);
+    let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
+      this.hdcServerIp, (msg: string) => { this.appendCloudLog(msg); });
+    try {
+      let result: WorkflowRunResult = await runner.runTask(task);
+      let message = result.message;
+      if (result.dailyLogPath.length > 0) {
+        message += '，daily-log 已生成';
       }
-      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
-      return new Promise<boolean>((resolve) => {
-        promptAction.showDialog({
-          title: '云端模型返回确认',
-          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
-          buttons: [
-            { text: '拒绝', color: '#ff0000' },
-            { text: '同意', color: '#00cc00' }
-          ]
-        }).then((data: promptAction.ShowDialogSuccessResponse) => {
-          let approved = data.index === 1;
-          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
-          resolve(approved);
-        }).catch(() => {
-          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
-          resolve(false);
-        });
-      });
-    });
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, result.status, message);
+      this.appendCloudLog('Workflow 运行摘要：' + result.runDir);
+    } catch (err) {
+      let e = err as Error;
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', e.message);
+      this.appendCloudLog('Workflow 执行异常：' + e.message);
+      AgentExecutionController.finishExecution('Workflow failed');
+    }
   }
 
   @Builder AssistantPage() {
@@ -1016,13 +1175,8 @@ struct Index {
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
           Button('加载大模型')
             .onClick(async () => {
-              let cfg = this.modelDir + '/config.json';
-              if (!this.prepareCustomOpp()) { return; }
               this.output = '加载中，请稍候...';
-              try {
-                this.output = await mnnllm.loadModel(cfg);
-                if (this.output === 'ok') { this.modelLoaded = true; }
-              } catch(err) { let e = err as Error; this.output = '加载失败: ' + e.message; }
+              await this.ensureLocalModelLoaded();
             })
             .enabled(!this.downloading)
             .height(42)
@@ -1057,9 +1211,10 @@ struct Index {
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
           .onClick(async () => {
-            if (!this.modelLoaded) { this.output = '请先加载模型后再运行智能体'; return; }
             if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
-            this.llmServer.currentTask = this.userInput;
+            if (!await this.ensureLocalAgentReady()) { return; }
+            this.agentRouter.submitLocalTask(this.userInput);
+            AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
             this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
           })
 
@@ -1069,25 +1224,9 @@ struct Index {
             .backgroundColor('#607D8B')
             .borderRadius(14)
             .layoutWeight(1)
-            .onClick(() => {
-              if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
-              this.llmServer.start(9126, this.filesDir, mnnllm as Record<string, Function>, (msg: string) => {
-                this.output = msg;
-                let match = msg.match(/<img>(.*?)<hw>/);
-                if (match && match[1]) { this.debugImagePath = 'file://' + match[1]; }
-              }, async (response: string) => {
-                if (this.autoConfirm) { return true; }
-                return new Promise<boolean>((resolve) => {
-                  promptAction.showDialog({
-                    title: '大模型返回确认',
-                    message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-                    buttons: [
-                      { text: '拒绝', color: '#ff0000' },
-                      { text: '同意', color: '#00cc00' }
-                    ]
-                  }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
-                });
-              });
+            .onClick(async () => {
+              if (!await this.ensureLocalModelLoaded()) { return; }
+              this.startLocalBackend();
             })
           Row() {
             Checkbox({ name: 'autoConfirm', group: 'settings' })
@@ -1198,7 +1337,7 @@ struct Index {
           .fontColor('#6F7684')
           .width('100%')
         Row() {
-          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.55:33117', text: this.wirelessIp })
+          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.195:33117', text: this.wirelessIp })
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
@@ -1432,6 +1571,20 @@ struct Index {
             .borderRadius(12)
             .padding({ left: 12, right: 12 })
             .onChange((val: string) => { this.cloudApiKey = val; })
+          Text('Decider Model')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+            .margin({ top: 10 })
+          TextInput({ placeholder: '留空则不传 model', text: this.cloudDeciderModel })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6 })
+            .onChange((val: string) => { this.cloudDeciderModel = val; })
         }
         .width('92%')
         .padding(18)
@@ -1456,7 +1609,7 @@ struct Index {
             .margin({ bottom: 10 })
             .onChange((val: string) => { this.hdcServerIp = val; })
           Row() {
-            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.55:33117', text: this.wirelessIp })
+            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.195:33117', text: this.wirelessIp })
               .height(42)
               .layoutWeight(1)
               .fontSize(13)
@@ -1511,15 +1664,15 @@ struct Index {
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
           .onClick(() => {
-            if (!this.isCloudConfigReady()) {
-              this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
-              return;
-            }
             if (this.cloudUserInput.trim().length === 0) {
               this.appendCloudLog('请先输入云端 Agent 任务。');
               return;
             }
-            this.cloudLlmServer.currentTask = this.cloudUserInput;
+            if (!this.ensureCloudAgentBackend()) {
+              return;
+            }
+            this.agentRouter.submitCloudTask(this.cloudUserInput);
+            AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
             this.resetCloudLog(`任务已下发：${this.cloudUserInput}`);
             this.appendCloudLog('等待 PC 侧 harmony_agent.py 轮询 9126。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。');
             this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
@@ -1657,7 +1810,13 @@ struct Index {
         }.tabBar(this.TabItem('C', '采集', 1))
         TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
         TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
-        TabContent() { TaskPage({ taskScene: $taskScene }) }.tabBar(this.TabItem('T', '任务', 4))
+        TabContent() {
+          TaskPage({
+            taskScene: $taskScene,
+            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
+            onOpenCloudLog: () => { this.currentTab = 3; }
+          })
+        }.tabBar(this.TabItem('T', '任务', 4))
       }
       .onChange((index: number) => { this.currentTab = index; })
       .width('100%')

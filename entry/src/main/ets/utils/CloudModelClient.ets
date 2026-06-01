@@ -10,6 +10,7 @@ export interface CloudModelConfig {
   plannerBaseUrl: string;
   deciderBaseUrl: string;
   apiKey: string;
+  deciderModel: string;
 }
 
 export interface CloudImageUrl {
@@ -41,8 +42,10 @@ export interface CloudChatCompletionOptions {
   baseUrl: string;
   apiKey: string;
   messages: CloudChatMessage[];
-  maxTokens?: number;
   temperature: number;
+  model?: string;
+  maxTokens?: number;
+  readTimeout?: number;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
 }
 
@@ -51,6 +54,7 @@ interface CloudChatRequest {
   temperature: number;
   stream: boolean;
   max_tokens?: number;
+  model?: string;
   chat_template_kwargs?: CloudChatTemplateKwargs;
 }
 
@@ -67,6 +71,28 @@ interface CloudChatResponse {
 }
 
 export class CloudModelClient {
+  private activeRequests: http.HttpRequest[] = [];
+
+  private registerActiveRequest(request: http.HttpRequest): void {
+    this.activeRequests.push(request);
+  }
+
+  private unregisterActiveRequest(request: http.HttpRequest): void {
+    this.activeRequests = this.activeRequests.filter((item: http.HttpRequest) => item !== request);
+  }
+
+  cancelActiveRequests(): void {
+    let pending = this.activeRequests.slice();
+    this.activeRequests = [];
+    for (let i = 0; i < pending.length; i++) {
+      try {
+        pending[i].destroy();
+      } catch (e) {
+        console.warn('[CloudModelClient] destroy pending request failed: ' + String(e));
+      }
+    }
+  }
+
   private buildQwenHistoryText(historyItems: string[]): string {
     if (historyItems.length === 0) {
       return '(No history)';
@@ -121,9 +147,13 @@ export class CloudModelClient {
     if (options.maxTokens !== undefined) {
       requestBody.max_tokens = options.maxTokens;
     }
+    if (options.model !== undefined && options.model.trim().length > 0) {
+      requestBody.model = options.model.trim();
+    }
     if (options.chatTemplateKwargs !== undefined) {
       requestBody.chat_template_kwargs = options.chatTemplateKwargs;
     }
+
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer ' + (options.apiKey.length > 0 ? options.apiKey : 'EMPTY')
@@ -133,11 +163,12 @@ export class CloudModelClient {
       header: headers,
       extraData: ArkJSON.stringify(requestBody),
       connectTimeout: 10000,
-      readTimeout: 120000,
+      readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
 
     let httpReq = http.createHttp();
+    this.registerActiveRequest(httpReq);
     try {
       let response = await httpReq.request(this.normalizeChatUrl(options.baseUrl), requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
@@ -155,18 +186,22 @@ export class CloudModelClient {
       }
       return parsed.choices[0].message.content;
     } finally {
+      this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
     }
   }
 
-  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string): Promise<string> {
+  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
+    model?: string, maxTokens?: number, readTimeout?: number): Promise<string> {
     try {
       return await this.chatCompletionText({
         baseUrl: baseUrl,
         apiKey: apiKey,
         messages: messages,
-        maxTokens: 2048,
-        temperature: 0
+        temperature: 0,
+        model: model,
+        maxTokens: maxTokens,
+        readTimeout: readTimeout
       });
     } catch (e) {
       let err = e as Error;
@@ -202,7 +237,24 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.deciderBaseUrl, [imagePart, textPart], config.apiKey);
+    return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.deciderModel, 256);
+  }
+
+  async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+    let imageUrl: CloudImageUrl = {
+      url: 'data:image/jpeg;base64,' + imageBase64
+    };
+    let imagePart: CloudImagePart = {
+      type: 'image_url',
+      image_url: imageUrl
+    };
+    let textPart: CloudTextPart = {
+      type: 'text',
+      text: question
+    };
+    return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.deciderModel, 1024, 60000);
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {
@@ -231,7 +283,6 @@ export class CloudModelClient {
       content: [contextPart, imagePart, stepPart]
     };
     let messages: CloudChatMessage[] = [systemMessage, userMessage];
-    return this.chatMessages(config.deciderBaseUrl, messages, config.apiKey);
+    return this.chatMessages(config.deciderBaseUrl, messages, config.apiKey, config.deciderModel, 256);
   }
 }
-

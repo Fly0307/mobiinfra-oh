@@ -1,11 +1,11 @@
-export const DATA_MANAGER_STORAGE_ROOT_NAME: string = 'data-home';
+export const DATA_MANAGER_STORAGE_ROOT_NAME: string = 'workflows';
 export const DAILY_LOG_DIR_NAME: string = 'daily-log';
 export const PROFILE_CONSOLIDATION_DIR_NAME: string = 'profile-consolidation';
 export const OUTPUTS_DIR_NAME: string = 'outputs';
 export const INDEXES_DIR_NAME: string = 'indexes';
 export const COLLECTION_GROUPS_DIR_NAME: string = 'collection-groups';
-export const WORKFLOW_RUNS_DIR_NAME: string = 'workflow-runs';
-export const DATA_MANAGER_CLEAR_REQUEST_FILE_NAME: string = '.clear-data-home-request.json';
+export const WORKFLOW_RUNS_DIR_NAME: string = 'runs';
+export const DATA_MANAGER_CLEAR_REQUEST_FILE_NAME: string = '.clear-workflows-request.json';
 
 export const DOMAIN_KEYS: string[] = ['eat', 'wear', 'live', 'travel', 'work', 'other'];
 

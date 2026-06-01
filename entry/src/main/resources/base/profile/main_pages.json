@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/FloatWindow",
     "pages/OpTest",
-    "pages/LogView"
+    "pages/LogView",
+    "pages/gallery/GalleryPage"
   ]
 }

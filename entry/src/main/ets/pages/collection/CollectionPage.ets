@@ -1,5 +1,5 @@
 import { AppHeader } from '../../components/AppHeader';
-import { promptAction } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 
 @Component
 export struct CollectionPage {
@@ -209,6 +209,18 @@ export struct CollectionPage {
         .borderRadius(18)
         .margin({ top: 22 })
         .onClick(() => { promptAction.showToast({ message: '新增采集源功能即将接入', duration: 1500 }); })
+
+        Column() {
+          Text('图库分析').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)
+          Text('采集相册、截图和文档图片，进行 OCR 与分类整理').fontSize(12).fontColor('#E9F7FF').margin({ top: 4 })
+        }
+        .justifyContent(FlexAlign.Center)
+        .width('86%')
+        .height(72)
+        .backgroundColor('#4B8BFF')
+        .borderRadius(18)
+        .margin({ top: 12 })
+        .onClick(() => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); })
         Blank().height(110)
       }.width('100%')
     }.width('100%').height('100%').backgroundColor('#F4F8FF')

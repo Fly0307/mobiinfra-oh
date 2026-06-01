@@ -14,6 +14,7 @@
 class HIAIModelManager {
 public:
     HIAIModelManager() = default;
+    // 单例封装 OH_NN executor，供 op/OMC A-B 测试复用同一套加载与推理流程。
     static HIAIModelManager &GetInstance();
 
     HIAIModelManager(const HIAIModelManager &) = delete;
@@ -46,6 +47,7 @@ public:
     OH_NN_ReturnCode UnloadModel();
 
 private:
+    // deviceID_ 记录选中的 HIAI_F NPU；tensor 生命周期跟随 executor_，UnloadModel 统一释放。
     size_t deviceID_ {0};
     std::vector<NN_Tensor*> inputTensors_;
     std::vector<NN_Tensor*> outputTensors_;

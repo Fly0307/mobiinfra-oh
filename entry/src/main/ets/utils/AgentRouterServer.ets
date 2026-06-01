@@ -228,6 +228,13 @@ export class AgentRouterServer {
       return;
     }
 
+    await AgentExecutionController.waitIfPaused();
+    if (this.isCancellationRequested()) {
+      this.log(this.routeMode, '>> [Cancel] cancellation intercepted after pause: ' + reqType);
+      this.sendTerminate(client, 'Task cancelled by user');
+      return;
+    }
+
     if (this.routeMode === 'cloud') {
       await this.handleCloudRequest(client, req, reqType);
       return;

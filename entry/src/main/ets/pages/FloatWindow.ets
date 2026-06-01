@@ -1,56 +1,167 @@
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 
+// 后台浮窗页面：展示 AppStorage.floatText 中的实时模型输出/Agent 状态，
+// 并提供暂停/继续、终止入口通知 AgentExecutionController 控制当前任务。
+// 注意：全屏边缘流光由 pages/EdgeFlowWindow 承载，本页面只保留小型控制面板。
 @Entry
 @Component
 struct FloatWindow {
-  @StorageLink('floatText') @Watch('onTextChange') floatText: string = 'AI Agent 运行中...'
-  private scroller: Scroller = new Scroller()
+  @StorageLink('floatText') floatText: string = 'AI Agent 运行中...'
+  @StorageLink('agentPauseRequested') pauseRequested: boolean = false
+  @StorageLink('agentFloatPanelExpanded') panelExpanded: boolean = false
 
-  onTextChange(): void {
-    setTimeout(() => {
-      this.scroller.scrollEdge(Edge.Bottom)
-    }, 50)
+  private statusLabel(): string {
+    return this.pauseRequested ? '暂停' : '执行';
+  }
+
+  private togglePanel(): void {
+    AgentExecutionController.toggleFloatPanelExpanded();
+  }
+
+  private handleMoveTouch(event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      AgentExecutionController.startFloatPanelMove();
+      return;
+    }
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      AgentExecutionController.endFloatPanelMove();
+    }
   }
 
   build() {
-    Row() {
-      Column() {
-        Scroll(this.scroller) {
-          Text(this.floatText)
-            .width('100%')
-            .fontSize(11)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#F8FAFC')
-            .padding({ left: 4, right: 2, top: 2, bottom: 2 })
-            .textAlign(TextAlign.Start)
+    Stack({ alignContent: Alignment.End }) {
+      if (this.panelExpanded) {
+        Row() {
+          Column() {
+            Text(this.statusLabel())
+              .width('100%')
+              .height(16)
+              .fontSize(9)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
+              .textAlign(TextAlign.Start)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+            Text(this.floatText)
+              .width('100%')
+              .fontSize(10)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#F0F8FAFC')
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .layoutWeight(1)
+          .height(46)
+          .constraintSize({ minWidth: 96 })
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 9, right: 8 })
+          .backgroundColor('#24101827')
+          .borderRadius(16)
+          .onClick(() => {
+            this.togglePanel();
+          })
+          .onTouch((event: TouchEvent) => {
+            this.handleMoveTouch(event);
+          })
+
+          Column() {
+            Text(this.pauseRequested ? '▶' : 'Ⅱ')
+              .height(17)
+              .fontSize(this.pauseRequested ? 12 : 11)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#F8FAFC')
+              .textAlign(TextAlign.Center)
+
+            Text(this.pauseRequested ? '继续' : '暂停')
+              .height(14)
+              .fontSize(8)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#DDE5E7EB')
+              .textAlign(TextAlign.Center)
+          }
+          .width(50)
+          .height(46)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor(this.pauseRequested ? '#704B8BFF' : '#4A475569')
+          .borderRadius(16)
+          .margin({ left: 6 })
+          .hitTestBehavior(HitTestMode.Default)
+          .onClick(() => {
+            AgentExecutionController.togglePause();
+          })
+
+          Column() {
+            Text('×')
+              .height(17)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#F8FAFC')
+              .textAlign(TextAlign.Center)
+
+            Text('终止')
+              .height(14)
+              .fontSize(8)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#FEE2E2')
+              .textAlign(TextAlign.Center)
+          }
+          .width(52)
+          .height(46)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor('#666B2530')
+          .borderRadius(16)
+          .margin({ left: 6 })
+          .hitTestBehavior(HitTestMode.Default)
+          .onClick(() => {
+            AgentExecutionController.requestCancellation();
+          })
         }
         .width('100%')
         .height('100%')
-        .scrollable(ScrollDirection.Vertical)
-      }
-      .layoutWeight(1)
-      .height('100%')
-      .backgroundColor('#66111827')
-      .borderRadius(8)
+        .alignItems(VerticalAlign.Center)
+        .justifyContent(FlexAlign.End)
+        .padding({ left: 12, right: 18, top: 10, bottom: 10 })
+        .backgroundColor('#00000000')
+        .shadow({ radius: 10, color: '#18000000', offsetX: 0, offsetY: 2 })
+      } else {
+        Row() {
+          Text(this.statusLabel())
+            .width(36)
+            .height(42)
+            .fontSize(10)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.pauseRequested ? '#FDE68A' : '#86EFAC')
+            .textAlign(TextAlign.Center)
 
-      Text('终止')
-        .width(34)
-        .height('100%')
-        .fontSize(11)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#E2E8F0')
-        .textAlign(TextAlign.Center)
-        .backgroundColor('#7A1E293B')
-        .borderRadius(8)
-        .padding({ left: 2, right: 2 })
+          Text('‹')
+            .width(14)
+            .height(42)
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#F8FAFC')
+            .textAlign(TextAlign.Center)
+        }
+        .width(58)
+        .height(42)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(VerticalAlign.Center)
+        .backgroundColor('#4A475569')
+        .borderRadius(16)
+        .shadow({ radius: 10, color: '#18000000', offsetX: 0, offsetY: 2 })
         .onClick(() => {
-          AgentExecutionController.requestCancellation();
+          this.togglePanel();
         })
+        .onTouch((event: TouchEvent) => {
+          this.handleMoveTouch(event);
+        })
+      }
     }
     .width('100%')
     .height('100%')
-    .alignItems(VerticalAlign.Center)
-    .backgroundColor('#8010202F')
-    .borderRadius(10)
+    .backgroundColor('#00000000')
   }
 }

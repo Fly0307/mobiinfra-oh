@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Simple HTTP server for model files with a /api/files JSON endpoint."""
+"""模型文件下载服务。
+
+手机 App 先请求 /api/files 获取文件名和大小，再逐个通过普通 GET 流式下载。
+运行目录应放置 config.json、tokenizer、mnn/om 等模型文件。
+"""
 import os
 import json
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -8,6 +12,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 class ModelHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/api/files':
+            # 返回当前目录下所有普通文件，App 侧会过滤掉 serve_model.py。
             files = []
             for name in sorted(os.listdir('.')):
                 if os.path.isfile(name):

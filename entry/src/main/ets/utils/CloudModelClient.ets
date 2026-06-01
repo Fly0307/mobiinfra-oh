@@ -6,6 +6,8 @@ import {
   CLOUD_DECIDER_USER_PROMPT
 } from './CloudDeciderPrompt';
 
+// OpenAI-compatible 云端模型客户端。Planner 和 Decider 可以指向不同 base URL，
+// 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
 export interface CloudModelConfig {
   plannerBaseUrl: string;
   deciderBaseUrl: string;
@@ -66,6 +68,7 @@ export class CloudModelClient {
   }
 
   cancelActiveRequests(): void {
+    // 浮窗终止任务时会调用这里，主动 destroy 当前 HTTP 请求，避免云端长推理阻塞收尾。
     let pending = this.activeRequests.slice();
     this.activeRequests = [];
     for (let i = 0; i < pending.length; i++) {
@@ -78,6 +81,7 @@ export class CloudModelClient {
   }
 
   private buildQwenHistoryText(historyItems: string[]): string {
+    // Qwen Decider 的历史只保留结构化动作摘要，避免把整段模型输出反复塞回上下文。
     if (historyItems.length === 0) {
       return '(No history)';
     }
@@ -96,6 +100,7 @@ export class CloudModelClient {
   }
 
   formatQwenDeciderPromptForLog(task: string, historyItems: string[], imageBase64: string): string {
+    // 日志中只展示 base64 前缀，既能确认图像被传入，又不会把完整截图刷进日志。
     let imagePrefixLength = imageBase64.length > 48 ? 48 : imageBase64.length;
     let imagePrefix = imageBase64.substring(0, imagePrefixLength);
     return '[0] role=system\n' +
@@ -109,6 +114,7 @@ export class CloudModelClient {
   }
 
   private normalizeChatUrl(baseUrl: string): string {
+    // 兼容三种用户输入：host、host/v1、host/v1/chat/completions。
     let url = baseUrl.trim();
     while (url.endsWith('/')) {
       url = url.substring(0, url.length - 1);
@@ -124,6 +130,7 @@ export class CloudModelClient {
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
     model?: string, maxTokens: number = 2048, readTimeout: number = 120000): Promise<string> {
+    // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
     let requestBody: CloudChatRequest = {
       messages: messages,
       temperature: 0,
@@ -173,6 +180,7 @@ export class CloudModelClient {
   }
 
   async chatPlanner(prompt: string, config: CloudModelConfig): Promise<string> {
+    // Planner 只吃纯文本，用来选择目标 App 或做一次性任务分解。
     let textPart: CloudTextPart = {
       type: 'text',
       text: prompt
@@ -181,6 +189,7 @@ export class CloudModelClient {
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+    // 通用图文 Decider：完整 prompt 与当前截图作为同一条 user 消息发送。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
     };
@@ -197,6 +206,7 @@ export class CloudModelClient {
   }
 
   async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
+    // workflow 中的图片问答步骤可能比动作 JSON 更长，因此使用更大的 max_tokens 和较短超时。
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
     };
@@ -213,6 +223,7 @@ export class CloudModelClient {
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {
+    // Qwen 专用 Decider：system、任务/历史、截图、当前步输出约束分开组织，输出更稳定。
     let contextText = this.buildQwenContextText(task, historyItems);
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64

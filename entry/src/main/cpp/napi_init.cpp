@@ -51,6 +51,8 @@
 
 using namespace MNN::Transformer;
 
+// 原生侧全局模型状态。所有 load/generate/chat/agentStep 都通过 g_mutex 串行化，
+// 避免 ArkTS 多次点击或 PC Agent 并发请求时同时访问 MNN Llm 实例。
 static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
@@ -59,6 +61,7 @@ static std::string g_runtimeSandboxDir;
 // ==================== Runtime log capture ====================
 namespace {
 struct LogCapture {
+    // 双写日志：一份在内存环形缓冲供 LogView 读取，一份追加到沙箱文件供崩溃后回看。
     std::mutex mu;
     std::deque<std::string> ring;
     size_t maxLines = 4000;
@@ -82,6 +85,7 @@ struct LogCapture {
 static LogCapture gLog;
 
 static void logReader(int readFd) {
+    // stdout/stderr 被重定向到 pipe 后由后台线程读取，再写回 HiLog 和 App 内日志。
     char buf[4096];
     std::string pending;
     while (true) {
@@ -99,11 +103,12 @@ static void logReader(int readFd) {
 }
 
 static void initLogCapture(const std::string& path) {
+    // 只初始化一次日志捕获；后续页面重复调用 initLogFile 不会重复 dup2/起线程。
     bool expected = false;
     if (!gLog.started.compare_exchange_strong(expected, true)) return;
     gLog.filePath = path;
 
-    // Load previous session's log into ring buffer (survives crash/restart)
+    // 读取上一次会话日志到 ring buffer，App 重启后仍能在 Runtime Logs 中看到尾部日志。
     FILE* rf = fopen(path.c_str(), "r");
     if (rf) {
         char linebuf[2048];
@@ -117,7 +122,7 @@ static void initLogCapture(const std::string& path) {
 
     gLog.file = fopen(path.c_str(), "a");
 
-    // Also redirect stdout/stderr for any printf-based logging
+    // 同时重定向 stdout/stderr，捕获 MNN/第三方库里 printf 风格的日志。
     int pipefd[2];
     if (pipe(pipefd) == 0) {
         gLog.origStdout = dup(STDOUT_FILENO);
@@ -175,7 +180,7 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
 }
 } // anonymous namespace
 
-// Strip HiLog privacy annotations (%{public}d -> %d) so vsnprintf can parse cleanly
+// 去掉 HiLog 隐私格式（%{public}d -> %d），这样同一条格式串也能安全喂给 vsnprintf。
 static std::string stripHiLogFmt(const char* fmt) {
     std::string out;
     for (const char* p = fmt; *p; ++p) {
@@ -200,7 +205,7 @@ static void appLog(const char* fmt, ...) {
     gLog.append(buf);
 }
 
-// Redefine LOGI/LOGE to write to both HiLog and the in-app ring buffer
+// 重定义 LOGI/LOGE：既写系统 HiLog，也写 App 内 ring buffer，便于手机端直接查看。
 #undef LOGI
 #undef LOGE
 #define LOGI(fmt, ...) do { \
@@ -212,7 +217,7 @@ static void appLog(const char* fmt, ...) {
     appLog("[ERR] " fmt, ##__VA_ARGS__); \
 } while(0)
 
-// Agent mode state (prefix KV cache reuse)
+// Agent 模式状态：prefix 预填后记录 KV 位置，每一步擦掉 prefix 之后的历史再生成。
 static bool g_agent_mode = false;
 static size_t g_prefix_pos = 0;
 static int g_agent_step = 0;
@@ -220,6 +225,7 @@ static int g_agent_step = 0;
 // ======================= 基础工具函数 =======================
 
 struct AsyncData {
+    // NAPI 异步任务通用上下文：后台线程写 outputStr，Complete 阶段 resolve/reject Promise。
     napi_async_work work;
     napi_deferred deferred;
     std::string inputStr;
@@ -264,6 +270,7 @@ static bool pathExistsLocal(const std::string& path) {
 }
 
 static void prependEnvPath(const char* key, const std::string& path) {
+    // 自定义算子 so 目录需要追加到 LD_LIBRARY_PATH；已存在时不重复插入。
     const char* current = ::getenv(key);
     if (current == nullptr || std::string(current).empty()) {
         ::setenv(key, path.c_str(), 1);
@@ -327,6 +334,7 @@ static bool copyRawDirRecursive(NativeResourceManager* mgr,
                                 const std::string& rawDirPath,
                                 const std::string& dstDirPath,
                                 std::string& err) {
+    // HarmonyOS rawfile 只读，HiAI 自定义 OPP 运行时需要真实文件路径，因此递归拷贝到沙箱。
     if (!ensureDirectoryRecursive(dstDirPath)) {
         err = "create destination directory failed: " + dstDirPath;
         return false;
@@ -365,6 +373,7 @@ static bool copyRawDirRecursive(NativeResourceManager* mgr,
 }
 
 static bool configureCustomOppRuntime(const std::string& sandboxRoot, std::string& err) {
+    // 配置 Ascend/HiAI 自定义 OPP 环境变量。缺少关键 so/json 时直接报错，避免 load 时才失败。
     const std::string customRoot = joinPath(sandboxRoot, "vendors/customize");
     const std::string libDir = joinPath(customRoot, "lib");
     const std::string markerSo = joinPath(libDir, "libcustom_op.so");
@@ -400,6 +409,7 @@ static bool customOppSandboxReady(const std::string& sandboxRoot) {
 }
 
 static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
+    // ArkTS 启动时调用：如果 rawfile 里没有 custom_opp，说明当前包不带自定义算子，直接返回 ok。
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -466,7 +476,7 @@ static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
 
 // ======================= Token streaming via TSFN =======================
 
-// Called on JS main thread for each token
+// 每个 token chunk 都通过 TSFN 切回 JS 主线程，用于更新浮窗的流式文本。
 static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
     if (data) {
         std::string* token = static_cast<std::string*>(data);
@@ -479,7 +489,7 @@ static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*cont
     }
 }
 
-// Custom streambuf: accumulates full output AND streams each token chunk via TSFN
+// 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。
 class TsfnStreambuf : public std::streambuf {
 public:
     TsfnStreambuf(napi_threadsafe_function tsfn) : tsfn_(tsfn) {}
@@ -547,6 +557,7 @@ static void LoadModelExecute(napi_env env, void* data) {
         return;
     }
 
+    // tmp_path 指向模型目录或 custom_opp 沙箱，供 MNN/HiAI 运行时写临时编译产物。
     std::string modelDir = asyncData->inputStr.substr(0, asyncData->inputStr.rfind('/'));
     std::string tmpPath = g_runtimeSandboxDir.empty() ? modelDir + "/tmp" : joinPath(g_runtimeSandboxDir, "tmp");
     if (!ensureDirectoryRecursive(tmpPath)) {
@@ -575,7 +586,7 @@ static void LoadModelExecute(napi_env env, void* data) {
 static void AsyncComplete(napi_env env, napi_status status, void* data) {
     AsyncData* asyncData = static_cast<AsyncData*>(data);
 
-    // Release TSFN if present (token streaming finished)
+    // token 流已经结束，释放 TSFN；否则 JS 回调引用会被原生侧长期持有。
     if (asyncData->tsfn) {
         napi_release_threadsafe_function(asyncData->tsfn, napi_tsfn_release);
         asyncData->tsfn = nullptr;
@@ -693,6 +704,7 @@ static void ChatExecute(napi_env env, void* data) {
     if (g_messages.empty()) {
         g_messages.emplace_back("system", "You are a helpful assistant.");
     }
+    // 多轮对话保存 ChatMessages；Agent 模式使用独立 API，避免污染普通聊天历史。
     g_messages.emplace_back("user", asyncData->inputStr);
     std::ostringstream oss;
     g_llm->response(g_messages, &oss);
@@ -748,17 +760,17 @@ static void AgentPrefillExecute(napi_env env, void* data) {
         return;
     }
 
-    // If already in agent mode, reset first
+    // 如果上一个 Agent 任务未正常 reset，先清理，避免复用到错误的 prefix KV。
     if (g_agent_mode) {
         g_llm->reset();
         g_agent_mode = false;
     }
 
-    // Configure for prefix reuse
+    // 打开 KV 复用并关闭模板包装；prefix 模板已经包含完整角色/格式控制。
     g_llm->set_config("{\"reuse_kv\":true}");
     g_llm->set_config("{\"use_template\":false}");
 
-    // Prefill prefix only (max_new_tokens = 0)
+    // 只 prefill prefix，不生成新 token；记录 prefix 结束位置供后续 eraseHistory 使用。
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
     g_prefix_pos = g_llm->getCurrentHistory();
     g_agent_mode = true;
@@ -810,13 +822,13 @@ static void AgentStepExecute(napi_env env, void* data) {
         return;
     }
 
-    // Erase previous step's variable + generated tokens, keep prefix KV
+    // 擦除上一轮 variable + 生成结果，只保留固定 prefix KV，减少长任务重复 prefill 成本。
     if (g_agent_step > 0) {
         g_llm->eraseHistory(g_prefix_pos, 0);
         LOGI("AgentStep: erased KV after prefix pos %{public}zu", g_prefix_pos);
     }
 
-    // Prefill variable part and generate (with optional token streaming)
+    // 预填当前 variable（历史 + 截图标签），随后生成动作 JSON；可选流式回调用于浮窗。
     std::string response;
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
@@ -1090,6 +1102,8 @@ static napi_value SetInt8XScale(napi_env env, napi_callback_info info) {
 }
 
 // ========== 10d. OMC Visual Block NPU Test (HarmonyOS NNRT API) ==========
+// 读取视觉分块 OMC 模型，走 HarmonyOS NNRT/HIAI executor 同步推理。
+// 用途是确认离线模型是否可加载，并为 MNN CPU/NPU 精度对比提供独立参照。
 
 struct OmcTestAsyncData {
     napi_async_work work = nullptr;
@@ -1248,6 +1262,8 @@ static napi_value OmcTestAsync(napi_env env, napi_callback_info info) {
 }
 
 // ========== 10. 单算子精度测试 (Convolution on CPU vs HiAI Delegate) ==========
+// OpTest 页面背后的测试集合：生成确定性输入，分别跑 CPU/MNN/HiAI/OM，
+// 再统计误差和耗时，定位 delegate 编译、量化或视觉 chunk 精度问题。
 using namespace MNN::Express;
 
 // batch: input batch size (N); warmup/repeat: timing iterations
@@ -1903,6 +1919,7 @@ static std::string runAttentionTest(int batch, int seqLen, int numHead, int head
 namespace {
 
 struct ChunkBenchResult {
+    // 单个视觉 chunk 的一次后端执行结果：输出张量、首轮耗时、均值耗时和附加说明。
     VARPS outputs;
     double firstMs = -1.0;
     double avgMs = -1.0;
@@ -2024,6 +2041,7 @@ static std::string basenameOf(const std::string& path) {
 }
 
 static std::vector<std::string> listVisualChunkModels(const std::string& modelDir) {
+    // 扫描 visual_blocks_npu_*.mnn 并按序号排序，保证多 chunk 测试顺序稳定。
     std::vector<std::string> out;
     DIR* dir = ::opendir(modelDir.c_str());
     if (dir == nullptr) {
@@ -3250,6 +3268,7 @@ static std::string runQwen3VlChunkModelTest(const std::string& modelRoot,
                                             int seqLen = 608,
                                             int warmup = 1,
                                             int repeat = 2) {
+    // Qwen3-VL 视觉分块精度测试：同一输入先跑 CPU baseline，再跑 HiAI delegate 对比输出。
     std::ostringstream log;
     std::string modelDir = modelRoot;
     if (!modelDir.empty() && modelDir.size() > 12 &&
@@ -3558,6 +3577,7 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
                                        int seqLen = 608,
                                        int warmup = 1,
                                        int repeat = 2) {
+    // 三方交叉验证：CPU baseline、MNN HiAI delegate、离线 OM/OMC 输出共同对比。
     std::ostringstream log;
     std::string modelDir = modelRoot;
     if (!modelDir.empty() && modelDir.size() > 12 &&
@@ -3884,6 +3904,7 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
 } // namespace
 
 static void OpTestExecute(napi_env env, void* data) {
+    // OpTest 调度入口。cfg 可以是 preset，也可以是 ropetest/layernorm/chunktest 等专项命令。
     AsyncData* asyncData = static_cast<AsyncData*>(data);
     std::ostringstream result;
 

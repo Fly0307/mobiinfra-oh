@@ -11,6 +11,11 @@ import sys
 import logging
 import argparse
 
+# PC 侧视觉自动化 Agent：
+# 1. 轮询 App 内 9126 TCP 服务获取任务；
+# 2. Planner 选择目标 App 并通过 HDC/hmdriver2 拉起；
+# 3. 循环截图、发送给本地/云端模型 Decider、解析动作 JSON；
+# 4. 执行点击/输入/滑动，并把动作历史带入下一轮。
 class TaskCompletedConnectionClosed(Exception):
     pass
 
@@ -54,9 +59,11 @@ LLM_APP_BUNDLE = "com.example.mnnllmchat"
 LLM_APP_ABILITY = "EntryAbility"
 
 def quiet_system(cmd):
+    # 跨平台静默执行 HDC 辅助命令，避免无任务轮询时刷屏。
     return os.system(f"{cmd} >{NULL_DEVICE} 2>&1")
 
 def get_hdc_target():
+    # 优先使用环境变量指定的设备；未指定时自动选择第一个无线 HDC target。
     global HDC_TARGET
     if HDC_TARGET:
         return HDC_TARGET
@@ -75,12 +82,14 @@ def get_hdc_target():
         return ""
 
 def hdc_prefix():
+    # 所有 hdc 命令统一走这里，保证多设备场景下始终带 -t target。
     target = get_hdc_target()
     if target:
         return f"hdc -t {target}"
     return "hdc"
 
 def refresh_hdc_forwarding(verbose=False):
+    # PC 通过 tcp:9126 转发到手机 App 内 TCP server；每次任务前刷新，避免旧映射残留。
     prefix = hdc_prefix()
     quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
     if verbose:
@@ -88,6 +97,7 @@ def refresh_hdc_forwarding(verbose=False):
     return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
 
 def normalize_hmdriver_loggers():
+    # hmdriver2 多次重载后可能重复挂 handler，导致日志重复；这里去重并关闭向上传播。
     logger_names = (
         "hmdriver2",
         "hmdriver2.driver",
@@ -120,10 +130,12 @@ def normalize_hmdriver_loggers():
         logger.propagate = False
 
 def bring_llm_app_to_foreground():
+    # 任务结束或异常时回到本 App，方便用户查看日志、截图和错误原因。
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
     os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
     time.sleep(1)
 APP_MAPPING = {
+    # Planner 输出中文 App 名或包名均可；中文名先映射为 HarmonyOS bundleName。
     "携程": "com.ctrip.harmonynext",
     "飞猪": "com.fliggy.hmos",
     "IntelliOS": "ohos.hongmeng.intellios",
@@ -168,6 +180,7 @@ APP_MAPPING = {
 }
 
 def load_prompt(filename):
+    # Prompt 模板集中放在 prompts/，不同模式通过文件名切换。
     path = os.path.join(PROMPTS_DIR, filename)
     if not os.path.exists(path):
         print(f">> [警告] 找不到 Prompt 模板文件: {path}")
@@ -179,6 +192,7 @@ def run_cmd(cmd):
     return subprocess.check_output(cmd, shell=True, text=True)
 
 def capture_screen(factor=0.25):
+    # 使用 hdc snapshot_display 截图并拉回 PC，再压缩为 base64 发送给 App/云端模型。
     print(">> Capturing screen via hdc...")
     local_path = os.path.join(os.path.dirname(__file__), "screen.jpeg")
     prefix = hdc_prefix()
@@ -254,6 +268,7 @@ def capture_screen_mobiagent_style(factor=0.5):
     return b64, new_w, new_h
 
 def send_request(req):
+    # 与 LlmServer.ets 保持同一套 JSON + <<EOF>> framing；一次连接只发送一条请求。
     payload = json.dumps(req) + "<<EOF>>"
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connected = False
@@ -275,6 +290,7 @@ def send_request(req):
         try:
             parsed_res = json.loads(res)
             if isinstance(parsed_res, dict) and "__cloud_debug_prompt" in parsed_res and "response" in parsed_res:
+                # 云端模式会把 Decider 实际输入 prompt 打回 PC，便于核查图文消息组织方式。
                 print("\n========== Cloud Decider Input Prompt ==========")
                 print(parsed_res["__cloud_debug_prompt"])
                 print("========== End Cloud Decider Input Prompt ==========\n")
@@ -297,6 +313,7 @@ def send_request(req):
             pass
 
 def send_request_best_effort(req, context="request"):
+    # 收尾/清理类请求不应让主循环退出；连接已关闭时打印提示后继续等待下一任务。
     try:
         return send_request(req)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as ex:
@@ -357,6 +374,7 @@ def reset_driver():
         d = None
 
 def poll_task():
+    # 后台轻量轮询 App 当前任务；失败时只刷新端口转发，不重置驱动，避免空闲时卡顿。
     try:
         res = send_request({"type": "poll"})
         data = json.loads(res)
@@ -376,6 +394,7 @@ def format_debug_text_block(label, text):
     )
 
 def extract_json_payload(raw_text):
+    # 模型输出可能包含 markdown、reasoning 文本或畸形 JSON；这里尽量抽取可执行动作对象。
     original_raw_text = "" if raw_text is None else str(raw_text)
 
     def _repair_leading_broken_object_quote(value):
@@ -771,6 +790,7 @@ def press_harmony_key(key_name, fallback_code):
         os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
+    # 将 Decider JSON 转成真实设备操作。坐标统一按 Qwen/MNN 的 0-1000 归一化格式还原。
     width, height = img_size
     data = extract_json_payload(plan)
     if not isinstance(data, dict):
@@ -834,6 +854,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
         
     elif action == "swipe":
+        # 优先支持显式起止坐标；缺省时按方向使用屏幕比例坐标，适配不同分辨率。
         start_coords = params.get("start_coords")
         end_coords = params.get("end_coords")
         if start_coords and end_coords:
@@ -913,6 +934,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
 
 # ===================== Stage 1: Planner =====================
 def run_planner(task):
+    # Stage 1：纯文本 Planner 只负责判断要打开哪个 App，不参与后续屏幕动作决策。
     template = load_prompt("planner_oneshot_harmony.md")
     if not template:
         template = load_prompt("planner.md")
@@ -956,6 +978,7 @@ def run_planner(task):
         raise RuntimeError(error_message) from ex
 
 def launch_app(app_name):
+    # Planner 可能返回中文 App 名，也可能直接返回 bundleName；两种都兼容。
     if not app_name:
         return False
         
@@ -991,7 +1014,7 @@ def run_task_in_app_agent(task):
     LAST_TASK_COMPLETED = False
     history_list = []
 
-    # 1. Build and send prefix (fixed across all steps)
+    # 1. 构造固定 prefix 并让端侧模型预填 KV；后续循环只发送 variable 部分。
     prefix_file = "e2e_v2_agent_prefix_noreason.md" if NO_REASON_MODE else "e2e_v2_agent_prefix.md"
     prefix_template = load_prompt(prefix_file)
     if not prefix_template:
@@ -1017,7 +1040,7 @@ def run_task_in_app_agent(task):
         send_request_best_effort({"type": "agent_reset"}, "Agent fallback reset")
         return run_task_in_app(task)
 
-    # 2. Step loop
+    # 2. 截图-推理-执行循环。每一轮都把动作摘要写入 history，减少重复操作。
     for step_idx in range(MAX_STEPS):
         print(f"\n--- [Agent Step {step_idx+1}/{MAX_STEPS}] ---")
 
@@ -1072,12 +1095,13 @@ def run_task_in_app_agent(task):
             print (f"[Agent] Appended JSON data to history: {history_list[-1]}")
         time.sleep(0.7)
 
-    # 3. Cleanup agent mode
+    # 3. 收尾重置 Agent 模式，释放端侧 KV 复用状态。
     print(">> [Agent] Resetting agent mode...")
     send_request_best_effort({"type": "agent_reset"}, "Agent 模式收尾重置")
 
 
 def run_task_in_app(task):
+    # 旧版普通模式：每一步发送完整图文 prompt，不做 prefix KV 复用，便于 fallback/debug。
     global LAST_TASK_COMPLETED
     LAST_TASK_COMPLETED = False
     history_list = []
@@ -1177,10 +1201,10 @@ if __name__ == "__main__":
                 refresh_hdc_forwarding()
                 reset_driver()
                 
-                # 1. 确保环境干净
+                # 1. 确保 App 端任务和模型上下文干净；preserve_execution 保留浮窗执行态。
                 send_request_best_effort({"type": "clear", "preserve_execution": True}, "任务开始前清理状态")
                 
-                # 2. Stage 1: Planner 解析意图并启动 App
+                # 2. Stage 1：Planner 解析意图并启动目标 App。
                 app_name = run_planner(task)
                 if app_name == "__USER_CANCELLED__":
                     print(">> [Planner] 用户取消任务，跳过后续 Decider。")
@@ -1192,10 +1216,10 @@ if __name__ == "__main__":
                         print(">> 等待 App 启动加载完成...")
                         time.sleep(1.3)
                     
-                    # 3. 再次清空上下文 (隔离 Planner 的纯文本历史和后续的图文历史)
+                    # 3. 再次清空上下文，隔离 Planner 的纯文本历史和后续图文历史。
                     send_request_best_effort({"type": "clear", "preserve_execution": True}, "Planner 后清理上下文")
 
-                    # 4. Stage 2: 任务在 App 内循环执行
+                    # 4. Stage 2：任务在目标 App 内循环执行。
                     if USE_AGENT_MODE:
                         run_task_in_app_agent(task)
                     else:

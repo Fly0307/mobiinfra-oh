@@ -15,6 +15,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
+import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 
 interface ServerFile {
   name: string;
@@ -28,25 +29,20 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-const DEFAULT_WIRELESS_IP = '192.168.137.195:33117';
-const DEFAULT_MODEL_SERVER_URL = 'http://166.111.53.96:9123';
-const DEFAULT_HDC_SERVER_URL = 'http://192.168.137.1:9124';
-const DEFAULT_CLOUD_BASE_URL = 'http://166.111.53.96:7003';
-const DEFAULT_CLOUD_API_KEY = 'mobiagent-key';
-const LEGACY_WIRELESS_IPS: string[] = [
-  '101.5.155.98:35729',
-  '192.168.137.172:35963',
-  '192.168.137.55:35963',
-  '192.168.137.55:33117'
-];
-
-PersistentStorage.persistProp('wirelessIp', DEFAULT_WIRELESS_IP);
-PersistentStorage.persistProp('serverIp', DEFAULT_MODEL_SERVER_URL);
-PersistentStorage.persistProp('hdcServerIp', DEFAULT_HDC_SERVER_URL);
-PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_CLOUD_BASE_URL);
-PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_CLOUD_BASE_URL);
-PersistentStorage.persistProp('cloudApiKey', DEFAULT_CLOUD_API_KEY);
-PersistentStorage.persistProp('cloudDeciderModel', '');
+PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
+PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
+PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
+PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
+PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+PersistentStorage.persistProp('endpointDefault.serverIp', '');
+PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
+PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
+PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
+PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
 
 @Entry
 @Component
@@ -68,13 +64,13 @@ struct Index {
   @State collectionModule: number = 1;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
-  @StorageLink('serverIp') serverIp: string = DEFAULT_MODEL_SERVER_URL;
-  @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_HDC_SERVER_URL;
-  @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_WIRELESS_IP;
-  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
-  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_CLOUD_BASE_URL;
-  @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_CLOUD_API_KEY;
-  @StorageLink('cloudDeciderModel') cloudDeciderModel: string = '';
+  @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
+  @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
+  @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
+  @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+  @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+  @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
+  @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -186,24 +182,33 @@ struct Index {
   }
 
   private migrateDefaultEndpointValues(): void {
-    if (this.hdcServerIp === 'http://166.111.53.96:9124') {
-      this.hdcServerIp = DEFAULT_HDC_SERVER_URL;
+    this.serverIp = this.migrateEndpointValue(this.serverIp, DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
+      LEGACY_ENDPOINT_CONFIG.modelDownloadServerUrls, 'endpointDefault.serverIp');
+    this.hdcServerIp = this.migrateEndpointValue(this.hdcServerIp, DEFAULT_ENDPOINT_CONFIG.hdcServerUrl,
+      LEGACY_ENDPOINT_CONFIG.hdcServerUrls, 'endpointDefault.hdcServerIp');
+    this.wirelessIp = this.migrateEndpointValue(this.wirelessIp, DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget,
+      LEGACY_ENDPOINT_CONFIG.wirelessHdcTargets, 'endpointDefault.wirelessIp');
+    this.cloudPlannerBaseUrl = this.migrateEndpointValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
+      LEGACY_ENDPOINT_CONFIG.cloudPlannerBaseUrls, 'endpointDefault.cloudPlannerBaseUrl');
+    this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
+      LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
+    this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
+      LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
+    this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
+      LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
+  }
+
+  private migrateEndpointValue(currentValue: string, configuredDefault: string, legacyDefaults: string[],
+    snapshotKey: string, treatEmptyAsDefault: boolean = true): string {
+    let lastAppliedDefault = AppStorage.get(snapshotKey) as string;
+    let shouldUseConfiguredDefault = legacyDefaults.includes(currentValue) ||
+      (lastAppliedDefault !== undefined && lastAppliedDefault.length > 0 && currentValue === lastAppliedDefault);
+    if (treatEmptyAsDefault && currentValue.trim().length === 0) {
+      shouldUseConfiguredDefault = true;
     }
-    if (this.wirelessIp.trim().length === 0 || LEGACY_WIRELESS_IPS.includes(this.wirelessIp)) {
-      this.wirelessIp = DEFAULT_WIRELESS_IP;
-    }
-    if (this.cloudPlannerBaseUrl === 'http://166.111.53.96:8001') {
-      this.cloudPlannerBaseUrl = DEFAULT_CLOUD_BASE_URL;
-    }
-    if (this.cloudDeciderBaseUrl === 'http://166.111.53.96:8000') {
-      this.cloudDeciderBaseUrl = DEFAULT_CLOUD_BASE_URL;
-    }
-    if (this.cloudApiKey.trim().length === 0) {
-      this.cloudApiKey = DEFAULT_CLOUD_API_KEY;
-    }
-    if (this.cloudDeciderModel === 'decider' || this.cloudDeciderModel === 'decider_model') {
-      this.cloudDeciderModel = '';
-    }
+    let nextValue = shouldUseConfiguredDefault ? configuredDefault : currentValue;
+    AppStorage.setOrCreate(snapshotKey, configuredDefault);
+    return nextValue;
   }
 
   private prepareCustomOpp(): boolean {
@@ -872,9 +877,9 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    this.appendCloudLog('准备切换到云端 Agent 路由，复用 9126...');
+    this.appendCloudLog(`准备切换到云端 Agent 路由，复用 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}...`);
     this.agentRouter.useCloud();
-    this.agentRouter.start(9126, this.filesDir);
+    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
@@ -904,7 +909,7 @@ struct Index {
 
   private startLocalBackend(): void {
     this.agentRouter.useLocal();
-    this.agentRouter.start(9126, this.filesDir);
+    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -1162,7 +1167,7 @@ struct Index {
           .fontSize(13)
           .fontColor('#6F7684')
           .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:9123', text: this.serverIp })
+        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl, text: this.serverIp })
           .height(42)
           .width('100%')
           .fontSize(13)
@@ -1178,7 +1183,7 @@ struct Index {
           .fontSize(13)
           .fontColor('#6F7684')
           .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:9124', text: this.hdcServerIp })
+        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
           .height(42)
           .width('100%')
           .fontSize(13)
@@ -1192,7 +1197,7 @@ struct Index {
           .fontColor('#6F7684')
           .width('100%')
         Row() {
-          TextInput({ placeholder: '手机无线调试地址，例如 192.168.137.195:33117', text: this.wirelessIp })
+          TextInput({ placeholder: '手机无线调试地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
@@ -1383,7 +1388,7 @@ struct Index {
             .fontSize(13)
             .fontColor('#6F7684')
             .width('100%')
-          TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:7003', text: this.cloudPlannerBaseUrl })
+          TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, text: this.cloudPlannerBaseUrl })
             .height(42)
             .width('100%')
             .fontSize(13)
@@ -1396,7 +1401,7 @@ struct Index {
             .fontSize(13)
             .fontColor('#6F7684')
             .width('100%')
-          TextInput({ placeholder: 'http://服务器IP:端口，例如 http://166.111.53.96:7003', text: this.cloudDeciderBaseUrl })
+          TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl, text: this.cloudDeciderBaseUrl })
             .height(42)
             .width('100%')
             .fontSize(13)
@@ -1441,7 +1446,7 @@ struct Index {
             .fontColor('#11182F')
             .width('100%')
             .margin({ bottom: 12 })
-          TextInput({ placeholder: 'HDC Server，例如 http://192.168.137.1:9124', text: this.hdcServerIp })
+          TextInput({ placeholder: 'HDC Server，默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
             .height(42)
             .width('100%')
             .fontSize(13)
@@ -1451,7 +1456,7 @@ struct Index {
             .margin({ bottom: 10 })
             .onChange((val: string) => { this.hdcServerIp = val; })
           Row() {
-            TextInput({ placeholder: '无线 HDC 地址，例如 192.168.137.195:33117', text: this.wirelessIp })
+            TextInput({ placeholder: '无线 HDC 地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
               .height(42)
               .layoutWeight(1)
               .fontSize(13)
@@ -1516,7 +1521,7 @@ struct Index {
             this.agentRouter.submitCloudTask(this.cloudUserInput);
             AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
             this.resetCloudLog(`任务已下发：${this.cloudUserInput}`);
-            this.appendCloudLog('等待 PC 侧 harmony_agent.py 轮询 9126。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。');
+            this.appendCloudLog(`等待 PC 侧 harmony_agent.py 轮询 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。`);
             this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
           })
 

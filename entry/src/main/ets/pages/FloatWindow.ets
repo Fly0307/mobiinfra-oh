@@ -2,6 +2,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 
 // 后台浮窗页面：展示 AppStorage.floatText 中的实时模型输出/Agent 状态，
 // 并提供“终止”入口通知 AgentExecutionController 请求取消当前任务。
+// 注意：全屏边缘流光由 pages/EdgeFlowWindow 承载，本页面只保留小型控制面板。
 @Entry
 @Component
 struct FloatWindow {

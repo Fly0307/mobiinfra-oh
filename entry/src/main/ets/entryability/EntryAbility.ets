@@ -1,14 +1,26 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 
 const DOMAIN = 0x0000;
+const FLOAT_PANEL_WIDTH = 430;
+const FLOAT_PANEL_HEIGHT = 96;
+const FLOAT_PANEL_RIGHT_MARGIN = 30;
+const FLOAT_PANEL_BOTTOM_MARGIN = 68;
+const DEFAULT_DISPLAY_WIDTH = 1080;
+const DEFAULT_DISPLAY_HEIGHT = 2340;
+
+interface DisplaySize {
+  width: number;
+  height: number;
+}
 
 // 应用主 Ability：加载 Index 页面，并在 Agent 执行期间协调后台浮窗、
 // 长时任务权限和“从浮窗回到主应用”的能力。
 export default class EntryAbility extends UIAbility {
+  private edgeFlowWindow: window.Window | null = null;
   private floatWindow: window.Window | null = null;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -114,8 +126,80 @@ export default class EntryAbility extends UIAbility {
     this.destroyFloatWindow();
   }
 
-  private createFloatWindow() {
-    // 后台浮窗只承载实时状态和终止按钮，不负责模型推理或任务调度。
+  private getDisplaySize(): DisplaySize {
+    try {
+      let defaultDisplay = display.getDefaultDisplaySync();
+      return {
+        width: defaultDisplay.width,
+        height: defaultDisplay.height
+      };
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to get display size. Cause: %{public}s', JSON.stringify(err));
+    }
+    return {
+      width: DEFAULT_DISPLAY_WIDTH,
+      height: DEFAULT_DISPLAY_HEIGHT
+    };
+  }
+
+  private createFloatWindow(): void {
+    // 后台任务由两层悬浮窗组成：全屏不可触透明流光层 + 可点击的小型状态面板。
+    this.createEdgeFlowWindow(() => {
+      this.createFloatPanelWindow();
+    });
+  }
+
+  private createEdgeFlowWindow(onReady: () => void): void {
+    if (this.edgeFlowWindow) {
+      this.edgeFlowWindow.showWindow();
+      onReady();
+      return;
+    }
+    let config: window.Configuration = {
+      name: 'MnnLlmChatEdgeFlowWindow',
+      windowType: window.WindowType.TYPE_FLOAT,
+      ctx: this.context
+    };
+
+    window.createWindow(config).then((win: window.Window) => {
+      this.edgeFlowWindow = win;
+      let displaySize = this.getDisplaySize();
+      win.resize(displaySize.width, displaySize.height);
+      win.moveWindowTo(0, 0);
+      try {
+        win.setWindowBackgroundColor('#00000000');
+      } catch (err) {
+        hilog.error(DOMAIN, 'testTag', 'Failed to configure edge flow window. Cause: %{public}s', JSON.stringify(err));
+      }
+      win.setWindowTouchable(false).catch((err: Error) => {
+        hilog.error(DOMAIN, 'testTag', 'Failed to disable edge flow window touch. Cause: %{public}s',
+          JSON.stringify(err));
+      });
+      win.setUIContent('pages/EdgeFlowWindow', (err) => {
+        if (err.code) {
+          hilog.error(DOMAIN, 'testTag', 'Failed to load edge flow window content. Cause: %{public}s',
+            JSON.stringify(err));
+          onReady();
+          return;
+        }
+        win.showWindow();
+        try {
+          win.setWindowBackgroundColor('#00000000');
+        } catch (error) {
+          hilog.error(DOMAIN, 'testTag', 'Failed to keep edge flow window transparent. Cause: %{public}s',
+            JSON.stringify(error));
+        }
+        onReady();
+        hilog.info(DOMAIN, 'testTag', 'Transparent edge flow window created and shown');
+      });
+    }).catch((err: Error) => {
+      hilog.error(DOMAIN, 'testTag', 'Failed to create edge flow window. Cause: ' + JSON.stringify(err));
+      onReady();
+    });
+  }
+
+  private createFloatPanelWindow(): void {
+    // 小型浮窗只承载实时状态和终止按钮，不负责模型推理或任务调度。
     if (this.floatWindow) {
       this.floatWindow.showWindow();
       return;
@@ -128,8 +212,12 @@ export default class EntryAbility extends UIAbility {
 
     window.createWindow(config).then((win: window.Window) => {
       this.floatWindow = win;
-      win.resize(430, 96);
-      win.moveWindowTo(620, 1570);
+      let displaySize = this.getDisplaySize();
+      win.resize(FLOAT_PANEL_WIDTH, FLOAT_PANEL_HEIGHT);
+      win.moveWindowTo(
+        Math.max(0, displaySize.width - FLOAT_PANEL_WIDTH - FLOAT_PANEL_RIGHT_MARGIN),
+        Math.max(0, displaySize.height - FLOAT_PANEL_HEIGHT - FLOAT_PANEL_BOTTOM_MARGIN)
+      );
       win.setUIContent('pages/FloatWindow', (err) => {
         if (err.code) {
           hilog.error(DOMAIN, 'testTag', 'Failed to load float window content. Cause: %{public}s', JSON.stringify(err));
@@ -151,6 +239,14 @@ export default class EntryAbility extends UIAbility {
         this.floatWindow = null;
       }).catch((err: Error) => {
         hilog.error(DOMAIN, 'testTag', 'Failed to destroy float window. Cause: ' + JSON.stringify(err));
+      });
+    }
+    if (this.edgeFlowWindow) {
+      this.edgeFlowWindow.destroyWindow().then(() => {
+        hilog.info(DOMAIN, 'testTag', 'Edge flow window destroyed');
+        this.edgeFlowWindow = null;
+      }).catch((err: Error) => {
+        hilog.error(DOMAIN, 'testTag', 'Failed to destroy edge flow window. Cause: ' + JSON.stringify(err));
       });
     }
   }

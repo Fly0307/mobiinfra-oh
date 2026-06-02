@@ -528,7 +528,7 @@ export class WorkflowStorage {
   static defaultAlipayWorkflow(): string {
     return WorkflowStorage.basicGuiWorkflow('查看支付宝上的用户账单信息', [
       WorkflowStorage.openAppStep('支付宝'),
-      WorkflowStorage.guiTaskStep(2, '点击我的，进入账单页面，查看账单信息'),
+      WorkflowStorage.guiTaskStep(2, '点击我的，进入账单页面，查看当前界面账单信息'),
       WorkflowStorage.screenshotStep(3, 'alipay_bill.jpg'),
       WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
         '帮我用一段话简要总结当前页面上的支付宝账单信息（不要使用markdown格式，也不要分点，尽量按照账单出现顺序描述每一条记录的类型、对象、金额和时间）')
@@ -568,7 +568,7 @@ export class WorkflowStorage {
   static defaultEleWorkflow(): string {
     return WorkflowStorage.basicGuiWorkflow('查看饿了么上的用户订单信息', [
       WorkflowStorage.openAppStep('饿了么'),
-      WorkflowStorage.guiTaskStep(2, '点击“我的”图标，点击我的订单，查看当前订单'),
+      WorkflowStorage.guiTaskStep(2, '点击“我的”图标，点击我的订单，结束任务'),
       WorkflowStorage.screenshotStep(3, 'ele_order.jpg'),
       WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
         '帮我用一段话简要总结当前页面上的外卖订单信息（不要使用markdown格式，按照第一单，第二单，第三单的顺序描述，包括点了什么，花了多少钱）')

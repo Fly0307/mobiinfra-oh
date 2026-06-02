@@ -879,15 +879,73 @@ struct Index {
     }
   }
 
-  startCloudBackend() {
+  private hdcServerApiUrl(path: string): string {
+    let url = this.hdcServerIp.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url + path;
+  }
+
+  private logAgentLoopReady(message: string, useCloudLog: boolean): void {
+    if (useCloudLog) {
+      this.appendCloudLog(message);
+      return;
+    }
+    this.output = message;
+  }
+
+  private async ensurePcAgentLoopReady(useCloudLog: boolean): Promise<boolean> {
+    if (this.hdcServerIp.trim().length === 0) {
+      this.logAgentLoopReady('HDC Server 未配置，无法恢复 PC Agent loop。', useCloudLog);
+      return false;
+    }
+
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: '{}',
+        connectTimeout: 5000,
+        readTimeout: 10000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(this.hdcServerApiUrl('/api/agent_loop/ensure'), options);
+      let body = String(resp.result);
+      let message = body;
+      try {
+        let parsed = ArkJSON.parse(body) as JsonMap;
+        let parsedMessage = parsed['message'];
+        if (typeof parsedMessage === 'string') {
+          message = parsedMessage;
+        }
+      } catch (e) {
+      }
+      if (resp.responseCode >= 200 && resp.responseCode < 300) {
+        this.logAgentLoopReady('PC Agent loop 已恢复：' + message, useCloudLog);
+        return true;
+      }
+      this.logAgentLoopReady('PC Agent loop 恢复失败：HTTP ' + resp.responseCode + ' ' + message, useCloudLog);
+      return false;
+    } catch (err) {
+      let e = err as BusinessError;
+      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + e.message, useCloudLog);
+      return false;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  async startCloudBackend(): Promise<boolean> {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
-      return;
+      return false;
     }
     this.appendCloudLog(`准备切换到云端 Agent 路由，复用 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}...`);
     // 云端模式仍复用 PC 侧同一套 TCP 协议；区别是 App 通过 AgentRouterServer 转发到云端模型。
     this.agentRouter.useCloud();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
@@ -916,10 +974,10 @@ struct Index {
     }
   }
 
-  private startLocalBackend(): void {
+  private async startLocalBackend(): Promise<boolean> {
     // 本地模式下 9126 请求会进入 libentry.so/MNN，本函数只负责切换路由并启动监听。
     this.agentRouter.useLocal();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -928,14 +986,13 @@ struct Index {
     }
 
     this.agentRouter.useLocal();
-    if (!this.agentRouter.running()) {
-      this.output = '未检测到本地 PC 控制后端，正在自动启动...';
-      this.startLocalBackend();
+    if (!await this.startLocalBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(false);
   }
 
-  private ensureCloudAgentBackend(): boolean {
+  private async ensureCloudAgentBackend(): Promise<boolean> {
     // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -943,11 +1000,10 @@ struct Index {
     }
 
     this.agentRouter.useCloud();
-    if (!this.agentRouter.running()) {
-      this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
-      this.startCloudBackend();
+    if (!await this.startCloudBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(true);
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
@@ -1097,7 +1153,7 @@ struct Index {
             .layoutWeight(1)
             .onClick(async () => {
               if (!await this.ensureLocalModelLoaded()) { return; }
-              this.startLocalBackend();
+              await this.startLocalBackend();
             })
           Row() {
             Checkbox({ name: 'autoConfirm', group: 'settings' })
@@ -1521,12 +1577,12 @@ struct Index {
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
-          .onClick(() => {
+          .onClick(async () => {
             if (this.cloudUserInput.trim().length === 0) {
               this.appendCloudLog('请先输入云端 Agent 任务。');
               return;
             }
-            if (!this.ensureCloudAgentBackend()) {
+            if (!await this.ensureCloudAgentBackend()) {
               return;
             }
             this.agentRouter.submitCloudTask(this.cloudUserInput);
@@ -1542,7 +1598,7 @@ struct Index {
             .layoutWeight(1)
             .backgroundColor('#607D8B')
             .borderRadius(14)
-            .onClick(() => { this.startCloudBackend(); })
+            .onClick(async () => { await this.startCloudBackend(); })
           Row() {
             Checkbox({ name: 'cloudAutoConfirm', group: 'cloudSettings' })
               .select(this.cloudAutoConfirm)

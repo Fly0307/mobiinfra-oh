@@ -3,15 +3,15 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { GalleryAnalysisResult, GalleryEmbeddingRecord, GalleryScanSession } from './GalleryTypes';
 
 const GALLERY_LOG_DIR = 'gallery-log';
-const DAILY_DIR = 'daily';
+const DAILY_LOG_DIR = 'daily-log';
 const ITEMS_DIR = 'items';
 const EMBEDDINGS_DIR = 'embeddings';
-const THUMBNAILS_DIR = 'thumbnails';
 const SCAN_SESSION_FILE = 'scan-session.json';
-const METADATA_START = '<!-- GALLERY_DAILY_METADATA';
+const METADATA_START = '<!-- DAILY_LOG_METADATA';
 const METADATA_END = '-->';
 
 interface GalleryDailyMetadata {
+  source: string;
   date: string;
   category: string;
   latest_entry_index: number;
@@ -24,7 +24,7 @@ export class GalleryStorage {
   }
 
   static dailyRoot(filesDir: string): string {
-    return GalleryStorage.rootDir(filesDir) + '/' + DAILY_DIR;
+    return GalleryStorage.rootDir(filesDir) + '/' + DAILY_LOG_DIR;
   }
 
   static itemRoot(filesDir: string): string {
@@ -33,10 +33,6 @@ export class GalleryStorage {
 
   static embeddingRoot(filesDir: string): string {
     return GalleryStorage.rootDir(filesDir) + '/' + EMBEDDINGS_DIR;
-  }
-
-  static thumbnailRoot(filesDir: string): string {
-    return GalleryStorage.rootDir(filesDir) + '/' + THUMBNAILS_DIR;
   }
 
   static scanSessionPath(filesDir: string): string {
@@ -65,10 +61,6 @@ export class GalleryStorage {
 
   static embeddingPathById(filesDir: string, date: string, id: string): string {
     return GalleryStorage.embeddingDateDir(filesDir, date) + '/' + id + '.json';
-  }
-
-  static thumbnailPathById(filesDir: string, date: string, id: string): string {
-    return GalleryStorage.thumbnailDateDir(filesDir, date) + '/' + id + '.jpg';
   }
 
   static hasResult(filesDir: string, date: string, id: string): boolean {
@@ -108,7 +100,6 @@ export class GalleryStorage {
     GalleryStorage.ensureDirectory(GalleryStorage.dailyRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.itemRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.embeddingRoot(filesDir));
-    GalleryStorage.ensureDirectory(GalleryStorage.thumbnailRoot(filesDir));
   }
 
   static readText(path: string): string {
@@ -147,7 +138,7 @@ export class GalleryStorage {
     GalleryStorage.ensureWorkspace(filesDir);
     let results: GalleryAnalysisResult[] = [];
     GalleryStorage.collectItems(GalleryStorage.itemRoot(filesDir), results);
-    results.sort((left: GalleryAnalysisResult, right: GalleryAnalysisResult) => right.createdAt - left.createdAt);
+    GalleryStorage.sortResultsByRecent(results);
     return results;
   }
 
@@ -216,9 +207,7 @@ export class GalleryStorage {
     GalleryStorage.ensureWorkspace(filesDir);
     let safeDate = GalleryStorage.safeDate(date);
     let results = GalleryStorage.loadResultsForDate(filesDir, safeDate);
-    results.sort((left: GalleryAnalysisResult, right: GalleryAnalysisResult) => {
-      return left.createdAt - right.createdAt;
-    });
+    GalleryStorage.sortResultsByRecent(results);
 
     let dailyDir = GalleryStorage.dailyDateDir(filesDir, safeDate);
     GalleryStorage.deletePathRecursively(dailyDir);
@@ -231,6 +220,7 @@ export class GalleryStorage {
         continue;
       }
       let metadata: GalleryDailyMetadata = {
+        source: 'gallery',
         date: safeDate,
         category: category,
         latest_entry_index: group.length,
@@ -255,6 +245,10 @@ export class GalleryStorage {
               lines.push('   - ' + detail);
             }
           }
+        }
+        let locationText = GalleryStorage.dailyLocationText(group[j]);
+        if (locationText.length > 0) {
+          lines.push('   - 位置：' + locationText);
         }
         lines.push('');
       }
@@ -303,8 +297,28 @@ export class GalleryStorage {
       embeddingStatus: result.embeddingStatus,
       embeddingDimension: result.embeddingDimension,
       error: result.error,
+      latitude: result.latitude,
+      longitude: result.longitude,
       createdAt: createdAt
     };
+  }
+
+  private static dailyLocationText(result: GalleryAnalysisResult): string {
+    if (result.latitude === undefined || result.longitude === undefined) {
+      return '';
+    }
+    let latitude = Number(result.latitude);
+    let longitude = Number(result.longitude);
+    if (isNaN(latitude) || isNaN(longitude)) {
+      return '';
+    }
+    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+      return '';
+    }
+    if (latitude === 0 && longitude === 0) {
+      return '';
+    }
+    return latitude.toFixed(6) + ', ' + longitude.toFixed(6);
   }
 
   private static collectItems(dir: string, results: GalleryAnalysisResult[]): void {
@@ -335,10 +349,6 @@ export class GalleryStorage {
     return GalleryStorage.embeddingRoot(filesDir) + '/' + GalleryStorage.safeDate(date);
   }
 
-  private static thumbnailDateDir(filesDir: string, date: string): string {
-    return GalleryStorage.thumbnailRoot(filesDir) + '/' + GalleryStorage.safeDate(date);
-  }
-
   private static dailyDateDir(filesDir: string, date: string): string {
     return GalleryStorage.dailyRoot(filesDir) + '/' + GalleryStorage.safeDate(date);
   }
@@ -353,21 +363,43 @@ export class GalleryStorage {
     return results;
   }
 
+  private static sortResultsByRecent(results: GalleryAnalysisResult[]): void {
+    results.sort((left: GalleryAnalysisResult, right: GalleryAnalysisResult) => {
+      let rightTime = GalleryStorage.resultTime(right);
+      let leftTime = GalleryStorage.resultTime(left);
+      if (rightTime !== leftTime) {
+        return rightTime - leftTime;
+      }
+      return right.createdAt - left.createdAt;
+    });
+  }
+
+  private static resultTime(item: GalleryAnalysisResult): number {
+    let dateText = item.date && item.date.length > 0 ? item.date : '';
+    if (dateText.length >= 10) {
+      let parsed = new Date(dateText + ' 00:00:00').getTime();
+      if (!isNaN(parsed)) {
+        return parsed;
+      }
+    }
+    return item.createdAt;
+  }
+
   private static safeDate(date: string): string {
     return date.replace(/[\\/:*?"<>|]+/g, '_');
   }
 
   private static safeCategory(category: string): string {
-    let value = category.trim().toLowerCase();
-    if (value === 'chat' || value === 'food' || value === 'shopping' || value === 'travel' ||
-      value === 'health' || value === 'document' || value === 'work') {
+    let value = category.trim();
+    if (value === '聊天' || value === '餐饮' || value === '购物' || value === '出行' ||
+      value === '健康' || value === '文档' || value === '工作') {
       return value;
     }
-    return 'other';
+    return '其他';
   }
 
   private static categoryOrder(): string[] {
-    return ['chat', 'food', 'shopping', 'travel', 'health', 'document', 'work', 'other'];
+    return ['聊天', '文档', '餐饮', '购物', '出行', '健康', '工作', '其他'];
   }
 
   private static dailyInlineText(value: string): string {

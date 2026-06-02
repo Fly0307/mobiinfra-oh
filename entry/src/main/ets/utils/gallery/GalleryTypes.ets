@@ -18,6 +18,8 @@ export interface GalleryPhotoInput {
   uri: string;
   id?: string;
   date?: string;
+  latitude?: number;
+  longitude?: number;
 }
 
 export interface GalleryScanItem {
@@ -57,6 +59,8 @@ export interface GalleryAnalysisResult {
   embeddingStatus: string;
   embeddingDimension: number;
   error: string;
+  latitude?: number;
+  longitude?: number;
   createdAt: number;
 }
 

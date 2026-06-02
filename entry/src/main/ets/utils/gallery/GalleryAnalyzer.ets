@@ -249,7 +249,7 @@ export class GalleryAnalyzer {
             uri: uri,
             thumbnailUri: '',
             title: 'OCR 未命中关键信息',
-            category: 'other',
+            category: '其他',
             summary: 'OCR 关键词预筛未命中，已跳过模型分析。',
             details: [],
             tags: [],
@@ -261,6 +261,8 @@ export class GalleryAnalyzer {
             embeddingStatus: 'skipped',
             embeddingDimension: 0,
             error: '',
+            latitude: input.latitude,
+            longitude: input.longitude,
             createdAt: new Date().getTime()
           };
           this.logInfo('item skipped keyword filter id=' + id);
@@ -290,7 +292,7 @@ export class GalleryAnalyzer {
       onProgress(progress);
 
       let modelJson = this.parseModelJson(rawModelText);
-      let category = this.nonEmpty(modelJson.category, 'other');
+      let category = this.nonEmpty(modelJson.category, '其他');
       let details = this.detailListFrom(modelJson.details);
       let tags = modelJson.tags ? modelJson.tags : [];
       let keywords = this.keywordsFrom(tags, ocrText);
@@ -350,6 +352,8 @@ export class GalleryAnalyzer {
         embeddingStatus: embeddingStatus,
         embeddingDimension: embeddingDimension,
         error: '',
+        latitude: input.latitude,
+        longitude: input.longitude,
         createdAt: new Date().getTime()
       };
       this.logInfo('item done id=' + id + ' elapsedMs=' + this.elapsed(itemStartedAt));
@@ -366,7 +370,7 @@ export class GalleryAnalyzer {
         uri: uri,
         thumbnailUri: '',
         title: '分析失败',
-        category: 'other',
+        category: '其他',
         summary: this.errorMessage(e),
         details: [],
         tags: [],
@@ -450,7 +454,7 @@ export class GalleryAnalyzer {
     } catch (e) {
       return {
         title: '图库图片',
-        category: 'other',
+        category: '其他',
         summary: raw.length > 140 ? raw.substring(0, 140) : raw,
         details: [],
         tags: []

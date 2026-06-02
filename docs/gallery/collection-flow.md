@@ -60,16 +60,16 @@ photoAccessHelper.getPhotoAccessHelper(context)
 继续行为：
 
 - 页面读取 `scan-session.json`。
-- 只把 `queued` 图片重新送入分析管线。
-- `done`、`skipped`、`failed` 不会重复处理。
-- 每张 queued 图片仍会先检查 `items/<date>/<id>.json`，命中则转为 `skipped`。
+- 把 `queued` 和上次临时失败的 `failed` 图片重新送入分析管线。
+- `done`、`skipped` 不会重复处理。
+- 每张重新送入的图片仍会先检查 `items/<date>/<id>.json`，命中成功缓存则转为 `skipped`。
 
 进度统计：
 
 - `总数`：本次全库扫描生成的图片数量。
-- `已处理`：`done + skipped + failed`。
-- `待处理`：仍为 `queued` 的图片数量。
-- `跳过`：命中缓存的图片数量。
+- `已完成`：`done + skipped`。
+- `未完成`：尚未完成的图片数量，包含未领取、正在执行和上次失败待重试的任务。
+- `跳过`：命中缓存或 OCR 关键词预筛过滤的图片数量。
 - `失败`：分析失败的图片数量。
 
 ## Shared Pipeline
@@ -85,7 +85,7 @@ photoAccessHelper.getPhotoAccessHelper(context)
 7. 对标题、类别、摘要和 OCR 文本拼接后做 embedding。
 8. 写入 `embeddings/<date>/<id>.json`。
 9. 写入 `items/<date>/<id>.json`。
-10. 批次结束后，从本批次涉及日期的 items 重建 daily markdown。
+10. 批次结束后，从本批次涉及日期的 items 重建 daily-log markdown。
 
 ## Operational Notes
 

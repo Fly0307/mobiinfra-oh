@@ -1,6 +1,6 @@
 # Gallery Storage Format
 
-图库采集结果按日期拆分存储。`items` 和 `embeddings` 使用单图单文件，支持并发写入；`daily` 是按天、按类别生成的 Markdown 派生索引，批次结束后从当天 items 统一重建。
+图库采集结果按日期拆分存储。`items` 和 `embeddings` 使用单图单文件，支持并发写入；`daily-log` 是按天、按类别生成的 Markdown 派生索引，批次结束后从当天 items 统一重建。
 
 ## Directory
 
@@ -8,10 +8,10 @@
 
 ```text
 gallery-log/
-  daily/
+  daily-log/
     2026-06-01/
-      chat.md
-      food.md
+      聊天.md
+      餐饮.md
   items/
     2026-06-01/
       gallery_123.json
@@ -24,7 +24,7 @@ gallery-log/
 
 目录职责：
 
-- `daily/<date>/<category>.md` 面向人读，按类别拆分摘要。
+- `daily-log/<date>/<category>.md` 面向人读，按类别拆分摘要。
 - `items/<date>/<id>.json` 面向程序查重和读取完整分析结果，不按类别拆分。
 - `embeddings/<date>/<id>.json` 面向向量检索，不按类别拆分。
 
@@ -32,19 +32,20 @@ gallery-log/
 
 ## Daily Markdown
 
-每个 daily 文件对应一天内的一个类别，例如 `gallery-log/daily/2026-06-01/food.md`。
+每个 daily-log 文件对应一天内的一个类别，例如 `gallery-log/daily-log/2026-06-01/餐饮.md`。
 
 ```md
-<!-- GALLERY_DAILY_METADATA
+<!-- DAILY_LOG_METADATA
 {
+  "source": "gallery",
   "date": "2026-06-01",
-  "category": "food",
+  "category": "餐饮",
   "latest_entry_index": 2,
   "item_count": 2
 }
 -->
 
-# 2026-06-01 / food
+# 2026-06-01 / 餐饮
 
 1. [gallery_456] 早餐聊天截图: 微信聊天中提到去楼下买豆浆、包子和鸡蛋。
    - 对方要求购买豆浆和两个包子。
@@ -60,8 +61,8 @@ gallery-log/
 
 - `metadata` 用于快速读取日期、类别和条目数量。
 - 正文每条保留 `id/title/summary`，并展开模型提取的 `details` 细节，方便人读和快速检索。
-- daily 记录具体但仍保持轻量；完整 OCR、原始模型返回、embedding 引用等使用 `id` 到 `items` 目录查详情。
-- daily 不作为事实源；同一天任意 item 更新后，可从 `items/<date>` 全量重建 `daily/<date>/*.md`。
+- daily-log 记录具体但仍保持轻量；完整 OCR、原始模型返回、embedding 引用等使用 `id` 到 `items` 目录查详情。
+- daily-log 不作为事实源；同一天任意 item 更新后，可从 `items/<date>` 全量重建 `daily-log/<date>/*.md`。
 
 ## Item JSON
 
@@ -72,7 +73,7 @@ gallery-log/
   "id": "gallery_456",
   "uri": "file://media/Photo/12/IMG_0001.jpg",
   "title": "早餐聊天截图",
-  "category": "food",
+  "category": "餐饮",
   "summary": "微信聊天中提到去楼下买豆浆、包子和鸡蛋。",
   "details": [
     "对方要求购买豆浆和两个包子。",
@@ -94,8 +95,8 @@ gallery-log/
 
 字段说明：
 
-- `category` 是稳定分桶字段，当前支持 `chat`、`food`、`shopping`、`travel`、`health`、`document`、`work`、`other`。
-- `summary` 是给 daily 文件和列表页展示的短摘要。
+- `category` 是稳定分桶字段，当前支持 `聊天`、`文档`、`餐饮`、`购物`、`出行`、`健康`、`工作`、`其他`。
+- `summary` 是给 daily-log 文件和列表页展示的短摘要。
 - `details` 是具体细节数组，用于记录人物、地点、商户、金额、时间、订单号、聊天事项、待办等可核查信息。
 - `date` 是图片归档日期，第一版使用分析日期；接入图库 asset 元数据后应使用拍摄或创建日期。
 - `ocrText` 是鸿蒙本地 OCR 文本；跳过 OCR 时为空。
@@ -132,8 +133,8 @@ itemPath = gallery-log/items/<date>/<id>.json
   "id": "gallery_456",
   "uri": "file://media/Photo/12/IMG_0001.jpg",
   "date": "2026-06-01",
-  "category": "food",
-  "text": "早餐聊天截图\nfood\n微信聊天中提到去楼下买豆浆、包子和鸡蛋。\n你帮我买个豆浆...",
+  "category": "餐饮",
+  "text": "早餐聊天截图\n餐饮\n微信聊天中提到去楼下买豆浆、包子和鸡蛋。\n你帮我买个豆浆...",
   "vector": [0.0123, -0.0456],
   "model": "BAAI/bge-m3",
   "mode": "remote",
@@ -146,14 +147,14 @@ itemPath = gallery-log/items/<date>/<id>.json
 - `text` 是用于 embedding 的拼接文本，包含标题、类别、摘要和 OCR。
 - `mode=remote` 表示云端 SiliconFlow/bge-m3。
 - `mode=huawei_local` 表示预留的华为端侧 embedding 接口或本地 fallback。
-- daily 文件不保存向量，避免 markdown 体积膨胀。
+- daily-log 文件不保存向量，避免 markdown 体积膨胀。
 
 ## Write Flow
 
 1. 写入 `embeddings/<date>/<id>.json`，得到 `embeddingRef`。
 2. 写入 `items/<date>/<id>.json`。
-3. 批次结束后收集本批次涉及的日期，从 `items/<date>/*.json` 重建 `daily/<date>/<category>.md`。
+3. 批次结束后收集本批次涉及的日期，从 `items/<date>/*.json` 重建 `daily-log/<date>/<category>.md`。
 
 ## Notes
 
-旧的 `gallery/results.json` 和 `gallery/embeddings.json` 聚合文件不再作为图库分析的目标格式。新的结构优先支持大量图片、items/embeddings 并发写入、按日期清理，以及后续向量检索。daily 是派生视图，损坏或格式升级时可以从 items 重新生成。
+旧的 `gallery/results.json`、`gallery/embeddings.json` 聚合文件以及 `gallery-log/daily` 目录不再作为图库分析的目标格式。新的结构优先支持大量图片、items/embeddings 并发写入、按日期清理，以及后续向量检索。daily-log 是派生视图，损坏或格式升级时可以从 items 重新生成。

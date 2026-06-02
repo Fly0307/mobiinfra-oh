@@ -25,6 +25,13 @@ export interface EmbeddingCloudConfig {
   model: string;
 }
 
+export interface GalleryMonthSummaryResult {
+  title: string;
+  summary: string;
+  suggestion: string;
+  rawText: string;
+}
+
 interface CloudImageUrl {
   url: string;
 }
@@ -211,6 +218,89 @@ export class CloudModelClient {
     return this.chatMessages(baseUrl, [message], apiKey);
   }
 
+  async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
+    let prompt = '你是一个图库月度洞察助手。' +
+      '\n\n请根据用户提供的月度图库聚合数据和图片摘要清单，判断这个月用户大概做了什么，并生成一个适合展示在“图库洞察”页的月度总结。' +
+      '\n严格基于输入数据，不要编造具体人名、地点、城市、店名或未出现的事件。' +
+      '\n如果只能推测，请使用“可能”“疑似”“看起来像”。' +
+      '\n不要使用“人生高光”“最重要”等强判断。' +
+      '\nsummary 必须包含 2 到 3 个具体观察，优先引用输入里的时间、类别、数量、平台、活动或事项线索；不要只写“内容丰富”“记录较多”这类笼统表述。' +
+      '\n\n输出 JSON，不要输出 Markdown，格式如下：' +
+      '\n{' +
+      '\n  "title": "最多14个字的标题",' +
+      '\n  "summary": "80到140字的月度总结，说明这个月大概做了什么",' +
+      '\n  "suggestion": "一句可执行整理建议"' +
+      '\n}' +
+      '\n\n月度图库聚合数据：\n' + monthAggregateText;
+    let message: CloudChatMessage = {
+      role: 'user',
+      content: prompt
+    };
+    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000);
+    let payloadText = this.extractJsonObject(content);
+    let payload: Record<string, Object> = {};
+    try {
+      payload = ArkJSON.parse(payloadText) as Record<string, Object>;
+    } catch (e) {
+      return {
+        title: '',
+        summary: content.trim(),
+        suggestion: '',
+        rawText: content
+      };
+    }
+    let title = this.getPayloadString(payload, 'title');
+    if (title.length === 0) {
+      title = this.getPayloadString(payload, '标题');
+    }
+    let summary = this.getPayloadString(payload, 'summary');
+    if (summary.length === 0) {
+      summary = this.getPayloadString(payload, '摘要');
+    }
+    let suggestion = this.getPayloadString(payload, 'suggestion');
+    if (suggestion.length === 0) {
+      suggestion = this.getPayloadString(payload, 'suggestions');
+    }
+    if (suggestion.length === 0) {
+      suggestion = this.getPayloadString(payload, '建议');
+    }
+    let reason = this.getPayloadString(payload, 'reason');
+    if (summary.length === 0 && title.length === 0 && suggestion.length === 0) {
+      throw new Error(reason.length > 0 ? reason : 'AI 月度总结返回缺少 title/summary/suggestion');
+    }
+    return {
+      title: title,
+      summary: summary.length > 0 ? summary : content.trim(),
+      suggestion: suggestion,
+      rawText: content
+    };
+  }
+
+  private getPayloadString(payload: Record<string, Object>, key: string): string {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return '';
+    }
+    return String(value).trim();
+  }
+
+  private extractJsonObject(raw: string): string {
+    let text = raw.trim();
+    if (text.startsWith('```')) {
+      let first = text.indexOf('\n');
+      let last = text.lastIndexOf('```');
+      if (first >= 0 && last > first) {
+        text = text.substring(first + 1, last).trim();
+      }
+    }
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return text.substring(start, end + 1);
+    }
+    return text;
+  }
+
   async chatPlanner(prompt: string, config: CloudModelConfig): Promise<string> {
     let textPart: CloudTextPart = {
       type: 'text',
@@ -263,10 +353,11 @@ export class CloudModelClient {
       type: 'text',
       text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
         '\n只返回 JSON，不要 Markdown。字段：title, category, summary, details, tags, importance。' +
-        '\ncategory 从 food, travel, shopping, health, document, chat, work, other 中选择。' +
+        '\ntitle、summary、details、tags 都必须使用中文；除非图片里原文就是英文品牌或专有名词，否则不要输出英文。' +
+        '\ncategory 必须从 聊天、文档、餐饮、购物、出行、健康、工作、其他 中选择，不要输出英文。' +
         '\nsummary 用 1 句概括这张图的核心信息。' +
         '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
-        '\ntags 输出 3 到 8 个短标签。' +
+        '\ntags 输出 3 到 8 个中文短标签，每个标签尽量 2 到 6 个汉字，不要输出英文标签。' +
         '\nimportance 是 0 到 1 的数字。' +
         '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)')
     };

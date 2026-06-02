@@ -248,6 +248,14 @@ export class GalleryStorage {
         lines.push((j + 1).toString() + '. [' + group[j].id + '] ' +
           GalleryStorage.dailyInlineText(group[j].title) + ': ' +
           GalleryStorage.dailyInlineText(group[j].summary));
+        if (group[j].details && group[j].details.length > 0) {
+          for (let k = 0; k < group[j].details.length; k++) {
+            let detail = GalleryStorage.dailyInlineText(group[j].details[k]);
+            if (detail.length > 0) {
+              lines.push('   - ' + detail);
+            }
+          }
+        }
         lines.push('');
       }
       GalleryStorage.writeText(GalleryStorage.dailyCategoryPath(filesDir, safeDate, category), lines.join('\n'));
@@ -285,6 +293,7 @@ export class GalleryStorage {
       title: result.title,
       category: category,
       summary: result.summary,
+      details: result.details ? result.details : [],
       tags: result.tags ? result.tags : [],
       ocrText: result.ocrText,
       rawModelText: result.rawModelText,

@@ -262,8 +262,11 @@ export class CloudModelClient {
     let textPart: CloudTextPart = {
       type: 'text',
       text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
-        '\n只返回 JSON，不要 Markdown。字段：title, category, summary, tags, importance。' +
+        '\n只返回 JSON，不要 Markdown。字段：title, category, summary, details, tags, importance。' +
         '\ncategory 从 food, travel, shopping, health, document, chat, work, other 中选择。' +
+        '\nsummary 用 1 句概括这张图的核心信息。' +
+        '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
+        '\ntags 输出 3 到 8 个短标签。' +
         '\nimportance 是 0 到 1 的数字。' +
         '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)')
     };

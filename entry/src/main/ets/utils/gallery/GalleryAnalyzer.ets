@@ -6,6 +6,7 @@ import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryEmbeddingService } from './GalleryEmbeddingService';
 import { GalleryStorage } from './GalleryStorage';
+import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import {
   GalleryAnalysisResult,
   GalleryAnalyzeOptions,
@@ -80,6 +81,7 @@ export class GalleryAnalyzer {
     onResult?: (result: GalleryAnalysisResult) => void, options?: GalleryAnalyzeOptions): Promise<GalleryAnalysisResult[]> {
     this.logInfo('batch start selected=' + inputs.length +
       ' skipOcr=' + config.skipOcr +
+      ' keywordFilter=' + config.useOcrKeywordFilter +
       ' ocrConcurrency=' + config.ocrConcurrency +
       ' modelConcurrency=' + config.modelConcurrency +
       ' embeddingConcurrency=' + config.embeddingConcurrency +
@@ -124,7 +126,7 @@ export class GalleryAnalyzer {
         if (options && options.onItemDone) {
           options.onItemDone(input, outcome);
         }
-        if (onResult) {
+        if (onResult && outcome.skippedByKeyword !== true) {
           onResult(result);
         }
         return true;
@@ -194,13 +196,7 @@ export class GalleryAnalyzer {
     }
     this.logInfo('item start id=' + id + ' uri=' + uri);
     let cached = GalleryStorage.loadResult(this.filesDir, date, id);
-    if (cached) {
-      if (!cached.thumbnailUri || cached.thumbnailUri.length === 0) {
-        cached.thumbnailUri = await this.ensureThumbnail(uri, date, id);
-        if (cached.thumbnailUri.length > 0) {
-          GalleryStorage.writeResult(this.filesDir, cached);
-        }
-      }
+    if (cached && this.isSuccessfulCachedResult(cached)) {
       progress.ocrDone += 1;
       progress.modelDone += 1;
       progress.embeddingDone += 1;
@@ -211,6 +207,9 @@ export class GalleryAnalyzer {
         cached: true
       };
     }
+    if (cached) {
+      this.logInfo('item retry cached failure id=' + id + ' date=' + date + ' error=' + cached.error);
+    }
     try {
       let decodeStartedAt = new Date().getTime();
       this.logInfo('decode start id=' + id);
@@ -218,7 +217,7 @@ export class GalleryAnalyzer {
       imageSource = image.createImageSource(imageFile.fd);
       pixelMap = await imageSource.createPixelMap();
       this.logInfo('decode done id=' + id + ' elapsedMs=' + this.elapsed(decodeStartedAt));
-      let thumbnailUri = await this.writeThumbnail(pixelMap, date, id);
+      await this.scaleForAnalysis(pixelMap, config.imageScale, id);
 
       await gates.ocr.acquire();
       let ocrText = '';
@@ -236,6 +235,42 @@ export class GalleryAnalyzer {
       }
       progress.ocrDone += 1;
       onProgress(progress);
+
+      if (config.useOcrKeywordFilter) {
+        let keywordMatch = GalleryKeywordFilter.matchUsefulKeywords(ocrText);
+        this.logInfo('keyword filter id=' + id + ' matched=' + keywordMatch.matched +
+          ' keywords=' + keywordMatch.keywords.join(','));
+        if (!keywordMatch.matched) {
+          progress.modelDone += 1;
+          progress.embeddingDone += 1;
+          onProgress(progress);
+          let skippedResult: GalleryAnalysisResult = {
+            id: id,
+            uri: uri,
+            thumbnailUri: '',
+            title: 'OCR 未命中关键信息',
+            category: 'other',
+            summary: 'OCR 关键词预筛未命中，已跳过模型分析。',
+            details: [],
+            tags: [],
+            ocrText: ocrText,
+            rawModelText: '',
+            keywords: [],
+            date: date,
+            embeddingRef: '',
+            embeddingStatus: 'skipped',
+            embeddingDimension: 0,
+            error: '',
+            createdAt: new Date().getTime()
+          };
+          this.logInfo('item skipped keyword filter id=' + id);
+          return {
+            result: skippedResult,
+            cached: true,
+            skippedByKeyword: true
+          };
+        }
+      }
 
       let packStartedAt = new Date().getTime();
       this.logInfo('pack image start id=' + id);
@@ -256,6 +291,7 @@ export class GalleryAnalyzer {
 
       let modelJson = this.parseModelJson(rawModelText);
       let category = this.nonEmpty(modelJson.category, 'other');
+      let details = this.detailListFrom(modelJson.details);
       let tags = modelJson.tags ? modelJson.tags : [];
       let keywords = this.keywordsFrom(tags, ocrText);
       let resultText = this.resultText(modelJson, ocrText);
@@ -300,10 +336,11 @@ export class GalleryAnalyzer {
       let result: GalleryAnalysisResult = {
         id: id,
         uri: uri,
-        thumbnailUri: thumbnailUri,
+        thumbnailUri: '',
         title: this.nonEmpty(modelJson.title, '图库图片'),
         category: category,
         summary: this.nonEmpty(modelJson.summary, ocrText.length > 0 ? ocrText.substring(0, Math.min(80, ocrText.length)) : '未识别到明确文本'),
+        details: details,
         tags: tags,
         ocrText: ocrText,
         rawModelText: rawModelText,
@@ -327,10 +364,11 @@ export class GalleryAnalyzer {
       let result: GalleryAnalysisResult = {
         id: id,
         uri: uri,
-        thumbnailUri: pixelMap ? await this.writeThumbnail(pixelMap, date, id) : '',
+        thumbnailUri: '',
         title: '分析失败',
         category: 'other',
         summary: this.errorMessage(e),
+        details: [],
         tags: [],
         ocrText: '',
         rawModelText: '',
@@ -393,63 +431,6 @@ export class GalleryAnalyzer {
     }
   }
 
-  private async writeThumbnail(pixelMap: image.PixelMap, date: string, id: string): Promise<string> {
-    let packer = image.createImagePacker();
-    try {
-      let data = await packer.packToData(pixelMap, {
-        format: 'image/jpeg',
-        quality: 72
-      });
-      let path = GalleryStorage.thumbnailPathById(this.filesDir, date, id);
-      let dir = path.substring(0, path.lastIndexOf('/'));
-      GalleryStorage.ensureDirectory(dir);
-      GalleryStorage.writeBytes(path, data);
-      return path;
-    } catch (e) {
-      this.logError('thumbnail failed id=' + id + ' error=' + this.errorMessage(e));
-      return '';
-    } finally {
-      try {
-        await packer.release();
-      } catch (e) {
-      }
-    }
-  }
-
-  private async ensureThumbnail(uri: string, date: string, id: string): Promise<string> {
-    let imageFile: fileIo.File | null = null;
-    let imageSource: image.ImageSource | null = null;
-    let pixelMap: image.PixelMap | null = null;
-    try {
-      imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
-      imageSource = image.createImageSource(imageFile.fd);
-      pixelMap = await imageSource.createPixelMap();
-      return await this.writeThumbnail(pixelMap, date, id);
-    } catch (e) {
-      this.logError('cached thumbnail failed id=' + id + ' error=' + this.errorMessage(e));
-      return '';
-    } finally {
-      if (pixelMap) {
-        try {
-          await pixelMap.release();
-        } catch (e) {
-        }
-      }
-      if (imageSource) {
-        try {
-          await imageSource.release();
-        } catch (e) {
-        }
-      }
-      if (imageFile) {
-        try {
-          await fileIo.close(imageFile);
-        } catch (e) {
-        }
-      }
-    }
-  }
-
   private parseModelJson(raw: string): GalleryModelJson {
     let text = raw.trim();
     if (text.startsWith('```')) {
@@ -471,6 +452,7 @@ export class GalleryAnalyzer {
         title: '图库图片',
         category: 'other',
         summary: raw.length > 140 ? raw.substring(0, 140) : raw,
+        details: [],
         tags: []
       };
     }
@@ -486,6 +468,10 @@ export class GalleryAnalyzer {
     }
     if (modelJson.summary && modelJson.summary.length > 0) {
       parts.push(modelJson.summary);
+    }
+    let details = this.detailListFrom(modelJson.details);
+    for (let i = 0; i < details.length; i++) {
+      parts.push(details[i]);
     }
     if (ocrText.length > 0) {
       parts.push(ocrText);
@@ -543,6 +529,49 @@ export class GalleryAnalyzer {
       return value.trim();
     }
     return fallback;
+  }
+
+  private detailListFrom(details: string[] | undefined): string[] {
+    let result: string[] = [];
+    if (!details) {
+      return result;
+    }
+    for (let i = 0; i < details.length && result.length < 8; i++) {
+      let value = String(details[i]).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (value.length > 0) {
+        result.push(value);
+      }
+    }
+    return result;
+  }
+
+  private isSuccessfulCachedResult(result: GalleryAnalysisResult): boolean {
+    return !result.error || result.error.trim().length === 0;
+  }
+
+  private normalizeImageScale(scale: number): number {
+    if (isNaN(scale)) {
+      return 0.25;
+    }
+    if (scale < 0.1) {
+      return 0.1;
+    }
+    if (scale > 1) {
+      return 1;
+    }
+    return scale;
+  }
+
+  private async scaleForAnalysis(pixelMap: image.PixelMap, scale: number, id: string): Promise<void> {
+    let normalizedScale = this.normalizeImageScale(scale);
+    if (normalizedScale >= 1) {
+      this.logInfo('image scale skipped id=' + id + ' scale=' + normalizedScale);
+      return;
+    }
+    let scaleStartedAt = new Date().getTime();
+    this.logInfo('image scale start id=' + id + ' scale=' + normalizedScale);
+    await pixelMap.scale(normalizedScale, normalizedScale);
+    this.logInfo('image scale done id=' + id + ' elapsedMs=' + this.elapsed(scaleStartedAt));
   }
 
   private errorMessage(e: Object): string {

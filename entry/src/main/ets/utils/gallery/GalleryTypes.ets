@@ -3,6 +3,7 @@ export interface GalleryAnalyzerConfig {
   apiKey: string;
   model: string;
   skipOcr: boolean;
+  useOcrKeywordFilter: boolean;
   ocrConcurrency: number;
   modelConcurrency: number;
   embeddingConcurrency: number;
@@ -10,6 +11,7 @@ export interface GalleryAnalyzerConfig {
   embeddingBaseUrl: string;
   embeddingApiKey: string;
   embeddingModel: string;
+  imageScale: number;
 }
 
 export interface GalleryPhotoInput {
@@ -45,6 +47,7 @@ export interface GalleryAnalysisResult {
   title: string;
   category: string;
   summary: string;
+  details: string[];
   tags: string[];
   ocrText: string;
   rawModelText: string;
@@ -60,6 +63,7 @@ export interface GalleryAnalysisResult {
 export interface GalleryAnalyzeOutcome {
   result: GalleryAnalysisResult;
   cached: boolean;
+  skippedByKeyword?: boolean;
 }
 
 export interface GalleryAnalyzeOptions {
@@ -97,6 +101,7 @@ export interface GalleryModelJson {
   title?: string;
   category?: string;
   summary?: string;
+  details?: string[];
   tags?: string[];
   importance?: number;
 }

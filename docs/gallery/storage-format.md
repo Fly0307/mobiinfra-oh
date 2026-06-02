@@ -4,7 +4,7 @@
 
 ## Directory
 
-应用内实际根目录为 `filesDir/gallery-log`。
+应用内实际根目录为 `filesDir/gallery-log`。当前调试包在真机上的参考路径为 `/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files/gallery-log/`。
 
 ```text
 gallery-log/
@@ -47,15 +47,20 @@ gallery-log/
 # 2026-06-01 / food
 
 1. [gallery_456] 早餐聊天截图: 微信聊天中提到去楼下买豆浆、包子和鸡蛋。
+   - 对方要求购买豆浆和两个包子。
+   - 聊天发生在早餐时段，内容和楼下早餐店相关。
+   - 可作为当天早餐偏好和代买事项记录。
 
 2. [gallery_789] 早餐小票: 便利店早餐消费记录，包含豆浆、饭团和付款金额。
+   - 商品包含豆浆和饭团。
+   - 小票中保留了付款金额和消费商户。
 ```
 
 规则：
 
 - `metadata` 用于快速读取日期、类别和条目数量。
-- 正文每条只保留 `id/title/summary`，方便人读和快速检索。
-- 完整内容不要写进 daily 文件，使用 `id` 到 `items` 目录查详情。
+- 正文每条保留 `id/title/summary`，并展开模型提取的 `details` 细节，方便人读和快速检索。
+- daily 记录具体但仍保持轻量；完整 OCR、原始模型返回、embedding 引用等使用 `id` 到 `items` 目录查详情。
 - daily 不作为事实源；同一天任意 item 更新后，可从 `items/<date>` 全量重建 `daily/<date>/*.md`。
 
 ## Item JSON
@@ -69,6 +74,11 @@ gallery-log/
   "title": "早餐聊天截图",
   "category": "food",
   "summary": "微信聊天中提到去楼下买豆浆、包子和鸡蛋。",
+  "details": [
+    "对方要求购买豆浆和两个包子。",
+    "聊天发生在早餐时段，内容和楼下早餐店相关。",
+    "可作为当天早餐偏好和代买事项记录。"
+  ],
   "tags": ["早餐", "微信", "买饭"],
   "ocrText": "你帮我买个豆浆和两个包子...",
   "rawModelText": "{\"title\":\"早餐聊天截图\",...}",
@@ -86,6 +96,7 @@ gallery-log/
 
 - `category` 是稳定分桶字段，当前支持 `chat`、`food`、`shopping`、`travel`、`health`、`document`、`work`、`other`。
 - `summary` 是给 daily 文件和列表页展示的短摘要。
+- `details` 是具体细节数组，用于记录人物、地点、商户、金额、时间、订单号、聊天事项、待办等可核查信息。
 - `date` 是图片归档日期，第一版使用分析日期；接入图库 asset 元数据后应使用拍摄或创建日期。
 - `ocrText` 是鸿蒙本地 OCR 文本；跳过 OCR 时为空。
 - `rawModelText` 保留大模型原始返回，便于调试和重新解析。

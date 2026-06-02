@@ -15,6 +15,7 @@
 entry/src/main/python/__pycache__/
 entry/src/main/python/*.jpeg
 MobiAgent/
+AGENTS.md
 AGENT.md*
 mobiagent/
 build-profile.json5*

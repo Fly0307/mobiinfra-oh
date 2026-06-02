@@ -13,6 +13,18 @@ export interface CloudModelConfig {
   deciderModel: string;
 }
 
+export interface GalleryCloudModelConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface EmbeddingCloudConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 interface CloudImageUrl {
   url: string;
 }
@@ -52,6 +64,19 @@ interface CloudChatChoice {
 
 interface CloudChatResponse {
   choices: CloudChatChoice[];
+}
+
+interface CloudEmbeddingRequest {
+  model: string;
+  input: string;
+}
+
+interface CloudEmbeddingItem {
+  embedding: number[];
+}
+
+interface CloudEmbeddingResponse {
+  data: CloudEmbeddingItem[];
 }
 
 export class CloudModelClient {
@@ -120,6 +145,20 @@ export class CloudModelClient {
       return url + '/chat/completions';
     }
     return url + '/v1/chat/completions';
+  }
+
+  private normalizeEmbeddingUrl(baseUrl: string): string {
+    let url = baseUrl.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    if (url.endsWith('/embeddings')) {
+      return url;
+    }
+    if (url.endsWith('/v1')) {
+      return url + '/embeddings';
+    }
+    return url + '/v1/embeddings';
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
@@ -210,6 +249,62 @@ export class CloudModelClient {
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       config.apiKey, config.deciderModel, 1024, 60000);
+  }
+
+  async analyzeGalleryImage(imageBase64: string, ocrText: string, config: GalleryCloudModelConfig): Promise<string> {
+    let imageUrl: CloudImageUrl = {
+      url: 'data:image/jpeg;base64,' + imageBase64
+    };
+    let imagePart: CloudImagePart = {
+      type: 'image_url',
+      image_url: imageUrl
+    };
+    let textPart: CloudTextPart = {
+      type: 'text',
+      text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
+        '\n只返回 JSON，不要 Markdown。字段：title, category, summary, tags, importance。' +
+        '\ncategory 从 food, travel, shopping, health, document, chat, work, other 中选择。' +
+        '\nimportance 是 0 到 1 的数字。' +
+        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)')
+    };
+    return this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.model, 1024, 90000);
+  }
+
+  async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {
+    let requestBody: CloudEmbeddingRequest = {
+      model: config.model,
+      input: input
+    };
+    let headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + (config.apiKey.length > 0 ? config.apiKey : 'EMPTY')
+    };
+    let requestOptions: http.HttpRequestOptions = {
+      method: http.RequestMethod.POST,
+      header: headers,
+      extraData: ArkJSON.stringify(requestBody),
+      connectTimeout: 10000,
+      readTimeout: 90000,
+      expectDataType: http.HttpDataType.STRING
+    };
+
+    let httpReq = http.createHttp();
+    this.registerActiveRequest(httpReq);
+    try {
+      let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new Error(`Embedding HTTP ${response.responseCode}: ${response.result}`);
+      }
+      let parsed = ArkJSON.parse(response.result as string) as CloudEmbeddingResponse;
+      if (parsed.data.length === 0) {
+        throw new Error('Embedding response has no vectors');
+      }
+      return parsed.data[0].embedding;
+    } finally {
+      this.unregisterActiveRequest(httpReq);
+      httpReq.destroy();
+    }
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {

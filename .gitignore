@@ -1,6 +1,7 @@
 /node_modules
 /oh_modules
 /local.properties
+/build-profile.json5
 /.idea
 **/build
 /.hvigor
@@ -15,3 +16,4 @@ entry/src/main/python/__pycache__/
 entry/src/main/python/*.jpeg
 MobiAgent/
 AGENT.md
+mobiagent/

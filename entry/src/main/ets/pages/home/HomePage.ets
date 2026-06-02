@@ -6,11 +6,13 @@ import {
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
 
+// “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
+    // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
     Row() {
       Text(icon)
         .fontSize(13)
@@ -35,6 +37,7 @@ export struct HomePage {
   }
 
   @Builder LifestyleItem(icon: string, title: string, desc: string, color: string) {
+    // 吃/穿/住/行画像摘要，当前为前端静态展示，后续可替换为真实画像数据。
     Column() {
       Text(icon).fontSize(13).fontColor(color).fontWeight(FontWeight.Bold).height(18).textAlign(TextAlign.Center).maxLines(1)
       Column() {
@@ -58,6 +61,7 @@ export struct HomePage {
   }
 
   @Builder RecommendCard(image: Resource, tag: string, title: string, desc: string, meta: string, color: string) {
+    // 推荐卡片横滑列表，统一图片、标签、标题和元信息的布局。
     Column() {
       Stack({ alignContent: Alignment.TopStart }) {
         Image(image).width('100%').height(116).objectFit(ImageFit.Cover)

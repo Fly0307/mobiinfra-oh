@@ -3,6 +3,8 @@ import { router } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction } from '@kit.ArkUI';
 
+// 运行日志页：可在原生日志 ring buffer 和云端 Agent 日志之间切换，
+// 用于调试模型加载、推理、HDC 通信和云端 Decider 输入输出。
 @Entry
 @Component
 struct LogView {
@@ -37,6 +39,7 @@ struct LogView {
   }
 
   reload() {
+    // Native 日志来自 libentry.so 的 getLogs；Cloud 日志来自 Index.ets 写入的 AppStorage。
     try {
       if (this.logSource === 0) {
         const text = native.getLogs() || '(empty native runtime logs)'

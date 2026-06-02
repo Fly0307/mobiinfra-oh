@@ -1,3 +1,4 @@
+// 跨页面头部组件：保持“数据归家”各 tab 的品牌区和隐私状态样式一致。
 @Component
 export struct AppHeader {
   title: string = '';

@@ -1,3 +1,4 @@
+// ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
 export const loadModel: (configPath: string) => string;
 export const generate: (prompt: string) => string;
 export const chat: (userMessage: string) => string;
@@ -5,16 +6,16 @@ export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
 export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
-// Agent mode (prefix KV cache reuse)
+// Agent 模式：先 agentPrefill 固定 prefix，再多次 agentStep 复用 KV，最后 agentReset 释放上下文。
 export const agentPrefill: (prefix: string) => Promise<string>;
 export const agentStep: (variablePart: string, onToken?: (token: string) => void) => Promise<string>;
 export const agentReset: () => Promise<string>;
 
-// OMC Visual Block NPU test
+// OMC 视觉分块 NPU 测试入口。
 export const omcTest: (modelDir: string) => Promise<string>;
 
-// Op precision test (CPU vs HiAI delegate)
-// config: "preset" for built-in test suite, or "ic,oc,ih,iw,kh,kw,sh,sw,group" for custom
+// 算子精度测试（CPU vs HiAI delegate）。
+// config: "preset" 使用内置测试集；或 "ic,oc,ih,iw,kh,kw,sh,sw,group" 指定单个卷积形状。
 export const opTest: (config: string) => Promise<string>;
 
 // HiAI conv-path override for A/B testing: 'auto' | 'matmul' | 'conv'

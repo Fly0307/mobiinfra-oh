@@ -4,6 +4,8 @@ import pasteboard from '@ohos.pasteboard';
 import promptAction from '@ohos.promptAction';
 import { common } from '@kit.AbilityKit';
 
+// 算子/视觉分块测试页：调用 libentry.so 的 opTest/omcTest，
+// 用于比较 MNN CPU、HiAI delegate 和 OM/OMC 输出精度及性能。
 @Entry
 @Component
 struct OpTest {
@@ -39,6 +41,7 @@ struct OpTest {
   }
 
   private runWithMode(cfg: string, banner: string) {
+    // 每次运行前先把 UI 上的后端/量化/CPU 精度配置写入原生侧环境，再启动异步测试。
     this.running = true
     native.setConvMode(this.convMode)
     native.setConvQuant(this.convQuant)

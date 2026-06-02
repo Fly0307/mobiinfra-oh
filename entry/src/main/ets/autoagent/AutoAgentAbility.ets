@@ -1,6 +1,8 @@
 import { AccessibilityExtensionAbility, AccessibilityEvent } from '@kit.AccessibilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
+// 预留的无障碍扩展能力：当前 PC 侧主要通过 HDC/hmdriver2 执行动作，
+// 这里保留 context 和事件日志，便于未来改为 App 内无障碍执行点击/滑动。
 export default class AutoAgentAbility extends AccessibilityExtensionAbility {
   async onConnect() {
     hilog.info(0x0000, 'AutoAgent', 'Accessibility Service Connected');

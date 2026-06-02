@@ -83,6 +83,7 @@ interface ToolOutput {
   question: string;
   response: string;
   daily_log_path?: string;
+  structured_output?: WorkflowJsonMap;
   deferred?: boolean;
 }
 
@@ -310,6 +311,10 @@ export class WorkflowRunner {
         if (AgentExecutionController.isCancelRequested()) {
           throw new Error('用户取消 workflow');
         }
+        await AgentExecutionController.waitIfPaused();
+        if (AgentExecutionController.isCancelRequested()) {
+          throw new Error('用户取消 workflow');
+        }
         let localId = String(steps[i].id);
         let actualId = actualPrefix.length === 0 ? localId : actualPrefix + '.' + localId;
         let stopped = await this.executeOneStep(steps[i], actualId, aliases);
@@ -327,7 +332,11 @@ export class WorkflowRunner {
     let started = new Date().getTime() / 1000;
     let localId = String(step.id);
     this.log('Step ' + actualId + ' started: ' + step.type);
-    AgentExecutionController.updateFloatText('Workflow Step ' + actualId + ': ' + step.type);
+    AgentExecutionController.updateFloatText(this.buildStepFloatText(step, actualId));
+    await AgentExecutionController.waitIfPaused();
+    if (AgentExecutionController.isCancelRequested()) {
+      throw new Error('用户取消 workflow');
+    }
     try {
       let resolved = this.shouldDeferNestedResolution(step) ? step : this.resolveStep(step);
       let output = await this.executeStep(resolved, actualId);
@@ -482,7 +491,11 @@ export class WorkflowRunner {
       if (AgentExecutionController.isCancelRequested()) {
         throw new Error('用户取消 workflow');
       }
-      AgentExecutionController.updateFloatText('Workflow Decider ' + (i + 1) + '/' + MAX_GUI_STEPS);
+      await AgentExecutionController.waitIfPaused();
+      if (AgentExecutionController.isCancelRequested()) {
+        throw new Error('用户取消 workflow');
+      }
+      AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + MAX_GUI_STEPS + ': 识别屏幕并决策');
       let shot = await this.hdcBridge.screenshot();
       let imageBase64 = shot.image_b64 || '';
       let width = shot.width || 0;
@@ -492,6 +505,7 @@ export class WorkflowRunner {
       this.log('Decider response:\n' + response);
       let parsed = this.extractJsonMap(response);
       let action = this.getMapString(parsed, 'action').toLowerCase();
+      AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
         stopReason = 'TASK_COMPLETED_' + action;
         break;
@@ -575,8 +589,13 @@ export class WorkflowRunner {
     if (question.length === 0 || image.length === 0) {
       throw new Error('vlm_qa requires question and image');
     }
+    let requiresStructuredOutput = inputs.json_schema !== undefined && inputs.json_schema !== null;
     let prompt = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
-    if (mode === 'summary' && inputs.blocking !== true) {
+    if (requiresStructuredOutput) {
+      prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
+        ArkJSON.stringify(inputs.json_schema);
+    }
+    if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
       this.pendingSummaryJobs.push(this.startSummaryJob(actualId, prompt, image));
       let deferredOutput: ToolOutput = {
@@ -599,6 +618,9 @@ export class WorkflowRunner {
       question: question,
       response: response
     };
+    if (requiresStructuredOutput) {
+      output.structured_output = this.extractJsonMap(response);
+    }
     if (mode === 'summary') {
       let dailyLogPath = this.appendDailySummaryLog(response);
       output.daily_log_path = dailyLogPath;
@@ -1008,6 +1030,31 @@ export class WorkflowRunner {
   private getMapString(map: WorkflowJsonMap, key: string): string {
     let value = map[key];
     return typeof value === 'string' ? value : '';
+  }
+
+  private buildStepFloatText(step: WorkflowStep, actualId: string): string {
+    if (step.task_description && step.task_description.length > 0) {
+      return 'Step ' + actualId + ': ' + step.task_description;
+    }
+    if (step.action && step.action.length > 0) {
+      return 'Step ' + actualId + ': ' + step.action;
+    }
+    if (step.name && step.name.length > 0) {
+      return 'Step ' + actualId + ': ' + step.name;
+    }
+    return 'Step ' + actualId + ': ' + step.type;
+  }
+
+  private buildDeciderFloatText(parsed: WorkflowJsonMap, index: number): string {
+    let action = this.getMapString(parsed, 'action');
+    if (action.length === 0) {
+      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': 等待动作';
+    }
+    let text = this.getMapString(parsed, 'text');
+    if (text.length > 0) {
+      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action + ' ' + text;
+    }
+    return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action;
   }
 
   private toNumber(value: WorkflowJsonValue | undefined, fallback: number): number {

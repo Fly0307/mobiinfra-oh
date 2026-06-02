@@ -23,6 +23,7 @@ HIAIModelManager &HIAIModelManager::GetInstance() {
 namespace {
 
 size_t GetDeviceID() {
+    // 遍历 HarmonyOS NNRT 设备，优先选择 HiAI NPU 设备 HIAI_F。
     size_t deviceID = 0;
     const size_t *allDevicesID = nullptr;
     uint32_t deviceCount = 0;
@@ -46,6 +47,7 @@ size_t GetDeviceID() {
 }
 
 void DestroyTensors(std::vector<NN_Tensor*> &tensors) {
+    // NN_Tensor 由 OH_NNTensor_Create 分配，必须逐个 Destroy 后再清空 vector。
     for (auto t : tensors) {
         OH_NNTensor_Destroy(&t);
     }
@@ -58,6 +60,7 @@ void DestroyTensors(std::vector<NN_Tensor*> &tensors) {
 // ================================================================
 
 OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_t modelSize) {
+    // 从 .omc 内存 buffer 构建离线模型，编译完成后保存 executor_ 供后续 RunSync。
     if (executor_ != nullptr) {
         OH_LOG_ERROR(LOG_APP, "executor already initialized");
         return OH_NN_FAILED;
@@ -68,7 +71,7 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
     }
     // (compatibility check skipped — CANNKit header may not be available)
 
-    // Build from buffer
+    // OMC 已经是离线模型，这里直接从内存 buffer 构造 Compilation。
     OH_NNCompilation *compilation = OH_NNCompilation_ConstructWithOfflineModelBuffer(modelData, modelSize);
     if (compilation == nullptr) {
         OH_LOG_ERROR(LOG_APP, "OH_NNCompilation_ConstructWithOfflineModelBuffer failed");
@@ -90,7 +93,7 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
         return ret;
     }
 
-    // Set NPU as preferred execution device (same as CANNKit demo)
+    // 设置 NPU 优先执行，逻辑与 CANNKit demo 保持一致。
     HiAI_BandMode bandMode = HiAI_BandMode::HIAI_BANDMODE_NORMAL;
     ret = HMS_HiAIOptions_SetBandMode(compilation, bandMode);
     OH_LOG_INFO(LOG_APP, "SetBandMode ret=%{public}d", ret);
@@ -119,6 +122,7 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
 }
 
 OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
+    // 根据 executor 描述自动创建输入/输出 tensor，调用方只需要按 index 写入数据。
     if (executor_ == nullptr) {
         OH_LOG_ERROR(LOG_APP, "executor not initialized");
         return OH_NN_FAILED;
@@ -157,6 +161,7 @@ OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
 }
 
 OH_NN_ReturnCode HIAIModelManager::SetInputData(int idx, const float *data, size_t count) {
+    // 当前测试链路只写 float 输入；count=0 时按 tensor buffer 大小自动填满。
     if (idx < 0 || (size_t)idx >= inputTensors_.size()) return OH_NN_FAILED;
     if (data == nullptr) return OH_NN_FAILED;
     void *buf = OH_NNTensor_GetDataBuffer(inputTensors_[idx]);
@@ -171,6 +176,7 @@ OH_NN_ReturnCode HIAIModelManager::SetInputData(int idx, const float *data, size
 }
 
 OH_NN_ReturnCode HIAIModelManager::RunModel() {
+    // 同步执行 OMC 模型，主要用于和 MNN CPU 输出做精度/性能对比。
     if (!executor_ || inputTensors_.empty() || outputTensors_.empty()) {
         OH_LOG_ERROR(LOG_APP, "model/io not ready");
         return OH_NN_FAILED;
@@ -184,6 +190,7 @@ OH_NN_ReturnCode HIAIModelManager::RunModel() {
 }
 
 std::vector<float> HIAIModelManager::GetOutputData(int idx) {
+    // 输出 tensor buffer 转成扁平 float vector，便于上层做误差统计。
     std::vector<float> out;
     if (idx < 0 || (size_t)idx >= outputTensors_.size()) return out;
     void *d = OH_NNTensor_GetDataBuffer(outputTensors_[idx]);

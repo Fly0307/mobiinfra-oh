@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
+    "pages/EdgeFlowWindow",
     "pages/FloatWindow",
     "pages/collection/CollectionGroupDetailPage",
     "pages/OpTest",

@@ -1,6 +1,7 @@
 import { accessibility } from '@kit.AccessibilityKit';
 
-// 这里是一个专门处理动态方法调用的帮助类，以避开严格校验
+// 无障碍手势注入辅助类。部分 HarmonyOS SDK 对 GesturePath 的构造类型暴露不稳定，
+// 所以这里通过 Reflect 动态访问，尽量绕开 ArkTS 严格类型校验带来的编译限制。
 export class AccessibilityWrapper {
   static async injectGesture(accContext: Object, x1: number, y1: number, x2: number, y2: number, duration: number): Promise<boolean> {
     try {

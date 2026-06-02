@@ -4,6 +4,8 @@ import { AppHeader } from '../../components/AppHeader';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowFileStats, WorkflowManagedFile, WorkflowTask } from '../../utils/WorkflowTypes';
 
+// 定时任务页：新版不再使用静态样例任务，而是从 App 沙箱中的 workflow JSON
+// 加载任务配置，并提供编辑、运行、daily-log/运行文件查看和清理能力。
 @Component
 export struct TaskPage {
   @Link taskScene: number;
@@ -25,12 +27,14 @@ export struct TaskPage {
   private filesDir: string = '';
 
   aboutToAppear(): void {
+    // workflow 配置和运行产物都保存在应用沙箱，进入页面时先定位 filesDir 再加载。
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     this.reloadTasks();
   }
 
   private reloadTasks(): void {
+    // WorkflowStorage 会在无配置时生成默认示例任务，页面只负责刷新状态。
     if (this.filesDir.length === 0) {
       return;
     }
@@ -45,6 +49,7 @@ export struct TaskPage {
   }
 
   private sceneTasks(): WorkflowTask[] {
+    // 任务按购物/外卖/娱乐/聊天场景分组，taskScene 由 Index.ets 通过 @Link 管理。
     let filtered: WorkflowTask[] = [];
     for (let i = 0; i < this.tasks.length; i++) {
       if (this.tasks[i].sceneId === this.taskScene) {
@@ -67,6 +72,7 @@ export struct TaskPage {
   }
 
   private saveEditor(): void {
+    // 编辑已有任务时保留启停状态和最近运行结果，只替换 workflow JSON 派生出的配置字段。
     try {
       let task = WorkflowStorage.createTaskFromJson(this.filesDir, this.taskScene, this.editorText, this.editingTaskId);
       if (this.editingTaskId.length > 0) {
@@ -105,6 +111,7 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
+    // 真实执行由 Index.ets 注入 onRunWorkflow；本页负责运行态、防重复点击和任务结果刷新。
     if (!task.enabled) {
       promptAction.showToast({ message: '任务已停用，请先打开开关', duration: 1500 });
       return;
@@ -213,6 +220,7 @@ export struct TaskPage {
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
+    // 文件查看器只读沙箱内受控目录，避免把任意路径暴露给 UI。
     this.fileViewerSelectedName = file.name;
     try {
       this.fileViewerText = WorkflowStorage.readText(file.path);
@@ -223,6 +231,7 @@ export struct TaskPage {
   }
 
   @Builder TaskCard(task: WorkflowTask) {
+    // 单个 workflow 任务卡片，展示运行状态、来源、最近消息，并提供运行/编辑入口。
     Column() {
       Row() {
         Text(task.icon).fontSize(17).fontColor(task.iconColor).fontWeight(FontWeight.Bold).width(58).height(58).textAlign(TextAlign.Center).backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8').borderRadius(16)
@@ -267,6 +276,7 @@ export struct TaskPage {
   }
 
   @Builder TaskSceneTab(label: string, index: number) {
+    // 横向场景筛选器：购物/外卖/娱乐/聊天。
     Text(label)
       .fontSize(14)
       .fontWeight(this.taskScene === index ? FontWeight.Bold : FontWeight.Regular)
@@ -282,6 +292,7 @@ export struct TaskPage {
   }
 
   @Builder EditorPanel() {
+    // JSON 编辑器直接编辑 workflow 原文，保存时由 WorkflowStorage 做结构校验和归档。
     if (this.editorOpen) {
       Column() {
         Row() {
@@ -330,6 +341,7 @@ export struct TaskPage {
   }
 
   @Builder TaskSceneList() {
+    // 根据当前场景渲染沙箱中的 workflow 任务；空状态提示用户新建 JSON 配置。
     if (this.sceneTasks().length === 0) {
       Column() {
         Text('当前场景暂无任务').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#11182F')
@@ -348,6 +360,7 @@ export struct TaskPage {
   }
 
   @Builder FileManagerPanel() {
+    // workflow 运行会生成配置、daily-log 和步骤输出，这里集中提供查看/清理入口。
     Column() {
       Text('Workflow 文件管理').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%')
       Text(this.fileStatsText).fontSize(12).fontColor('#6F7584').margin({ top: 7 }).width('100%')
@@ -422,6 +435,7 @@ export struct TaskPage {
   }
 
   @Builder FileViewerPanel() {
+    // 轻量只读文件查看器，用于快速确认 daily-log 或运行摘要内容。
     if (this.fileViewerOpen) {
       Column() {
         Row() {
@@ -502,11 +516,21 @@ export struct TaskPage {
                 Text('JSON 编排').fontSize(11).fontColor('#765BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F0ECFF').borderRadius(10).margin({ left: 10 })
               }
               Text('选择场景，使用 workflow JSON 采集并整理数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
-              Row() {
-                Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
-                Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
-                Text('聊天').fontSize(11).fontColor('#4B8BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFF5FF').borderRadius(10).margin({ left: 8 })
-              }.margin({ top: 12 })
+              Scroll() {
+                Row() {
+                  Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
+                  Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
+                  Text('娱乐').fontSize(11).fontColor('#8066FF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F2EEFF').borderRadius(10).margin({ left: 8 })
+                  Text('聊天').fontSize(11).fontColor('#4B8BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFF5FF').borderRadius(10).margin({ left: 8 })
+                  Text('生活').fontSize(11).fontColor('#D97706').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF7ED').borderRadius(10).margin({ left: 8 })
+                  Text('社交').fontSize(11).fontColor('#D9467D').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF1F5').borderRadius(10).margin({ left: 8 })
+                }
+              }
+              .width('100%')
+              .height(28)
+              .scrollable(ScrollDirection.Horizontal)
+              .scrollBar(BarState.Off)
+              .margin({ top: 12 })
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
             Column() {
               Text('+').fontSize(28).fontColor(Color.White).fontWeight(FontWeight.Regular)
@@ -538,11 +562,16 @@ export struct TaskPage {
             this.TaskSceneTab('娱乐', 2)
             Blank().width(10)
             this.TaskSceneTab('聊天', 3)
+            Blank().width(10)
+            this.TaskSceneTab('生活', 4)
+            Blank().width(10)
+            this.TaskSceneTab('社交', 5)
           }.padding({ left: 24, right: 24 })
         }
         .width('100%')
         .height(46)
         .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
         .margin({ top: 22, bottom: 18 })
 
         this.TaskSceneList()

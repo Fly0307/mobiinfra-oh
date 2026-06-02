@@ -15,6 +15,8 @@ except Exception as ex:
 
 NO_REASON_MODE = False
 
+# PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
+# 服务端在确认设备已连接后自动拉起 harmony_agent.py。
 class HDCServerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/api/workflow':
@@ -27,14 +29,14 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 cmd = data.get('cmd', '')
                 if cmd:
                     print(f">> 正在执行远程指令: {cmd}")
-                    # 使用 subprocess 执行系统命令
+                    # App 端只发送受控调试命令；这里保留 shell=True 以兼容 hdc/tconn 等复合命令。
                     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                     
-                    # 检查是否成功连接了HDC，并在需要时启动 agent
+                    # 检查是否成功连接了 HDC，并在需要时启动 Agent 轮询 9126。
                     if is_hdc_connected():
                         start_harmony_agent()
 
-                    # 将stdout和stderr合并返回给手机App
+                    # 将 stdout 和 stderr 合并返回给手机 App，便于用户在 App 内直接诊断连接问题。
                     output = f"【标准输出】\n{result.stdout}\n【标准错误】\n{result.stderr}"
                     
                     self.send_response(200)
@@ -261,7 +263,7 @@ def handle_workflow_action(action, payload):
 
 def is_hdc_connected():
     try:
-        # 当只有一行[Empty]时表示空，正常应该输出设备IP或者序列号
+        # 当只有一行 [Empty] 时表示空，正常应该输出设备 IP 或者序列号。
         result = subprocess.run("hdc list targets", shell=True, capture_output=True, text=True)
         output = result.stdout.strip()
         if not output or "[Empty]" in output or "not found" in output:
@@ -273,7 +275,7 @@ def is_hdc_connected():
 
 def start_harmony_agent():
     global agent_process
-    # 如果已经在运行中且没有退出，就不重复启动
+    # 如果已经在运行中且没有退出，就不重复启动，避免多个 Agent 同时操作同一台设备。
     if agent_process is not None:
         ret_code = agent_process.poll()
         if ret_code is None:
@@ -285,8 +287,8 @@ def start_harmony_agent():
     agent_script = os.path.join(os.path.dirname(__file__), "harmony_agent.py")
     print(f">> 正在后台自动启动任务代理: {agent_script}")
     try:
-        # 使用当前运行 hdc_server 的 python 环境，避免装包问题。
-        # 共享 stdout 和 stderr，使得它的输出直接打印在这个控制台里
+        # 使用当前运行 hdc_server 的 Python 环境，避免 hmdriver2/Pillow 安装在另一个解释器里。
+        # 共享 stdout/stderr，使 Agent 的执行日志直接打印在这个控制台里。
         cmd = [sys.executable, agent_script]
         if NO_REASON_MODE:
             cmd.append("--no_reason")
@@ -314,13 +316,13 @@ if __name__ == '__main__':
     if args.no_reason:
         NO_REASON_MODE = True
 
-    # 启动代理 (如果 HDC 已经挂载)
+    # 启动代理（如果 HDC 已经挂载）；否则等 App 发起无线连接测试后再拉起。
     if is_hdc_connected():
         start_harmony_agent()
     else:
         print(">> 未检测到 HDC 设备连接，将延后到 App 端发起连接指令后再启动...")
         
-    # 监听在全新的端口，和文件下载的 9123 分开，也避开 Socket 的 9126
+    # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = 9124
     server = HTTPServer(('0.0.0.0', PORT), HDCServerHandler)
     print(f"HDC 远程控制服务端已启动，监听端口: {PORT}...")

@@ -1,6 +1,8 @@
 import { AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
 
+// 数据采集页：按聊天/购物/通知/娱乐切换展示采集样例。
+// collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
   @Link collectionModule: number;
@@ -45,6 +47,7 @@ export struct CollectionPage {
   }
 
   @Builder CollectTab(label: string, icon: string, index: number) {
+    // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
     Row() {
       Text(icon).fontSize(11).fontColor(this.collectionModule === index ? Color.White : '#596071').fontWeight(FontWeight.Bold)
       Text(label).fontSize(14).fontWeight(this.collectionModule === index ? FontWeight.Bold : FontWeight.Regular).fontColor(this.collectionModule === index ? Color.White : '#596071').margin({ left: 5 }).maxLines(1)
@@ -76,6 +79,7 @@ export struct CollectionPage {
   }
 
   @Builder CollectionRows() {
+    // 当前是 mock 数据展示；保留分支结构，方便后续接真实采集源时按模块替换。
     if (this.collectionModule === 0) {
       this.OrderRow($r('app.media.rec_food'), '和妈妈的晚餐计划', '微信聊天', '今天 08:12', '12 条')
       Divider().color('#EEF0F5')
@@ -104,6 +108,7 @@ export struct CollectionPage {
   }
 
   @Builder PreferenceLine(color: string, name: string, value: string, widthValue: string) {
+    // 消费偏好条形图的最小复用单元。
     Row() {
       Row().width(7).height(7).backgroundColor(color).borderRadius(4)
       Text(name).fontSize(12).fontColor('#4C5260').width(66).margin({ left: 6 }).maxLines(1)

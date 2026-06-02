@@ -19,3 +19,4 @@ AGENT.md*
 AGENTS.md*
 mobiagent/
 build-profile.json5*
+*.diff

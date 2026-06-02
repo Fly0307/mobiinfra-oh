@@ -15,8 +15,15 @@
 entry/src/main/python/__pycache__/
 entry/src/main/python/*.jpeg
 MobiAgent/
+<<<<<<< HEAD
 AGENT.md*
 AGENTS.md*
 mobiagent/
 build-profile.json5*
 *.diff
+=======
+AGENTS.md
+AGENT.md*
+mobiagent/
+build-profile.json5*
+>>>>>>> feh_dev3

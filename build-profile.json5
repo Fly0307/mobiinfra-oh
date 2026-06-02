@@ -1,20 +1,6 @@
 {
   "app": {
-    "signingConfigs": [
-      {
-        "name": "default",
-        "type": "HarmonyOS",
-        "material": {
-          "certpath": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001A171C48EDA78232ADE1C3F9D509F908892801DAAA56E44D098CF5D1C6766DB6487AFA4BA3DCE2",
-          "profile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p7b",
-          "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\fenge\\.ohos\\config\\default_MnnLlmChat_J2FWSP91nHiIeifOnNDcqKTyiQEa6HBejVNXSUQSzJA=.p12",
-          "storePassword": "0000001A0EA1E2FBD85C1185B53021D62709827BB0304D5673B2F579A006DD32733426F6EFAE67D6A1CB"
-        }
-      }
-    ],
+    "signingConfigs": [],
     "products": [
       {
         "name": "default",
@@ -27,6 +13,9 @@
           "strictMode": {
             "caseSensitiveCheck": true,
             "useNormalizedOHMUrl": true
+          },
+          "externalNativeOptions": {
+            "abiFilters": ["x86_64"]
           }
         }
       }

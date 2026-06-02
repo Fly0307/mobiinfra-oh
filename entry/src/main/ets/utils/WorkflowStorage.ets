@@ -139,11 +139,11 @@ export class WorkflowStorage {
       }
       let parsed = ArkJSON.parse(WorkflowStorage.readText(path)) as WorkflowTaskIndex;
       let tasks = parsed.tasks || [];
-      let mergedTasks = WorkflowStorage.mergeMissingDefaultTasks(filesDir, tasks);
-      if (mergedTasks.length !== tasks.length) {
-        WorkflowStorage.saveTasks(filesDir, mergedTasks);
+      let syncedTasks = WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, tasks);
+      if (!WorkflowStorage.areTaskListsEqual(tasks, syncedTasks)) {
+        WorkflowStorage.saveTasks(filesDir, syncedTasks);
       }
-      return mergedTasks;
+      return syncedTasks;
     } catch (e) {
       let defaults = WorkflowStorage.createDefaultTasks(filesDir);
       WorkflowStorage.saveTasks(filesDir, defaults);
@@ -151,20 +151,76 @@ export class WorkflowStorage {
     }
   }
 
-  private static mergeMissingDefaultTasks(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
-    let nextTasks = tasks.slice();
-    let knownIds: Record<string, boolean> = {};
-    for (let i = 0; i < nextTasks.length; i++) {
-      knownIds[nextTasks[i].id] = true;
+  private static syncCodeDefinedDefaultTasks(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
+    let defaults = WorkflowStorage.createDefaultTasks(filesDir);
+    let defaultById: Record<string, WorkflowTask> = {};
+    for (let i = 0; i < defaults.length; i++) {
+      defaultById[defaults[i].id] = defaults[i];
     }
 
-    let defaults = WorkflowStorage.createDefaultTasks(filesDir);
+    let nextTasks: WorkflowTask[] = [];
+    let knownIds: Record<string, boolean> = {};
+    for (let i = 0; i < tasks.length; i++) {
+      let task = tasks[i];
+      let defaultTask = defaultById[task.id];
+      if (defaultTask) {
+        nextTasks.push(WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task));
+      } else if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id)) {
+        continue;
+      } else {
+        nextTasks.push(task);
+      }
+      knownIds[task.id] = true;
+    }
+
     for (let i = 0; i < defaults.length; i++) {
       if (!knownIds[defaults[i].id]) {
         nextTasks.push(defaults[i]);
       }
     }
     return nextTasks;
+  }
+
+  private static mergeStoredStateIntoDefaultTask(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
+    return {
+      id: defaultTask.id,
+      sceneId: defaultTask.sceneId,
+      icon: defaultTask.icon,
+      iconColor: defaultTask.iconColor,
+      title: defaultTask.title,
+      source: defaultTask.source,
+      enabled: storedTask.enabled === false ? false : defaultTask.enabled,
+      configFileName: defaultTask.configFileName,
+      workflowJson: defaultTask.workflowJson,
+      lastStatus: WorkflowStorage.nonEmptyOrDefault(storedTask.lastStatus, defaultTask.lastStatus),
+      lastRun: WorkflowStorage.nonEmptyOrDefault(storedTask.lastRun, defaultTask.lastRun),
+      lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage)
+    };
+  }
+
+  private static findDefaultTask(filesDir: string, taskId: string): WorkflowTask | null {
+    let defaults = WorkflowStorage.createDefaultTasks(filesDir);
+    for (let i = 0; i < defaults.length; i++) {
+      if (defaults[i].id === taskId) {
+        return defaults[i];
+      }
+    }
+    return null;
+  }
+
+  private static areTaskListsEqual(left: WorkflowTask[], right: WorkflowTask[]): boolean {
+    return ArkJSON.stringify(left) === ArkJSON.stringify(right);
+  }
+
+  private static isCodeDefinedDefaultTaskId(taskId: string): boolean {
+    return taskId.startsWith('default_');
+  }
+
+  private static nonEmptyOrDefault(value: string, fallback: string): string {
+    if (value && value.length > 0) {
+      return value;
+    }
+    return fallback;
   }
 
   static saveTasks(filesDir: string, tasks: WorkflowTask[]): void {
@@ -186,6 +242,10 @@ export class WorkflowStorage {
 
   static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
     let tasks = WorkflowStorage.loadTasks(filesDir);
+    let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
+    if (defaultTask) {
+      task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
+    }
     let found = false;
     for (let i = 0; i < tasks.length; i++) {
       if (tasks[i].id === task.id) {
@@ -253,6 +313,9 @@ export class WorkflowStorage {
     if (sceneId === 4) {
       return 'Life';
     }
+    if (sceneId === 6) {
+      return 'Trip';
+    }
     return 'Social';
   }
 
@@ -272,6 +335,9 @@ export class WorkflowStorage {
     if (sceneId === 4) {
       return '#F59E0B';
     }
+    if (sceneId === 6) {
+      return '#0EA5E9';
+    }
     return '#E85D8E';
   }
 
@@ -287,7 +353,8 @@ export class WorkflowStorage {
       WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultDianpingWorkflow(), 'default_dianping_order'),
       WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultMeituanWorkflow(), 'default_meituan_order'),
       WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultWeiboWorkflow(), 'default_weibo_hot_search'),
-      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultXiaohongshuWorkflow(), 'default_xiaohongshu_history')
+      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultXiaohongshuWorkflow(), 'default_xiaohongshu_history'),
+      WorkflowStorage.createTaskFromJson(filesDir, 6, WorkflowStorage.defaultCtripWorkflow(), 'default_ctrip_order')
     ];
   }
 
@@ -306,6 +373,9 @@ export class WorkflowStorage {
     }
     if (sceneId === 5) {
       return WorkflowStorage.defaultWeiboWorkflow();
+    }
+    if (sceneId === 6) {
+      return WorkflowStorage.defaultCtripWorkflow();
     }
     return WorkflowStorage.defaultAlipayWorkflow();
   }
@@ -462,6 +532,16 @@ export class WorkflowStorage {
       WorkflowStorage.screenshotStep(3, 'alipay_bill.jpg'),
       WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
         '帮我用一段话简要总结当前页面上的支付宝账单信息（不要使用markdown格式，也不要分点，尽量按照账单出现顺序描述每一条记录的类型、对象、金额和时间）')
+    ]);
+  }
+
+  static defaultCtripWorkflow(): string {
+    return WorkflowStorage.basicGuiWorkflow('查看携程上的用户全部订单', [
+      WorkflowStorage.openAppStep('携程旅行'),
+      WorkflowStorage.guiTaskStep(2, '点击“我的”，进入待付款界面，切换到“全部”标签，查看当前界面的订单'),
+      WorkflowStorage.screenshotStep(3, 'ctrip_order.jpg'),
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+        '帮我用一段话简要总结当前页面上的携程全部订单内容（不要使用markdown格式，也不要分点，尽量按照订单出现顺序描述每一单的出行类型、目的地或酒店/车次/航班、时间、金额和订单状态）')
     ]);
   }
 

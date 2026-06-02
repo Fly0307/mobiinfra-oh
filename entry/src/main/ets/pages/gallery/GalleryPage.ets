@@ -63,13 +63,13 @@ struct GalleryPage {
   @State resultDisplayLimit: number = GALLERY_RESULT_PAGE_SIZE;
   @State lastRunText: string = '尚未开始';
   @State settingsOpen: boolean = false;
-  @State progressText: string = '等待选择图库图片';
   @State autoScanStatus: string = 'idle';
   @State scanTotal: number = 0;
   @State scanProcessed: number = 0;
   @State scanPending: number = 0;
   @State scanSkipped: number = 0;
   @State scanFailed: number = 0;
+  @State scanRevision: number = 0;
   @State results: GalleryAnalysisResult[] = [];
   @State resultRevision: number = 0;
   @State selectedMonthKey: string = '';
@@ -77,6 +77,7 @@ struct GalleryPage {
   @State monthlyAiLoadingKey: string = '';
   @State monthlyAiErrorKey: string = '';
   @State monthlyAiErrorText: string = '';
+  @State selectedDetailId: string = '';
   @StorageLink('galleryApiBaseUrl') galleryApiBaseUrl: string = DEFAULT_GALLERY_API_BASE_URL;
   @StorageLink('galleryApiKey') galleryApiKey: string = DEFAULT_GALLERY_API_KEY;
   @StorageLink('galleryModel') galleryModel: string = DEFAULT_GALLERY_MODEL;
@@ -155,7 +156,6 @@ struct GalleryPage {
       this.selectedTimeFilter = 0;
       this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
       this.clearMonthlyAiState();
-      this.progressText = '已选择 ' + uris.length + ' 张图片';
       this.setLastRunLabel('分析中');
       let analyzer = new GalleryAnalyzer(this.filesDir, this.cloudClient);
       let finalResults = await analyzer.analyzeUris(uris, this.buildAnalyzerConfig(false), (next: GalleryProgress) => {
@@ -171,12 +171,10 @@ struct GalleryPage {
       }
       this.analyzing = false;
       this.progress = 100;
-      this.progressText = '分析完成';
       this.setLastRun(new Date().getTime());
       promptAction.showToast({ message: '图库分析完成', duration: 1500 });
     } catch (e) {
       this.analyzing = false;
-      this.progressText = this.errorMessage(e);
       this.setLastRunLabel('分析失败');
       promptAction.showToast({ message: '图库分析失败：' + this.errorMessage(e), duration: 2000 });
     }
@@ -207,7 +205,6 @@ struct GalleryPage {
     } catch (e) {
       this.analyzing = false;
       this.autoScanStatus = 'failed';
-      this.progressText = this.errorMessage(e);
       this.setLastRunLabel('分析失败');
       promptAction.showToast({ message: '自动分析失败：' + this.errorMessage(e), duration: 2000 });
     }
@@ -223,7 +220,14 @@ struct GalleryPage {
       promptAction.showToast({ message: '没有可继续的扫描任务', duration: 1200 });
       return;
     }
-    await this.runScanSession(session);
+    try {
+      await this.runScanSession(session);
+    } catch (e) {
+      this.analyzing = false;
+      this.autoScanStatus = 'failed';
+      this.setLastRunLabel('分析失败');
+      promptAction.showToast({ message: '继续分析失败：' + this.errorMessage(e), duration: 2000 });
+    }
   }
 
   private requestPauseAutoAnalyze(): void {
@@ -232,7 +236,6 @@ struct GalleryPage {
     }
     this.pauseRequested = true;
     this.autoScanStatus = 'pausing';
-    this.progressText = '正在暂停，等待当前请求完成';
     let session = GalleryStorage.loadScanSession(this.filesDir);
     if (session) {
       session.status = 'pausing';
@@ -247,14 +250,13 @@ struct GalleryPage {
       GalleryStorage.saveScanSession(this.filesDir, session);
       this.applyScanSession(session);
       this.progress = 100;
-      this.updateScanProgressText('自动分析完成', session);
       this.setLastRun(new Date().getTime());
       return;
     }
     this.pauseRequested = false;
     this.analyzing = true;
     this.autoScanStatus = 'running';
-    this.progress = session.total === 0 ? 0 : Math.floor(session.processed * 100 / session.total);
+    this.progress = this.progressPercentFromUnits(session.processed, session.total);
     this.selectedFilter = 0;
     this.selectedTimeFilter = 0;
     this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
@@ -262,10 +264,9 @@ struct GalleryPage {
     session.status = 'running';
     GalleryStorage.saveScanSession(this.filesDir, session);
     this.applyScanSession(session);
-    this.updateScanProgressText('准备分析', session);
 
     let analyzer = new GalleryAnalyzer(this.filesDir, this.cloudClient);
-    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(true), (next: GalleryProgress) => {
+    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(true), (_next: GalleryProgress) => {
       this.updateAutoProgress(session);
     }, (result: GalleryAnalysisResult) => {
       this.mergeResult(result);
@@ -275,7 +276,6 @@ struct GalleryPage {
         this.markScanItem(session, input, outcome.cached, outcome.result.error);
         GalleryStorage.saveScanSession(this.filesDir, session);
         this.applyScanSession(session);
-        this.updateScanProgressText(this.scanItemStatusText(input, outcome), session);
       }
     });
     let storedResults = GalleryStorage.loadResults(this.filesDir);
@@ -291,7 +291,6 @@ struct GalleryPage {
       GalleryStorage.saveScanSession(this.filesDir, session);
       this.autoScanStatus = 'paused';
       this.applyScanSession(session);
-      this.updateScanProgressText('已暂停', session);
       this.setLastRunLabel('已暂停');
       promptAction.showToast({ message: '自动分析已暂停', duration: 1200 });
       return;
@@ -301,8 +300,7 @@ struct GalleryPage {
     session.status = sessionCompleted ? 'completed' : 'paused';
     GalleryStorage.saveScanSession(this.filesDir, session);
     this.applyScanSession(session);
-    this.progress = session.total === 0 ? 100 : Math.floor(session.processed * 100 / session.total);
-    this.updateScanProgressText(sessionCompleted ? '自动分析完成' : '已暂停', session);
+    this.progress = session.total === 0 ? 100 : this.progressPercentFromUnits(session.processed, session.total);
     if (sessionCompleted) {
       this.setLastRun(new Date().getTime());
     } else {
@@ -648,7 +646,8 @@ struct GalleryPage {
     this.scanFailed = session.failed;
     this.scanPending = Math.max(0, session.total - session.processed);
     this.autoScanStatus = session.status;
-    this.progress = session.total === 0 ? 0 : Math.floor(session.processed * 100 / session.total);
+    this.progress = this.progressPercentFromUnits(session.processed, session.total);
+    this.scanRevision += 1;
   }
 
   private restoreScanSessionState(): void {
@@ -664,7 +663,6 @@ struct GalleryPage {
       this.applyScanSession(session);
     }
     if (this.scanPending > 0 && (session.status === 'paused' || session.status === 'pausing' || session.status === 'running')) {
-      this.updateScanProgressText('可继续', session);
       this.setLastRunLabel('已暂停');
     }
   }
@@ -762,9 +760,9 @@ struct GalleryPage {
       this.scanPending = 0;
       this.scanSkipped = 0;
       this.scanFailed = 0;
+      this.scanRevision += 1;
       this.autoScanStatus = 'idle';
       this.setLastRunLabel('尚未开始');
-      this.progressText = '缓存已清理';
       promptAction.showToast({ message: '图库缓存已清理', duration: 1200 });
     }
   }
@@ -835,8 +833,9 @@ struct GalleryPage {
       .onClick(() => { this.runAction(actionId); })
   }
 
-  @Builder ActionToolbar(analyzedText: string, lastRunText: string) {
+  @Builder ActionToolbar(analyzedText: string, lastRunText: string, revision: number) {
     Column() {
+      Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
       Row() {
         this.StatCell('已分析', analyzedText, '#2F5BEA')
         Divider().vertical(true).height(38).color('#E5E8F0')
@@ -882,41 +881,40 @@ struct GalleryPage {
   }
 
   @Builder ProgressStrip(scanTotal: number, scanProcessed: number, scanPending: number, scanSkipped: number,
-    scanFailed: number, progressValue: number, progressText: string, title: string, visible: boolean,
-    analyzing: boolean) {
-    if (visible) {
-      Column() {
-        Row() {
-          Text(title)
-            .fontSize(13)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#202636')
-            .layoutWeight(1)
-          Text(progressValue.toString() + '%')
-            .fontSize(12)
-            .fontColor('#667085')
-        }.width('100%')
-        Progress({ value: progressValue, total: 100, type: ProgressType.Linear })
-          .width('100%')
-          .height(5)
-          .color('#2F5BEA')
-          .backgroundColor('#E8EDF7')
-          .margin({ top: 8 })
-        Text(progressText)
+    scanFailed: number, progressValue: number, title: string, analyzing: boolean, revision: number) {
+    Column() {
+      Row() {
+        Text(title)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#202636')
+          .layoutWeight(1)
+        Text(this.progressPercentText(progressValue))
           .fontSize(12)
           .fontColor('#667085')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.width('100%')
+      Stack({ alignContent: Alignment.Start }) {
+        Row()
           .width('100%')
-          .margin({ top: 8 })
-        this.ScanStatsPanel(scanTotal, scanProcessed, scanPending, scanSkipped, scanFailed, analyzing)
+          .height(6)
+          .backgroundColor('#E8EDF7')
+          .borderRadius(3)
+        Row()
+          .width(this.progressFillWidth(progressValue))
+          .height(6)
+          .backgroundColor('#2F5BEA')
+          .borderRadius(3)
       }
-      .width('90%')
-      .padding(14)
-      .backgroundColor(Color.White)
-      .borderRadius(12)
-      .margin({ top: 10 })
+      .width('100%')
+      .height(6)
+      .margin({ top: 8 })
+      this.ScanStatsPanel(scanTotal, scanProcessed, scanPending, scanSkipped, scanFailed, analyzing, revision)
     }
+    .width('90%')
+    .padding(14)
+    .backgroundColor(Color.White)
+    .borderRadius(12)
+    .margin({ top: 10 })
   }
 
   @Builder CompactActionButton(title: string, color: string, actionId: number) {
@@ -946,13 +944,23 @@ struct GalleryPage {
     .alignItems(HorizontalAlign.Start)
   }
 
+  @Builder ScanStatTextCell(label: string, value: string, color: string) {
+    Column() {
+      Text(label).fontSize(11).fontColor('#7C8494').maxLines(1)
+      Text(value).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Start)
+  }
+
   @Builder ScanStatsPanel(scanTotal: number, scanProcessed: number, scanPending: number,
-    scanSkipped: number, scanFailed: number, analyzing: boolean) {
+    scanSkipped: number, scanFailed: number, analyzing: boolean, revision: number) {
     if (scanTotal > 0 || analyzing) {
       Column() {
+        Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
         Row() {
           this.ScanStatCell('总数', scanTotal, '#151A28')
-          this.ScanStatCell('已完成', scanProcessed, '#5B68FF')
+          this.ScanStatTextCell('已完成', this.resultPanelCountText(), '#5B68FF')
           this.ScanStatCell('未完成', scanPending, '#FF8A3D')
           this.ScanStatCell('跳过', scanSkipped, '#39BFA3')
           this.ScanStatCell('失败', scanFailed, '#E5484D')
@@ -1156,6 +1164,170 @@ struct GalleryPage {
     }
   }
 
+  @Builder DetailSectionTitle(label: string) {
+    Text(label)
+      .fontSize(13)
+      .fontWeight(FontWeight.Bold)
+      .fontColor('#202636')
+      .width('100%')
+      .margin({ top: 14 })
+  }
+
+  @Builder DetailInfoRow(label: string, value: string) {
+    Row() {
+      Text(label)
+        .fontSize(12)
+        .fontColor('#7C8494')
+        .width(64)
+        .maxLines(1)
+      Text(value)
+        .fontSize(12)
+        .fontColor('#303746')
+        .layoutWeight(1)
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .margin({ top: 8 })
+  }
+
+  @Builder DetailTag(label: string) {
+    Text(label)
+      .fontSize(11)
+      .fontColor('#596273')
+      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+      .backgroundColor('#F1F4FA')
+      .borderRadius(8)
+      .margin({ right: 7, top: 7 })
+  }
+
+  @Builder ResultDetailPanel() {
+    if (this.selectedDetailId.length > 0) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => { this.closeResultDetail(); })
+
+        ForEach(this.selectedDetailItems(), (item: GalleryAnalysisResult) => {
+          Column() {
+            Row() {
+              Column() {
+                Text(item.title)
+                  .fontSize(18)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#11182F')
+                  .maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(this.categoryLabel(item.category))
+                  .fontSize(12)
+                  .fontColor(this.categoryColor(item.category))
+                  .margin({ top: 5 })
+                  .maxLines(1)
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              .margin({ right: 12 })
+              Text('关闭')
+                .fontSize(13)
+                .fontColor('#5B68FF')
+                .onClick(() => { this.closeResultDetail(); })
+            }
+            .width('100%')
+
+            Scroll() {
+              Column() {
+                Image(this.previewUri(item))
+                  .width('100%')
+                  .height(220)
+                  .objectFit(ImageFit.Contain)
+                  .backgroundColor('#F2F4F7')
+                  .borderRadius(12)
+                  .margin({ top: 14 })
+
+                Text(item.summary)
+                  .fontSize(13)
+                  .fontColor('#4D5566')
+                  .lineHeight(20)
+                  .width('100%')
+                  .margin({ top: 12 })
+
+                this.DetailSectionTitle('基础信息')
+                this.DetailInfoRow('时间', this.resultTime(item))
+                this.DetailInfoRow('日期', this.groupDate(item))
+                this.DetailInfoRow('状态', this.resultStatus(item))
+                this.DetailInfoRow('ID', item.id)
+
+                if (this.resultDetails(item).length > 0) {
+                  this.DetailSectionTitle('分析明细')
+                  ForEach(this.resultDetails(item), (detail: string) => {
+                    Text('· ' + detail)
+                      .fontSize(12)
+                      .fontColor('#4D5566')
+                      .lineHeight(18)
+                      .width('100%')
+                      .margin({ top: 6 })
+                  }, (detail: string, index: number) => item.id + '_detail_' + index.toString())
+                }
+
+                if (this.resultTags(item).length > 0) {
+                  this.DetailSectionTitle('标签')
+                  Row() {
+                    ForEach(this.resultTags(item), (tag: string) => {
+                      this.DetailTag(tag)
+                    }, (tag: string, index: number) => item.id + '_tag_' + index.toString())
+                  }
+                  .width('100%')
+                  .margin({ top: 1 })
+                }
+
+                if (item.ocrText && item.ocrText.length > 0) {
+                  this.DetailSectionTitle('OCR 文本')
+                  Text(item.ocrText)
+                    .fontSize(12)
+                    .fontColor('#4D5566')
+                    .lineHeight(18)
+                    .width('100%')
+                    .padding(10)
+                    .backgroundColor('#F7F9FC')
+                    .borderRadius(10)
+                    .margin({ top: 8 })
+                }
+
+                if (item.error && item.error.length > 0) {
+                  this.DetailSectionTitle('错误信息')
+                  Text(item.error)
+                    .fontSize(12)
+                    .fontColor('#B42318')
+                    .lineHeight(18)
+                    .width('100%')
+                    .padding(10)
+                    .backgroundColor('#FFF4F2')
+                    .borderRadius(10)
+                    .margin({ top: 8 })
+                }
+
+                Blank().height(8)
+              }
+              .width('100%')
+            }
+            .width('100%')
+            .layoutWeight(1)
+          }
+          .width('88%')
+          .height('82%')
+          .padding(18)
+          .backgroundColor(Color.White)
+          .borderRadius(18)
+          .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+        }, (item: GalleryAnalysisResult) => item.id)
+      }
+      .width('100%')
+      .height('100%')
+    }
+  }
+
   @Builder FilterChip(label: string, index: number) {
     Text(label)
       .fontSize(13)
@@ -1245,6 +1417,40 @@ struct GalleryPage {
 
   private hasAnyDisplayDetail(item: GalleryAnalysisResult): boolean {
     return this.detailAt(item, 0).length > 0 || this.detailAt(item, 1).length > 0 || this.detailAt(item, 2).length > 0;
+  }
+
+  private selectedDetailItems(): GalleryAnalysisResult[] {
+    if (this.selectedDetailId.length === 0) {
+      return [];
+    }
+    for (let i = 0; i < this.results.length; i++) {
+      if (this.results[i].id === this.selectedDetailId) {
+        return [this.results[i]];
+      }
+    }
+    return [];
+  }
+
+  private showResultDetail(item: GalleryAnalysisResult): void {
+    this.selectedDetailId = item.id;
+  }
+
+  private closeResultDetail(): void {
+    this.selectedDetailId = '';
+  }
+
+  private resultDetails(item: GalleryAnalysisResult): string[] {
+    if (item.details) {
+      return item.details;
+    }
+    return [];
+  }
+
+  private resultTags(item: GalleryAnalysisResult): string[] {
+    if (item.tags) {
+      return item.tags;
+    }
+    return [];
   }
 
   @Builder TagChip(label: string) {
@@ -1341,6 +1547,7 @@ struct GalleryPage {
     .backgroundColor('#FFFFFF')
     .borderRadius(12)
     .margin({ top: 10 })
+    .onClick(() => { this.showResultDetail(item); })
   }
 
   private buildAnalyzerConfig(useOcrKeywordFilter: boolean): GalleryAnalyzerConfig {
@@ -1362,38 +1569,67 @@ struct GalleryPage {
   }
 
   private updateProgress(next: GalleryProgress): void {
-    let done = next.processed > 0 ? next.processed : next.modelDone + next.failed;
-    this.progress = next.selected === 0 ? 0 : Math.floor(done * 100 / next.selected);
-    this.progressText = next.current + ' · 已完成 ' + next.processed + '/' + next.selected +
-      ' · 未完成 ' + next.pending +
-      ' · 跳过 ' + next.skipped +
-      ' · 失败 ' + next.failed;
+    let completed = Math.max(0, next.processed - next.failed);
+    this.progress = this.progressPercentFromUnits(completed, next.selected);
   }
 
   private updateAutoProgress(session: GalleryScanSession): void {
     this.recountScanSession(session);
-    this.progress = session.total === 0 ? 0 : Math.floor(session.processed * 100 / session.total);
-    this.updateScanProgressText('分析中', session);
+    this.scanTotal = session.total;
+    this.scanProcessed = session.processed;
+    this.scanSkipped = session.skipped;
+    this.scanFailed = session.failed;
+    this.scanPending = Math.max(0, session.total - session.processed);
+    this.autoScanStatus = session.status;
+    this.progress = this.progressPercentFromUnits(session.processed, session.total);
+    this.scanRevision += 1;
   }
 
-  private updateScanProgressText(current: string, session: GalleryScanSession): void {
-    this.recountScanSession(session);
-    this.progressText = current +
-      ' · 已完成 ' + session.processed + '/' + session.total +
-      ' · 未完成 ' + Math.max(0, session.total - session.processed) +
-      ' · 跳过 ' + session.skipped +
-      ' · 失败 ' + session.failed;
+  private progressPercentFromUnits(doneUnits: number, totalUnits: number): number {
+    if (totalUnits <= 0) {
+      return 0;
+    }
+    let percent = doneUnits * 100 / totalUnits;
+    if (percent < 0) {
+      return 0;
+    }
+    if (percent > 100) {
+      return 100;
+    }
+    return Math.round(percent * 100) / 100;
   }
 
-  private scanItemStatusText(input: GalleryPhotoInput, outcome: GalleryAnalyzeOutcome): string {
-    let label = input.id && input.id.length > 0 ? input.id : '当前图片';
-    if (outcome.result.error && outcome.result.error.length > 0) {
-      return '分析失败 ' + label;
+  private progressPercentText(value: number): string {
+    if (value >= 100) {
+      return '100%';
     }
-    if (outcome.cached) {
-      return '跳过缓存 ' + label;
+    if (value <= 0) {
+      return '0%';
     }
-    return '完成分析 ' + label;
+    if (value < 10) {
+      return value.toFixed(2) + '%';
+    }
+    return value.toFixed(1) + '%';
+  }
+
+  private progressFillWidth(value: number): string {
+    if (value <= 0) {
+      return '0%';
+    }
+    if (value >= 100) {
+      return '100%';
+    }
+    if (value < 1) {
+      return '1%';
+    }
+    return value.toFixed(2) + '%';
+  }
+
+  private analyzedCountText(): string {
+    if (this.scanTotal > 0 && (this.analyzing || this.hasPausedScan() || this.autoScanStatus === 'completed')) {
+      return this.scanProcessed.toString() + '/' + this.scanTotal.toString() + ' 张';
+    }
+    return this.results.length.toString() + ' 张';
   }
 
   private filteredResults(): GalleryAnalysisResult[] {
@@ -1928,9 +2164,11 @@ struct GalleryPage {
         .width('90%')
         .margin({ top: 24 })
 
-        this.ActionToolbar(this.results.length.toString() + ' 张', this.lastRunText)
+        this.ActionToolbar(this.analyzedCountText(), this.lastRunText, this.scanRevision)
+        if (this.shouldShowProgressStrip()) {
         this.ProgressStrip(this.scanTotal, this.scanProcessed, this.scanPending, this.scanSkipped, this.scanFailed,
-          this.progress, this.progressText, this.progressTitle(), this.shouldShowProgressStrip(), this.analyzing)
+            this.progress, this.progressTitle(), this.analyzing, this.scanRevision + this.resultRevision)
+        }
         this.MonthlyInsightsPanel(this.resultRevision)
         this.ResultsPanel(this.resultRevision)
 
@@ -1942,6 +2180,7 @@ struct GalleryPage {
       .backgroundColor('#F6F7FA')
 
       this.SettingsPanel()
+      this.ResultDetailPanel()
     }
     .width('100%')
     .height('100%')

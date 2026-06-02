@@ -56,6 +56,11 @@ interface GalleryStageGates {
   embedding: GallerySemaphore;
 }
 
+interface GalleryModelParseResult {
+  json: GalleryModelJson;
+  text: string;
+}
+
 export class GalleryAnalyzer {
   private filesDir: string;
   private cloudClient: CloudModelClient;
@@ -116,13 +121,11 @@ export class GalleryAnalyzer {
       let outcome = await this.analyzeOne(input, config, gates, progress, onProgress);
       let result = outcome.result;
       results.push(result);
-      progress.processed += 1;
-      progress.pending = Math.max(0, progress.selected - progress.processed);
       if (outcome.cached) {
+        progress.processed += 1;
+        progress.pending = Math.max(0, progress.selected - progress.processed);
         progress.skipped += 1;
-      }
-      onProgress(progress);
-      if (outcome.cached) {
+        onProgress(progress);
         if (options && options.onItemDone) {
           options.onItemDone(input, outcome);
         }
@@ -136,6 +139,9 @@ export class GalleryAnalyzer {
       let normalized = GalleryStorage.writeResult(this.filesDir, result);
       this.pushUnique(dirtyDates, normalized.date);
       this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
+      progress.processed += 1;
+      progress.pending = Math.max(0, progress.selected - progress.processed);
+      onProgress(progress);
       if (options && options.onItemDone) {
         options.onItemDone(input, {
           result: normalized,
@@ -197,6 +203,7 @@ export class GalleryAnalyzer {
     this.logInfo('item start id=' + id + ' uri=' + uri);
     let cached = GalleryStorage.loadResult(this.filesDir, date, id);
     if (cached && this.isSuccessfulCachedResult(cached)) {
+      progress.current = '命中缓存 ' + id;
       progress.ocrDone += 1;
       progress.modelDone += 1;
       progress.embeddingDone += 1;
@@ -213,6 +220,8 @@ export class GalleryAnalyzer {
     try {
       let decodeStartedAt = new Date().getTime();
       this.logInfo('decode start id=' + id);
+      progress.current = '读取图片 ' + id;
+      onProgress(progress);
       imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       imageSource = image.createImageSource(imageFile.fd);
       pixelMap = await imageSource.createPixelMap();
@@ -225,10 +234,14 @@ export class GalleryAnalyzer {
         if (!config.skipOcr) {
           let ocrStartedAt = new Date().getTime();
           this.logInfo('ocr start id=' + id);
+          progress.current = 'OCR 识别 ' + id;
+          onProgress(progress);
           ocrText = await this.ocrService.recognize(pixelMap);
           this.logInfo('ocr done id=' + id + ' chars=' + ocrText.length + ' elapsedMs=' + this.elapsed(ocrStartedAt));
         } else {
           this.logInfo('ocr skipped id=' + id);
+          progress.current = '跳过 OCR ' + id;
+          onProgress(progress);
         }
       } finally {
         gates.ocr.release();
@@ -241,6 +254,7 @@ export class GalleryAnalyzer {
         this.logInfo('keyword filter id=' + id + ' matched=' + keywordMatch.matched +
           ' keywords=' + keywordMatch.keywords.join(','));
         if (!keywordMatch.matched) {
+          progress.current = 'OCR 预筛跳过 ' + id;
           progress.modelDone += 1;
           progress.embeddingDone += 1;
           onProgress(progress);
@@ -276,6 +290,8 @@ export class GalleryAnalyzer {
 
       let packStartedAt = new Date().getTime();
       this.logInfo('pack image start id=' + id);
+      progress.current = '压缩图片 ' + id;
+      onProgress(progress);
       let imageBase64 = await this.pixelMapToJpegBase64(pixelMap);
       this.logInfo('pack image done id=' + id + ' base64Chars=' + imageBase64.length + ' elapsedMs=' + this.elapsed(packStartedAt));
       await gates.model.acquire();
@@ -283,6 +299,8 @@ export class GalleryAnalyzer {
       try {
         let modelStartedAt = new Date().getTime();
         this.logInfo('model start id=' + id + ' baseUrl=' + config.apiBaseUrl + ' model=' + config.model);
+        progress.current = '模型分析 ' + id;
+        onProgress(progress);
         rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, this.toCloudConfig(config));
         this.logInfo('model done id=' + id + ' chars=' + rawModelText.length + ' elapsedMs=' + this.elapsed(modelStartedAt));
       } finally {
@@ -291,7 +309,9 @@ export class GalleryAnalyzer {
       progress.modelDone += 1;
       onProgress(progress);
 
-      let modelJson = this.parseModelJson(rawModelText);
+      let modelParse = this.parseModelJson(rawModelText, id);
+      let modelJson = modelParse.json;
+      rawModelText = modelParse.text;
       let category = this.nonEmpty(modelJson.category, '其他');
       let details = this.detailListFrom(modelJson.details);
       let tags = modelJson.tags ? modelJson.tags : [];
@@ -306,6 +326,8 @@ export class GalleryAnalyzer {
           let embeddingStartedAt = new Date().getTime();
           this.logInfo('embedding start id=' + id + ' mode=' + config.embeddingMode + ' model=' +
             (config.embeddingMode === 'huawei_local' ? 'huawei_local_basic' : config.embeddingModel));
+          progress.current = '生成 Embedding ' + id;
+          onProgress(progress);
           let vector = await this.embeddingService.embedText(resultText, config, this.filesDir);
           embeddingDimension = vector.length;
           embeddingStatus = 'ok';
@@ -331,6 +353,8 @@ export class GalleryAnalyzer {
         }
       } else {
         this.logInfo('embedding skipped id=' + id + ' emptyText=true');
+        progress.current = '跳过 Embedding ' + id;
+        onProgress(progress);
       }
       progress.embeddingDone += 1;
       onProgress(progress);
@@ -435,7 +459,50 @@ export class GalleryAnalyzer {
     }
   }
 
-  private parseModelJson(raw: string): GalleryModelJson {
+  private parseModelJson(raw: string, id: string): GalleryModelParseResult {
+    let text = this.cleanModelJsonText(raw);
+    let parsed = this.tryParseModelJson(text);
+    if (parsed) {
+      return {
+        json: parsed,
+        text: text
+      };
+    }
+    let candidates = this.modelJsonRepairCandidates(text);
+    for (let i = 0; i < candidates.length; i++) {
+      let repaired = candidates[i];
+      parsed = this.tryParseModelJson(repaired);
+      if (parsed) {
+        this.logInfo('model json repaired id=' + id +
+          ' candidate=' + (i + 1).toString() + '/' + candidates.length.toString() +
+          ' originalChars=' + text.length +
+          ' repairedChars=' + repaired.length +
+          ' originalTail=' + this.debugTail(text) +
+          ' repairedTail=' + this.debugTail(repaired));
+        return {
+          json: parsed,
+          text: repaired
+        };
+      }
+    }
+    this.logError('model json parse failed id=' + id +
+      ' rawChars=' + raw.length +
+      ' cleanedChars=' + text.length +
+      ' candidates=' + candidates.length.toString() +
+      ' cleanedTail=' + this.debugTail(text));
+    return {
+      json: {
+        title: '图库图片',
+        category: '其他',
+        summary: raw.length > 140 ? raw.substring(0, 140) : raw,
+        details: [],
+        tags: []
+      },
+      text: raw
+    };
+  }
+
+  private cleanModelJsonText(raw: string): string {
     let text = raw.trim();
     if (text.startsWith('```')) {
       let first = text.indexOf('\n');
@@ -446,20 +513,159 @@ export class GalleryAnalyzer {
     }
     let start = text.indexOf('{');
     let end = text.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      text = text.substring(start, end + 1);
+    if (start >= 0) {
+      if (end > start) {
+        text = text.substring(start, end + 1);
+      } else {
+        text = text.substring(start);
+      }
     }
+    return text.trim();
+  }
+
+  private tryParseModelJson(text: string): GalleryModelJson | null {
     try {
       return ArkJSON.parse(text) as GalleryModelJson;
     } catch (e) {
-      return {
-        title: '图库图片',
-        category: '其他',
-        summary: raw.length > 140 ? raw.substring(0, 140) : raw,
-        details: [],
-        tags: []
-      };
+      return null;
     }
+  }
+
+  private modelJsonRepairCandidates(text: string): string[] {
+    let candidates: string[] = [];
+    let trimmed = text.trim();
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(trimmed));
+    let withoutComma = this.removeTrailingJsonComma(trimmed);
+    this.pushModelJsonCandidate(candidates, withoutComma + ']}');
+    this.pushModelJsonCandidate(candidates, withoutComma + '"]}');
+    this.pushModelJsonCandidate(candidates, withoutComma + '}');
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + ']}'));
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '"]}'));
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '}'));
+    return candidates;
+  }
+
+  private pushModelJsonCandidate(candidates: string[], text: string): void {
+    this.pushUnique(candidates, text);
+    let escaped = this.escapeJsonStringControlChars(text);
+    if (escaped !== text) {
+      this.pushUnique(candidates, escaped);
+    }
+  }
+
+  private escapeJsonStringControlChars(text: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      let ch = text.charAt(i);
+      if (inString) {
+        if (escaped) {
+          result += ch;
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          result += ch;
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          result += ch;
+          inString = false;
+          continue;
+        }
+        if (ch === '\n' || ch === '\r' || ch === '\t') {
+          result += ' ';
+          continue;
+        }
+        result += ch;
+        continue;
+      }
+      result += ch;
+      if (ch === '"') {
+        inString = true;
+      }
+    }
+    return result;
+  }
+
+  private repairModelJsonText(text: string): string {
+    let trimmed = text.trim();
+    if (trimmed.length === 0 || trimmed.indexOf('{') < 0) {
+      return trimmed;
+    }
+    let stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < trimmed.length; i++) {
+      let ch = trimmed.charAt(i);
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{' || ch === '[') {
+        stack.push(ch);
+        continue;
+      }
+      if (ch === '}' || ch === ']') {
+        if (stack.length > 0 && this.matchingJsonClose(stack[stack.length - 1]) === ch) {
+          stack.pop();
+        }
+      }
+    }
+    let repaired = trimmed;
+    if (inString) {
+      repaired += '"';
+    }
+    while (stack.length > 0) {
+      repaired = this.removeTrailingJsonComma(repaired);
+      let open = stack[stack.length - 1];
+      stack.splice(stack.length - 1, 1);
+      if (open === '[') {
+        repaired += ']';
+      } else {
+        repaired += '}';
+      }
+    }
+    return repaired;
+  }
+
+  private matchingJsonClose(open: string): string {
+    return open === '[' ? ']' : '}';
+  }
+
+  private removeTrailingJsonComma(text: string): string {
+    let end = text.length - 1;
+    while (end >= 0) {
+      let ch = text.charAt(end);
+      if (ch !== ' ' && ch !== '\n' && ch !== '\r' && ch !== '\t') {
+        break;
+      }
+      end -= 1;
+    }
+    if (end >= 0 && text.charAt(end) === ',') {
+      return text.substring(0, end) + text.substring(end + 1);
+    }
+    return text;
+  }
+
+  private debugTail(text: string): string {
+    let normalized = text.replace(/[\r\n\t]+/g, ' ');
+    if (normalized.length <= 240) {
+      return normalized;
+    }
+    return normalized.substring(normalized.length - 240);
   }
 
   private resultText(modelJson: GalleryModelJson, ocrText: string): string {

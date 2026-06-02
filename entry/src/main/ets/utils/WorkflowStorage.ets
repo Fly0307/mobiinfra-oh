@@ -568,7 +568,7 @@ export class WorkflowStorage {
   static defaultEleWorkflow(): string {
     return WorkflowStorage.basicGuiWorkflow('查看饿了么上的用户订单信息', [
       WorkflowStorage.openAppStep('饿了么'),
-      WorkflowStorage.guiTaskStep(2, '点击“我的”图标，点击我的订单，查看外卖订单'),
+      WorkflowStorage.guiTaskStep(2, '点击“我的”图标，点击我的订单，查看当前订单'),
       WorkflowStorage.screenshotStep(3, 'ele_order.jpg'),
       WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
         '帮我用一段话简要总结当前页面上的外卖订单信息（不要使用markdown格式，按照第一单，第二单，第三单的顺序描述，包括点了什么，花了多少钱）')

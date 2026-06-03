@@ -104,6 +104,7 @@ export interface WorkflowManagedFile {
   name: string;
   path: string;
   size: number;
+  modifiedTime: number;
 }
 
 export interface WorkflowStepResult {

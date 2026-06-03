@@ -1,5 +1,5 @@
 import { common } from '@kit.AbilityKit';
-import { promptAction } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowFileStats, WorkflowManagedFile, WorkflowTask } from '../../utils/WorkflowTypes';
@@ -19,11 +19,10 @@ export struct TaskPage {
   @State editingTaskId: string = '';
   @State runningTaskId: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
-  @State fileViewerOpen: boolean = false;
-  @State fileViewerTitle: string = '';
-  @State fileViewerFiles: WorkflowManagedFile[] = [];
-  @State fileViewerSelectedName: string = '';
-  @State fileViewerText: string = '';
+  @State configManagedFiles: WorkflowManagedFile[] = [];
+  @State dailyLogManagedFiles: WorkflowManagedFile[] = [];
+  @State runManagedFiles: WorkflowManagedFile[] = [];
+  @State fileViewerCategory: string = '';
 
   private filesDir: string = '';
 
@@ -44,9 +43,42 @@ export struct TaskPage {
   }
 
   private refreshStatsText(): void {
+    this.configManagedFiles = WorkflowStorage.listConfigFiles(this.filesDir);
+    this.dailyLogManagedFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
+    this.runManagedFiles = WorkflowStorage.listRunFiles(this.filesDir);
     let stats: WorkflowFileStats = WorkflowStorage.getStats(this.filesDir);
     this.fileStatsText = '配置 ' + stats.configCount + ' 个，daily-log ' + stats.dailyLogCount +
       ' 个，运行文件 ' + stats.runCount + ' 个，共 ' + WorkflowStorage.formatSize(stats.totalBytes);
+  }
+
+  private totalFileSize(files: WorkflowManagedFile[]): number {
+    let total = 0;
+    for (let i = 0; i < files.length; i++) {
+      total += files[i].size;
+    }
+    return total;
+  }
+
+  private openFileViewer(category: string): void {
+    this.fileViewerCategory = category;
+    router.pushUrl({
+      url: 'pages/task/WorkflowFileViewer',
+      params: { category: category }
+    });
+  }
+
+  private deleteFileCategory(category: string): void {
+    if (category === 'config') {
+      this.deleteWorkflowConfigs();
+      return;
+    }
+    if (category === 'daily') {
+      this.deleteDailyLogs();
+      return;
+    }
+    if (category === 'run') {
+      this.deleteRunFiles();
+    }
   }
 
   private sceneTasks(): WorkflowTask[] {
@@ -184,53 +216,6 @@ export struct TaskPage {
     }).catch(() => {});
   }
 
-  private openConfigFileViewer(): void {
-    this.fileViewerTitle = 'Workflow 配置文件';
-    this.fileViewerFiles = WorkflowStorage.listConfigFiles(this.filesDir);
-    this.fileViewerOpen = true;
-    if (this.fileViewerFiles.length > 0) {
-      this.openManagedFile(this.fileViewerFiles[0]);
-    } else {
-      this.fileViewerSelectedName = '';
-      this.fileViewerText = '暂无 workflow 配置文件';
-    }
-  }
-
-  private openDailyLogFileViewer(): void {
-    this.fileViewerTitle = 'daily-log 文件';
-    this.fileViewerFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
-    this.fileViewerOpen = true;
-    if (this.fileViewerFiles.length > 0) {
-      this.openManagedFile(this.fileViewerFiles[0]);
-    } else {
-      this.fileViewerSelectedName = '';
-      this.fileViewerText = '暂无 daily-log 文件';
-    }
-  }
-
-  private openRunFileViewer(): void {
-    this.fileViewerTitle = '运行文件';
-    this.fileViewerFiles = WorkflowStorage.listRunFiles(this.filesDir);
-    this.fileViewerOpen = true;
-    if (this.fileViewerFiles.length > 0) {
-      this.openManagedFile(this.fileViewerFiles[0]);
-    } else {
-      this.fileViewerSelectedName = '';
-      this.fileViewerText = '暂无运行文件';
-    }
-  }
-
-  private openManagedFile(file: WorkflowManagedFile): void {
-    // 文件查看器只读沙箱内受控目录，避免把任意路径暴露给 UI。
-    this.fileViewerSelectedName = file.name;
-    try {
-      this.fileViewerText = WorkflowStorage.readText(file.path);
-    } catch (e) {
-      let err = e as Error;
-      this.fileViewerText = '读取失败：' + (err.message || String(e));
-    }
-  }
-
   @Builder TaskCard(task: WorkflowTask) {
     // 单个 workflow 任务卡片，展示运行状态、来源、最近消息，并提供运行/编辑入口。
     Column() {
@@ -364,70 +349,23 @@ export struct TaskPage {
   @Builder FileManagerPanel() {
     // workflow 运行会生成配置、daily-log 和步骤输出，这里集中提供查看/清理入口。
     Column() {
-      Text('Workflow 文件管理').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%')
-      Text(this.fileStatsText).fontSize(12).fontColor('#6F7584').margin({ top: 7 }).width('100%')
       Row() {
-        Button('删除配置')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FF6B4A')
-          .borderRadius(12)
-          .onClick(() => { this.deleteWorkflowConfigs(); })
-        Button('删除 daily-log')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#F59E0B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.deleteDailyLogs(); })
-        Button('删除运行文件')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#D97706')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.deleteRunFiles(); })
-      }.width('100%').margin({ top: 14 })
-      Row() {
-        Button('查看配置')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#EEF4FF')
-          .fontColor('#4F68FF')
-          .borderRadius(12)
-          .onClick(() => { this.openConfigFileViewer(); })
-        Button('查看 daily-log')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#EFFBF7')
-          .fontColor('#279C83')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.openDailyLogFileViewer(); })
-        Button('查看运行文件')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FFF3E8')
-          .fontColor('#C76A00')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.openRunFileViewer(); })
-      }.width('100%').margin({ top: 10 })
-      Row() {
+        Column() {
+          Text('Workflow 文件管理').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#11182F').width('100%')
+          Text(this.fileStatsText).fontSize(12).fontColor('#6F7584').margin({ top: 7 }).width('100%').maxLines(2)
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         Button('刷新')
-          .height(40)
-          .layoutWeight(1)
+          .width(64)
+          .height(34)
           .fontSize(12)
           .backgroundColor('#607D8B')
           .borderRadius(12)
+          .margin({ left: 10 })
           .onClick(() => { this.reloadTasks(); })
-      }.width('100%').margin({ top: 10 })
+      }.width('100%')
+      this.FileCategoryRow('config', '配置', 'Workflow JSON', '#4F68FF', '#EEF4FF', this.configManagedFiles)
+      this.FileCategoryRow('daily', '日志', 'Daily Log', '#279C83', '#EFFBF7', this.dailyLogManagedFiles)
+      this.FileCategoryRow('run', '运行文件', 'Run outputs', '#C76A00', '#FFF3E8', this.runManagedFiles)
     }
     .width('86%')
     .padding(18)
@@ -436,74 +374,49 @@ export struct TaskPage {
     .margin({ bottom: 18 })
   }
 
-  @Builder FileViewerPanel() {
-    // 轻量只读文件查看器，用于快速确认 daily-log 或运行摘要内容。
-    if (this.fileViewerOpen) {
+  @Builder FileCategoryRow(category: string, title: string, subtitle: string, color: string, bgColor: string,
+    files: WorkflowManagedFile[]) {
+    Row() {
       Column() {
-        Row() {
-          Text(this.fileViewerTitle)
-            .fontSize(17)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-            .layoutWeight(1)
-          Text('关闭')
-            .fontSize(13)
-            .fontColor('#7B8290')
-            .onClick(() => { this.fileViewerOpen = false; })
-        }.width('100%')
-        if (this.fileViewerFiles.length > 0) {
-          Scroll() {
-            Row() {
-              ForEach(this.fileViewerFiles, (file: WorkflowManagedFile) => {
-                Button(file.name + ' (' + WorkflowStorage.formatSize(file.size) + ')')
-                  .height(34)
-                  .fontSize(11)
-                  .backgroundColor(this.fileViewerSelectedName === file.name ? '#765BFF' : '#F3F5FA')
-                  .fontColor(this.fileViewerSelectedName === file.name ? Color.White : '#4E5666')
-                  .borderRadius(11)
-                  .margin({ right: 8 })
-                  .onClick(() => { this.openManagedFile(file); })
-              }, (file: WorkflowManagedFile) => file.path)
-            }
-          }
+        Text(title)
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
           .width('100%')
-          .height(42)
-          .scrollable(ScrollDirection.Horizontal)
-          .margin({ top: 12 })
-          Text('当前文件：' + this.fileViewerSelectedName)
-            .fontSize(12)
-            .fontColor('#6F7584')
-            .margin({ top: 10 })
-            .width('100%')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Scroll() {
-            Text(this.fileViewerText)
-              .fontSize(11)
-              .fontFamily('monospace')
-              .fontColor('#2F3645')
-              .width('100%')
-          }
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(subtitle + ' · ' + files.length + ' 个 · ' + WorkflowStorage.formatSize(this.totalFileSize(files)))
+          .fontSize(12)
+          .fontColor('#6F7584')
+          .margin({ top: 6 })
           .width('100%')
-          .height(280)
-          .padding(12)
-          .backgroundColor('#F7F9FE')
-          .borderRadius(14)
-          .margin({ top: 8 })
-        } else {
-          Text(this.fileViewerText)
-            .fontSize(13)
-            .fontColor('#7B8290')
-            .margin({ top: 14 })
-            .width('100%')
-        }
-      }
-      .width('86%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ bottom: 18 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+      Button('查看')
+        .width(82)
+        .height(36)
+        .fontSize(13)
+        .fontColor(Color.White)
+        .backgroundColor(color)
+        .borderRadius(12)
+        .margin({ left: 10 })
+        .onClick(() => { this.openFileViewer(category); })
+      Button('清理')
+        .width(72)
+        .height(36)
+        .fontSize(13)
+        .fontColor('#6F7584')
+        .backgroundColor('#F3F5FA')
+        .borderRadius(12)
+        .margin({ left: 8 })
+        .onClick(() => { this.deleteFileCategory(category); })
     }
+    .width('100%')
+    .padding(14)
+    .backgroundColor(bgColor)
+    .borderRadius(16)
+    .margin({ top: 12 })
   }
 
   build() {
@@ -567,10 +480,8 @@ export struct TaskPage {
 
         this.TaskSceneList()
         this.FileManagerPanel()
-        this.FileViewerPanel()
         Blank().height(110)
       }.width('100%')
     }.width('100%').height('100%').backgroundColor('#F4F8FF')
   }
 }
-

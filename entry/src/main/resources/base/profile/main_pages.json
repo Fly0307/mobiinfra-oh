@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/EdgeFlowWindow",
     "pages/FloatWindow",
+    "pages/task/WorkflowFileViewer",
     "pages/collection/CollectionGroupDetailPage",
     "pages/OpTest",
     "pages/LogView"

@@ -2,10 +2,9 @@ import json
 import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
-import sys
 import argparse
 import time
-import os
+import threading
 
 try:
     import harmony_agent
@@ -14,13 +13,21 @@ except Exception as ex:
     print(f">> [警告] 无法导入 harmony_agent workflow bridge 能力: {ex}")
 
 NO_REASON_MODE = False
+LEGACY_LOOP_ENABLED = True
+HDC_HEALTH_CACHE_TTL = 2.0
+
+_hdc_health_checked_at = 0.0
+_hdc_health_connected = False
 
 # PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
-# 服务端在确认设备已连接后自动拉起 harmony_agent.py。
+# workflow bridge 直接通过 /api/workflow 执行动作；9126 轮询 Agent 默认启动，
+# 供 App 端本地/云端智能体按钮取任务使用，可用 --workflow_only 关闭。
 class HDCServerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/api/workflow':
             self.handle_workflow_request()
+        elif self.path == '/api/agent_loop/ensure':
+            self.handle_agent_loop_ensure()
         elif self.path == '/api/run_cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
@@ -30,10 +37,10 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 if cmd:
                     print(f">> 正在执行远程指令: {cmd}")
                     # App 端只发送受控调试命令；这里保留 shell=True 以兼容 hdc/tconn 等复合命令。
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    result = run_remote_command(cmd)
                     
-                    # 检查是否成功连接了 HDC，并在需要时启动 Agent 轮询 9126。
-                    if is_hdc_connected():
+                    # 确保 9126 轮询 Agent 处于运行状态；workflow bridge 不依赖它。
+                    if LEGACY_LOOP_ENABLED and is_hdc_connected(force=True):
                         start_harmony_agent()
 
                     # 将 stdout 和 stderr 合并返回给手机 App，便于用户在 App 内直接诊断连接问题。
@@ -80,16 +87,38 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 'message': str(e)
             })
 
-agent_process = None
+    def handle_agent_loop_ensure(self):
+        try:
+            result = ensure_agent_loop_ready()
+            status_code = 200 if result.get('status') == 'ok' else 500
+            self.write_json(status_code, result)
+        except Exception as e:
+            print(f">> [AgentLoopEnsure错误] {e}")
+            self.write_json(500, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+agent_thread = None
+agent_stop_event = threading.Event()
 
 def ensure_workflow_agent_ready():
     if harmony_agent is None:
         raise RuntimeError('harmony_agent.py is unavailable')
     if not is_hdc_connected():
         raise RuntimeError('HDC target is not connected')
-    harmony_agent.refresh_hdc_forwarding()
-    if getattr(harmony_agent, 'd', None) is None:
-        harmony_agent.reset_driver()
+
+def run_remote_command(cmd):
+    def execute():
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if harmony_agent is not None and 'hdc' in cmd.lower():
+            harmony_agent.HDC_TARGET = ''
+            invalidate_hdc_health_cache()
+        return result
+
+    if harmony_agent is not None and hasattr(harmony_agent, 'run_with_device_control'):
+        return harmony_agent.run_with_device_control('run_cmd', execute)
+    return execute()
 
 def run_hdc_command(cmd):
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -104,6 +133,12 @@ def hdc_prefix():
 
 def workflow_gui_action(payload):
     ensure_workflow_agent_ready()
+    return harmony_agent.run_with_device_control(
+        'workflow_gui_action',
+        lambda: _workflow_gui_action_impl(payload)
+    )
+
+def _workflow_gui_action_impl(payload):
     action = str(payload.get('action', '')).lower()
     driver = getattr(harmony_agent, 'd', None) if harmony_agent is not None else None
 
@@ -111,7 +146,7 @@ def workflow_gui_action(payload):
         x = int(payload.get('x', 0))
         y = int(payload.get('y', 0))
         if driver:
-            driver.click(x, y)
+            harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
         return {'status': 'ok', 'message': f'click {x},{y}'}
@@ -119,9 +154,9 @@ def workflow_gui_action(payload):
     if action == 'input':
         text = str(payload.get('text', ''))
         if driver:
-            driver.shell('uitest uiInput keyEvent 2072 2017')
-            driver.press_key(2071)
-            driver.input_text(text)
+            harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
+            harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
+            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
@@ -142,13 +177,13 @@ def workflow_gui_action(payload):
         direction = str(payload.get('direction', 'up')).lower()
         if driver:
             if direction == 'up':
-                driver.swipe(0.5, harmony_agent.SWIPE_V_END, 0.5, harmony_agent.SWIPE_V_START, speed=1000)
+                harmony_agent.run_driver_call("Driver.swipe(up)", lambda d: d.swipe(0.5, harmony_agent.SWIPE_V_END, 0.5, harmony_agent.SWIPE_V_START, speed=1000))
             elif direction == 'down':
-                driver.swipe(0.5, harmony_agent.SWIPE_V_START, 0.5, harmony_agent.SWIPE_V_END, speed=1000)
+                harmony_agent.run_driver_call("Driver.swipe(down)", lambda d: d.swipe(0.5, harmony_agent.SWIPE_V_START, 0.5, harmony_agent.SWIPE_V_END, speed=1000))
             elif direction == 'left':
-                driver.swipe(harmony_agent.SWIPE_H_END, 0.5, harmony_agent.SWIPE_H_START, 0.5, speed=1000)
+                harmony_agent.run_driver_call("Driver.swipe(left)", lambda d: d.swipe(harmony_agent.SWIPE_H_END, 0.5, harmony_agent.SWIPE_H_START, 0.5, speed=1000))
             elif direction == 'right':
-                driver.swipe(harmony_agent.SWIPE_H_START, 0.5, harmony_agent.SWIPE_H_END, 0.5, speed=1000)
+                harmony_agent.run_driver_call("Driver.swipe(right)", lambda d: d.swipe(harmony_agent.SWIPE_H_START, 0.5, harmony_agent.SWIPE_H_END, 0.5, speed=1000))
             else:
                 raise RuntimeError(f'unknown swipe direction: {direction}')
         else:
@@ -176,7 +211,8 @@ def workflow_gui_action(payload):
         package_name = str(payload.get('package_name', ''))
         if not package_name:
             raise RuntimeError('app_start requires package_name')
-        harmony_agent.launch_app(package_name)
+        if not harmony_agent.launch_app(package_name):
+            raise RuntimeError(f'app_start failed: {package_name}')
         return {'status': 'ok', 'message': f'app_start {package_name}', 'package_name': package_name}
 
     if action == 'app_stop':
@@ -184,7 +220,7 @@ def workflow_gui_action(payload):
         if not package_name:
             raise RuntimeError('app_stop requires package_name')
         if driver:
-            driver.stop_app(package_name)
+            harmony_agent.run_driver_call("Driver.stop_app", lambda d: d.stop_app(package_name))
         else:
             run_hdc_command(f"{hdc_prefix()} shell aa force-stop {package_name}")
         return {'status': 'ok', 'message': f'app_stop {package_name}', 'package_name': package_name}
@@ -261,66 +297,119 @@ def handle_workflow_action(action, payload):
 
     raise RuntimeError(f'Unsupported workflow action: {action}')
 
-def is_hdc_connected():
+def invalidate_hdc_health_cache():
+    global _hdc_health_checked_at, _hdc_health_connected
+    _hdc_health_checked_at = 0.0
+    _hdc_health_connected = False
+
+def is_hdc_connected(force=False):
+    global _hdc_health_checked_at, _hdc_health_connected
+    now = time.monotonic()
+    if not force and _hdc_health_checked_at > 0 and now - _hdc_health_checked_at < HDC_HEALTH_CACHE_TTL:
+        return _hdc_health_connected
+
     try:
         # 当只有一行 [Empty] 时表示空，正常应该输出设备 IP 或者序列号。
         result = subprocess.run("hdc list targets", shell=True, capture_output=True, text=True)
         output = result.stdout.strip()
         if not output or "[Empty]" in output or "not found" in output:
+            _hdc_health_checked_at = now
+            _hdc_health_connected = False
             return False
+        _hdc_health_checked_at = now
+        _hdc_health_connected = True
         return True
     except Exception as e:
         print(f">> [警告] 检查 HDC 连接失败: {e}")
+        _hdc_health_checked_at = now
+        _hdc_health_connected = False
         return False
 
-def start_harmony_agent():
-    global agent_process
-    # 如果已经在运行中且没有退出，就不重复启动，避免多个 Agent 同时操作同一台设备。
-    if agent_process is not None:
-        ret_code = agent_process.poll()
-        if ret_code is None:
-            # 仍在运行
-            return
-        else:
-            print(f">> [提示] harmony_agent.py 之前已退出（退出码: {ret_code}），现在准备重新拉起...")
-
-    agent_script = os.path.join(os.path.dirname(__file__), "harmony_agent.py")
-    print(f">> 正在后台自动启动任务代理: {agent_script}")
+def _run_harmony_agent_thread(stop_event):
     try:
-        # 使用当前运行 hdc_server 的 Python 环境，避免 hmdriver2/Pillow 安装在另一个解释器里。
-        # 共享 stdout/stderr，使 Agent 的执行日志直接打印在这个控制台里。
-        cmd = [sys.executable, agent_script]
-        if NO_REASON_MODE:
-            cmd.append("--no_reason")
+        harmony_agent.set_no_reason_mode(NO_REASON_MODE)
+        harmony_agent.run_agent_loop(stop_event)
+    except Exception as ex:
+        print(f">> [AgentThread错误] harmony_agent loop exited unexpectedly: {ex}")
 
-        agent_process = subprocess.Popen(
-            cmd,
-            stdout=sys.stdout,
-            stderr=sys.stderr
-        )
-    except Exception as e:
-        print(f">> [错误] 无法启动 harmony_agent.py: {e}")
+def start_harmony_agent():
+    global agent_thread, agent_stop_event
+    if not LEGACY_LOOP_ENABLED:
+        return
+    if harmony_agent is None:
+        print(">> [警告] harmony_agent.py is unavailable; agent loop will not start.")
+        return
+    if agent_thread is not None and agent_thread.is_alive():
+        return
+
+    agent_stop_event = threading.Event()
+    harmony_agent.set_no_reason_mode(NO_REASON_MODE)
+    print(">> 正在后台启动任务代理线程: harmony_agent.run_agent_loop")
+    agent_thread = threading.Thread(
+        target=_run_harmony_agent_thread,
+        args=(agent_stop_event,),
+        name="harmony-agent-loop",
+        daemon=True
+    )
+    agent_thread.start()
+
+def ensure_agent_loop_ready():
+    if not LEGACY_LOOP_ENABLED:
+        return {
+            'status': 'error',
+            'message': '9126 polling loop is disabled by --workflow_only'
+        }
+    if harmony_agent is None:
+        return {
+            'status': 'error',
+            'message': 'harmony_agent.py is unavailable'
+        }
+
+    start_harmony_agent()
+    if not is_hdc_connected(force=True):
+        return {
+            'status': 'error',
+            'message': 'HDC target is not connected'
+        }
+
+    harmony_agent.refresh_hdc_forwarding()
+    return {
+        'status': 'ok',
+        'message': 'agent loop is running and 9126 fport refreshed',
+        'loop_alive': agent_thread is not None and agent_thread.is_alive()
+    }
 
 def cleanup():
-    global agent_process
-    if agent_process and agent_process.poll() is None:
-        print("\n>> 正在关闭 harmony_agent.py...")
-        agent_process.terminate()
-        agent_process.wait()
+    global agent_thread
+    agent_stop_event.set()
+    if harmony_agent is not None and hasattr(harmony_agent, 'stop_agent_loop'):
+        harmony_agent.stop_agent_loop()
+    if agent_thread is not None and agent_thread.is_alive():
+        print("\n>> 正在关闭 harmony_agent 后台线程...")
+        agent_thread.join(timeout=5)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
+    parser.add_argument("--legacy_loop", action="store_true",
+                        help="Compatibility flag; the 9126 polling harmony_agent loop is enabled by default")
+    parser.add_argument("--workflow_only", action="store_true",
+                        help="Do not start the 9126 polling harmony_agent loop; only expose /api/workflow")
     args = parser.parse_args()
     
     if args.no_reason:
         NO_REASON_MODE = True
+    LEGACY_LOOP_ENABLED = not args.workflow_only
+    if args.legacy_loop:
+        LEGACY_LOOP_ENABLED = True
 
-    # 启动代理（如果 HDC 已经挂载）；否则等 App 发起无线连接测试后再拉起。
-    if is_hdc_connected():
+    # 9126 轮询同时服务 App 端“本地/云端智能体执行”按钮；workflow bridge 仍然按请求直接控制设备。
+    if LEGACY_LOOP_ENABLED:
         start_harmony_agent()
+        if not is_hdc_connected(force=True):
+            print(">> 未检测到 HDC 设备连接；轮询 Agent loop 已启动，将在连接恢复后继续尝试。")
     else:
-        print(">> 未检测到 HDC 设备连接，将延后到 App 端发起连接指令后再启动...")
+        print(">> 旧版 harmony_agent 轮询未启用；workflow bridge 将按请求直接控制设备。")
         
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = 9124

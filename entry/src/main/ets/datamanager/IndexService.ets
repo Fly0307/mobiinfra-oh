@@ -46,13 +46,17 @@ import {
   normalizeEntityMentions,
   normalizeFreeText,
   normalizeLookupText,
+  normalizeProfileShortSummary,
   nowIsoLocal,
   parseNumberedEntries,
+  profileShortSummaryFromText,
   publicEvent,
   sourceSearchText,
   stableUnique,
+  stableUniqueNumbers,
   summarizeText
 } from './DataManagerUtils';
+import { workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
 
 export interface IndexBuildResult {
   sourceFiles: number;
@@ -115,6 +119,11 @@ interface SourceDocument {
 
 interface DomainDocument {
   domains: StringMap;
+  postings: StringArrayMap;
+}
+
+interface WorkflowSceneDocument {
+  scenes: StringMap;
   postings: StringArrayMap;
 }
 
@@ -256,6 +265,8 @@ export class IndexService {
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'inverted', 'index.json'), this.buildInvertedDocument(events));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.buildSourceDocument(events));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'domain', 'index.json'), this.buildDomainDocument(events));
+    this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'workflow-scene'));
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.buildWorkflowSceneDocument(events));
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
     let currentIds = Object.keys(events).sort();
     let previousIds = Object.keys(previousEvents).sort();
@@ -336,6 +347,20 @@ export class IndexService {
         (postings[domain] || []).forEach((id: string) => domainIds[id] = true);
       });
       ids.forEach((id: string) => matching[id] = matching[id] && domainIds[id] === true);
+    }
+
+    let workflowSceneIds = options.workflowSceneIds || [];
+    if (workflowSceneIds.length > 0) {
+      let selectedScenes = this.setFromNumbers(workflowSceneIds);
+      ids.forEach((id: string) => {
+        let sceneMatch = false;
+        (events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
+          if (selectedScenes[String(sceneId)] === true) {
+            sceneMatch = true;
+          }
+        });
+        matching[id] = matching[id] && sceneMatch;
+      });
     }
 
     if (options.entities.length > 0) {
@@ -433,6 +458,17 @@ export class IndexService {
         (postings[domain] || []).forEach((id: string) => domainIds[id] = true);
       });
       candidate = this.intersectCandidate(candidate, domainIds);
+    }
+
+    let workflowSceneIds = options.workflowSceneIds || [];
+    if (workflowSceneIds.length > 0) {
+      let sceneDocument = this.storage.readJson<WorkflowSceneDocument>(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.emptyWorkflowSceneDocument());
+      let postings = sceneDocument.postings || {};
+      let sceneIds: BooleanMap = {};
+      workflowSceneIds.forEach((sceneId: number) => {
+        (postings[String(sceneId)] || []).forEach((id: string) => sceneIds[id] = true);
+      });
+      candidate = this.intersectCandidate(candidate, sceneIds);
     }
 
     if (options.entities.length > 0) {
@@ -581,6 +617,12 @@ export class IndexService {
     return result;
   }
 
+  private setFromNumbers(values: number[]): BooleanMap {
+    let result: BooleanMap = {};
+    values.forEach((value: number) => result[String(value)] = true);
+    return result;
+  }
+
   private intersectCandidate(left: BooleanMap | null, right: BooleanMap): BooleanMap {
     if (left === null) {
       return this.setFromIds(Object.keys(right).filter((id: string) => right[id] === true));
@@ -672,6 +714,7 @@ export class IndexService {
       tags: (event.tags || []).slice(),
       source_refs: (event.source_refs || []).slice(),
       sources: (event.sources || []).slice(),
+      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
       image_paths: (event.image_paths || []).slice(),
       keywords: (event.keywords || []).slice(),
       domains: (event.domains || []).slice(),
@@ -710,6 +753,7 @@ export class IndexService {
         tags: stableUnique(record.tags || []),
         source_refs: stableUnique(record.source_refs || []),
         sources: eventSourceNames(record.source_refs || [], relativePath),
+        workflow_scene_ids: stableUniqueNumbers(record.workflow_scene_ids || []),
         image_paths: this.imagePathsForSourceRefs(record.source_refs || [], imageReferences),
         keywords: [],
         domains: [],
@@ -735,7 +779,8 @@ export class IndexService {
         return;
       }
       let steps = stepsValue as Record<string, JsonMap>;
-      Object.keys(steps).forEach((stepKey: string) => {
+      let stepKeys = Object.keys(steps);
+      stepKeys.forEach((stepKey: string) => {
         let step = steps[stepKey];
         let outputValue = step['output'];
         if (!outputValue || typeof outputValue !== 'object') {
@@ -746,7 +791,7 @@ export class IndexService {
           return;
         }
         let logRelative = this.pathAfterDirectory(output['daily_log_path'], 'daily-log');
-        let imagePath = this.workflowImageRelativePath(output['image'], runName);
+        let imagePath = this.workflowImageReferenceForToolOutput(output, runName, stepKey, steps, stepKeys);
         let summary = this.summaryOutputText(output);
         if (logRelative.length === 0 || imagePath.length === 0 || summary.length === 0) {
           return;
@@ -792,6 +837,19 @@ export class IndexService {
     return imageReferences;
   }
 
+  private workflowImageReferenceForToolOutput(output: JsonMap, runName: string, stepKey: string,
+    steps: Record<string, JsonMap>, stepKeys: string[]): string {
+    let directImage = this.workflowImageRelativePath(output['image'], runName);
+    if (directImage.length > 0) {
+      return directImage;
+    }
+    let directImagePath = this.workflowImageRelativePath(output['image_path'], runName);
+    if (directImagePath.length > 0) {
+      return directImagePath;
+    }
+    return this.nearestScreenshotImageReference(runName, stepKey, steps, stepKeys);
+  }
+
   private pathAfterDirectory(value: Object | string | number | boolean | null | undefined, directoryName: string): string {
     let normalized = normalizeFreeText(value).replace(/\\/g, '/');
     if (normalized.length === 0) {
@@ -826,6 +884,99 @@ export class IndexService {
       return this.storage.exists(this.paths.fromDataManagerRelative(relative)) ? relative : '';
     }
     return '';
+  }
+
+  private nearestScreenshotImageReference(runName: string, toolStepKey: string,
+    steps: Record<string, JsonMap>, stepKeys: string[]): string {
+    let toolStep = steps[toolStepKey];
+    let toolStarted = this.stepTime(toolStep, 'started_at');
+    let toolOrder = this.stepOrder(toolStepKey, stepKeys);
+    let toolScope = this.stepScope(toolStepKey);
+    let bestReference = '';
+    let bestSameScope = false;
+    let bestScore = -1;
+    for (let index = 0; index < stepKeys.length; index++) {
+      let candidateKey = stepKeys[index];
+      if (candidateKey === toolStepKey) {
+        continue;
+      }
+      let candidateStep = steps[candidateKey];
+      let output = this.stepOutputMap(candidateStep);
+      if (output === null) {
+        continue;
+      }
+      let reference = this.screenshotImageReference(runName, candidateKey, output);
+      if (reference.length === 0) {
+        continue;
+      }
+      let candidateFinished = this.stepTime(candidateStep, 'finished_at');
+      let candidateStarted = this.stepTime(candidateStep, 'started_at');
+      let candidateOrder = this.stepOrder(candidateKey, stepKeys);
+      let beforeTool = false;
+      if (toolStarted > 0 && candidateFinished > 0) {
+        beforeTool = candidateFinished <= toolStarted;
+      } else if (toolStarted > 0 && candidateStarted > 0) {
+        beforeTool = candidateStarted <= toolStarted;
+      } else {
+        beforeTool = candidateOrder < toolOrder;
+      }
+      if (!beforeTool) {
+        continue;
+      }
+      let sameScope = this.stepScope(candidateKey) === toolScope;
+      let score = candidateFinished > 0 ? candidateFinished : candidateOrder;
+      if (bestReference.length === 0 || (sameScope && !bestSameScope) ||
+        (sameScope === bestSameScope && score > bestScore)) {
+        bestReference = reference;
+        bestSameScope = sameScope;
+        bestScore = score;
+      }
+    }
+    return bestReference;
+  }
+
+  private screenshotImageReference(runName: string, stepKey: string, output: JsonMap): string {
+    if (normalizeFreeText(output['action']) !== 'screenshot') {
+      return '';
+    }
+    let directImagePath = this.workflowImageRelativePath(output['image_path'], runName);
+    if (directImagePath.length > 0) {
+      return directImagePath;
+    }
+    if (normalizeFreeText(output['image_b64']).length > 0) {
+      return 'runs/' + runName + '/run_summary.json#steps/' + stepKey + '/output/image_b64';
+    }
+    if (normalizeFreeText(output['image_path']).length > 0) {
+      return 'runs/' + runName + '/run_summary.json#steps/' + stepKey + '/output/image_path';
+    }
+    return '';
+  }
+
+  private stepOutputMap(step: JsonMap): JsonMap | null {
+    let output = step['output'];
+    if (!output || typeof output !== 'object') {
+      return null;
+    }
+    return output as JsonMap;
+  }
+
+  private stepTime(step: JsonMap, key: string): number {
+    let value = step[key];
+    return typeof value === 'number' ? value : 0;
+  }
+
+  private stepOrder(stepKey: string, stepKeys: string[]): number {
+    for (let index = 0; index < stepKeys.length; index++) {
+      if (stepKeys[index] === stepKey) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  private stepScope(stepKey: string): string {
+    let index = stepKey.lastIndexOf('.');
+    return index > 0 ? stepKey.substring(0, index) : '';
   }
 
   private summaryOutputText(output: JsonMap): string {
@@ -948,6 +1099,32 @@ export class IndexService {
     Object.keys(postings).forEach((domain: string) => postings[domain] = stableUnique(postings[domain]).sort());
     let document: DomainDocument = {
       domains: DOMAIN_DESCRIPTIONS,
+      postings: postings
+    };
+    return document;
+  }
+
+  private buildWorkflowSceneDocument(events: EventMap): WorkflowSceneDocument {
+    let scenes: StringMap = createStringMap();
+    let postings: StringArrayMap = {};
+    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+      let key = String(scene.sceneId);
+      scenes[key] = scene.label;
+      postings[key] = [];
+    });
+    Object.keys(events).sort().forEach((eventId: string) => {
+      let sceneIds = stableUniqueNumbers(events[eventId].workflow_scene_ids || []);
+      sceneIds.forEach((sceneId: number) => {
+        let key = String(sceneId);
+        if (!postings[key]) {
+          postings[key] = [];
+        }
+        postings[key].push(eventId);
+      });
+    });
+    Object.keys(postings).forEach((sceneId: string) => postings[sceneId] = stableUnique(postings[sceneId]).sort());
+    let document: WorkflowSceneDocument = {
+      scenes: scenes,
       postings: postings
     };
     return document;
@@ -1281,6 +1458,9 @@ export class IndexService {
         domainState.event_ids = eventIds;
         domainState.event_count = eventIds.length;
         domainState.date_range = this.eventDateRange(domainEvents);
+        if (domainState.short_summary.length === 0 && domainState.event_count > 0) {
+          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, domainState.claims || []);
+        }
         dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
       } else if (domainEvents.length === 0) {
         domainState = {
@@ -1290,6 +1470,7 @@ export class IndexService {
           event_ids: [],
           event_count: 0,
           date_range: this.eventDateRange(domainEvents),
+          short_summary: '',
           summary: '',
           claims: [],
           generation: 'empty'
@@ -1304,12 +1485,16 @@ export class IndexService {
           event_ids: eventIds,
           event_count: domainEvents.length,
           date_range: this.eventDateRange(domainEvents),
+          short_summary: normalizeProfileShortSummary(payload.short_summary),
           summary: normalizeFreeText(payload.summary),
           claims: claims,
           generation: modelConfig.enabled ? 'model' : 'heuristic'
         };
         if (domainState.summary.length === 0 && claims.length > 0) {
           domainState.summary = this.profileSummaryFromClaims(domain, claims);
+        }
+        if (domainState.short_summary.length === 0) {
+          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, claims);
         }
       }
       domainsState[domain] = domainState;
@@ -1336,6 +1521,7 @@ export class IndexService {
   private profileDomainInputHash(domain: string, domainEvents: IndexedEvent[], modelConfig: DataManagerModelConfig): string {
     let parts: string[] = [
       domain,
+      'short_summary_v1',
       modelConfig.enabled ? 'model' : 'heuristic',
       modelConfig.enabled ? String(PROFILE_MODEL_MAX_TOKENS) : '0',
       modelConfig.enabled ? String(PROFILE_MODEL_PROMPT_CHAR_LIMIT) : '0',
@@ -1367,6 +1553,7 @@ export class IndexService {
       event_ids: (domain.event_ids || []).slice(),
       event_count: domain.event_count,
       date_range: range,
+      short_summary: normalizeProfileShortSummary(domain.short_summary),
       summary: domain.summary,
       claims: (domain.claims || []).map((claim: ProfileClaim): ProfileClaim => {
         let item: ProfileClaim = {
@@ -1469,6 +1656,20 @@ export class IndexService {
       return '';
     }
     return `${DOMAIN_DISPLAY_NAMES[domain] || domain}领域呈现出这些倾向：${statements.slice(0, 3).join('；')}。`;
+  }
+
+  private profileShortSummary(domain: string, summary: string, claims: ProfileClaim[]): string {
+    for (let claim of claims) {
+      let fromClaim = profileShortSummaryFromText(domain, claim.statement, '');
+      if (fromClaim.length === 4) {
+        return fromClaim;
+      }
+    }
+    let fromSummary = profileShortSummaryFromText(domain, summary, '');
+    if (fromSummary.length === 4) {
+      return fromSummary;
+    }
+    return profileShortSummaryFromText(domain, '', '近期记录');
   }
 
   private renderProfileMarkdown(profile: ProfileState): string {
@@ -1660,6 +1861,7 @@ export class IndexService {
         event_ids: [],
         event_count: 0,
         date_range: range,
+        short_summary: '',
         summary: '',
         claims: [],
         generation: 'empty'
@@ -1728,6 +1930,21 @@ export class IndexService {
     DOMAIN_KEYS.forEach((domain: string) => postings[domain] = []);
     let document: DomainDocument = {
       domains: DOMAIN_DESCRIPTIONS,
+      postings: postings
+    };
+    return document;
+  }
+
+  private emptyWorkflowSceneDocument(): WorkflowSceneDocument {
+    let scenes: StringMap = createStringMap();
+    let postings: StringArrayMap = {};
+    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+      let key = String(scene.sceneId);
+      scenes[key] = scene.label;
+      postings[key] = [];
+    });
+    let document: WorkflowSceneDocument = {
+      scenes: scenes,
       postings: postings
     };
     return document;

@@ -29,8 +29,10 @@ import {
   normalizeDomains,
   normalizeEntityMentions,
   normalizeFreeText,
+  normalizeProfileShortSummary,
   normalizedSimilarityKey,
   normalizedTransactionSignature,
+  profileShortSummaryFromText,
   selectCandidateRecords,
   sourceDisplayName,
   stableUnique,
@@ -129,6 +131,11 @@ interface ProfileMergePromptPayload {
   batch?: ProfileChunkPayload;
 }
 
+interface ProfileMergeResult {
+  short_summary: string;
+  claims: RawProfileClaim[];
+}
+
 interface EntityResolutionPromptPayload {
   type: string;
   mentions: EntityMention[];
@@ -202,8 +209,8 @@ const SUMMARY_SYSTEM_PROMPT: string =
 const PROFILE_SYSTEM_PROMPT: string =
   '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。' +
   '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：' +
-  '{"summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
-  'summary 应像产品中的个人画像卡片，概括整体倾向，不要列举订单、聊天或浏览事实。' +
+  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
+  'short_summary 必须严格为 4 个中文字符，像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”，不要标点、空格、数字或解释。summary 应像产品中的个人画像卡片，概括整体倾向，不要列举订单、聊天或浏览事实。' +
   'claims 只保留 2 到 5 条高层 insight，可以描述偏好、习惯、近期关注话题、常用服务/商户、稳定联系人或地点，但每条必须由至少 2 条输入事件直接支持。' +
   '不要推断职业、收入、性格、身份等事件没有证明的信息。证据少或只出现一次时，使用“最近出现”“曾记录”等保守表述；只有多条独立事件支持时才使用“经常”“偏好”“常用”等强表述。' +
   '合并上一版画像时，只保留仍有当前事件证据支持的结论；相近结论应合并，不要重复输出。event_ids 必须来自输入事件，不要编造 id；每条结论至少包含 1 个 event_id。' +
@@ -214,11 +221,11 @@ const PROFILE_SYSTEM_PROMPT: string =
 const PROFILE_MERGE_SYSTEM_PROMPT: string =
   '你是用户画像归并助手。输入是同一领域内多个分块已经生成的候选画像结论，以及上一版该领域画像结论。' +
   '请去重、合并相近含义，并输出适合 App 前端展示的最终用户画像，返回严格 JSON：' +
-  '{"summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
+  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
   '只能基于 candidate_claims 和 previous_claims 中已有信息归并，不要创造新的品牌、实体、话题或事件 id。' +
   'claims 只保留 2 到 5 条高层 insight；相近结论必须合并，单次事件陈述不能作为画像。' +
   '每条结论必须至少由 2 个 event_ids 支持；event_ids 必须来自输入候选结论。合并上一版画像时，只保留仍被候选结论支持的内容。' +
-  '不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”。relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。不要输出 markdown 或解释。';
+  'short_summary 必须严格为 4 个中文字符，不要标点、空格、数字或解释。不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”。relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。不要输出 markdown 或解释。';
 
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
 const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
@@ -464,8 +471,10 @@ export class DataPipelineModelClient {
         if (claims.length === 0) {
           return this.heuristicProfile(domain, events);
         }
+        let summary = this.profileSummaryFromRawClaims(domain, claims);
         return {
-          summary: this.profileSummaryFromRawClaims(domain, claims),
+          short_summary: this.profileShortSummary(domain, parsed.short_summary, summary, claims, events),
+          summary: summary,
           claims: claims
         };
       }
@@ -476,12 +485,14 @@ export class DataPipelineModelClient {
         candidateClaims = candidateClaims.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8));
       }
       let merged = await this.mergeProfileClaimsWithModel(domain, candidateClaims, previousClaims, events, config);
-      if (merged.length === 0) {
+      if (merged.claims.length === 0) {
         return this.heuristicProfile(domain, events);
       }
+      let summary = this.profileSummaryFromRawClaims(domain, merged.claims);
       return {
-        summary: this.profileSummaryFromRawClaims(domain, merged),
-        claims: merged
+        short_summary: this.profileShortSummary(domain, merged.short_summary, summary, merged.claims, events),
+        summary: summary,
+        claims: merged.claims
       };
     } catch (e) {
       let err = e as Error;
@@ -666,6 +677,7 @@ export class DataPipelineModelClient {
         raw_excerpt: entry.entry_text,
         source_ref: entry.source_ref,
         source_date: entry.source_date,
+        workflow_scene_id: entry.workflow_scene_id,
         dedup_text: normalizeDedupText(normalizedFact)
       };
       facts.push(fact);
@@ -871,31 +883,35 @@ export class DataPipelineModelClient {
   }
 
   private async mergeProfileClaimsWithModel(domain: string, candidateClaims: RawProfileClaim[], previousClaims: ProfileClaim[],
-    events: IndexedEvent[], config: DataManagerModelConfig): Promise<RawProfileClaim[]> {
+    events: IndexedEvent[], config: DataManagerModelConfig): Promise<ProfileMergeResult> {
     let pending = this.normalizeGeneratedProfileClaims(candidateClaims, events, domain, 80);
     if (pending.length === 0) {
-      return [];
+      return { short_summary: '', claims: [] };
     }
     let currentPrevious = previousClaims;
     for (let round = 1; round <= PROFILE_MODEL_MERGE_ROUND_LIMIT; round++) {
       let payloads = this.profileModelMergePayloads(domain, pending, currentPrevious, round);
       let merged: RawProfileClaim[] = [];
+      let shortSummary = '';
       for (let payload of payloads) {
         let raw = await this.callJson(config, PROFILE_MERGE_SYSTEM_PROMPT, this.profilePromptText(payload));
         let parsed = this.normalizeProfilePayload(raw);
+        if (shortSummary.length === 0) {
+          shortSummary = parsed.short_summary;
+        }
         merged = merged.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 16));
       }
       merged = this.normalizeGeneratedProfileClaims(merged, events, domain, 80);
       if (merged.length === 0) {
-        return pending.slice(0, 8);
+        return { short_summary: '', claims: pending.slice(0, 8) };
       }
       if (payloads.length === 1 || merged.length >= pending.length) {
-        return merged.slice(0, 8);
+        return { short_summary: shortSummary, claims: merged.slice(0, 8) };
       }
       pending = merged;
       currentPrevious = [];
     }
-    return pending.slice(0, 8);
+    return { short_summary: '', claims: pending.slice(0, 8) };
   }
 
   private normalizeGeneratedProfileClaims(rawClaims: RawProfileClaim[], events: IndexedEvent[], domain: string, limit: number): RawProfileClaim[] {
@@ -970,9 +986,33 @@ export class DataPipelineModelClient {
     return summarizeText(`${DOMAIN_DISPLAY_NAMES[domain] || domain}领域呈现出这些倾向：${statements.slice(0, 3).join('；')}。`, 180);
   }
 
+  private profileShortSummary(domain: string, modelShortSummary: string, summary: string, claims: RawProfileClaim[], events: IndexedEvent[]): string {
+    let normalized = normalizeProfileShortSummary(modelShortSummary);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+    for (let claim of claims) {
+      let fromClaim = profileShortSummaryFromText(domain, claim.statement, '');
+      if (fromClaim.length === 4) {
+        return fromClaim;
+      }
+    }
+    let fromSummary = profileShortSummaryFromText(domain, summary, '');
+    if (fromSummary.length === 4) {
+      return fromSummary;
+    }
+    for (let event of events) {
+      let fromEvent = profileShortSummaryFromText(domain, event.summary || event.normalized_fact, '');
+      if (fromEvent.length === 4) {
+        return fromEvent;
+      }
+    }
+    return profileShortSummaryFromText(domain, '', '近期记录');
+  }
+
   private heuristicProfile(domain: string, events: IndexedEvent[]): ProfileModelPayload {
     if (events.length === 0) {
-      let empty: ProfileModelPayload = { summary: '', claims: [] };
+      let empty: ProfileModelPayload = { short_summary: '', summary: '', claims: [] };
       return empty;
     }
     let sourceCounter: NumberMap = {};
@@ -1018,9 +1058,11 @@ export class DataPipelineModelClient {
       claims.push(claim);
     }
     let payload: ProfileModelPayload = {
+      short_summary: '',
       summary: claims.length > 0 ? claims.map((claim: RawProfileClaim) => normalizeFreeText(claim.statement)).join('；') + '。' : '',
       claims: claims
     };
+    payload.short_summary = this.profileShortSummary(domain, '', payload.summary, claims, events);
     return payload;
   }
 
@@ -1099,6 +1141,7 @@ export class DataPipelineModelClient {
       tags: event.tags.slice(),
       source_refs: event.source_refs.slice(),
       sources: event.sources.slice(),
+      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
       image_paths: event.image_paths.slice(),
       keywords: event.keywords.slice(),
       domains: event.domains.slice(),
@@ -1142,6 +1185,7 @@ export class DataPipelineModelClient {
       }
     }
     let result: ProfileModelPayload = {
+      short_summary: normalizeProfileShortSummary(payload['short_summary']),
       summary: normalizeFreeText(payload['summary']),
       claims: claims
     };

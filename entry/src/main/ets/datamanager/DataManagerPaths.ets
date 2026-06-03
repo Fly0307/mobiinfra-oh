@@ -47,6 +47,7 @@ export class DataManagerPaths {
       this.storage.join(this.indexesRoot, 'entity'),
       this.storage.join(this.indexesRoot, 'temporal'),
       this.storage.join(this.indexesRoot, 'profile'),
+      this.storage.join(this.indexesRoot, 'workflow-scene'),
       this.collectionGroupsRoot
     ].forEach((path: string) => {
       this.storage.ensureDir(path);

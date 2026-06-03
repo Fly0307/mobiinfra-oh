@@ -155,6 +155,50 @@ PC 与手机 App TCP 服务之间使用简单文本协议：
   - `action`：一次性文本/图文推理请求。
   - `cloud_history_append`：云端 Agent 在 PC 执行动作成功后追加历史。
 
+## Workflow / Agent / PC Server 运行链路
+
+### 端口和服务边界
+
+| 端口 | 所在端 | 入口 | 作用 |
+| --- | --- | --- | --- |
+| `9123` | PC | `python/serve_model.py` | 模型文件 HTTP 下载服务。 |
+| `9124` | PC | `python/hdc_server.py` | App 调 PC 的 HDC HTTP 服务，暴露 `/api/run_cmd`、`/api/workflow`、`/api/agent_loop/ensure`。 |
+| `9126` | 手机 App | `utils/AgentRouterServer.ets` | App 内 TCP Agent Router，PC 通过 HDC `fport` 访问。 |
+
+`hdc_server.py` 是 PC 侧常驻入口。默认启动时会拉起一个后台线程运行 `harmony_agent.run_agent_loop()`，用于轮询 App 内 `9126` 的云端/MNN Agent 任务；同时它还提供 `/api/workflow`，用于 workflow 任务的按需桥接。仅运行 workflow 时可用 `--workflow_only` 关闭后台轮询。
+
+### Workflow 任务
+
+1. `pages/task/TaskPage.ets` 触发 `Index.runWorkflowTask()`。
+2. `utils/WorkflowRunner.ets` 在 App 沙箱内编排 workflow step，并负责调用云端 Planner、Decider 和 Summary。
+3. 需要设备动作时，`WorkflowRunner` 通过 `utils/HdcWorkflowBridge.ets` POST 到 PC `http://<pc>:9124/api/workflow`。
+4. `python/hdc_server.py` 根据 action 分发到 `python/harmony_agent.py`，执行 `app_start`、`screenshot`、`gui_action`、`execute_decider_action` 等能力。
+5. 任务结束后，`WorkflowRunner.returnToHostApp()` 会把宿主 App 拉回前台，并通过 `AgentExecutionController.finishExecution()` 清理浮窗状态。
+
+Workflow 不走 `9126` 的 `poll`。它的模型请求在 App 侧直接发生，PC 侧主要负责 HDC/hmdriver2 设备控制。
+
+### 云端 Agent
+
+1. `Index.ensureCloudAgentBackend()` 切换 `AgentRouterServer` 到 `cloud` 模式。
+2. `AgentRouterServer.ensureStarted()` 确保手机端 `9126` 正在监听；如果上一轮 workflow 或前后台切换导致监听状态不可靠，空闲状态下会先 close 再重新 listen。
+3. App 调用 PC `POST /api/agent_loop/ensure`，让 `hdc_server.py` 确认后台 `harmony_agent.run_agent_loop()` 存活，并刷新 `hdc fport tcp:9126 tcp:9126`。
+4. `submitCloudTask()` 设置 `currentTask`。PC 侧 `harmony_agent.poll_task()` 通过 `9126` 获取任务。
+5. PC 侧负责截图和执行动作；Planner/Decider 请求通过 `AgentRouterServer.handleCloudRequest()` 转发给 `CloudModelClient`。
+
+### MNN 本地 Agent
+
+1. `Index.ensureLocalAgentReady()` 先确保本地模型已通过 `mnnllm.loadModel()` 加载。
+2. App 将 `AgentRouterServer` 切换到 `local` 模式，并同样确保 `9126` 监听和 PC loop/fport 可用。
+3. `submitLocalTask()` 设置 `currentTask`。PC 侧轮询获得任务后，仍由 `harmony_agent.py` 截图和执行动作。
+4. Planner/Decider 请求通过 `AgentRouterServer.handleLocalRequest()` 调用 `libentry.so` 暴露的 `agentPrefill`、`agentStep`、`agentReset` 或 `chat`。
+
+### 串行切换约定
+
+- 三种入口可以在一个任务完成后串行切换，不需要重启 PC `hdc_server.py`。
+- App 侧在启动云端/MNN Agent 前会恢复 `9126` Router，并请求 PC 刷新 loop/fport。
+- 同一时间仍只应运行一个自动化任务。并发启动多个入口会同时竞争手机前台 App、截图和 HDC 控制，不属于当前支持场景。
+- PC 侧 `poll` 请求设置了短超时，避免 workflow 把 App 切到后台后旧连接长时间挂住，导致后续 Agent 任务无法被轮询到。
+
 ## 维护建议
 
 1. 优先维护 `AgentRouterServer.ets`。当前主流程统一通过它承接手机侧 TCP 请求分发和本地/云端 Agent 路由。

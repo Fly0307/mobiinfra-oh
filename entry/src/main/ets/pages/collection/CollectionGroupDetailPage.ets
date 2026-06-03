@@ -163,7 +163,7 @@ struct CollectionGroupDetailPage {
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor('#151A28')
-          Text('返回采集页后重新同步或重分组')
+          Text('返回采集页后重新同步')
             .fontSize(12)
             .fontColor('#7C8494')
             .margin({ top: 8 })

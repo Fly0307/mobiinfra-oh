@@ -198,30 +198,36 @@ export class CloudModelClient {
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
-    model?: string, maxTokens?: number, readTimeout?: number): Promise<string> {
+    model?: string, maxTokens?: number, readTimeout?: number,
+    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
     // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
+    let options: CloudChatCompletionOptions = {
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      messages: messages,
+      temperature: 0,
+      model: model,
+      maxTokens: maxTokens,
+      readTimeout: readTimeout
+    };
+    if (chatTemplateKwargs !== undefined) {
+      options.chatTemplateKwargs = chatTemplateKwargs;
+    }
     try {
-      return await this.chatCompletionText({
-        baseUrl: baseUrl,
-        apiKey: apiKey,
-        messages: messages,
-        temperature: 0,
-        model: model,
-        maxTokens: maxTokens,
-        readTimeout: readTimeout
-      });
+      return await this.chatCompletionText(options);
     } catch (e) {
       let err = e as Error;
       return ArkJSON.stringify({ action: 'error', reason: err.message });
     }
   }
 
-  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string): Promise<string> {
+  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string,
+    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
     let message: CloudChatMessage = {
       role: 'user',
       content: content
     };
-    return this.chatMessages(baseUrl, [message], apiKey);
+    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatTemplateKwargs);
   }
 
   async chatPlanner(prompt: string, config: CloudModelConfig): Promise<string> {
@@ -230,7 +236,7 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey);
+    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {

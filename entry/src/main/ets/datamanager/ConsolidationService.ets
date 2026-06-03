@@ -33,7 +33,9 @@ import {
   selectRecentScopeRecords,
   sourceRef,
   stableUnique,
-  updateExistingRecord
+  stableUniqueNumbers,
+  updateExistingRecord,
+  workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
 export interface ConsolidationResult {
@@ -125,6 +127,7 @@ export class ConsolidationService {
             entry_index: index,
             entry_text: text,
             workflow_metadata: metadata,
+            workflow_scene_id: workflowSceneIdFromMetadata(metadata),
             source_ref: sourceRef(day, fileName, index)
           });
         }
@@ -249,6 +252,7 @@ export class ConsolidationService {
       item.dedup_text = normalizeDedupText(item.dedup_text || item.normalized_fact || '');
       item.source_refs = Array.isArray(item.source_refs) ? item.source_refs : [];
       item.source_dates = Array.isArray(item.source_dates) ? item.source_dates : [];
+      item.workflow_scene_ids = Array.isArray(item.workflow_scene_ids) ? stableUniqueNumbers(item.workflow_scene_ids) : [];
       item.raw_excerpts = Array.isArray(item.raw_excerpts) ? item.raw_excerpts : [];
       item.tags = Array.isArray(item.tags) ? item.tags : [];
       item.model_notes = Array.isArray(item.model_notes) ? item.model_notes : [];

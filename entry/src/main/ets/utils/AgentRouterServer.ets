@@ -58,6 +58,10 @@ export class AgentRouterServer {
     return this.isRunning;
   }
 
+  public hasPendingTask(): boolean {
+    return this.currentTask.length > 0;
+  }
+
   public getRouteMode(): AgentRouteMode {
     return this.routeMode;
   }
@@ -82,6 +86,17 @@ export class AgentRouterServer {
 
   public useCloud(): void {
     this.routeMode = 'cloud';
+  }
+
+  public async ensureStarted(port: number, filesDir: string): Promise<boolean> {
+    if (!this.isRunning) {
+      return await this.start(port, filesDir);
+    }
+    if (this.hasPendingTask()) {
+      this.log(this.routeMode, 'Agent router backend is busy; keep current listener.');
+      return true;
+    }
+    return await this.restart(port, filesDir);
   }
 
   public submitLocalTask(task: string): void {
@@ -139,29 +154,18 @@ export class AgentRouterServer {
     }
   }
 
-  public start(port: number, filesDir: string): void {
+  public async start(port: number, filesDir: string): Promise<boolean> {
     if (this.isRunning) {
       this.log(this.routeMode, 'Agent router backend is already running.');
-      return;
+      return true;
     }
 
     this.filesDir = filesDir;
     this.cancellationRequested = false;
-    this.server = socket.constructTCPSocketServerInstance();
+    let server = socket.constructTCPSocketServerInstance();
     let ipAddress: socket.NetAddress = { address: '0.0.0.0', port: port, family: 1 };
 
-    this.server.listen(ipAddress, (err) => {
-      if (err) {
-        this.log(this.routeMode, '[ERROR] Agent router backend failed to start: ' + ArkJSON.stringify(err));
-        return;
-      }
-      this.isRunning = true;
-      this.log(this.routeMode,
-        '====== Agent router backend started ======\nTCP port: ' + port +
-        '\nCloud Agent and local MNN Agent now share the same port via in-app routing.');
-    });
-
-    this.server.on('connect', (client: socket.TCPSocketConnection) => {
+    server.on('connect', (client: socket.TCPSocketConnection) => {
       let bufferStr = '';
       if (this.routeMode === 'cloud' && !this.cloudConnectLogged) {
         this.cloudConnectLogged = true;
@@ -196,6 +200,43 @@ export class AgentRouterServer {
         }
       });
     });
+
+    try {
+      await server.listen(ipAddress);
+      this.server = server;
+      this.isRunning = true;
+      this.log(this.routeMode,
+        '====== Agent router backend started ======\nTCP port: ' + port +
+        '\nCloud Agent and local MNN Agent now share the same port via in-app routing.');
+      return true;
+    } catch (e) {
+      this.log(this.routeMode, '[ERROR] Agent router backend failed to start: ' + String(e));
+      try {
+        await server.close();
+      } catch (closeErr) {
+      }
+      return false;
+    }
+  }
+
+  public async restart(port: number, filesDir: string): Promise<boolean> {
+    await this.stop();
+    return await this.start(port, filesDir);
+  }
+
+  public async stop(): Promise<void> {
+    let oldServer = this.server;
+    this.server = null;
+    this.isRunning = false;
+    if (oldServer === null) {
+      return;
+    }
+
+    try {
+      await oldServer.close();
+    } catch (e) {
+      this.log(this.routeMode, 'Agent router backend close warning: ' + String(e));
+    }
   }
 
   private async handleRequest(client: socket.TCPSocketConnection, req: RequestMap): Promise<void> {

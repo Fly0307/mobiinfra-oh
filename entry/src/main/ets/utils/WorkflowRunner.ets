@@ -167,6 +167,7 @@ export class WorkflowRunner {
   private runDir: string = '';
   private runDate: string = '';
   private workflowFile: string = '';
+  private runningTask: WorkflowTask | null = null;
   private currentAppName: string = '';
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
@@ -184,6 +185,7 @@ export class WorkflowRunner {
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
     this.workflow = WorkflowStorage.validateWorkflowJson(task.workflowJson);
+    this.runningTask = task;
     this.contextValues = this.workflow.context || {};
     this.stepResults = {};
     this.aliasStack = [];
@@ -660,11 +662,24 @@ export class WorkflowRunner {
       let result = await jobs[i];
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
-        this.appendDailySummaryLog(result.response);
+        let dailyLogPath = this.appendDailySummaryLog(result.response);
+        this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
       } else {
         this.log('VLM QA deferred failed (' + result.actual_id + '): ' + result.error);
       }
     }
+  }
+
+  private updateDeferredSummaryOutput(actualId: string, response: string, dailyLogPath: string): void {
+    let result = this.stepResults[actualId];
+    if (!result) {
+      return;
+    }
+    let output = result.output as Object as ToolOutput;
+    output.response = response;
+    output.daily_log_path = dailyLogPath;
+    output.deferred = false;
+    result.output = output as Object as WorkflowJsonMap;
   }
 
   private async runLoop(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
@@ -943,6 +958,9 @@ export class WorkflowRunner {
       if (this.workflow.metadata.description) {
         workflowMetadata['description'] = this.workflow.metadata.description;
       }
+    }
+    if (this.runningTask !== null) {
+      workflowMetadata['task_scene_id'] = this.runningTask.sceneId;
     }
     let metadata: DailyLogMetadata = {
       workflow_metadata: workflowMetadata,

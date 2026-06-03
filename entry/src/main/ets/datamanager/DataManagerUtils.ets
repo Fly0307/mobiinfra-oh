@@ -112,6 +112,58 @@ export function summarizeText(value: string, maxLength: number = 80): string {
   return text.substring(0, maxLength) + '...';
 }
 
+function compactChineseProfileText(value: Object | string | number | boolean | null | undefined): string {
+  return normalizeFreeText(value).replace(/[^\u4e00-\u9fff]/g, '');
+}
+
+export function normalizeProfileShortSummary(value: Object | string | number | boolean | null | undefined): string {
+  let compact = compactChineseProfileText(value);
+  return compact.length === 4 ? compact : '';
+}
+
+export function profileShortSummaryFromText(domain: string, value: string, fallback: string = '近期记录'): string {
+  let compact = compactChineseProfileText(value);
+  let displayName = DOMAIN_DISPLAY_NAMES[domain] || '';
+  if (displayName.length > 0 && compact.startsWith(displayName + '领域')) {
+    compact = compact.substring((displayName + '领域').length);
+  }
+  let fillerWords: string[] = [
+    '该领域',
+    '领域',
+    '呈现出',
+    '这些倾向',
+    '倾向',
+    '用户',
+    '数据',
+    '记录显示',
+    '记录',
+    '主要',
+    '来自',
+    '近期',
+    '最近',
+    '话题',
+    '反复出现',
+    '出现',
+    '可以',
+    '看到'
+  ];
+  fillerWords.forEach((word: string) => {
+    compact = compact.replace(new RegExp(word, 'g'), '');
+  });
+  if (compact.length >= 4) {
+    return compact.substring(0, 4);
+  }
+  let fallbackCompact = compactChineseProfileText(fallback);
+  if (fallbackCompact.length === 0) {
+    return '';
+  }
+  let padded = compact + fallbackCompact;
+  if (padded.length >= 4) {
+    return padded.substring(0, 4);
+  }
+  return '近期记录';
+}
+
 export function stableUnique(values: string[]): string[] {
   let result: string[] = [];
   let seen: BooleanMap = {};
@@ -123,6 +175,27 @@ export function stableUnique(values: string[]): string[] {
     }
   }
   return result;
+}
+
+export function stableUniqueNumbers(values: number[]): number[] {
+  let result: number[] = [];
+  let seen: Record<string, boolean> = {};
+  for (let value of values) {
+    if (isNaN(value)) {
+      continue;
+    }
+    let key = String(value);
+    if (!seen[key]) {
+      seen[key] = true;
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+export function workflowSceneIdFromMetadata(metadata: JsonMap): number {
+  let value = Number(metadata['task_scene_id']);
+  return isNaN(value) ? -1 : value;
 }
 
 export function normalizeTags(values: Object | string[] | null | undefined): string[] {
@@ -187,7 +260,7 @@ export function parseNumberedEntries(body: string): NumberedEntry[] {
   if (normalized.length === 0) {
     return entries;
   }
-  let pattern = /(?:^|\n)(\d+)\.\s+([\s\S]*?)(?=\n\d+\.\s+|$)/g;
+  let pattern = /(?:^|\n\s*\n)(\d+)\.\s+([\s\S]*?)(?=\n\s*\n\d+\.\s+|$)/g;
   let match: RegExpExecArray | null = pattern.exec(normalized);
   while (match !== null) {
     let text = match[2].trim();
@@ -342,6 +415,7 @@ export function heuristicSplit(entry: SourceEntry): CandidateFact[] {
         raw_excerpt: text,
         source_ref: entry.source_ref,
         source_date: entry.source_date,
+        workflow_scene_id: entry.workflow_scene_id,
         dedup_text: normalizeDedupText(normalized)
       };
     });
@@ -355,6 +429,7 @@ export function heuristicSplit(entry: SourceEntry): CandidateFact[] {
     raw_excerpt: text,
     source_ref: entry.source_ref,
     source_date: entry.source_date,
+    workflow_scene_id: entry.workflow_scene_id,
     dedup_text: normalizeDedupText(text)
   }];
 }
@@ -470,6 +545,7 @@ export function atomicizeCandidateFacts(entry: SourceEntry, facts: CandidateFact
           raw_excerpt: fact.raw_excerpt,
           source_ref: fact.source_ref,
           source_date: fact.source_date,
+          workflow_scene_id: fact.workflow_scene_id,
           dedup_text: dedupText
         };
         atomicFacts.push(atomicFact);
@@ -488,6 +564,7 @@ export function atomicizeCandidateFacts(entry: SourceEntry, facts: CandidateFact
         raw_excerpt: fact.raw_excerpt,
         source_ref: fact.source_ref,
         source_date: fact.source_date,
+        workflow_scene_id: fact.workflow_scene_id,
         dedup_text: dedupText
       };
       atomicFacts.push(atomicFact);
@@ -631,6 +708,10 @@ export function updateExistingRecord(record: AggregatedRecord, fact: CandidateFa
   if (record.source_refs.indexOf(fact.source_ref) < 0) {
     record.source_refs.push(fact.source_ref);
   }
+  if (!isNaN(fact.workflow_scene_id) && fact.workflow_scene_id >= 0 && record.workflow_scene_ids.indexOf(fact.workflow_scene_id) < 0) {
+    record.workflow_scene_ids.push(fact.workflow_scene_id);
+    record.workflow_scene_ids.sort((left: number, right: number) => left - right);
+  }
   if (record.raw_excerpts.indexOf(fact.raw_excerpt) < 0) {
     record.raw_excerpts.push(fact.raw_excerpt);
   }
@@ -700,6 +781,7 @@ export function createNewRecord(nextRecordId: number, fact: CandidateFact, decis
     last_seen_date: fact.source_date,
     source_refs: [fact.source_ref],
     source_dates: stableUnique([fact.event_date || fact.source_date, fact.source_date]).sort(),
+    workflow_scene_ids: !isNaN(fact.workflow_scene_id) && fact.workflow_scene_id >= 0 ? [fact.workflow_scene_id] : [],
     summary: summarizeText(fact.summary || fact.normalized_fact),
     normalized_fact: normalizeFreeText(fact.normalized_fact),
     raw_excerpts: [fact.raw_excerpt],

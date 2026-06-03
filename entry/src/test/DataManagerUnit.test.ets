@@ -4,8 +4,10 @@ import {
   findExactExistingMatch,
   eventSourceNames,
   indexTerms,
+  normalizeProfileShortSummary,
   parseDailyLogDocument,
   parseNumberedEntries,
+  profileShortSummaryFromText,
   sourceAppDisplayName,
   sourceDisplayName
 } from '../main/ets/datamanager/DataManagerUtils';
@@ -38,6 +40,7 @@ function demoIndexedEvent(id: string, summary: string, source: string, domain: s
     tags: [],
     source_refs: [],
     sources: [source],
+    workflow_scene_ids: [3],
     image_paths: [],
     keywords: [keyword],
     domains: [domain],
@@ -57,6 +60,19 @@ export default function dataManagerUnitTest() {
       let entries = parseNumberedEntries(doc.body);
       expect(entries.length).assertEqual(2);
       expect(entries[0].index).assertEqual(1);
+    });
+
+    it('parseNumberedEntriesIgnoresNestedLists', 0, () => {
+      let body = '1. 这段聊天记录主要围绕手机刷机故障处理展开，具体内容如下：\n' +
+        '1. **故障描述**：手机出现 Magisk 图标异常。\n' +
+        '2. **处理方案**：预约线下重新刷机。\n' +
+        '3. **回应**：建议先暂停折腾。\n\n' +
+        '2. 第二条顶层记录，讨论 workflow 替代 cli 的可行性。';
+      let entries = parseNumberedEntries(body);
+      expect(entries.length).assertEqual(2);
+      expect(entries[0].index).assertEqual(1);
+      expect(entries[0].text.indexOf('故障描述') >= 0).assertTrue();
+      expect(entries[1].index).assertEqual(2);
     });
 
     it('sourceDisplayName', 0, () => {
@@ -85,6 +101,14 @@ export default function dataManagerUnitTest() {
       expect(terms.indexOf('顺风') >= 0).assertTrue();
     });
 
+    it('profileShortSummaryNormalization', 0, () => {
+      expect(normalizeProfileShortSummary('清淡轻食')).assertEqual('清淡轻食');
+      expect(normalizeProfileShortSummary('清淡轻食。')).assertEqual('清淡轻食');
+      expect(normalizeProfileShortSummary('健康轻食餐')).assertEqual('');
+      expect(profileShortSummaryFromText('eat', '近期咖啡、奶茶等话题反复出现。', '')).assertEqual('咖啡奶茶');
+      expect(profileShortSummaryFromText('travel', '', '近期记录')).assertEqual('近期记录');
+    });
+
     it('atomicizeCandidateFacts', 0, () => {
       let entry: SourceEntry = {
         source_date: '2026-05-21',
@@ -92,6 +116,7 @@ export default function dataManagerUnitTest() {
         entry_index: 1,
         entry_text: '当前页面显示了订单记录，其中最近一单是潮汕牛肉火锅实付25.8元，第二单是大米先生实付23.9元。',
         workflow_metadata: createJsonMap(),
+        workflow_scene_id: 1,
         source_ref: '2026-05-21/demo.md#1'
       };
       let fact: CandidateFact = {
@@ -103,6 +128,7 @@ export default function dataManagerUnitTest() {
         raw_excerpt: entry.entry_text,
         source_ref: entry.source_ref,
         source_date: entry.source_date,
+        workflow_scene_id: entry.workflow_scene_id,
         dedup_text: entry.entry_text
       };
       let facts = atomicizeCandidateFacts(entry, [fact]);
@@ -118,6 +144,7 @@ export default function dataManagerUnitTest() {
         last_seen_date: '2026-05-21',
         source_refs: ['2026-05-21/demo.md#1'],
         source_dates: ['2026-05-21'],
+        workflow_scene_ids: [1],
         summary: '潮汕牛肉火锅实付25.8元',
         normalized_fact: '潮汕牛肉火锅实付25.8元',
         raw_excerpts: [],
@@ -135,6 +162,7 @@ export default function dataManagerUnitTest() {
         raw_excerpt: '',
         source_ref: '2026-05-21/demo.md#1',
         source_date: '2026-05-21',
+        workflow_scene_id: 1,
         dedup_text: '大米先生实付23.9元'
       };
       let match = findExactExistingMatch([record], fact);

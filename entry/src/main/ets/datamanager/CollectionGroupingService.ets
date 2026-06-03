@@ -29,6 +29,7 @@ import {
   stableUnique,
   summarizeText
 } from './DataManagerUtils';
+import { workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
 
 export interface CollectionGroupingBuildResult {
   tabCount: number;
@@ -52,32 +53,16 @@ type CollectionGroupMap = Record<string, CollectionGroupState[]>;
 const MAX_GROUPS_PER_TAB: number = 12;
 
 export function collectionTabSpecs(): CollectionTabSpec[] {
-  return [
-    {
-      tabIndex: 0,
-      tabId: 'chat',
-      title: '最近聊天',
-      query: { keywords: ['微信'], domains: [], entities: [], date: '', month: '', startDate: '', endDate: '', limit: 0 }
-    },
-    {
-      tabIndex: 1,
-      tabId: 'orders',
-      title: '最近订单',
-      query: { keywords: [], domains: ['eat', 'wear', 'live', 'travel'], entities: [], date: '', month: '', startDate: '', endDate: '', limit: 0 }
-    },
-    {
-      tabIndex: 2,
-      tabId: 'notifications',
-      title: '最近通知',
-      query: { keywords: ['通知'], domains: [], entities: [], date: '', month: '', startDate: '', endDate: '', limit: 0 }
-    },
-    {
-      tabIndex: 3,
-      tabId: 'entertainment',
-      title: '娱乐记录',
-      query: { keywords: ['视频'], domains: [], entities: [], date: '', month: '', startDate: '', endDate: '', limit: 0 }
-    }
-  ];
+  let scenes = workflowSceneConfigs();
+  return scenes.map((scene: WorkflowSceneConfig): CollectionTabSpec => {
+    let spec: CollectionTabSpec = {
+      tabIndex: scene.sceneId,
+      tabId: scene.tabId,
+      title: scene.label + '记录',
+      query: { keywords: [], domains: [], entities: [], date: '', month: '', startDate: '', endDate: '', workflowSceneIds: [scene.sceneId], limit: 0 }
+    };
+    return spec;
+  });
 }
 
 export function collectionTabSpecByIndex(index: number): CollectionTabSpec {
@@ -85,7 +70,7 @@ export function collectionTabSpecByIndex(index: number): CollectionTabSpec {
   if (index >= 0 && index < specs.length) {
     return specs[index];
   }
-  return specs[1];
+  return specs[0];
 }
 
 export function emptyCollectionGroupsDocument(spec: CollectionTabSpec): CollectionGroupsDocument {
@@ -280,6 +265,7 @@ export class CollectionGroupingService {
         event.summary,
         event.normalized_fact,
         (event.sources || []).join(','),
+        (event.workflow_scene_ids || []).join(','),
         (event.domains || []).join(','),
         (event.keywords || []).join(','),
         (event.entities || []).join(',')

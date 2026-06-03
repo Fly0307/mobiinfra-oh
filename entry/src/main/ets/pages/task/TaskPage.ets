@@ -3,6 +3,7 @@ import { promptAction } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowFileStats, WorkflowManagedFile, WorkflowTask } from '../../utils/WorkflowTypes';
+import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 
 // 定时任务页：新版不再使用静态样例任务，而是从 App 沙箱中的 workflow JSON
 // 加载任务配置，并提供编辑、运行、daily-log/运行文件查看和清理能力。
@@ -275,19 +276,20 @@ export struct TaskPage {
     .margin({ bottom: 18 })
   }
 
-  @Builder TaskSceneTab(label: string, index: number) {
+  @Builder TaskSceneTab(scene: WorkflowSceneConfig) {
     // 横向场景筛选器：购物/外卖/娱乐/聊天。
-    Text(label)
+    Text(scene.label)
       .fontSize(14)
-      .fontWeight(this.taskScene === index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.taskScene === index ? Color.White : '#6D7481')
+      .fontWeight(this.taskScene === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.taskScene === scene.sceneId ? Color.White : '#6D7481')
       .height(42)
       .padding({ left: 18, right: 18 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.taskScene === index ? '#765BFF' : Color.White)
+      .backgroundColor(this.taskScene === scene.sceneId ? scene.color : Color.White)
       .borderRadius(21)
+      .margin({ right: 10 })
       .onClick(() => {
-        this.taskScene = index;
+        this.taskScene = scene.sceneId;
       })
   }
 
@@ -518,12 +520,9 @@ export struct TaskPage {
               Text('选择场景，使用 workflow JSON 采集并整理数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
               Scroll() {
                 Row() {
-                  Text('购物').fontSize(11).fontColor('#6B5CFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F5FF').borderRadius(10)
-                  Text('外卖').fontSize(11).fontColor('#39BFA3').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFFBF7').borderRadius(10).margin({ left: 8 })
-                  Text('娱乐').fontSize(11).fontColor('#8066FF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F2EEFF').borderRadius(10).margin({ left: 8 })
-                  Text('聊天').fontSize(11).fontColor('#4B8BFF').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#EFF5FF').borderRadius(10).margin({ left: 8 })
-                  Text('生活').fontSize(11).fontColor('#D97706').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF7ED').borderRadius(10).margin({ left: 8 })
-                  Text('社交').fontSize(11).fontColor('#D9467D').padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#FFF1F5').borderRadius(10).margin({ left: 8 })
+                  ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+                    Text(scene.label).fontSize(11).fontColor(scene.color).padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F9FE').borderRadius(10).margin({ right: 8 })
+                  }, (scene: WorkflowSceneConfig) => scene.tabId)
                 }
               }
               .width('100%')
@@ -555,17 +554,9 @@ export struct TaskPage {
 
         Scroll() {
           Row() {
-            this.TaskSceneTab('购物', 0)
-            Blank().width(10)
-            this.TaskSceneTab('外卖', 1)
-            Blank().width(10)
-            this.TaskSceneTab('娱乐', 2)
-            Blank().width(10)
-            this.TaskSceneTab('聊天', 3)
-            Blank().width(10)
-            this.TaskSceneTab('生活', 4)
-            Blank().width(10)
-            this.TaskSceneTab('社交', 5)
+            ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+              this.TaskSceneTab(scene)
+            }, (scene: WorkflowSceneConfig) => scene.tabId)
           }.padding({ left: 24, right: 24 })
         }
         .width('100%')

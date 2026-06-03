@@ -45,13 +45,10 @@ interface RunCmdRequest {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
-const DEFAULT_DATA_MANAGER_GROUPING_BASE_URL = 'http://123.60.91.241:9003';
-
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
-PersistentStorage.persistProp('dataManagerGroupingBaseUrl', DEFAULT_DATA_MANAGER_GROUPING_BASE_URL);
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
@@ -59,7 +56,6 @@ PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
 PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
-PersistentStorage.persistProp('endpointDefault.dataManagerGroupingBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
@@ -81,14 +77,13 @@ struct Index {
   @State backendTypeInput: string = 'cpu';
   @State mllmBackendTypeInput: string = 'cpu';
   @State currentTab: number = 0;
-  @State collectionModule: number = 1;
+  @State collectionModule: number = 0;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
-  @StorageLink('dataManagerGroupingBaseUrl') dataManagerGroupingBaseUrl: string = DEFAULT_DATA_MANAGER_GROUPING_BASE_URL;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
@@ -138,14 +133,6 @@ struct Index {
       baseUrl: this.cloudPlannerBaseUrl,
       apiKey: this.cloudApiKey,
       enabled: this.cloudPlannerBaseUrl.trim().length > 0
-    };
-  }
-
-  private getDataManagerGroupingModelConfig(): DataManagerModelConfig {
-    return {
-      baseUrl: this.dataManagerGroupingBaseUrl,
-      apiKey: this.cloudApiKey,
-      enabled: this.dataManagerGroupingBaseUrl.trim().length > 0
     };
   }
 
@@ -201,12 +188,15 @@ struct Index {
       dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
       let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
         this.updateDataManagerProgress(progress);
-      }, this.getDataManagerGroupingModelConfig());
+      });
       this.reloadDataManagerViewModels();
       this.appendCloudLog('DataManager refresh: ' + summary.message);
       this.dataManagerProgressStage = '完成';
       this.dataManagerProgressMessage = summary.message;
       this.dataManagerProgressPercent = 100;
+      if (summary.skipped) {
+        promptAction.showToast({ message: '已是最新数据', duration: 1500 });
+      }
       dataManagerInfo('refreshDataManager success: ' + summary.message);
     } catch (e) {
       let err = e as Error;
@@ -218,38 +208,6 @@ struct Index {
     } finally {
       this.dataManagerRefreshing = false;
       dataManagerInfo('refreshDataManager finished');
-    }
-  }
-
-  private async regroupDataManagerCollections(): Promise<void> {
-    dataManagerInfo(`regroupDataManagerCollections invoked: hasFacade=${this.dataManagerFacade !== null}, refreshing=${this.dataManagerRefreshing}`);
-    if (this.dataManagerFacade === null || this.dataManagerRefreshing) {
-      return;
-    }
-    this.dataManagerRefreshing = true;
-    this.dataManagerProgressStage = '正在构建索引';
-    this.dataManagerProgressMessage = '';
-    this.dataManagerProgressPercent = 94;
-    try {
-      let message = await this.dataManagerFacade.regroup(this.getDataManagerGroupingModelConfig(), (progress: DataManagerProgress) => {
-        this.updateDataManagerProgress(progress);
-      });
-      this.reloadDataManagerViewModels();
-      this.appendCloudLog('DataManager regroup: ' + message);
-      this.dataManagerProgressStage = '完成';
-      this.dataManagerProgressMessage = message;
-      this.dataManagerProgressPercent = 100;
-      dataManagerInfo('regroupDataManagerCollections success: ' + message);
-    } catch (e) {
-      let err = e as Error;
-      this.appendCloudLog('DataManager regroup failed: ' + err.message);
-      this.dataManagerProgressStage = '失败';
-      this.dataManagerProgressMessage = '重分组失败: ' + err.message;
-      this.dataManagerProgressPercent = 100;
-      dataManagerError('regroupDataManagerCollections failed: ' + err.message);
-    } finally {
-      this.dataManagerRefreshing = false;
-      dataManagerInfo('regroupDataManagerCollections finished');
     }
   }
 
@@ -344,9 +302,6 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.wirelessHdcTargets, 'endpointDefault.wirelessIp');
     this.cloudPlannerBaseUrl = this.migrateEndpointValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudPlannerBaseUrls, 'endpointDefault.cloudPlannerBaseUrl');
-    this.dataManagerGroupingBaseUrl = this.migrateEndpointValue(this.dataManagerGroupingBaseUrl,
-      DEFAULT_DATA_MANAGER_GROUPING_BASE_URL, [DEFAULT_DATA_MANAGER_GROUPING_BASE_URL],
-      'endpointDefault.dataManagerGroupingBaseUrl');
     this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
@@ -1029,15 +984,73 @@ struct Index {
     }
   }
 
-  startCloudBackend() {
+  private hdcServerApiUrl(path: string): string {
+    let url = this.hdcServerIp.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url + path;
+  }
+
+  private logAgentLoopReady(message: string, useCloudLog: boolean): void {
+    if (useCloudLog) {
+      this.appendCloudLog(message);
+      return;
+    }
+    this.output = message;
+  }
+
+  private async ensurePcAgentLoopReady(useCloudLog: boolean): Promise<boolean> {
+    if (this.hdcServerIp.trim().length === 0) {
+      this.logAgentLoopReady('HDC Server 未配置，无法恢复 PC Agent loop。', useCloudLog);
+      return false;
+    }
+
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: '{}',
+        connectTimeout: 5000,
+        readTimeout: 10000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(this.hdcServerApiUrl('/api/agent_loop/ensure'), options);
+      let body = String(resp.result);
+      let message = body;
+      try {
+        let parsed = ArkJSON.parse(body) as JsonMap;
+        let parsedMessage = parsed['message'];
+        if (typeof parsedMessage === 'string') {
+          message = parsedMessage;
+        }
+      } catch (e) {
+      }
+      if (resp.responseCode >= 200 && resp.responseCode < 300) {
+        this.logAgentLoopReady('PC Agent loop 已恢复：' + message, useCloudLog);
+        return true;
+      }
+      this.logAgentLoopReady('PC Agent loop 恢复失败：HTTP ' + resp.responseCode + ' ' + message, useCloudLog);
+      return false;
+    } catch (err) {
+      let e = err as BusinessError;
+      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + e.message, useCloudLog);
+      return false;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  async startCloudBackend(): Promise<boolean> {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
-      return;
+      return false;
     }
     this.appendCloudLog(`准备切换到云端 Agent 路由，复用 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}...`);
     // 云端模式仍复用 PC 侧同一套 TCP 协议；区别是 App 通过 AgentRouterServer 转发到云端模型。
     this.agentRouter.useCloud();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
@@ -1066,10 +1079,10 @@ struct Index {
     }
   }
 
-  private startLocalBackend(): void {
+  private async startLocalBackend(): Promise<boolean> {
     // 本地模式下 9126 请求会进入 libentry.so/MNN，本函数只负责切换路由并启动监听。
     this.agentRouter.useLocal();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -1078,14 +1091,13 @@ struct Index {
     }
 
     this.agentRouter.useLocal();
-    if (!this.agentRouter.running()) {
-      this.output = '未检测到本地 PC 控制后端，正在自动启动...';
-      this.startLocalBackend();
+    if (!await this.startLocalBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(false);
   }
 
-  private ensureCloudAgentBackend(): boolean {
+  private async ensureCloudAgentBackend(): Promise<boolean> {
     // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -1093,11 +1105,10 @@ struct Index {
     }
 
     this.agentRouter.useCloud();
-    if (!this.agentRouter.running()) {
-      this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
-      this.startCloudBackend();
+    if (!await this.startCloudBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(true);
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
@@ -1247,7 +1258,7 @@ struct Index {
             .layoutWeight(1)
             .onClick(async () => {
               if (!await this.ensureLocalModelLoaded()) { return; }
-              this.startLocalBackend();
+              await this.startLocalBackend();
             })
           Row() {
             Checkbox({ name: 'autoConfirm', group: 'settings' })
@@ -1558,19 +1569,6 @@ struct Index {
             .padding({ left: 12, right: 12 })
             .margin({ top: 6, bottom: 10 })
             .onChange((val: string) => { this.cloudPlannerBaseUrl = val; })
-          Text('采集分组服务')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-          TextInput({ placeholder: 'http://服务器IP:端口，例如 http://123.60.91.241:9003', text: this.dataManagerGroupingBaseUrl })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6, bottom: 10 })
-            .onChange((val: string) => { this.dataManagerGroupingBaseUrl = val; })
           Text('Decider 服务')
             .fontSize(13)
             .fontColor('#6F7684')
@@ -1684,12 +1682,12 @@ struct Index {
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
-          .onClick(() => {
+          .onClick(async () => {
             if (this.cloudUserInput.trim().length === 0) {
               this.appendCloudLog('请先输入云端 Agent 任务。');
               return;
             }
-            if (!this.ensureCloudAgentBackend()) {
+            if (!await this.ensureCloudAgentBackend()) {
               return;
             }
             this.agentRouter.submitCloudTask(this.cloudUserInput);
@@ -1705,7 +1703,7 @@ struct Index {
             .layoutWeight(1)
             .backgroundColor('#607D8B')
             .borderRadius(14)
-            .onClick(() => { this.startCloudBackend(); })
+            .onClick(async () => { await this.startCloudBackend(); })
           Row() {
             Checkbox({ name: 'cloudAutoConfirm', group: 'cloudSettings' })
               .select(this.cloudAutoConfirm)
@@ -1825,8 +1823,7 @@ struct Index {
             collectionModule: $collectionModule,
             viewModels: this.collectionViews,
             refreshing: this.dataManagerRefreshing,
-            onRefresh: () => { this.refreshDataManager(); },
-            onRegroup: () => { this.regroupDataManagerCollections(); }
+            onRefresh: () => { this.refreshDataManager(); }
           })
         }.tabBar(this.TabItem('C', '采集', 1))
         TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))

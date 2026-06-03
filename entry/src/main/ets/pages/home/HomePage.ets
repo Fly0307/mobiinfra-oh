@@ -1,10 +1,10 @@
 import { AppHeader } from '../../components/AppHeader';
 import {
   HomeDomainViewModel,
-  HomeProfileViewModel,
-  HomeRecommendationViewModel
+  HomeProfileViewModel
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
+import { promptAction } from '@kit.ArkUI';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
@@ -36,18 +36,44 @@ export struct HomePage {
     .border({ width: 1, color: '#E8EEFA' })
   }
 
-  @Builder LifestyleItem(icon: string, title: string, desc: string, color: string) {
+  private profileDetailMessage(item: HomeDomainViewModel): string {
+    let lines: string[] = [item.fullDesc.length > 0 ? item.fullDesc : '暂无数据'];
+    let claims = item.claims || [];
+    if (claims.length > 0) {
+      lines.push('');
+      lines.push('画像依据');
+      claims.forEach((claim: string) => {
+        lines.push('- ' + claim);
+      });
+    }
+    return lines.join('\n');
+  }
+
+  private showProfileDetail(item: HomeDomainViewModel): void {
+    promptAction.showDialog({
+      title: item.title + '画像',
+      message: this.profileDetailMessage(item),
+      buttons: [
+        { text: '知道了', color: item.color }
+      ]
+    }).catch(() => {});
+  }
+
+  @Builder LifestyleItem(item: HomeDomainViewModel) {
     // 吃/穿/住/行画像摘要，当前为前端静态展示，后续可替换为真实画像数据。
     Column() {
-      Text(icon).fontSize(13).fontColor(color).fontWeight(FontWeight.Bold).height(18).textAlign(TextAlign.Center).maxLines(1)
+      Text(item.icon).fontSize(13).fontColor(item.color).fontWeight(FontWeight.Bold).height(18).textAlign(TextAlign.Center).maxLines(1)
       Column() {
-        Text(title).fontSize(18).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(1)
-        Text(desc).fontSize(11).fontColor('#818795').margin({ top: 2 }).maxLines(1)
+        Text(item.title).fontSize(18).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(1)
+        Text(item.desc).fontSize(11).fontColor('#818795').margin({ top: 2 }).maxLines(1)
       }.alignItems(HorizontalAlign.Center)
     }
     .justifyContent(FlexAlign.Center)
     .layoutWeight(1)
     .height('100%')
+    .onClick(() => {
+      this.showProfileDetail(item);
+    })
   }
 
   private recommendationImage(domain: string): Resource {
@@ -165,7 +191,7 @@ export struct HomePage {
 
         Row() {
           ForEach(this.profile.domains.slice(0, 4), (item: HomeDomainViewModel, index: number) => {
-            this.LifestyleItem(item.icon, item.title, item.desc, item.color)
+            this.LifestyleItem(item)
             if (index < 3) {
               Divider().vertical(true).height(34).color('#E5E7EF')
             }
@@ -185,10 +211,11 @@ export struct HomePage {
 
         Scroll() {
           Row() {
-            ForEach(this.profile.recommendations, (item: HomeRecommendationViewModel) => {
-              this.RecommendCard(this.recommendationImage(item.domain), item.tag, item.title, item.desc, item.meta, item.color)
-              Blank().width(14)
-            }, (item: HomeRecommendationViewModel) => item.id)
+            this.RecommendCard($r('app.media.rec_food'), '美食推荐', '健康轻食餐厅', '连续推荐 3 家优质餐厅', '1.2km', '#39C2A2')
+            Blank().width(14)
+            this.RecommendCard($r('app.media.rec_sport'), '健康提醒', '晚间运动提醒', '建议 20:30 开始运动', '20:30', '#8066FF')
+            Blank().width(14)
+            this.RecommendCard($r('app.media.rec_travel'), '出行建议', '周末出行建议', '2 条适合你的周末路线', '约 120km', '#4B9BFF')
           }
           .padding({ left: 18, right: 18, bottom: 6 })
         }

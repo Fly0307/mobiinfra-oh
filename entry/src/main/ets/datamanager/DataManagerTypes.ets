@@ -66,6 +66,7 @@ export interface RawProfileClaim {
 }
 
 export interface ProfileModelPayload {
+  short_summary: string;
   summary: string;
   claims: RawProfileClaim[];
 }
@@ -139,6 +140,7 @@ export interface SourceEntry {
   entry_index: number;
   entry_text: string;
   workflow_metadata: JsonMap;
+  workflow_scene_id: number;
   source_ref: string;
 }
 
@@ -151,6 +153,7 @@ export interface CandidateFact {
   raw_excerpt: string;
   source_ref: string;
   source_date: string;
+  workflow_scene_id: number;
   dedup_text: string;
 }
 
@@ -160,6 +163,7 @@ export interface AggregatedRecord {
   last_seen_date: string;
   source_refs: string[];
   source_dates: string[];
+  workflow_scene_ids: number[];
   summary: string;
   normalized_fact: string;
   raw_excerpts: string[];
@@ -204,6 +208,7 @@ export interface IndexedEvent {
   tags: string[];
   source_refs: string[];
   sources: string[];
+  workflow_scene_ids: number[];
   image_paths: string[];
   keywords: string[];
   domains: string[];
@@ -236,6 +241,7 @@ export interface ProfileDomainState {
   event_ids: string[];
   event_count: number;
   date_range: StringMap;
+  short_summary: string;
   summary: string;
   claims: ProfileClaim[];
   generation: string;
@@ -257,6 +263,7 @@ export interface QueryOptions {
   month: string;
   startDate: string;
   endDate: string;
+  workflowSceneIds: number[];
   limit: number;
 }
 
@@ -292,6 +299,8 @@ export interface HomeDomainViewModel {
   icon: string;
   title: string;
   desc: string;
+  fullDesc: string;
+  claims: string[];
   color: string;
   eventCount: number;
 }

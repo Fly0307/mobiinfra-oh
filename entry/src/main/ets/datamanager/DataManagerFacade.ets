@@ -3,7 +3,7 @@ import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { ConsolidationService } from './ConsolidationService';
 import { IndexService } from './IndexService';
-import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, heuristicCollectionGroups } from './CollectionGroupingService';
+import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { dataManagerInfo } from './DataManagerLog';
 import {
   CollectionEventViewModel,
@@ -37,6 +37,7 @@ import {
   nowIsoLocal,
   parseDailyLogDocument,
   parseNumberedEntries,
+  profileShortSummaryFromText,
   sourceAppDisplayName,
   sourceDisplayName,
   stableUnique,
@@ -72,14 +73,14 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
 }
 
 export function createEmptyCollectionViewModels(): CollectionViewModel[] {
-  return [0, 1, 2, 3].map((index: number) => emptyCollectionViewModel(index));
+  return collectionTabSpecs().map((spec) => emptyCollectionViewModel(spec.tabIndex));
 }
 
 function defaultHomeDomains(): HomeDomainViewModel[] {
-  let eat: HomeDomainViewModel = { domain: 'eat', icon: 'Eat', title: '吃', desc: '等待整理', color: '#39C2A2', eventCount: 0 };
-  let wear: HomeDomainViewModel = { domain: 'wear', icon: 'Wear', title: '穿', desc: '等待整理', color: '#7669FF', eventCount: 0 };
-  let live: HomeDomainViewModel = { domain: 'live', icon: 'Live', title: '住', desc: '等待整理', color: '#FF963D', eventCount: 0 };
-  let travel: HomeDomainViewModel = { domain: 'travel', icon: 'Go', title: '行', desc: '等待整理', color: '#4B9BFF', eventCount: 0 };
+  let eat: HomeDomainViewModel = { domain: 'eat', icon: 'Eat', title: '吃', desc: '暂无数据', fullDesc: '暂无数据', claims: [], color: '#39C2A2', eventCount: 0 };
+  let wear: HomeDomainViewModel = { domain: 'wear', icon: 'Wear', title: '穿', desc: '暂无数据', fullDesc: '暂无数据', claims: [], color: '#7669FF', eventCount: 0 };
+  let live: HomeDomainViewModel = { domain: 'live', icon: 'Live', title: '住', desc: '暂无数据', fullDesc: '暂无数据', claims: [], color: '#FF963D', eventCount: 0 };
+  let travel: HomeDomainViewModel = { domain: 'travel', icon: 'Go', title: '行', desc: '暂无数据', fullDesc: '暂无数据', claims: [], color: '#4B9BFF', eventCount: 0 };
   return [eat, wear, live, travel];
 }
 
@@ -91,7 +92,7 @@ function defaultRecommendations(): HomeRecommendationViewModel[] {
 }
 
 function emptyCollectionViewModel(index: number): CollectionViewModel {
-  let title = ['最近聊天', '最近订单', '最近通知', '娱乐记录'][index] || '采集记录';
+  let title = collectionTabSpecByIndex(index).title || '采集记录';
   return {
     title: title,
     countLabel: '0 条',
@@ -339,6 +340,8 @@ export class DataManagerFacade {
         icon: item.icon,
         title: item.title,
         desc: this.domainDescription(doc),
+        fullDesc: this.domainFullDescription(doc),
+        claims: this.domainClaimStatements(doc),
         color: item.color,
         eventCount: doc ? doc.event_count : 0
       };
@@ -356,7 +359,7 @@ export class DataManagerFacade {
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {
-    return [0, 1, 2, 3].map((index: number) => this.loadCollectionViewModel(index));
+    return collectionTabSpecs().map((spec) => this.loadCollectionViewModel(spec.tabIndex));
   }
 
   loadCollectionViewModel(tabIndex: number): CollectionViewModel {
@@ -564,13 +567,47 @@ export class DataManagerFacade {
     if (!doc || doc.event_count === 0) {
       return '暂无数据';
     }
-    if (doc.summary.length > 0) {
-      return summarizeText(doc.summary, 18);
+    let shortSummary = normalizeFreeText(doc.short_summary);
+    let claims = doc.claims || [];
+    if (shortSummary.length > 0) {
+      return shortSummary;
     }
-    if (doc.claims.length > 0) {
-      return summarizeText(doc.claims[0].statement, 8);
+    if (claims.length > 0) {
+      let fromClaim = profileShortSummaryFromText(doc.domain, claims[0].statement, '');
+      if (fromClaim.length === 4) {
+        return fromClaim;
+      }
+    }
+    let fromSummary = profileShortSummaryFromText(doc.domain, doc.summary, '');
+    if (fromSummary.length === 4) {
+      return fromSummary;
     }
     return '暂无数据';
+  }
+
+  private domainFullDescription(doc: ProfileDomainState | undefined): string {
+    if (!doc || doc.event_count === 0) {
+      return '暂无数据';
+    }
+    let summary = normalizeFreeText(doc.summary);
+    if (summary.length > 0) {
+      return summary;
+    }
+    let claims = this.domainClaimStatements(doc);
+    if (claims.length > 0) {
+      return claims.join('；');
+    }
+    return '暂无数据';
+  }
+
+  private domainClaimStatements(doc: ProfileDomainState | undefined): string[] {
+    if (!doc || doc.event_count === 0) {
+      return [];
+    }
+    return (doc.claims || [])
+      .map((claim: ProfileClaim): string => normalizeFreeText(claim.statement))
+      .filter((statement: string) => statement.length > 0)
+      .slice(0, 5);
   }
 
   private formatHomeUpdatedLabel(value: string): string {
@@ -614,7 +651,7 @@ export class DataManagerFacade {
         return;
       }
       score += 18;
-      if (normalizeFreeText(doc.summary).length > 0 || doc.claims.length > 0) {
+      if (normalizeFreeText(doc.summary).length > 0 || (doc.claims || []).length > 0) {
         score += 7;
       }
     });
@@ -632,10 +669,11 @@ export class DataManagerFacade {
     let result: HomeRecommendationViewModel[] = [];
     DOMAIN_KEYS.forEach((domain: string) => {
       let doc = profile.domains[domain];
-      if (!doc || doc.claims.length === 0) {
+      let claims = doc ? (doc.claims || []) : [];
+      if (!doc || claims.length === 0) {
         return;
       }
-      doc.claims.slice(0, 2).forEach((claim: ProfileClaim, index: number) => {
+      claims.slice(0, 2).forEach((claim: ProfileClaim, index: number) => {
         let recommendation: HomeRecommendationViewModel = {
           id: domain + '-' + index,
           domain: domain,

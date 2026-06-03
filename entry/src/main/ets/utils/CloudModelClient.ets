@@ -15,33 +15,49 @@ export interface CloudModelConfig {
   deciderModel: string;
 }
 
-interface CloudImageUrl {
+export interface CloudImageUrl {
   url: string;
 }
 
-interface CloudTextPart {
+export interface CloudTextPart {
   type: string;
   text: string;
 }
 
-interface CloudImagePart {
+export interface CloudImagePart {
   type: string;
   image_url: CloudImageUrl;
 }
 
-type CloudContentPart = CloudTextPart | CloudImagePart;
+export type CloudContentPart = CloudTextPart | CloudImagePart;
 
-interface CloudChatMessage {
+export interface CloudChatMessage {
   role: string;
   content: string | CloudContentPart[];
+}
+
+export interface CloudChatTemplateKwargs {
+  enable_thinking: boolean;
+}
+
+export interface CloudChatCompletionOptions {
+  baseUrl: string;
+  apiKey: string;
+  messages: CloudChatMessage[];
+  temperature: number;
+  model?: string;
+  maxTokens?: number;
+  readTimeout?: number;
+  chatTemplateKwargs?: CloudChatTemplateKwargs;
 }
 
 interface CloudChatRequest {
   messages: CloudChatMessage[];
   temperature: number;
   stream: boolean;
-  max_tokens: number;
+  max_tokens?: number;
   model?: string;
+  chat_template_kwargs?: CloudChatTemplateKwargs;
 }
 
 interface CloudChatMessageResult {
@@ -128,41 +144,51 @@ export class CloudModelClient {
     return url + '/v1/chat/completions';
   }
 
-  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
-    model?: string, maxTokens: number = 2048, readTimeout: number = 120000): Promise<string> {
-    // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
+  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
     let requestBody: CloudChatRequest = {
-      messages: messages,
-      temperature: 0,
-      stream: false,
-      max_tokens: maxTokens
+      messages: options.messages,
+      temperature: options.temperature,
+      stream: false
     };
-    if (model && model.trim().length > 0) {
-      requestBody.model = model.trim();
+    if (options.maxTokens !== undefined) {
+      requestBody.max_tokens = options.maxTokens;
     }
+    if (options.model !== undefined && options.model.trim().length > 0) {
+      requestBody.model = options.model.trim();
+    }
+    if (options.chatTemplateKwargs !== undefined) {
+      requestBody.chat_template_kwargs = options.chatTemplateKwargs;
+    }
+
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + (apiKey.length > 0 ? apiKey : 'EMPTY')
+      'Authorization': 'Bearer ' + (options.apiKey.length > 0 ? options.apiKey : 'EMPTY')
     };
     let requestOptions: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,
       header: headers,
       extraData: ArkJSON.stringify(requestBody),
       connectTimeout: 10000,
-      readTimeout: readTimeout,
+      readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
 
     let httpReq = http.createHttp();
     this.registerActiveRequest(httpReq);
     try {
-      let response = await httpReq.request(this.normalizeChatUrl(baseUrl), requestOptions);
+      let response = await httpReq.request(this.normalizeChatUrl(options.baseUrl), requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
-        return `{"action":"error","reason":"Cloud HTTP ${response.responseCode}: ${response.result}"}`;
+        throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
-      let parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
+      let parsed: CloudChatResponse;
+      try {
+        parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
+      } catch (e) {
+        let err = e as Error;
+        throw new Error('Cloud response JSON parse failed: ' + err.message);
+      }
       if (parsed.choices.length === 0) {
-        return '{"action":"error","reason":"Cloud response has no choices"}';
+        throw new Error('Cloud response has no choices');
       }
       return parsed.choices[0].message.content;
     } finally {
@@ -171,12 +197,37 @@ export class CloudModelClient {
     }
   }
 
-  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string): Promise<string> {
+  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
+    model?: string, maxTokens?: number, readTimeout?: number,
+    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
+    // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
+    let options: CloudChatCompletionOptions = {
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      messages: messages,
+      temperature: 0,
+      model: model,
+      maxTokens: maxTokens,
+      readTimeout: readTimeout
+    };
+    if (chatTemplateKwargs !== undefined) {
+      options.chatTemplateKwargs = chatTemplateKwargs;
+    }
+    try {
+      return await this.chatCompletionText(options);
+    } catch (e) {
+      let err = e as Error;
+      return ArkJSON.stringify({ action: 'error', reason: err.message });
+    }
+  }
+
+  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string,
+    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
     let message: CloudChatMessage = {
       role: 'user',
       content: content
     };
-    return this.chatMessages(baseUrl, [message], apiKey);
+    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatTemplateKwargs);
   }
 
   async chatPlanner(prompt: string, config: CloudModelConfig): Promise<string> {
@@ -185,7 +236,7 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey);
+    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {

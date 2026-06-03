@@ -97,9 +97,12 @@ export class WorkflowStorage {
     }
   }
 
-  static validateWorkflowJson(rawJson: string): WorkflowDefinition {
+  static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
     let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
-    if (!parsed.steps || parsed.steps.length === 0) {
+    if (!parsed.steps) {
+      throw new Error('workflow.steps 不能为空');
+    }
+    if (requireSteps && parsed.steps.length === 0) {
       throw new Error('workflow.steps 不能为空');
     }
     let seen: Record<string, boolean> = {};
@@ -258,7 +261,28 @@ export class WorkflowStorage {
       tasks.push(task);
     }
     WorkflowStorage.saveTasks(filesDir, tasks);
-    return tasks;
+    return WorkflowStorage.loadTasks(filesDir);
+  }
+
+  static deleteTask(filesDir: string, taskId: string): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let nextTasks: WorkflowTask[] = [];
+    let configFileName = '';
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        configFileName = tasks[i].configFileName;
+      } else {
+        nextTasks.push(tasks[i]);
+      }
+    }
+    WorkflowStorage.saveTasks(filesDir, nextTasks);
+    if (configFileName.length > 0) {
+      try {
+        fs.unlinkSync(WorkflowStorage.configDir(filesDir) + '/' + configFileName);
+      } catch (e) {
+      }
+    }
+    return nextTasks;
   }
 
   static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): void {
@@ -275,7 +299,7 @@ export class WorkflowStorage {
   }
 
   static createTaskFromJson(filesDir: string, sceneId: number, rawJson: string, existingId?: string): WorkflowTask {
-    let workflow = WorkflowStorage.validateWorkflowJson(rawJson);
+    let workflow = WorkflowStorage.validateWorkflowJson(rawJson, false);
     let metadata = workflow.metadata;
     let title = metadata && metadata.description ? metadata.description : '自定义 Workflow';
     let source = metadata && metadata.name ? metadata.name : 'workflow';

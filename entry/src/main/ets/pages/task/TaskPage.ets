@@ -30,11 +30,6 @@ interface StepPathPart {
   index: number;
 }
 
-interface StepIdRemap {
-  oldId: string;
-  newId: string;
-}
-
 interface SegmentOption {
   label: string;
   value: string;
@@ -104,7 +99,6 @@ const CHILD_BRANCH_ELSE = 'else';
 export struct TaskPage {
   @Link taskScene: number;
   onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
-  onOpenCloudLog: () => void = () => {};
 
   @State tasks: WorkflowTask[] = [];
   @State editorOpen: boolean = false;
@@ -235,7 +229,7 @@ export struct TaskPage {
       return;
     }
     this.editingTaskId = task.id;
-    this.openWorkflowEditor(task.workflowJson, mode, task.sceneId);
+    this.openWorkflowEditor(WorkflowStorage.readTaskWorkflowJson(this.filesDir, task), mode, task.sceneId);
   }
 
   private openWorkflowEditor(rawJson: string, mode: string, sceneId: number): void {
@@ -331,6 +325,10 @@ export struct TaskPage {
         this.editorWorkflow = WorkflowStorage.validateWorkflowJson(this.editorText, false);
         this.editorContextText = this.contextToText(this.editorWorkflow.context);
         this.loadWorkflowMetaDraft();
+        if (this.selectedPath.length > 0 && !this.stepByPath(this.selectedPath)) {
+          this.selectedPath = '';
+          this.clearNodeDrafts();
+        }
         if (this.selectedPath.length === 0 && this.editorWorkflow.steps.length > 0) {
           this.selectedPath = this.makePath('', ROOT_BRANCH, 0);
         }
@@ -363,8 +361,20 @@ export struct TaskPage {
   }
 
   private setTaskEnabled(task: WorkflowTask, enabled: boolean): void {
-    let next: WorkflowTask = task;
-    next.enabled = enabled;
+    let next: WorkflowTask = {
+      id: task.id,
+      sceneId: task.sceneId,
+      icon: task.icon,
+      iconColor: task.iconColor,
+      title: task.title,
+      source: task.source,
+      enabled: enabled,
+      configFileName: task.configFileName,
+      workflowJson: task.workflowJson,
+      lastStatus: task.lastStatus,
+      lastRun: task.lastRun,
+      lastMessage: task.lastMessage
+    };
     this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
     this.refreshStatsText();
   }
@@ -598,7 +608,6 @@ export struct TaskPage {
   }
 
   private markWorkflowStructureChanged(): void {
-    this.renumberWorkflowSteps();
     this.flowGraphVersion = this.flowGraphVersion + 1;
     this.editorWorkflow = this.cloneWorkflow(this.editorWorkflow);
     this.syncEditorTextFromWorkflow();
@@ -647,52 +656,6 @@ export struct TaskPage {
     if (templateKey.length > 0) {
       this.insertTemplateAfterSelection(templateKey);
     }
-  }
-
-  private replaceEvery(text: string, search: string, replacement: string): string {
-    return text.split(search).join(replacement);
-  }
-
-  private renumberWorkflowSteps(): void {
-    let mappings: StepIdRemap[] = [];
-    this.renumberStepList(this.editorWorkflow.steps, 1, mappings);
-    this.remapWorkflowStepReferences(mappings);
-  }
-
-  private renumberStepList(steps: WorkflowStep[], nextId: number, mappings: StepIdRemap[]): number {
-    let currentId = nextId;
-    for (let i = 0; i < steps.length; i++) {
-      let oldId = String(steps[i].id);
-      let newId = String(currentId);
-      mappings.push({ oldId: oldId, newId: newId });
-      steps[i].id = currentId;
-      currentId++;
-      if (steps[i].steps) {
-        currentId = this.renumberStepList(steps[i].steps as WorkflowStep[], currentId, mappings);
-      }
-      if (steps[i].then_steps) {
-        currentId = this.renumberStepList(steps[i].then_steps as WorkflowStep[], currentId, mappings);
-      }
-      if (steps[i].else_steps) {
-        currentId = this.renumberStepList(steps[i].else_steps as WorkflowStep[], currentId, mappings);
-      }
-    }
-    return currentId;
-  }
-
-  private remapWorkflowStepReferences(mappings: StepIdRemap[]): void {
-    let text = ArkJSON.stringify(this.editorWorkflow);
-    for (let i = 0; i < mappings.length; i++) {
-      if (mappings[i].oldId !== mappings[i].newId) {
-        text = this.replaceEvery(text, '${steps.' + mappings[i].oldId + '.', '${steps.__step_remap_' + String(i) + '__.');
-      }
-    }
-    for (let i = 0; i < mappings.length; i++) {
-      if (mappings[i].oldId !== mappings[i].newId) {
-        text = this.replaceEvery(text, '${steps.__step_remap_' + String(i) + '__.', '${steps.' + mappings[i].newId + '.');
-      }
-    }
-    this.editorWorkflow = ArkJSON.parse(text) as WorkflowDefinition;
   }
 
   private clearNodeDrafts(): void {

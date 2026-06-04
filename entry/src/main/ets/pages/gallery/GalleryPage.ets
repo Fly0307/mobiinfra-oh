@@ -3,7 +3,8 @@ import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import {
   CloudModelClient,
   GalleryCloudModelConfig,
-  GalleryMonthSummaryResult
+  GalleryMonthSummaryResult,
+  GalleryQuestionAnswerResult
 } from '../../utils/CloudModelClient';
 import { GalleryAnalyzer } from '../../utils/gallery/GalleryAnalyzer';
 import { GalleryAutoScanner } from '../../utils/gallery/GalleryAutoScanner';
@@ -23,6 +24,7 @@ import {
   GalleryScanItem,
   GalleryScanSession
 } from '../../utils/gallery/GalleryTypes';
+import { GallerySearchHit, GallerySearchService } from '../../utils/gallery/GallerySearchService';
 
 const DEFAULT_GALLERY_API_BASE_URL = 'https://api.modelbest.cn/v1';
 const DEFAULT_GALLERY_API_KEY = 'sk-pQ8L2zF3XmR5kY9wV4jB7hN1tC6vM0xG3aD5sH2bJ9lK4cZ8';
@@ -36,7 +38,7 @@ const DEFAULT_GALLERY_EMBEDDING_MODE = 'huawei_local';
 const DEFAULT_GALLERY_EMBEDDING_BASE_URL = 'https://api.siliconflow.cn/v1';
 const DEFAULT_GALLERY_EMBEDDING_API_KEY = 'sk-ftatcmqivwegrrazieeiiwswmotmryswxwhjuakxwsmsudrs';
 const DEFAULT_GALLERY_EMBEDDING_MODEL = 'BAAI/bge-m3';
-const DEFAULT_GALLERY_IMAGE_SCALE = '0.25';
+const DEFAULT_GALLERY_IMAGE_SCALE = '0.9';
 const GALLERY_RESULT_PAGE_SIZE = 10;
 
 PersistentStorage.persistProp('galleryApiBaseUrl', DEFAULT_GALLERY_API_BASE_URL);
@@ -63,6 +65,7 @@ struct GalleryPage {
   @State resultDisplayLimit: number = GALLERY_RESULT_PAGE_SIZE;
   @State lastRunText: string = '尚未开始';
   @State settingsOpen: boolean = false;
+  @State manualAnalyzing: boolean = false;
   @State autoScanStatus: string = 'idle';
   @State scanTotal: number = 0;
   @State scanProcessed: number = 0;
@@ -70,6 +73,7 @@ struct GalleryPage {
   @State scanSkipped: number = 0;
   @State scanFailed: number = 0;
   @State scanRevision: number = 0;
+  @State progressRevision: number = 0;
   @State results: GalleryAnalysisResult[] = [];
   @State resultRevision: number = 0;
   @State selectedMonthKey: string = '';
@@ -78,6 +82,15 @@ struct GalleryPage {
   @State monthlyAiErrorKey: string = '';
   @State monthlyAiErrorText: string = '';
   @State selectedDetailId: string = '';
+  @State settingsRevision: number = 0;
+  @State galleryQuestion: string = '';
+  @State gallerySearchHits: GallerySearchHit[] = [];
+  @State gallerySearchRevision: number = 0;
+  @State gallerySearchMessage: string = '输入问题后检索图库记录';
+  @State galleryAnswerText: string = '';
+  @State galleryAnswerMeta: string = '';
+  @State galleryAnswerLoading: boolean = false;
+  @State galleryAnswerError: string = '';
   @StorageLink('galleryApiBaseUrl') galleryApiBaseUrl: string = DEFAULT_GALLERY_API_BASE_URL;
   @StorageLink('galleryApiKey') galleryApiKey: string = DEFAULT_GALLERY_API_KEY;
   @StorageLink('galleryModel') galleryModel: string = DEFAULT_GALLERY_MODEL;
@@ -138,6 +151,110 @@ struct GalleryPage {
     return this.visibleResults().length.toString() + ' 张';
   }
 
+  private runGalleryKeywordSearch(): void {
+    let query = this.galleryQuestion.trim();
+    if (query.length === 0) {
+      this.gallerySearchHits = [];
+      this.gallerySearchMessage = '输入问题后检索图库记录';
+      this.galleryAnswerText = '';
+      this.galleryAnswerMeta = '';
+      this.galleryAnswerError = '';
+      this.gallerySearchRevision += 1;
+      promptAction.showToast({ message: '请输入要检索的问题', duration: 1200 });
+      return;
+    }
+    let hits = GallerySearchService.search(query, this.results, 20);
+    this.gallerySearchHits = hits;
+    this.gallerySearchMessage = hits.length > 0 ? '找到 ' + hits.length.toString() + ' 条相关图片' : '没有找到明确相关图片';
+    this.gallerySearchRevision += 1;
+  }
+
+  private async runGalleryQuestionAnswer(): Promise<void> {
+    let query = this.galleryQuestion.trim();
+    if (query.length === 0) {
+      promptAction.showToast({ message: '请输入要问的问题', duration: 1200 });
+      return;
+    }
+    this.runGalleryKeywordSearch();
+    if (this.gallerySearchHits.length === 0) {
+      this.galleryAnswerText = '没有找到明确相关图片。';
+      this.galleryAnswerMeta = '';
+      this.galleryAnswerError = '';
+      this.gallerySearchRevision += 1;
+      return;
+    }
+    this.galleryAnswerLoading = true;
+    this.galleryAnswerError = '';
+    this.galleryAnswerText = '';
+    this.galleryAnswerMeta = '';
+    this.gallerySearchRevision += 1;
+    try {
+      let answer = await this.cloudClient.answerGalleryQuestion(this.galleryCloudModelConfig(), query,
+        this.galleryAnswerCandidateText(this.gallerySearchHits));
+      this.galleryAnswerText = answer.answer;
+      this.galleryAnswerMeta = this.galleryAnswerMetaText(answer);
+    } catch (e) {
+      this.galleryAnswerError = this.errorMessage(e);
+      promptAction.showToast({ message: '图库问答失败：' + this.errorMessage(e), duration: 1800 });
+    } finally {
+      this.galleryAnswerLoading = false;
+      this.gallerySearchRevision += 1;
+    }
+  }
+
+  private clearGalleryQuestion(): void {
+    this.galleryQuestion = '';
+    this.gallerySearchHits = [];
+    this.gallerySearchMessage = '输入问题后检索图库记录';
+    this.galleryAnswerText = '';
+    this.galleryAnswerMeta = '';
+    this.galleryAnswerError = '';
+    this.galleryAnswerLoading = false;
+    this.gallerySearchRevision += 1;
+  }
+
+  private galleryAnswerCandidateText(hits: GallerySearchHit[]): string {
+    let limit = Math.min(10, hits.length);
+    let lines: string[] = [];
+    for (let i = 0; i < limit; i++) {
+      let item = hits[i].item;
+      lines.push((i + 1).toString() + '. id=' + item.id);
+      lines.push('日期：' + this.groupDate(item));
+      lines.push('类别：' + this.categoryLabel(item.category));
+      lines.push('标签：' + (item.tags && item.tags.length > 0 ? item.tags.join('、') : '无'));
+      lines.push('标题：' + item.title);
+      lines.push('摘要：' + item.summary);
+      if (item.details && item.details.length > 0) {
+        lines.push('细节：' + item.details.join('；'));
+      }
+      if (item.ocrText && item.ocrText.length > 0) {
+        lines.push('OCR：' + this.compactText(item.ocrText, 240));
+      }
+      lines.push('命中原因：' + hits[i].reason);
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  private galleryAnswerMetaText(answer: GalleryQuestionAnswerResult): string {
+    let parts: string[] = [];
+    if (answer.matchedIds.length > 0) {
+      parts.push('引用 ' + answer.matchedIds.length.toString() + ' 张');
+    }
+    if (answer.confidence > 0) {
+      parts.push('置信度 ' + answer.confidence.toFixed(2));
+    }
+    return parts.join(' · ');
+  }
+
+  private compactText(value: string, maxLength: number): string {
+    let text = value ? String(value).replace(/\s+/g, ' ').trim() : '';
+    if (text.length <= maxLength) {
+      return text;
+    }
+    return text.substring(0, maxLength) + '...';
+  }
+
   private async startManualAnalyze(): Promise<void> {
     if (this.analyzing) {
       promptAction.showToast({ message: '图库分析正在进行', duration: 1200 });
@@ -151,7 +268,14 @@ struct GalleryPage {
         return;
       }
       this.analyzing = true;
+      this.manualAnalyzing = true;
       this.progress = 0;
+      this.scanTotal = uris.length;
+      this.scanProcessed = 0;
+      this.scanPending = uris.length;
+      this.scanSkipped = 0;
+      this.scanFailed = 0;
+      this.progressRevision += 1;
       this.selectedFilter = 0;
       this.selectedTimeFilter = 0;
       this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
@@ -170,11 +294,19 @@ struct GalleryPage {
         this.replaceResults(finalResults);
       }
       this.analyzing = false;
+      this.manualAnalyzing = false;
       this.progress = 100;
+      this.scanProcessed = uris.length;
+      this.scanPending = 0;
+      this.clearManualProgressState();
+      this.progressRevision += 1;
+      this.refreshAnalyzeStats();
       this.setLastRun(new Date().getTime());
       promptAction.showToast({ message: '图库分析完成', duration: 1500 });
     } catch (e) {
       this.analyzing = false;
+      this.manualAnalyzing = false;
+      this.clearManualProgressState();
       this.setLastRunLabel('分析失败');
       promptAction.showToast({ message: '图库分析失败：' + this.errorMessage(e), duration: 2000 });
     }
@@ -342,6 +474,12 @@ struct GalleryPage {
     this.results = nextResults;
     this.resultRevision += 1;
     this.ensureSelectedMonth();
+  }
+
+  private refreshAnalyzeStats(): void {
+    this.replaceResults(GalleryStorage.loadResults(this.filesDir));
+    this.restoreLastRunFromResults();
+    this.scanRevision += 1;
   }
 
   private monthlyInsights(): GalleryMonthlyInsight[] {
@@ -864,6 +1002,9 @@ struct GalleryPage {
   }
 
   private shouldShowProgressStrip(): boolean {
+    if (this.manualAnalyzing) {
+      return false;
+    }
     return this.analyzing || this.hasPausedScan() || this.scanTotal > 0;
   }
 
@@ -960,7 +1101,7 @@ struct GalleryPage {
         Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
         Row() {
           this.ScanStatCell('总数', scanTotal, '#151A28')
-          this.ScanStatTextCell('已完成', this.resultPanelCountText(), '#5B68FF')
+          this.ScanStatCell('已完成', scanProcessed, '#5B68FF')
           this.ScanStatCell('未完成', scanPending, '#FF8A3D')
           this.ScanStatCell('跳过', scanSkipped, '#39BFA3')
           this.ScanStatCell('失败', scanFailed, '#E5484D')
@@ -1097,19 +1238,23 @@ struct GalleryPage {
 
           Scroll() {
             Column() {
-              this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, 'https://api.example.com/v1', 0)
-              this.SettingInput('API Key', this.galleryApiKey, 'Bearer token 或服务密钥', 1)
-              this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
-              this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
-              this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
-              this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
-              this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
-              this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding；开启时使用 SiliconFlow / bge-m3', this.galleryEmbeddingMode === 'remote', 4)
-              this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, 'https://api.siliconflow.cn/v1', 5)
-              this.SettingInput('Embedding API Key', this.galleryEmbeddingApiKey, 'SiliconFlow 服务密钥', 6)
-              this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, 'BAAI/bge-m3', 7)
-              this.ConcurrencyInput('Embedding 并发请求数', this.galleryEmbeddingConcurrency, '范围 1-4，默认 2', 4, 2)
-              this.SettingInput('图片分析缩放比例', this.galleryImageScale, '0.10 - 1.00，默认 0.25', 8)
+              ForEach([this.settingsRevision], (_revision: number) => {
+                Column() {
+                  this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, 'https://api.example.com/v1', 0)
+                  this.SettingInput('API Key', this.galleryApiKey, 'Bearer token 或服务密钥', 1)
+                  this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
+                  this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
+                  this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
+                  this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
+                  this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
+                  this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding；开启时使用 SiliconFlow / bge-m3', this.galleryEmbeddingMode === 'remote', 4)
+                  this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, 'https://api.siliconflow.cn/v1', 5)
+                  this.SettingInput('Embedding API Key', this.galleryEmbeddingApiKey, 'SiliconFlow 服务密钥', 6)
+                  this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, 'BAAI/bge-m3', 7)
+                  this.ConcurrencyInput('Embedding 并发请求数', this.galleryEmbeddingConcurrency, '范围 1-4，默认 2', 4, 2)
+                  this.SettingInput('图片分析缩放比例', this.galleryImageScale, '0.10 - 1.00，默认 0.25', 8)
+                }.width('100%')
+              }, (revision: number) => revision.toString())
             }.width('100%')
           }
           .width('100%')
@@ -1138,6 +1283,7 @@ struct GalleryPage {
                 this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
                 this.galleryEmbeddingModel = DEFAULT_GALLERY_EMBEDDING_MODEL;
                 this.galleryImageScale = DEFAULT_GALLERY_IMAGE_SCALE;
+                this.settingsRevision += 1;
               })
             Button('保存')
               .height(40)
@@ -1570,7 +1716,13 @@ struct GalleryPage {
 
   private updateProgress(next: GalleryProgress): void {
     let completed = Math.max(0, next.processed - next.failed);
+    this.scanTotal = next.selected;
+    this.scanProcessed = next.processed;
+    this.scanPending = next.pending;
+    this.scanSkipped = next.skipped;
+    this.scanFailed = next.failed;
     this.progress = this.progressPercentFromUnits(completed, next.selected);
+    this.progressRevision += 1;
   }
 
   private updateAutoProgress(session: GalleryScanSession): void {
@@ -1583,6 +1735,17 @@ struct GalleryPage {
     this.autoScanStatus = session.status;
     this.progress = this.progressPercentFromUnits(session.processed, session.total);
     this.scanRevision += 1;
+    this.progressRevision += 1;
+  }
+
+  private clearManualProgressState(): void {
+    this.scanTotal = 0;
+    this.scanProcessed = 0;
+    this.scanPending = 0;
+    this.scanSkipped = 0;
+    this.scanFailed = 0;
+    this.progress = 0;
+    this.progressRevision += 1;
   }
 
   private progressPercentFromUnits(doneUnits: number, totalUnits: number): number {
@@ -1796,7 +1959,7 @@ struct GalleryPage {
       return '未入库';
     }
     if (status.indexOf('failed') === 0) {
-      return '入库失败';
+      return 'Embedding 失败';
     }
     return status;
   }
@@ -1898,10 +2061,13 @@ struct GalleryPage {
       .fontSize(11)
       .fontColor(this.monthlyCategoryColor(item.label))
       .fontWeight(FontWeight.Bold)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
       .padding({ left: 9, right: 9, top: 5, bottom: 5 })
       .backgroundColor(this.monthlyCategoryBg(item.label))
       .borderRadius(8)
       .margin({ right: 7, top: 7 })
+      .constraintSize({ maxWidth: 132 })
   }
 
   @Builder MonthlyRepresentativeImage(item: GalleryAnalysisResult) {
@@ -1911,6 +2077,7 @@ struct GalleryPage {
       .objectFit(ImageFit.Cover)
       .borderRadius(8)
       .margin({ right: 8 })
+      .onClick(() => { this.showResultDetail(item); })
   }
 
   @Builder MonthlyInsightsPanel(revision: number) {
@@ -2024,15 +2191,178 @@ struct GalleryPage {
       .scrollable(ScrollDirection.Horizontal)
       .margin({ top: 12 })
 
-      Row() {
-        ForEach(insight.categoryCounts, (item: GalleryMonthlyCategoryCount) => {
-          this.MonthlyCategoryChip(item)
-        }, (item: GalleryMonthlyCategoryCount) => revision.toString() + '_' + insight.key + '_chip_' + item.label)
+      Scroll() {
+        Row() {
+          ForEach(insight.categoryCounts.slice(0, Math.min(6, insight.categoryCounts.length)),
+            (item: GalleryMonthlyCategoryCount) => {
+              this.MonthlyCategoryChip(item)
+            }, (item: GalleryMonthlyCategoryCount) => revision.toString() + '_' + insight.key + '_chip_' + item.label)
+        }
       }
       .width('100%')
+      .height(34)
+      .scrollable(ScrollDirection.Horizontal)
       .margin({ top: 2 })
     }
     .width('100%')
+  }
+
+  @Builder GallerySearchHitCard(hit: GallerySearchHit) {
+    Row() {
+      Image(this.previewUri(hit.item))
+        .width(64)
+        .height(64)
+        .objectFit(ImageFit.Cover)
+        .borderRadius(8)
+      Column() {
+        Row() {
+          Text(hit.item.title)
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.categoryLabel(hit.item.category))
+            .fontSize(10)
+            .fontColor(this.categoryColor(hit.item.category))
+            .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+            .backgroundColor(this.categoryBg(hit.item.category))
+            .borderRadius(7)
+        }.width('100%')
+        Text(hit.item.summary)
+          .fontSize(11)
+          .fontColor('#596273')
+          .margin({ top: 5 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row() {
+          Text(hit.reason)
+            .fontSize(10)
+            .fontColor('#4B5F9F')
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.groupDate(hit.item))
+            .fontSize(10)
+            .fontColor('#8A92A3')
+            .margin({ left: 8 })
+            .maxLines(1)
+        }.width('100%').margin({ top: 5 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 10 })
+    }
+    .width('100%')
+    .padding(10)
+    .backgroundColor('#F8FAFE')
+    .borderRadius(12)
+    .margin({ top: 8 })
+    .onClick(() => { this.showResultDetail(hit.item); })
+  }
+
+  @Builder GalleryQuestionPanel(revision: number) {
+    Column() {
+      Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
+      Row() {
+        Column() {
+          Text('图库问答').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
+          Text(this.gallerySearchMessage).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }.width('100%')
+      Row() {
+        TextInput({ placeholder: '例如：找一下外卖订单、停车缴费、会议安排', text: this.galleryQuestion })
+          .height(42)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#F7F9FE')
+          .borderRadius(12)
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => { this.galleryQuestion = value; })
+        Button('检索')
+          .width(64)
+          .height(42)
+          .fontSize(12)
+          .backgroundColor('#5B68FF')
+          .borderRadius(12)
+          .margin({ left: 8 })
+          .onClick(() => { this.runGalleryKeywordSearch(); })
+        Button(this.galleryAnswerLoading ? '生成中' : '问答')
+          .width(70)
+          .height(42)
+          .fontSize(12)
+          .backgroundColor('#2F5BEA')
+          .borderRadius(12)
+          .margin({ left: 8 })
+          .enabled(!this.galleryAnswerLoading)
+          .onClick(() => { this.runGalleryQuestionAnswer(); })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      Row() {
+        Text('关键词检索').fontSize(11).fontColor('#8A92A3').layoutWeight(1)
+        if (this.galleryQuestion.length > 0 || this.gallerySearchHits.length > 0) {
+          Text('清空')
+            .fontSize(12)
+            .fontColor('#5B68FF')
+            .onClick(() => { this.clearGalleryQuestion(); })
+        }
+      }
+      .width('100%')
+      .margin({ top: 8 })
+      if (this.galleryAnswerLoading) {
+        Text('正在基于检索结果生成回答...')
+          .fontSize(12)
+          .fontColor('#667085')
+          .width('100%')
+          .padding(10)
+          .backgroundColor('#F7F9FC')
+          .borderRadius(10)
+          .margin({ top: 10 })
+      }
+      if (this.galleryAnswerText.length > 0) {
+        Column() {
+          Text(this.galleryAnswerText)
+            .fontSize(13)
+            .fontColor('#303746')
+            .lineHeight(20)
+            .width('100%')
+          if (this.galleryAnswerMeta.length > 0) {
+            Text(this.galleryAnswerMeta)
+              .fontSize(11)
+              .fontColor('#7F8592')
+              .margin({ top: 6 })
+              .width('100%')
+          }
+        }
+        .alignItems(HorizontalAlign.Start)
+        .width('100%')
+        .padding(12)
+        .backgroundColor('#F2F6FF')
+        .borderRadius(12)
+        .margin({ top: 10 })
+      }
+      if (this.galleryAnswerError.length > 0) {
+        Text('问答失败：' + this.galleryAnswerError)
+          .fontSize(12)
+          .fontColor('#B42318')
+          .width('100%')
+          .margin({ top: 8 })
+      }
+      if (this.gallerySearchHits.length > 0) {
+        ForEach(this.gallerySearchHits, (hit: GallerySearchHit) => {
+          this.GallerySearchHitCard(hit)
+        }, (hit: GallerySearchHit) => revision.toString() + '_' + hit.item.id)
+      }
+    }
+    .width('90%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .margin({ top: 14 })
   }
 
   @Builder TimeFilterChip(label: string, index: number) {
@@ -2164,12 +2494,14 @@ struct GalleryPage {
         .width('90%')
         .margin({ top: 24 })
 
-        this.ActionToolbar(this.analyzedCountText(), this.lastRunText, this.scanRevision)
+        this.ActionToolbar(this.analyzedCountText(), this.lastRunText, this.scanRevision + this.resultRevision)
         if (this.shouldShowProgressStrip()) {
         this.ProgressStrip(this.scanTotal, this.scanProcessed, this.scanPending, this.scanSkipped, this.scanFailed,
-            this.progress, this.progressTitle(), this.analyzing, this.scanRevision + this.resultRevision)
+            this.progress, this.progressTitle(), this.analyzing,
+            this.scanRevision + this.resultRevision + this.progressRevision)
         }
         this.MonthlyInsightsPanel(this.resultRevision)
+        this.GalleryQuestionPanel(this.gallerySearchRevision + this.resultRevision)
         this.ResultsPanel(this.resultRevision)
 
         Blank().height(100)

@@ -21,6 +21,8 @@ import {
 
 const GALLERY_LOG_DOMAIN = 0x0000;
 const GALLERY_LOG_TAG = 'Gallery';
+const GALLERY_LOG_STORAGE_KEY = 'galleryLogs';
+const GALLERY_LOG_MAX_CHARS = 60000;
 
 class GallerySemaphore {
   private permits: number;
@@ -328,10 +330,15 @@ export class GalleryAnalyzer {
             (config.embeddingMode === 'huawei_local' ? 'huawei_local_basic' : config.embeddingModel));
           progress.current = '生成 Embedding ' + id;
           onProgress(progress);
-          let vector = await this.embeddingService.embedText(resultText, config, this.filesDir);
+          let embeddingResult = await this.embeddingService.embedText(resultText, config, this.filesDir,
+            (level: string, message: string) => {
+              this.logEmbeddingMessage(level, id, message);
+            });
+          let vector = embeddingResult.vector;
           embeddingDimension = vector.length;
           embeddingStatus = 'ok';
-          this.logInfo('embedding done id=' + id + ' dimension=' + embeddingDimension + ' elapsedMs=' + this.elapsed(embeddingStartedAt));
+          this.logInfo('embedding done id=' + id + ' mode=' + embeddingResult.mode + ' model=' + embeddingResult.model +
+            ' dimension=' + embeddingDimension + ' elapsedMs=' + this.elapsed(embeddingStartedAt));
           let embedding: GalleryEmbeddingRecord = {
             id: id,
             uri: uri,
@@ -339,8 +346,8 @@ export class GalleryAnalyzer {
             category: category,
             text: resultText,
             vector: vector,
-            model: config.embeddingMode === 'huawei_local' ? 'huawei_local_basic' : config.embeddingModel,
-            mode: config.embeddingMode,
+            model: embeddingResult.model,
+            mode: embeddingResult.mode,
             createdAt: new Date().getTime()
           };
           GalleryStorage.upsertEmbedding(this.filesDir, embedding);
@@ -797,9 +804,31 @@ export class GalleryAnalyzer {
 
   private logInfo(message: string): void {
     hilog.info(GALLERY_LOG_DOMAIN, GALLERY_LOG_TAG, '%{public}s', message);
+    this.captureLog('INFO', message);
   }
 
   private logError(message: string): void {
     hilog.error(GALLERY_LOG_DOMAIN, GALLERY_LOG_TAG, '%{public}s', message);
+    this.captureLog('ERROR', message);
+  }
+
+  private logEmbeddingMessage(level: string, id: string, message: string): void {
+    let text = 'embedding id=' + id + ' ' + message;
+    if (level === 'ERROR') {
+      this.logError(text);
+      return;
+    }
+    this.logInfo(text);
+  }
+
+  private captureLog(level: string, message: string): void {
+    let previous = AppStorage.get(GALLERY_LOG_STORAGE_KEY) as string;
+    let current = previous && previous.length > 0 ? previous : '';
+    let line = '[' + new Date().toLocaleTimeString() + '] [' + level + '] ' + message;
+    let next = current.length > 0 ? current + '\n' + line : line;
+    if (next.length > GALLERY_LOG_MAX_CHARS) {
+      next = next.substring(next.length - GALLERY_LOG_MAX_CHARS);
+    }
+    AppStorage.setOrCreate(GALLERY_LOG_STORAGE_KEY, next);
   }
 }

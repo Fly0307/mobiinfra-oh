@@ -34,6 +34,13 @@ export interface GalleryMonthSummaryResult {
   rawText: string;
 }
 
+export interface GalleryQuestionAnswerResult {
+  answer: string;
+  matchedIds: string[];
+  confidence: number;
+  rawText: string;
+}
+
 interface CloudImageUrl {
   url: string;
 }
@@ -61,6 +68,26 @@ interface CloudChatRequest {
   stream: boolean;
   max_tokens: number;
   model?: string;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  chat_template_kwargs?: CloudChatTemplateKwargs;
+}
+
+interface CloudChatOptions {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  chat_template_kwargs?: CloudChatTemplateKwargs;
+}
+
+interface CloudChatTemplateKwargs {
+  enable_thinking: boolean;
 }
 
 interface CloudChatMessageResult {
@@ -90,6 +117,17 @@ interface CloudEmbeddingResponse {
 
 export class CloudModelClient {
   private activeRequests: http.HttpRequest[] = [];
+  private readonly galleryChatOptions: CloudChatOptions = {
+    temperature: 0.7,
+    top_p: 0.8,
+    top_k: 20,
+    min_p: 0.0,
+    presence_penalty: 1.5,
+    repetition_penalty: 1.0,
+    chat_template_kwargs: {
+      enable_thinking: false
+    }
+  };
 
   private registerActiveRequest(request: http.HttpRequest): void {
     this.activeRequests.push(request);
@@ -175,7 +213,8 @@ export class CloudModelClient {
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
-    model?: string, maxTokens: number = 2048, readTimeout: number = 120000): Promise<string> {
+    model?: string, maxTokens: number = 2048, readTimeout: number = 120000,
+    options?: CloudChatOptions): Promise<string> {
     // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
     let requestBody: CloudChatRequest = {
       messages: messages,
@@ -183,6 +222,29 @@ export class CloudModelClient {
       stream: false,
       max_tokens: maxTokens
     };
+    if (options) {
+      if (options.temperature !== undefined) {
+        requestBody.temperature = options.temperature;
+      }
+      if (options.top_p !== undefined) {
+        requestBody.top_p = options.top_p;
+      }
+      if (options.top_k !== undefined) {
+        requestBody.top_k = options.top_k;
+      }
+      if (options.min_p !== undefined) {
+        requestBody.min_p = options.min_p;
+      }
+      if (options.presence_penalty !== undefined) {
+        requestBody.presence_penalty = options.presence_penalty;
+      }
+      if (options.repetition_penalty !== undefined) {
+        requestBody.repetition_penalty = options.repetition_penalty;
+      }
+      if (options.chat_template_kwargs !== undefined) {
+        requestBody.chat_template_kwargs = options.chat_template_kwargs;
+      }
+    }
     if (model && model.trim().length > 0) {
       requestBody.model = model.trim();
     }
@@ -228,22 +290,25 @@ export class CloudModelClient {
   async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
     let prompt = '你是一个图库月度洞察助手。' +
       '\n\n请根据用户提供的月度图库聚合数据和图片摘要清单，判断这个月用户大概做了什么，并生成一个适合展示在“图库洞察”页的月度总结。' +
+      '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
       '\n严格基于输入数据，不要编造具体人名、地点、城市、店名或未出现的事件。' +
       '\n如果只能推测，请使用“可能”“疑似”“看起来像”。' +
       '\n不要使用“人生高光”“最重要”等强判断。' +
       '\nsummary 必须包含 2 到 3 个具体观察，优先引用输入里的时间、类别、数量、平台、活动或事项线索；不要只写“内容丰富”“记录较多”这类笼统表述。' +
-      '\n\n输出 JSON，不要输出 Markdown，格式如下：' +
+      '\n\n只输出 JSON，格式如下：' +
       '\n{' +
       '\n  "title": "最多14个字的标题",' +
       '\n  "summary": "80到140字的月度总结，说明这个月大概做了什么",' +
       '\n  "suggestion": "一句可执行整理建议"' +
       '\n}' +
-      '\n\n月度图库聚合数据：\n' + monthAggregateText;
+      '\n\n月度图库聚合数据：\n' + monthAggregateText +
+      '\n\n只输出 JSON，不要思考。';
     let message: CloudChatMessage = {
       role: 'user',
       content: prompt
     };
-    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000);
+    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000,
+      this.galleryChatOptions);
     let payloadText = this.extractJsonObject(content);
     let payload: Record<string, Object> = {};
     try {
@@ -283,12 +348,96 @@ export class CloudModelClient {
     };
   }
 
+  async answerGalleryQuestion(config: GalleryCloudModelConfig, question: string,
+    candidateText: string): Promise<GalleryQuestionAnswerResult> {
+    let prompt = '你是图库问答助手。' +
+      '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
+      '\n只基于给定的候选图片记录回答用户问题，不要编造候选记录中没有的事实。' +
+      '\n如果候选记录证据不足，请直接说明没有找到明确记录。' +
+      '\n只输出 JSON，不要输出 Markdown、解释、前后缀或思考过程，格式如下：' +
+      '\n{' +
+      '\n  "answer": "基于候选图片的简短回答",' +
+      '\n  "matchedIds": ["相关图片 id"],' +
+      '\n  "confidence": 0.0' +
+      '\n}' +
+      '\n\n用户问题：\n' + question +
+      '\n\n候选图片记录：\n' + candidateText;
+    let message: CloudChatMessage = {
+      role: 'user',
+      content: prompt
+    };
+    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000,
+      this.galleryChatOptions);
+    let payloadText = this.extractJsonObject(content);
+    let payload: Record<string, Object> = {};
+    try {
+      payload = ArkJSON.parse(payloadText) as Record<string, Object>;
+    } catch (e) {
+      return {
+        answer: content.trim(),
+        matchedIds: [],
+        confidence: 0,
+        rawText: content
+      };
+    }
+    let answer = this.getPayloadString(payload, 'answer');
+    if (answer.length === 0) {
+      answer = this.getPayloadString(payload, '回答');
+    }
+    let matchedIds = this.getPayloadStringArray(payload, 'matchedIds');
+    if (matchedIds.length === 0) {
+      matchedIds = this.getPayloadStringArray(payload, 'matched_ids');
+    }
+    let confidence = this.getPayloadNumber(payload, 'confidence');
+    return {
+      answer: answer.length > 0 ? answer : content.trim(),
+      matchedIds: matchedIds,
+      confidence: confidence,
+      rawText: content
+    };
+  }
+
   private getPayloadString(payload: Record<string, Object>, key: string): string {
     let value = payload[key];
     if (value === undefined || value === null) {
       return '';
     }
     return String(value).trim();
+  }
+
+  private getPayloadStringArray(payload: Record<string, Object>, key: string): string[] {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return [];
+    }
+    if (Array.isArray(value)) {
+      let items = value as Object[];
+      let result: string[] = [];
+      for (let i = 0; i < items.length; i++) {
+        let text = String(items[i]).trim();
+        if (text.length > 0) {
+          result.push(text);
+        }
+      }
+      return result;
+    }
+    let textValue = String(value).trim();
+    if (textValue.length === 0) {
+      return [];
+    }
+    return [textValue];
+  }
+
+  private getPayloadNumber(payload: Record<string, Object>, key: string): number {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return 0;
+    }
+    let parsed = parseFloat(String(value));
+    if (isNaN(parsed)) {
+      return 0;
+    }
+    return parsed;
   }
 
   private extractJsonObject(raw: string): string {
@@ -362,17 +511,19 @@ export class CloudModelClient {
     let textPart: CloudTextPart = {
       type: 'text',
       text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
+        '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
         '\n只返回 JSON，不要 Markdown。字段：title, category, summary, details, tags, importance。' +
-        '\ntitle、summary、details、tags 都必须使用中文；除非图片里原文就是英文品牌或专有名词，否则不要输出英文。' +
-        '\ncategory 必须从 聊天、文档、餐饮、购物、出行、健康、工作、其他 中选择，不要输出英文。' +
+        '\ntitle、summary、details、tags 的内容都必须使用中文，除非是英文专有名词' +
+        '\ncategory 必须从"聊天、文档、餐饮、购物、出行、健康、工作、其他"中选择' +
         '\nsummary 用 1 句概括这张图的核心信息。' +
         '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
-        '\ntags 输出 3 到 8 个中文短标签，每个标签尽量 2 到 6 个汉字，不要输出英文标签。' +
+        '\ntags 输出 3 到 8 个中文两字标签，优先从候选标签中选择。候选tag：聊天、待办、会议、工作、项目、客户、通知、截图、账单、消费、外卖、餐饮、购物、快递、售后、健康、体检、用药、运动、睡眠、饮食、医疗、文档、合同、笔记、课程、作业、证件、资料、发票、家庭、朋友、聚会、亲子、宠物、节日、纪念、账号、安全、配置、报错、登录、密码' +
         '\nimportance 是 0 到 1 的数字。' +
-        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)')
+        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)') +
+        '\n请返回 JSON'
     };
     return this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      config.apiKey, config.model, 1024, 90000);
+      config.apiKey, config.model, 2048, 90000, this.galleryChatOptions);
   }
 
   async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {

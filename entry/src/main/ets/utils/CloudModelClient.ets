@@ -15,6 +15,32 @@ export interface CloudModelConfig {
   deciderModel: string;
 }
 
+export interface GalleryCloudModelConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface EmbeddingCloudConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface GalleryMonthSummaryResult {
+  title: string;
+  summary: string;
+  suggestion: string;
+  rawText: string;
+}
+
+export interface GalleryQuestionAnswerResult {
+  answer: string;
+  matchedIds: string[];
+  confidence: number;
+  rawText: string;
+}
+
 export interface CloudImageUrl {
   url: string;
 }
@@ -49,6 +75,11 @@ export interface CloudChatCompletionOptions {
   maxTokens?: number;
   readTimeout?: number;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
 }
 
 interface CloudChatRequest {
@@ -57,6 +88,21 @@ interface CloudChatRequest {
   stream: boolean;
   max_tokens?: number;
   model?: string;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  chat_template_kwargs?: CloudChatTemplateKwargs;
+}
+
+interface CloudChatOptions {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
   chat_template_kwargs?: CloudChatTemplateKwargs;
 }
 
@@ -72,8 +118,32 @@ interface CloudChatResponse {
   choices: CloudChatChoice[];
 }
 
+interface CloudEmbeddingRequest {
+  model: string;
+  input: string;
+}
+
+interface CloudEmbeddingItem {
+  embedding: number[];
+}
+
+interface CloudEmbeddingResponse {
+  data: CloudEmbeddingItem[];
+}
+
 export class CloudModelClient {
   private activeRequests: http.HttpRequest[] = [];
+  private readonly galleryChatOptions: CloudChatOptions = {
+    temperature: 0.7,
+    top_p: 0.8,
+    top_k: 20,
+    min_p: 0.0,
+    presence_penalty: 1.5,
+    repetition_penalty: 1.0,
+    chat_template_kwargs: {
+      enable_thinking: false
+    }
+  };
 
   private registerActiveRequest(request: http.HttpRequest): void {
     this.activeRequests.push(request);
@@ -144,6 +214,20 @@ export class CloudModelClient {
     return url + '/v1/chat/completions';
   }
 
+  private normalizeEmbeddingUrl(baseUrl: string): string {
+    let url = baseUrl.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    if (url.endsWith('/embeddings')) {
+      return url;
+    }
+    if (url.endsWith('/v1')) {
+      return url + '/embeddings';
+    }
+    return url + '/v1/embeddings';
+  }
+
   async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
     let requestBody: CloudChatRequest = {
       messages: options.messages,
@@ -155,6 +239,21 @@ export class CloudModelClient {
     }
     if (options.model !== undefined && options.model.trim().length > 0) {
       requestBody.model = options.model.trim();
+    }
+    if (options.top_p !== undefined) {
+      requestBody.top_p = options.top_p;
+    }
+    if (options.top_k !== undefined) {
+      requestBody.top_k = options.top_k;
+    }
+    if (options.min_p !== undefined) {
+      requestBody.min_p = options.min_p;
+    }
+    if (options.presence_penalty !== undefined) {
+      requestBody.presence_penalty = options.presence_penalty;
+    }
+    if (options.repetition_penalty !== undefined) {
+      requestBody.repetition_penalty = options.repetition_penalty;
     }
     if (options.chatTemplateKwargs !== undefined) {
       requestBody.chat_template_kwargs = options.chatTemplateKwargs;
@@ -199,19 +298,36 @@ export class CloudModelClient {
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
     model?: string, maxTokens?: number, readTimeout?: number,
-    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
+    chatOptions?: CloudChatOptions): Promise<string> {
     // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
     let options: CloudChatCompletionOptions = {
       baseUrl: baseUrl,
       apiKey: apiKey,
       messages: messages,
-      temperature: 0,
+      temperature: chatOptions?.temperature === undefined ? 0 : chatOptions.temperature,
       model: model,
       maxTokens: maxTokens,
       readTimeout: readTimeout
     };
-    if (chatTemplateKwargs !== undefined) {
-      options.chatTemplateKwargs = chatTemplateKwargs;
+    if (chatOptions !== undefined) {
+      if (chatOptions.top_p !== undefined) {
+        options.top_p = chatOptions.top_p;
+      }
+      if (chatOptions.top_k !== undefined) {
+        options.top_k = chatOptions.top_k;
+      }
+      if (chatOptions.min_p !== undefined) {
+        options.min_p = chatOptions.min_p;
+      }
+      if (chatOptions.presence_penalty !== undefined) {
+        options.presence_penalty = chatOptions.presence_penalty;
+      }
+      if (chatOptions.repetition_penalty !== undefined) {
+        options.repetition_penalty = chatOptions.repetition_penalty;
+      }
+      if (chatOptions.chat_template_kwargs !== undefined) {
+        options.chatTemplateKwargs = chatOptions.chat_template_kwargs;
+      }
     }
     try {
       return await this.chatCompletionText(options);
@@ -227,7 +343,180 @@ export class CloudModelClient {
       role: 'user',
       content: content
     };
-    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatTemplateKwargs);
+    let chatOptions: CloudChatOptions | undefined = chatTemplateKwargs === undefined ? undefined : {
+      chat_template_kwargs: chatTemplateKwargs
+    };
+    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatOptions);
+  }
+
+  async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
+    let prompt = '你是一个图库月度洞察助手。' +
+      '\n\n请根据用户提供的月度图库聚合数据和图片摘要清单，判断这个月用户大概做了什么，并生成一个适合展示在“图库洞察”页的月度总结。' +
+      '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
+      '\n严格基于输入数据，不要编造具体人名、地点、城市、店名或未出现的事件。' +
+      '\n如果只能推测，请使用“可能”“疑似”“看起来像”。' +
+      '\n不要使用“人生高光”“最重要”等强判断。' +
+      '\nsummary 必须包含 2 到 3 个具体观察，优先引用输入里的时间、类别、数量、平台、活动或事项线索；不要只写“内容丰富”“记录较多”这类笼统表述。' +
+      '\n\n只输出 JSON，格式如下：' +
+      '\n{' +
+      '\n  "title": "最多14个字的标题",' +
+      '\n  "summary": "80到140字的月度总结，说明这个月大概做了什么",' +
+      '\n  "suggestion": "一句可执行整理建议"' +
+      '\n}' +
+      '\n\n月度图库聚合数据：\n' + monthAggregateText +
+      '\n\n只输出 JSON，不要思考。';
+    let message: CloudChatMessage = {
+      role: 'user',
+      content: prompt
+    };
+    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000,
+      this.galleryChatOptions);
+    let payloadText = this.extractJsonObject(content);
+    let payload: Record<string, Object> = {};
+    try {
+      payload = ArkJSON.parse(payloadText) as Record<string, Object>;
+    } catch (e) {
+      return {
+        title: '',
+        summary: content.trim(),
+        suggestion: '',
+        rawText: content
+      };
+    }
+    let title = this.getPayloadString(payload, 'title');
+    if (title.length === 0) {
+      title = this.getPayloadString(payload, '标题');
+    }
+    let summary = this.getPayloadString(payload, 'summary');
+    if (summary.length === 0) {
+      summary = this.getPayloadString(payload, '摘要');
+    }
+    let suggestion = this.getPayloadString(payload, 'suggestion');
+    if (suggestion.length === 0) {
+      suggestion = this.getPayloadString(payload, 'suggestions');
+    }
+    if (suggestion.length === 0) {
+      suggestion = this.getPayloadString(payload, '建议');
+    }
+    let reason = this.getPayloadString(payload, 'reason');
+    if (summary.length === 0 && title.length === 0 && suggestion.length === 0) {
+      throw new Error(reason.length > 0 ? reason : 'AI 月度总结返回缺少 title/summary/suggestion');
+    }
+    return {
+      title: title,
+      summary: summary.length > 0 ? summary : content.trim(),
+      suggestion: suggestion,
+      rawText: content
+    };
+  }
+
+  async answerGalleryQuestion(config: GalleryCloudModelConfig, question: string,
+    candidateText: string): Promise<GalleryQuestionAnswerResult> {
+    let prompt = '你是图库问答助手。' +
+      '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
+      '\n只基于给定的候选图片记录回答用户问题，不要编造候选记录中没有的事实。' +
+      '\n如果候选记录证据不足，请直接说明没有找到明确记录。' +
+      '\n只输出 JSON，不要输出 Markdown、解释、前后缀或思考过程，格式如下：' +
+      '\n{' +
+      '\n  "answer": "基于候选图片的简短回答",' +
+      '\n  "matchedIds": ["相关图片 id"],' +
+      '\n  "confidence": 0.0' +
+      '\n}' +
+      '\n\n用户问题：\n' + question +
+      '\n\n候选图片记录：\n' + candidateText;
+    let message: CloudChatMessage = {
+      role: 'user',
+      content: prompt
+    };
+    let content = await this.chatMessages(config.baseUrl, [message], config.apiKey, config.model, 1024, 90000,
+      this.galleryChatOptions);
+    let payloadText = this.extractJsonObject(content);
+    let payload: Record<string, Object> = {};
+    try {
+      payload = ArkJSON.parse(payloadText) as Record<string, Object>;
+    } catch (e) {
+      return {
+        answer: content.trim(),
+        matchedIds: [],
+        confidence: 0,
+        rawText: content
+      };
+    }
+    let answer = this.getPayloadString(payload, 'answer');
+    if (answer.length === 0) {
+      answer = this.getPayloadString(payload, '回答');
+    }
+    let matchedIds = this.getPayloadStringArray(payload, 'matchedIds');
+    if (matchedIds.length === 0) {
+      matchedIds = this.getPayloadStringArray(payload, 'matched_ids');
+    }
+    let confidence = this.getPayloadNumber(payload, 'confidence');
+    return {
+      answer: answer.length > 0 ? answer : content.trim(),
+      matchedIds: matchedIds,
+      confidence: confidence,
+      rawText: content
+    };
+  }
+
+  private getPayloadString(payload: Record<string, Object>, key: string): string {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return '';
+    }
+    return String(value).trim();
+  }
+
+  private getPayloadStringArray(payload: Record<string, Object>, key: string): string[] {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return [];
+    }
+    if (Array.isArray(value)) {
+      let items = value as Object[];
+      let result: string[] = [];
+      for (let i = 0; i < items.length; i++) {
+        let text = String(items[i]).trim();
+        if (text.length > 0) {
+          result.push(text);
+        }
+      }
+      return result;
+    }
+    let textValue = String(value).trim();
+    if (textValue.length === 0) {
+      return [];
+    }
+    return [textValue];
+  }
+
+  private getPayloadNumber(payload: Record<string, Object>, key: string): number {
+    let value = payload[key];
+    if (value === undefined || value === null) {
+      return 0;
+    }
+    let parsed = parseFloat(String(value));
+    if (isNaN(parsed)) {
+      return 0;
+    }
+    return parsed;
+  }
+
+  private extractJsonObject(raw: string): string {
+    let text = raw.trim();
+    if (text.startsWith('```')) {
+      let first = text.indexOf('\n');
+      let last = text.lastIndexOf('```');
+      if (first >= 0 && last > first) {
+        text = text.substring(first + 1, last).trim();
+      }
+    }
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return text.substring(start, end + 1);
+    }
+    return text;
   }
 
   async chatPlanner(prompt: string, config: CloudModelConfig): Promise<string> {
@@ -271,6 +560,68 @@ export class CloudModelClient {
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       config.apiKey, config.deciderModel, 1024, 60000);
+  }
+
+  async analyzeGalleryImage(imageBase64: string, ocrText: string, config: GalleryCloudModelConfig): Promise<string> {
+    let imageUrl: CloudImageUrl = {
+      url: 'data:image/jpeg;base64,' + imageBase64
+    };
+    let imagePart: CloudImagePart = {
+      type: 'image_url',
+      image_url: imageUrl
+    };
+    let textPart: CloudTextPart = {
+      type: 'text',
+      text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
+        '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
+        '\n只返回 JSON，不要 Markdown。字段：title, category, summary, details, tags, importance。' +
+        '\ntitle、summary、details、tags 的内容都必须使用中文，除非是英文专有名词' +
+        '\ncategory 必须从"聊天、文档、餐饮、购物、出行、健康、工作、其他"中选择' +
+        '\nsummary 用 1 句概括这张图的核心信息。' +
+        '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
+        '\ntags 输出 3 到 8 个中文两字标签，优先从候选标签中选择。候选tag：聊天、待办、会议、工作、项目、客户、通知、截图、账单、消费、外卖、餐饮、购物、快递、售后、健康、体检、用药、运动、睡眠、饮食、医疗、文档、合同、笔记、课程、作业、证件、资料、发票、家庭、朋友、聚会、亲子、宠物、节日、纪念、账号、安全、配置、报错、登录、密码' +
+        '\nimportance 是 0 到 1 的数字。' +
+        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)') +
+        '\n请返回 JSON'
+    };
+    return this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+      config.apiKey, config.model, 2048, 90000, this.galleryChatOptions);
+  }
+
+  async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {
+    let requestBody: CloudEmbeddingRequest = {
+      model: config.model,
+      input: input
+    };
+    let headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + (config.apiKey.length > 0 ? config.apiKey : 'EMPTY')
+    };
+    let requestOptions: http.HttpRequestOptions = {
+      method: http.RequestMethod.POST,
+      header: headers,
+      extraData: ArkJSON.stringify(requestBody),
+      connectTimeout: 10000,
+      readTimeout: 90000,
+      expectDataType: http.HttpDataType.STRING
+    };
+
+    let httpReq = http.createHttp();
+    this.registerActiveRequest(httpReq);
+    try {
+      let response = await httpReq.request(this.normalizeEmbeddingUrl(config.baseUrl), requestOptions);
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new Error(`Embedding HTTP ${response.responseCode}: ${response.result}`);
+      }
+      let parsed = ArkJSON.parse(response.result as string) as CloudEmbeddingResponse;
+      if (parsed.data.length === 0) {
+        throw new Error('Embedding response has no vectors');
+      }
+      return parsed.data[0].embedding;
+    } finally {
+      this.unregisterActiveRequest(httpReq);
+      httpReq.destroy();
+    }
   }
 
   async chatQwenDecider(task: string, historyItems: string[], imageBase64: string, config: CloudModelConfig): Promise<string> {

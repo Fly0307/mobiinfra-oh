@@ -6,6 +6,7 @@
     "pages/task/WorkflowFileViewer",
     "pages/collection/CollectionGroupDetailPage",
     "pages/OpTest",
-    "pages/LogView"
+    "pages/LogView",
+    "pages/gallery/GalleryPage"
   ]
 }

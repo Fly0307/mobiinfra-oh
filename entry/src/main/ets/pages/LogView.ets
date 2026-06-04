@@ -3,8 +3,8 @@ import { router } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction } from '@kit.ArkUI';
 
-// 运行日志页：可在原生日志 ring buffer 和云端 Agent 日志之间切换，
-// 用于调试模型加载、推理、HDC 通信和云端 Decider 输入输出。
+// 运行日志页：可在原生日志 ring buffer、云端 Agent 日志和图库分析日志之间切换，
+// 用于调试模型加载、推理、HDC 通信、云端 Decider 输入输出和图库入库状态。
 @Entry
 @Component
 struct LogView {
@@ -39,14 +39,17 @@ struct LogView {
   }
 
   reload() {
-    // Native 日志来自 libentry.so 的 getLogs；Cloud 日志来自 Index.ets 写入的 AppStorage。
+    // Native 日志来自 libentry.so 的 getLogs；Cloud/Gallery 日志来自 AppStorage。
     try {
       if (this.logSource === 0) {
         const text = native.getLogs() || '(empty native runtime logs)'
         this.logs = text
-      } else {
+      } else if (this.logSource === 1) {
         const text = AppStorage.get('cloudAgentLogs') as string
         this.logs = text && text.length > 0 ? text : '(empty cloud agent logs)'
+      } else {
+        const text = AppStorage.get('galleryLogs') as string
+        this.logs = text && text.length > 0 ? text : '(empty gallery logs)'
       }
       if (this.autoScroll) {
         this.scroller.scrollEdge(Edge.Bottom)
@@ -63,7 +66,7 @@ struct LogView {
           .fontSize(14).height(36)
           .onClick(() => router.back())
         Blank()
-        Text(this.logSource === 0 ? 'Runtime Logs' : 'Cloud Agent Logs')
+        Text(this.logTitle())
           .fontSize(18).fontWeight(FontWeight.Bold)
         Blank()
         Button(this.autoRefresh ? 'Auto ON' : 'Auto OFF')
@@ -86,6 +89,13 @@ struct LogView {
           .backgroundColor(this.logSource === 1 ? '#5B68FF' : '#888888')
           .onClick(() => {
             this.logSource = 1
+            this.reload()
+          })
+        Button('Gallery')
+          .fontSize(12).height(34).flexGrow(1).margin({ left: 8 })
+          .backgroundColor(this.logSource === 2 ? '#5B68FF' : '#888888')
+          .onClick(() => {
+            this.logSource = 2
             this.reload()
           })
       }
@@ -115,8 +125,10 @@ struct LogView {
             try {
               if (this.logSource === 0) {
                 native.clearLogs()
-              } else {
+              } else if (this.logSource === 1) {
                 AppStorage.setOrCreate('cloudAgentLogs', '')
+              } else {
+                AppStorage.setOrCreate('galleryLogs', '')
               }
               this.logs = '(cleared)'
             } catch (e) {
@@ -145,6 +157,16 @@ struct LogView {
     .width('100%')
     .height('100%')
     .backgroundColor('#F0F0F0')
+  }
+
+  private logTitle(): string {
+    if (this.logSource === 0) {
+      return 'Runtime Logs'
+    }
+    if (this.logSource === 1) {
+      return 'Cloud Agent Logs'
+    }
+    return 'Gallery Logs'
   }
 }
 

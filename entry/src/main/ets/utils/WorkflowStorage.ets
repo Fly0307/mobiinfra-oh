@@ -162,7 +162,6 @@ export class WorkflowStorage {
     }
 
     let nextTasks: WorkflowTask[] = [];
-    let knownIds: Record<string, boolean> = {};
     for (let i = 0; i < tasks.length; i++) {
       let task = tasks[i];
       let defaultTask = defaultById[task.id];
@@ -173,28 +172,22 @@ export class WorkflowStorage {
       } else {
         nextTasks.push(task);
       }
-      knownIds[task.id] = true;
-    }
-
-    for (let i = 0; i < defaults.length; i++) {
-      if (!knownIds[defaults[i].id]) {
-        nextTasks.push(defaults[i]);
-      }
     }
     return nextTasks;
   }
 
   private static mergeStoredStateIntoDefaultTask(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
+    let sceneId = storedTask.sceneId >= 0 ? storedTask.sceneId : defaultTask.sceneId;
     return {
       id: defaultTask.id,
-      sceneId: defaultTask.sceneId,
-      icon: defaultTask.icon,
-      iconColor: defaultTask.iconColor,
-      title: defaultTask.title,
-      source: defaultTask.source,
-      enabled: storedTask.enabled === false ? false : defaultTask.enabled,
-      configFileName: defaultTask.configFileName,
-      workflowJson: defaultTask.workflowJson,
+      sceneId: sceneId,
+      icon: WorkflowStorage.nonEmptyOrDefault(storedTask.icon, WorkflowStorage.iconForScene(sceneId)),
+      iconColor: WorkflowStorage.nonEmptyOrDefault(storedTask.iconColor, WorkflowStorage.colorForScene(sceneId)),
+      title: WorkflowStorage.nonEmptyOrDefault(storedTask.title, defaultTask.title),
+      source: WorkflowStorage.nonEmptyOrDefault(storedTask.source, defaultTask.source),
+      enabled: storedTask.enabled === false ? false : storedTask.enabled === true ? true : defaultTask.enabled,
+      configFileName: WorkflowStorage.nonEmptyOrDefault(storedTask.configFileName, defaultTask.configFileName),
+      workflowJson: WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson),
       lastStatus: WorkflowStorage.nonEmptyOrDefault(storedTask.lastStatus, defaultTask.lastStatus),
       lastRun: WorkflowStorage.nonEmptyOrDefault(storedTask.lastRun, defaultTask.lastRun),
       lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage)

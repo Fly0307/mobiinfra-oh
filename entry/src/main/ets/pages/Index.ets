@@ -11,6 +11,19 @@ import { HomePage } from './home/HomePage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
+import {
+  createEmptyCollectionViewModels,
+  createEmptyHomeProfileViewModel,
+  DataManagerFacade
+} from '../datamanager/DataManagerFacade';
+import {
+  CollectionViewModel,
+  DataManagerModelConfig,
+  DataManagerProgress,
+  HomeDomainViewModel,
+  HomeProfileViewModel
+} from '../datamanager/DataManagerTypes';
+import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
@@ -64,7 +77,7 @@ struct Index {
   @State backendTypeInput: string = 'cpu';
   @State mllmBackendTypeInput: string = 'cpu';
   @State currentTab: number = 0;
-  @State collectionModule: number = 1;
+  @State collectionModule: number = 0;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
@@ -80,11 +93,18 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State dataManagerRefreshing: boolean = false;
+  @State dataManagerProgressStage: string = '准备';
+  @State dataManagerProgressMessage: string = '准备整理数据';
+  @State dataManagerProgressPercent: number = 0;
+  @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
 
   private filesDir: string = '';
   private modelDir: string = '';
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
+  private dataManagerFacade: DataManagerFacade | null = null;
   
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -108,11 +128,95 @@ struct Index {
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
   }
 
+  private getDataManagerModelConfig(): DataManagerModelConfig {
+    return {
+      baseUrl: this.cloudPlannerBaseUrl,
+      apiKey: this.cloudApiKey,
+      enabled: this.cloudPlannerBaseUrl.trim().length > 0
+    };
+  }
+
+  private initDataManager(): void {
+    if (this.filesDir.length === 0) {
+      dataManagerWarn('initDataManager skipped: filesDir is empty');
+      return;
+    }
+    dataManagerInfo('initDataManager start: filesDir=' + this.filesDir);
+    this.dataManagerFacade = new DataManagerFacade(this.filesDir);
+    this.dataManagerFacade.ensureReady();
+    this.reloadDataManagerViewModels();
+    dataManagerInfo('initDataManager done');
+  }
+
+  private reloadDataManagerViewModels(): void {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('reloadDataManagerViewModels skipped: facade is null');
+      return;
+    }
+    this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
+    dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
+  }
+
+  private updateDataManagerProgress(progress: DataManagerProgress): void {
+    this.dataManagerProgressStage = progress.percent < 60 ? '正在整理日志' : '正在构建索引';
+    this.dataManagerProgressMessage = progress.message;
+    this.dataManagerProgressPercent = Math.max(0, Math.min(100, progress.percent));
+  }
+
+  private async refreshDataManager(): Promise<void> {
+    dataManagerInfo(`refreshDataManager invoked: hasFacade=${this.dataManagerFacade !== null}, refreshing=${this.dataManagerRefreshing}`);
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('refreshDataManager skipped: facade is null');
+      return;
+    }
+    if (this.dataManagerRefreshing) {
+      dataManagerWarn('refreshDataManager skipped: already refreshing');
+      return;
+    }
+    if (!this.dataManagerFacade.hasDailyLogData()) {
+      dataManagerInfo('refreshDataManager skipped: no daily-log data');
+      promptAction.showToast({ message: '暂无数据', duration: 1500 });
+      return;
+    }
+    this.dataManagerRefreshing = true;
+    this.dataManagerProgressStage = '正在整理日志';
+    this.dataManagerProgressMessage = '';
+    this.dataManagerProgressPercent = 0;
+    try {
+      let modelConfig = this.getDataManagerModelConfig();
+      dataManagerInfo(`refreshDataManager start: modelEnabled=${modelConfig.enabled}, baseUrl=${modelConfig.baseUrl}`);
+      let summary = await this.dataManagerFacade.refresh(modelConfig, (progress: DataManagerProgress) => {
+        this.updateDataManagerProgress(progress);
+      });
+      this.reloadDataManagerViewModels();
+      this.appendCloudLog('DataManager refresh: ' + summary.message);
+      this.dataManagerProgressStage = '完成';
+      this.dataManagerProgressMessage = summary.message;
+      this.dataManagerProgressPercent = 100;
+      if (summary.skipped) {
+        promptAction.showToast({ message: '已是最新数据', duration: 1500 });
+      }
+      dataManagerInfo('refreshDataManager success: ' + summary.message);
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('DataManager refresh failed: ' + err.message);
+      this.dataManagerProgressStage = '失败';
+      this.dataManagerProgressMessage = '整理失败: ' + err.message;
+      this.dataManagerProgressPercent = 100;
+      dataManagerError('refreshDataManager failed: ' + err.message);
+    } finally {
+      this.dataManagerRefreshing = false;
+      dataManagerInfo('refreshDataManager finished');
+    }
+  }
+
   aboutToAppear() {
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
@@ -121,6 +225,7 @@ struct Index {
       console.error('initLogFile failed: ' + err.message);
     }
     this.prepareCustomOpp();
+    this.initDataManager();
     this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
       this.output = msg;
       let match = msg.match(/<img>(.*?)<hw>/);
@@ -879,15 +984,73 @@ struct Index {
     }
   }
 
-  startCloudBackend() {
+  private hdcServerApiUrl(path: string): string {
+    let url = this.hdcServerIp.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url + path;
+  }
+
+  private logAgentLoopReady(message: string, useCloudLog: boolean): void {
+    if (useCloudLog) {
+      this.appendCloudLog(message);
+      return;
+    }
+    this.output = message;
+  }
+
+  private async ensurePcAgentLoopReady(useCloudLog: boolean): Promise<boolean> {
+    if (this.hdcServerIp.trim().length === 0) {
+      this.logAgentLoopReady('HDC Server 未配置，无法恢复 PC Agent loop。', useCloudLog);
+      return false;
+    }
+
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: '{}',
+        connectTimeout: 5000,
+        readTimeout: 10000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(this.hdcServerApiUrl('/api/agent_loop/ensure'), options);
+      let body = String(resp.result);
+      let message = body;
+      try {
+        let parsed = ArkJSON.parse(body) as JsonMap;
+        let parsedMessage = parsed['message'];
+        if (typeof parsedMessage === 'string') {
+          message = parsedMessage;
+        }
+      } catch (e) {
+      }
+      if (resp.responseCode >= 200 && resp.responseCode < 300) {
+        this.logAgentLoopReady('PC Agent loop 已恢复：' + message, useCloudLog);
+        return true;
+      }
+      this.logAgentLoopReady('PC Agent loop 恢复失败：HTTP ' + resp.responseCode + ' ' + message, useCloudLog);
+      return false;
+    } catch (err) {
+      let e = err as BusinessError;
+      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + e.message, useCloudLog);
+      return false;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  async startCloudBackend(): Promise<boolean> {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
-      return;
+      return false;
     }
     this.appendCloudLog(`准备切换到云端 Agent 路由，复用 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}...`);
     // 云端模式仍复用 PC 侧同一套 TCP 协议；区别是 App 通过 AgentRouterServer 转发到云端模型。
     this.agentRouter.useCloud();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalModelLoaded(): Promise<boolean> {
@@ -916,10 +1079,10 @@ struct Index {
     }
   }
 
-  private startLocalBackend(): void {
+  private async startLocalBackend(): Promise<boolean> {
     // 本地模式下 9126 请求会进入 libentry.so/MNN，本函数只负责切换路由并启动监听。
     this.agentRouter.useLocal();
-    this.agentRouter.start(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
+    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
@@ -928,14 +1091,13 @@ struct Index {
     }
 
     this.agentRouter.useLocal();
-    if (!this.agentRouter.running()) {
-      this.output = '未检测到本地 PC 控制后端，正在自动启动...';
-      this.startLocalBackend();
+    if (!await this.startLocalBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(false);
   }
 
-  private ensureCloudAgentBackend(): boolean {
+  private async ensureCloudAgentBackend(): Promise<boolean> {
     // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -943,11 +1105,10 @@ struct Index {
     }
 
     this.agentRouter.useCloud();
-    if (!this.agentRouter.running()) {
-      this.appendCloudLog('未检测到云端 PC 控制后端，正在自动启动...');
-      this.startCloudBackend();
+    if (!await this.startCloudBackend()) {
+      return false;
     }
-    return true;
+    return await this.ensurePcAgentLoopReady(true);
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
@@ -1097,7 +1258,7 @@ struct Index {
             .layoutWeight(1)
             .onClick(async () => {
               if (!await this.ensureLocalModelLoaded()) { return; }
-              this.startLocalBackend();
+              await this.startLocalBackend();
             })
           Row() {
             Checkbox({ name: 'autoConfirm', group: 'settings' })
@@ -1521,12 +1682,12 @@ struct Index {
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
-          .onClick(() => {
+          .onClick(async () => {
             if (this.cloudUserInput.trim().length === 0) {
               this.appendCloudLog('请先输入云端 Agent 任务。');
               return;
             }
-            if (!this.ensureCloudAgentBackend()) {
+            if (!await this.ensureCloudAgentBackend()) {
               return;
             }
             this.agentRouter.submitCloudTask(this.cloudUserInput);
@@ -1542,7 +1703,7 @@ struct Index {
             .layoutWeight(1)
             .backgroundColor('#607D8B')
             .borderRadius(14)
-            .onClick(() => { this.startCloudBackend(); })
+            .onClick(async () => { await this.startCloudBackend(); })
           Row() {
             Checkbox({ name: 'cloudAutoConfirm', group: 'cloudSettings' })
               .select(this.cloudAutoConfirm)
@@ -1615,17 +1776,75 @@ struct Index {
     })
   }
 
-  build() {
-    Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-      TabContent() { HomePage() }.tabBar(this.TabItem('H', '首页', 0))
-      TabContent() { CollectionPage({ collectionModule: $collectionModule }) }.tabBar(this.TabItem('C', '采集', 1))
-      TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
-      TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
-      TabContent() { TaskPage({ taskScene: $taskScene, onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }, onOpenCloudLog: () => { this.currentTab = 3; } }) }.tabBar(this.TabItem('T', '任务', 4))
+  @Builder DataManagerProgressOverlay() {
+    if (this.dataManagerRefreshing) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Text(this.dataManagerProgressStage)
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+            .maxLines(1)
+          Progress({ value: this.dataManagerProgressPercent, total: 100, type: ProgressType.Linear })
+            .width('100%')
+            .height(8)
+            .color('#4F68FF')
+            .backgroundColor('#E7EBF5')
+            .margin({ top: 18 })
+          Row() {
+            Text(`${Math.round(this.dataManagerProgressPercent)}%`)
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#4F68FF')
+          }
+          .width('100%')
+          .margin({ top: 10 })
+        }
+        .width('78%')
+        .padding({ left: 22, right: 22, top: 24, bottom: 22 })
+        .backgroundColor('#FFFFFFFF')
+        .borderRadius(18)
+        .shadow({ radius: 22, color: '#33000000', offsetX: 0, offsetY: 8 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#66000000')
+      .zIndex(99)
+      .onClick(() => {})
     }
-    .onChange((index: number) => { this.currentTab = index; })
+  }
+
+  build() {
+    Stack() {
+      Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+        TabContent() { HomePage({ profile: this.homeProfile }) }.tabBar(this.TabItem('H', '首页', 0))
+        TabContent() {
+          CollectionPage({
+            collectionModule: $collectionModule,
+            viewModels: this.collectionViews,
+            refreshing: this.dataManagerRefreshing,
+            onRefresh: () => { this.refreshDataManager(); }
+          })
+        }.tabBar(this.TabItem('C', '采集', 1))
+        TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
+        TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
+        TabContent() {
+          TaskPage({
+            taskScene: $taskScene,
+            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
+            onOpenCloudLog: () => { this.currentTab = 3; }
+          })
+        }.tabBar(this.TabItem('T', '任务', 4))
+      }
+      .onChange((index: number) => { this.currentTab = index; })
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#F4F8FF')
+
+      this.DataManagerProgressOverlay()
+    }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F4F8FF')
   }
 }
+

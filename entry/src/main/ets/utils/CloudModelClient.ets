@@ -41,32 +41,52 @@ export interface GalleryQuestionAnswerResult {
   rawText: string;
 }
 
-interface CloudImageUrl {
+export interface CloudImageUrl {
   url: string;
 }
 
-interface CloudTextPart {
+export interface CloudTextPart {
   type: string;
   text: string;
 }
 
-interface CloudImagePart {
+export interface CloudImagePart {
   type: string;
   image_url: CloudImageUrl;
 }
 
-type CloudContentPart = CloudTextPart | CloudImagePart;
+export type CloudContentPart = CloudTextPart | CloudImagePart;
 
-interface CloudChatMessage {
+export interface CloudChatMessage {
   role: string;
   content: string | CloudContentPart[];
+}
+
+export interface CloudChatTemplateKwargs {
+  enable_thinking: boolean;
+}
+
+export interface CloudChatCompletionOptions {
+  baseUrl: string;
+  apiKey: string;
+  messages: CloudChatMessage[];
+  temperature: number;
+  model?: string;
+  maxTokens?: number;
+  readTimeout?: number;
+  chatTemplateKwargs?: CloudChatTemplateKwargs;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
 }
 
 interface CloudChatRequest {
   messages: CloudChatMessage[];
   temperature: number;
   stream: boolean;
-  max_tokens: number;
+  max_tokens?: number;
   model?: string;
   top_p?: number;
   top_k?: number;
@@ -84,10 +104,6 @@ interface CloudChatOptions {
   presence_penalty?: number;
   repetition_penalty?: number;
   chat_template_kwargs?: CloudChatTemplateKwargs;
-}
-
-interface CloudChatTemplateKwargs {
-  enable_thinking: boolean;
 }
 
 interface CloudChatMessageResult {
@@ -212,65 +228,66 @@ export class CloudModelClient {
     return url + '/v1/embeddings';
   }
 
-  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
-    model?: string, maxTokens: number = 2048, readTimeout: number = 120000,
-    options?: CloudChatOptions): Promise<string> {
-    // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
+  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
     let requestBody: CloudChatRequest = {
-      messages: messages,
-      temperature: 0,
-      stream: false,
-      max_tokens: maxTokens
+      messages: options.messages,
+      temperature: options.temperature,
+      stream: false
     };
-    if (options) {
-      if (options.temperature !== undefined) {
-        requestBody.temperature = options.temperature;
-      }
-      if (options.top_p !== undefined) {
-        requestBody.top_p = options.top_p;
-      }
-      if (options.top_k !== undefined) {
-        requestBody.top_k = options.top_k;
-      }
-      if (options.min_p !== undefined) {
-        requestBody.min_p = options.min_p;
-      }
-      if (options.presence_penalty !== undefined) {
-        requestBody.presence_penalty = options.presence_penalty;
-      }
-      if (options.repetition_penalty !== undefined) {
-        requestBody.repetition_penalty = options.repetition_penalty;
-      }
-      if (options.chat_template_kwargs !== undefined) {
-        requestBody.chat_template_kwargs = options.chat_template_kwargs;
-      }
+    if (options.maxTokens !== undefined) {
+      requestBody.max_tokens = options.maxTokens;
     }
-    if (model && model.trim().length > 0) {
-      requestBody.model = model.trim();
+    if (options.model !== undefined && options.model.trim().length > 0) {
+      requestBody.model = options.model.trim();
     }
+    if (options.top_p !== undefined) {
+      requestBody.top_p = options.top_p;
+    }
+    if (options.top_k !== undefined) {
+      requestBody.top_k = options.top_k;
+    }
+    if (options.min_p !== undefined) {
+      requestBody.min_p = options.min_p;
+    }
+    if (options.presence_penalty !== undefined) {
+      requestBody.presence_penalty = options.presence_penalty;
+    }
+    if (options.repetition_penalty !== undefined) {
+      requestBody.repetition_penalty = options.repetition_penalty;
+    }
+    if (options.chatTemplateKwargs !== undefined) {
+      requestBody.chat_template_kwargs = options.chatTemplateKwargs;
+    }
+
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + (apiKey.length > 0 ? apiKey : 'EMPTY')
+      'Authorization': 'Bearer ' + (options.apiKey.length > 0 ? options.apiKey : 'EMPTY')
     };
     let requestOptions: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,
       header: headers,
       extraData: ArkJSON.stringify(requestBody),
       connectTimeout: 10000,
-      readTimeout: readTimeout,
+      readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
 
     let httpReq = http.createHttp();
     this.registerActiveRequest(httpReq);
     try {
-      let response = await httpReq.request(this.normalizeChatUrl(baseUrl), requestOptions);
+      let response = await httpReq.request(this.normalizeChatUrl(options.baseUrl), requestOptions);
       if (response.responseCode < 200 || response.responseCode >= 300) {
-        return `{"action":"error","reason":"Cloud HTTP ${response.responseCode}: ${response.result}"}`;
+        throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
-      let parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
+      let parsed: CloudChatResponse;
+      try {
+        parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
+      } catch (e) {
+        let err = e as Error;
+        throw new Error('Cloud response JSON parse failed: ' + err.message);
+      }
       if (parsed.choices.length === 0) {
-        return '{"action":"error","reason":"Cloud response has no choices"}';
+        throw new Error('Cloud response has no choices');
       }
       return parsed.choices[0].message.content;
     } finally {
@@ -279,12 +296,57 @@ export class CloudModelClient {
     }
   }
 
-  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string): Promise<string> {
+  private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,
+    model?: string, maxTokens?: number, readTimeout?: number,
+    chatOptions?: CloudChatOptions): Promise<string> {
+    // 这里返回 string 而不是直接抛业务错误，是为了让 PC Agent 仍能收到 action=error 的 JSON。
+    let options: CloudChatCompletionOptions = {
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      messages: messages,
+      temperature: chatOptions?.temperature === undefined ? 0 : chatOptions.temperature,
+      model: model,
+      maxTokens: maxTokens,
+      readTimeout: readTimeout
+    };
+    if (chatOptions !== undefined) {
+      if (chatOptions.top_p !== undefined) {
+        options.top_p = chatOptions.top_p;
+      }
+      if (chatOptions.top_k !== undefined) {
+        options.top_k = chatOptions.top_k;
+      }
+      if (chatOptions.min_p !== undefined) {
+        options.min_p = chatOptions.min_p;
+      }
+      if (chatOptions.presence_penalty !== undefined) {
+        options.presence_penalty = chatOptions.presence_penalty;
+      }
+      if (chatOptions.repetition_penalty !== undefined) {
+        options.repetition_penalty = chatOptions.repetition_penalty;
+      }
+      if (chatOptions.chat_template_kwargs !== undefined) {
+        options.chatTemplateKwargs = chatOptions.chat_template_kwargs;
+      }
+    }
+    try {
+      return await this.chatCompletionText(options);
+    } catch (e) {
+      let err = e as Error;
+      return ArkJSON.stringify({ action: 'error', reason: err.message });
+    }
+  }
+
+  private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string,
+    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
     let message: CloudChatMessage = {
       role: 'user',
       content: content
     };
-    return this.chatMessages(baseUrl, [message], apiKey);
+    let chatOptions: CloudChatOptions | undefined = chatTemplateKwargs === undefined ? undefined : {
+      chat_template_kwargs: chatTemplateKwargs
+    };
+    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatOptions);
   }
 
   async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
@@ -463,7 +525,7 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey);
+    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {

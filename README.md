@@ -108,7 +108,37 @@ App 采用沉浸式重设计的扁平化与玻璃态 UI 卡片，包含底部的
 
 ---
 
-## ❓ 四、常见问题与排错 (FAQ)
+## 🔁 四、Workflow / 云端 Agent / MNN Agent 执行链路
+
+当前 App 有三种自动化执行入口，它们共享同一台手机和同一个 PC HDC 服务，但任务下发方式不同：
+
+| 执行方式 | App 侧入口 | PC 侧入口 | 模型推理位置 | 设备控制方式 |
+| --- | --- | --- | --- | --- |
+| Workflow 任务 | 「任务」页任务卡片 | `hdc_server.py` 的 `/api/workflow` | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | PC 侧 `harmony_agent.py` 执行 HDC/hmdriver2 截图与动作 |
+| 云端 Agent | 「云端」页“开始云端智能体执行” | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `CloudModelClient` | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
+| MNN 本地 Agent | 「本地推理」页“开始智能体执行” | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `libentry.so`/MNN | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
+
+关键端口：
+
+- `9123`：PC 模型文件下载服务，通常由 `serve_model.py` 提供。
+- `9124`：PC HDC HTTP 服务，通常由 `hdc_server.py` 提供。
+- `9126`：App 内 TCP Agent Router。PC 侧通过 `hdc fport tcp:9126 tcp:9126` 映射到手机 App。
+
+Workflow 不依赖 `9126` 轮询。它由 App 内 `WorkflowRunner` 编排，每一步通过 `HdcWorkflowBridge` 调用 PC 的 `/api/workflow`，PC 只负责启动 App、截图和执行 GUI 动作。Planner、Decider 和图片总结请求仍由 App 侧直接调用云端模型配置。
+
+云端 Agent 和 MNN 本地 Agent 共享 `9126` 轮询链路。点击开始任务前，App 会切换 `AgentRouterServer` 到 cloud 或 local 模式，确保 `9126` 正在监听，并调用 PC 的 `/api/agent_loop/ensure` 让 `hdc_server.py` 确认后台 `harmony_agent.run_agent_loop()` 存活且刷新端口映射。随后 PC 侧轮询 `poll` 拿到任务，再按 Planner -> 截图 -> Decider -> 执行动作的循环运行。
+
+执行方式可以串行切换：一个 workflow 完成后，可以直接启动云端 Agent 或 MNN Agent；一个 Agent 任务完成后，也可以直接切换到 workflow。切换时不需要重启 PC server。仍建议同一时间只运行一个自动化任务，避免多个入口同时控制同一台手机。
+
+`hdc_server.py` 默认会启动 `9126` 轮询 loop。如果只需要运行 workflow bridge，可以使用：
+
+```bash
+python entry/src/main/python/hdc_server.py --workflow_only
+```
+
+注意：使用 `--workflow_only` 时，云端 Agent 和 MNN 本地 Agent 不会收到 PC 轮询任务。
+
+## ❓ 五、常见问题与排错 (FAQ)
 
 **如果... 端口冲突导致 `TCP Port listen failed at 9126` 怎么办？**
 答：最新的代码已经自带防呆机制，但如果不幸复现，可通过执行手机控制台命令修复：切断重练无线调试，APP 触发 **[启动 PC 控制后端]** 时内部的 `hdc fport rm tcp:9126 tcp:9126` 会自动把残留摘除清理。

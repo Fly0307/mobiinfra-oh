@@ -20,3 +20,4 @@ export default class AutoAgentAbility extends AccessibilityExtensionAbility {
     hilog.info(0x0000, 'AutoAgent', 'Received event: %{public}s', JSON.stringify(accessibilityEvent));
   }
 }
+

@@ -10,6 +10,8 @@ import re
 import sys
 import logging
 import argparse
+import threading
+import uuid
 
 # PC 侧视觉自动化 Agent：
 # 1. 轮询 App 内 9126 TCP 服务获取任务；
@@ -32,6 +34,10 @@ PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
 HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
 LAST_TASK_COMPLETED = False
+DEVICE_CONTROL_LOCK = threading.RLock()
+AGENT_LOOP_STOP_EVENT = threading.Event()
+POLL_FPORT_REFRESH_INTERVAL = 15.0
+LAST_POLL_FPORT_REFRESH = 0.0
 
 # Agent mode toggle: True = prefix KV cache reuse, False = original chat-based flow
 USE_AGENT_MODE = True
@@ -46,6 +52,7 @@ API_TIMEOUT = 30
 DECIDER_MAX_TOKENS = 256
 GROUNDER_MAX_TOKENS = 128
 DEVICE_WAIT_TIME = 0.5
+APP_LAUNCH_WAIT_TIME = 0.8
 APP_STOP_WAIT = 3
 
 # 滑动坐标缩放比例
@@ -89,6 +96,12 @@ def hdc_prefix():
     return "hdc"
 
 def refresh_hdc_forwarding(verbose=False):
+    return run_with_device_control(
+        "refresh_hdc_forwarding",
+        lambda: _refresh_hdc_forwarding_impl(verbose)
+    )
+
+def _refresh_hdc_forwarding_impl(verbose=False):
     # PC 通过 tcp:9126 转发到手机 App 内 TCP server；每次任务前刷新，避免旧映射残留。
     prefix = hdc_prefix()
     quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
@@ -129,7 +142,97 @@ def normalize_hmdriver_loggers():
         logger.handlers = unique_handlers
         logger.propagate = False
 
+def set_no_reason_mode(enabled):
+    global NO_REASON_MODE
+    NO_REASON_MODE = bool(enabled)
+
+def stop_agent_loop():
+    AGENT_LOOP_STOP_EVENT.set()
+
+def reset_agent_loop_stop():
+    AGENT_LOOP_STOP_EVENT.clear()
+
+def is_driver_connection_error(ex):
+    msg = str(ex)
+    lower = msg.lower()
+    return (
+        isinstance(ex, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError, json.JSONDecodeError)) or
+        (
+            "10053" in msg or
+            "10054" in msg or
+            "broken pipe" in lower or
+            "connection reset" in lower or
+            "connection aborted" in lower or
+            "forcibly closed" in lower or
+            "unable to write data" in lower or
+            "software caused connection abort" in lower or
+            "你的主机中的软件中止了一个已建立的连接" in msg or
+            "远程主机强迫关闭" in msg
+        )
+    )
+
+def run_with_device_control(operation_name, operation):
+    with DEVICE_CONTROL_LOCK:
+        return operation()
+
+def run_driver_call(operation_name, operation):
+    global d
+    if not d:
+        return None
+    try:
+        return operation(d)
+    except Exception as ex:
+        if is_driver_connection_error(ex):
+            print(f">> [DriverManager] {operation_name} connection lost: {ex}; reset Driver and retry once.")
+            reset_driver()
+            if d:
+                return operation(d)
+            raise RuntimeError(f"Driver unavailable after reset during {operation_name}") from ex
+        raise
+
+def ensure_driver_available():
+    global d
+    if d:
+        return True
+    print(">> [DriverManager] Driver 未初始化，正在按需初始化以启动 App...")
+    reset_driver()
+    return d is not None
+
+def get_main_ability_for_bundle(bundle):
+    if not ensure_driver_available():
+        return ""
+    try:
+        ability = run_driver_call(
+            "Driver.get_app_main_ability",
+            lambda driver: driver.get_app_main_ability(bundle)
+        )
+        if isinstance(ability, dict):
+            name = ability.get("name", "")
+            return name if isinstance(name, str) else ""
+    except Exception as ex:
+        print(f">> [启动警告] 查询 {bundle} 主 Ability 失败: {ex}")
+    return ""
+
+def start_app_with_explicit_ability(bundle, ability_name):
+    if not ability_name:
+        return False
+    cmd = f"{hdc_prefix()} shell aa start -a {ability_name} -b {bundle}"
+    try:
+        print(f">> 执行启动命令 (hdc explicit): {cmd}")
+        _run_timed_command("launch_app explicit aa start", cmd)
+        time.sleep(APP_LAUNCH_WAIT_TIME)
+        return True
+    except Exception as ex:
+        print(f">> [启动警告] 显式 Ability 启动失败，准备回退: {ex}")
+        return False
+
 def bring_llm_app_to_foreground():
+    return run_with_device_control(
+        "bring_llm_app_to_foreground",
+        _bring_llm_app_to_foreground_impl
+    )
+
+def _bring_llm_app_to_foreground_impl():
     # 任务结束或异常时回到本 App，方便用户查看日志、截图和错误原因。
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
     os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
@@ -191,86 +294,111 @@ def load_prompt(filename):
 def run_cmd(cmd):
     return subprocess.check_output(cmd, shell=True, text=True)
 
+def _run_timed_command(label, cmd, capture_output=True):
+    started = time.perf_counter()
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=capture_output,
+        text=True
+    )
+    elapsed = time.perf_counter() - started
+    print(f">> [HDC Timing] {label}: {elapsed:.3f}s")
+    if result.returncode != 0:
+        output = ''
+        if capture_output:
+            output = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(output or f"{label} failed: returncode={result.returncode}")
+    return result
+
+def _cleanup_device_file_async(prefix, device_path):
+    def cleanup():
+        started = time.perf_counter()
+        subprocess.run(
+            f"{prefix} shell rm \"{device_path}\"",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        elapsed = time.perf_counter() - started
+        print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s")
+
+    threading.Thread(
+        target=cleanup,
+        name="hdc-screenshot-cleanup",
+        daemon=True
+    ).start()
+
+def _encode_resized_screenshot(local_path, factor):
+    with Image.open(local_path) as img:
+        w, h = img.size
+        new_w, new_h = int(w * factor), int(h * factor)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        buffered = io.BytesIO()
+        img.save(buffered, format="JPEG")
+    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return b64, new_w, new_h
+
+def _capture_screen_file(local_path, factor, label):
+    prefix = hdc_prefix()
+    device_path = f"/data/local/tmp/_tmp_{uuid.uuid4().hex}.jpeg"
+    snapshot_created = False
+    if os.path.exists(local_path):
+        os.remove(local_path)
+
+    try:
+        _run_timed_command(
+            f"{label} snapshot_display",
+            f"{prefix} shell \"snapshot_display -f {device_path}\""
+        )
+        snapshot_created = True
+        _run_timed_command(
+            f"{label} file recv",
+            f"{prefix} file recv {device_path} \"{local_path}\""
+        )
+
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"local screenshot not found after recv: {local_path}; device path: {device_path}")
+
+        started = time.perf_counter()
+        result = _encode_resized_screenshot(local_path, factor)
+        print(f">> [HDC Timing] {label} resize+base64: {time.perf_counter() - started:.3f}s")
+        return result
+    finally:
+        if snapshot_created:
+            _cleanup_device_file_async(prefix, device_path)
+
 def capture_screen(factor=0.25):
+    return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+
+def _capture_screen_impl(factor=0.25):
     # 使用 hdc snapshot_display 截图并拉回 PC，再压缩为 base64 发送给 App/云端模型。
     print(">> Capturing screen via hdc...")
     local_path = os.path.join(os.path.dirname(__file__), "screen.jpeg")
-    prefix = hdc_prefix()
-    
-    # 截取屏幕并提取鸿蒙实际为你随机生成的文件名 (忽略大小写)
-    output = subprocess.check_output(f"{prefix} shell snapshot_display", shell=True, text=True, stderr=subprocess.STDOUT)
-    match = re.search(r'(?i)write to\s+(/\S+\.jpeg)', output)
-    
-    if match:
-        
-        device_path = match.group(1)
-        print(f">> 获取到截图文件: {device_path}")
-    else:
-        # Fallback 尝试捕捉任意带路径的 .jpeg 输出
-        match_fallback = re.search(r'(/\S+\.jpeg)', output)
-        if match_fallback:
-            device_path = match_fallback.group(1)
-        else:
-            raise RuntimeError("snapshot_display did not report a device jpeg path")
-    print(f">> 使用截图路径: {device_path}")     
-    # 先删除电脑端旧文件，防止拉取失败时继续读取旧图片
-    if os.path.exists(local_path):
-        os.remove(local_path)
-        
-    # 下拉截图到电脑（使用跨平台无输出模式，解决 Linux/zsh/win 下的 >nul 问题）
-    recv_result = subprocess.run(
-        f"{prefix} file recv {device_path} \"{local_path}\"",
-        shell=True,
-        capture_output=True,
-        text=True
-    )
-    if recv_result.returncode != 0:
-        raise RuntimeError(
-            "hdc file recv failed: " +
-            (recv_result.stderr.strip() or recv_result.stdout.strip() or f"returncode={recv_result.returncode}")
-        )
-    
-    if not os.path.exists(local_path):
-        raise FileNotFoundError(f"local screenshot not found after recv: {local_path}; device path: {device_path}")
-    
-    # 拉取后顺手把手机里的临时文件删掉，防止手机空间爆满
-    subprocess.run(f"{prefix} shell rm \"{device_path}\"", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    img = Image.open(local_path)
-    w, h = img.size
-    
-    # 为了减少网络传输压力和内存占用，进行缩小
-    new_w, new_h = int(w * factor), int(h * factor)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG")
-    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    
-    return b64, new_w, new_h
+    return _capture_screen_file(local_path, factor, "screenshot")
 
 def capture_screen_mobiagent_style(factor=0.5):
-    """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""
-    if d is None:
-        print(">> [Cloud Screenshot] hmdriver2 Driver unavailable, fallback to hdc snapshot_display.")
-        return capture_screen(factor)
+    return run_with_device_control(
+        "capture_screen_mobiagent_style",
+        lambda: _capture_screen_mobiagent_style_impl(factor)
+    )
 
-    print(">> [Cloud Screenshot] Capturing screen via hmdriver2 Driver.screenshot...")
+def _capture_screen_mobiagent_style_impl(factor=0.5):
+    """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""
+    # Avoid hmdriver2 Driver.screenshot here: it performs snapshot, recv, and rm
+    # synchronously. The direct HDC path keeps the same screenshot size while making
+    # cleanup non-blocking and exposing per-stage timing.
+    print(">> [Cloud Screenshot] Capturing screen via direct HDC snapshot_display...")
     screenshot_path = "screenshot-Harmony.jpg"
-    d.screenshot(screenshot_path)
-    img = Image.open(screenshot_path)
-    w, h = img.size
-    new_w, new_h = int(w * factor), int(h * factor)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG")
-    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    return b64, new_w, new_h
+    return _capture_screen_file(screenshot_path, factor, "cloud screenshot")
 
 def send_request(req):
     # 与 LlmServer.ets 保持同一套 JSON + <<EOF>> framing；一次连接只发送一条请求。
     payload = json.dumps(req) + "<<EOF>>"
+    req_type = req.get("type", "")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if req_type == "poll":
+        s.settimeout(2.0)
     connected = False
     try:
         s.connect((HOST, PORT))
@@ -348,32 +476,37 @@ def is_cancelled_status_response(response_text):
 def is_connection_closed_error(err_msg):
     lower = err_msg.lower()
     return (
+        "10053" in err_msg or
         "10054" in err_msg or
+        "connection aborted" in lower or
         "forcibly closed" in lower or
         "connection reset" in lower or
+        "你的主机中的软件中止了一个已建立的连接" in err_msg or
         "远程主机强迫关闭" in err_msg
     )
 
 def reset_driver():
     """触发式重置：清理并重新初始化 Driver，丢弃无用的轮询阈值逻辑"""
     global d
-    try:
-        import sys
-        normalize_hmdriver_loggers()
-        # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
-        modules_to_remove = [m for m in list(sys.modules.keys()) if m.startswith('hmdriver2')]
-        for m in modules_to_remove:
-            del sys.modules[m]
+    with DEVICE_CONTROL_LOCK:
+        try:
+            import sys
+            normalize_hmdriver_loggers()
+            # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
+            modules_to_remove = [m for m in list(sys.modules.keys()) if m.startswith('hmdriver2')]
+            for m in modules_to_remove:
+                del sys.modules[m]
             
-        from hmdriver2.driver import Driver
-        d = Driver()
-        normalize_hmdriver_loggers()
-        print(">> [系统] 驱动对象 (Driver) 初始化/重置成功！")
-    except Exception as ex:
-        print(f">> [系统警告] hmdriver2 驱动重置失败: {ex}")
-        d = None
+            from hmdriver2.driver import Driver
+            d = Driver()
+            normalize_hmdriver_loggers()
+            print(">> [系统] 驱动对象 (Driver) 初始化/重置成功！")
+        except Exception as ex:
+            print(f">> [系统警告] hmdriver2 驱动重置失败: {ex}")
+            d = None
 
 def poll_task():
+    global LAST_POLL_FPORT_REFRESH
     # 后台轻量轮询 App 当前任务；失败时只刷新端口转发，不重置驱动，避免空闲时卡顿。
     try:
         res = send_request({"type": "poll"})
@@ -382,7 +515,10 @@ def poll_task():
     except Exception:
         # 轮询失败（例如设备被刚刚切换，9126 通道断开），仅在此处轻量补发一次端口映射
         # 不连带重置 hmdriver2 驱动（避免没任务时的后台严重卡顿）
-        refresh_hdc_forwarding()
+        now = time.monotonic()
+        if now - LAST_POLL_FPORT_REFRESH >= POLL_FPORT_REFRESH_INTERVAL:
+            LAST_POLL_FPORT_REFRESH = now
+            refresh_hdc_forwarding()
         return ""
 
 def format_debug_text_block(label, text):
@@ -779,17 +915,29 @@ def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
     return [int(x * width / 1000), int(y * height / 1000)]
 
 def press_harmony_key(key_name, fallback_code):
+    return run_with_device_control(
+        f"press_harmony_key({key_name})",
+        lambda: _press_harmony_key_impl(key_name, fallback_code)
+    )
+
+def _press_harmony_key_impl(key_name, fallback_code):
     if d:
         try:
             from hmdriver2.keycode import KeyCode
             key_code = getattr(KeyCode, key_name, fallback_code)
-            d.press_key(key_code)
         except Exception:
-            d.press_key(fallback_code)
+            key_code = fallback_code
+        run_driver_call(f"Driver.press_key({key_name})", lambda driver: driver.press_key(key_code))
     else:
         os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
+    return run_with_device_control(
+        "execute_action_and_get_details",
+        lambda: _execute_action_and_get_details_impl(plan, img_size)
+    )
+
+def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
     # 将 Decider JSON 转成真实设备操作。坐标统一按 Qwen/MNN 的 0-1000 归一化格式还原。
     width, height = img_size
     data = extract_json_payload(plan)
@@ -822,7 +970,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             x, y = (x1 + x2) // 2, (y1 + y2) // 2
 
         if d:
-            d.click(int(x), int(y))
+            run_driver_call("Driver.click", lambda driver: driver.click(int(x), int(y)))
         else:
             os.system(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
         time.sleep(DEVICE_WAIT_TIME)
@@ -842,11 +990,11 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             
         if d:
             print(f">> [Agent] Clicking at {px}, {py}")
-            d.click(px, py)
+            run_driver_call("Driver.click", lambda driver: driver.click(px, py))
             time.sleep(DEVICE_WAIT_TIME)
-            d.shell("uitest uiInput keyEvent 2072 2017")
-            d.press_key(2071)
-            d.input_text(text)
+            run_driver_call("Driver.shell(clear_input)", lambda driver: driver.shell("uitest uiInput keyEvent 2072 2017"))
+            run_driver_call("Driver.press_key(2071)", lambda driver: driver.press_key(2071))
+            run_driver_call("Driver.input_text", lambda driver: driver.input_text(text))
             press_harmony_key("ENTER", 2054)
         else:
             os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
@@ -862,7 +1010,7 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             ex, ey = convert_qwen3_coordinates_to_absolute(end_coords, width, height, is_bbox=False)
             print(f">> Swipe from [{sx}, {sy}] to [{ex}, {ey}]")
             if d:
-                d.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000)
+                run_driver_call("Driver.swipe", lambda driver: driver.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000))
             else:
                 os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
         else:
@@ -871,13 +1019,13 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
             direction_lower = direction.lower()
             if d:
                 if direction_lower == "up":
-                    d.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000)
+                    run_driver_call("Driver.swipe(up)", lambda driver: driver.swipe(0.5, SWIPE_V_END, 0.5, SWIPE_V_START, speed=1000))
                 elif direction_lower == "down":
-                    d.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000)
+                    run_driver_call("Driver.swipe(down)", lambda driver: driver.swipe(0.5, SWIPE_V_START, 0.5, SWIPE_V_END, speed=1000))
                 elif direction_lower == "left":
-                    d.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000)
+                    run_driver_call("Driver.swipe(left)", lambda driver: driver.swipe(SWIPE_H_END, 0.5, SWIPE_H_START, 0.5, speed=1000))
                 elif direction_lower == "right":
-                    d.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000)
+                    run_driver_call("Driver.swipe(right)", lambda driver: driver.swipe(SWIPE_H_START, 0.5, SWIPE_H_END, 0.5, speed=1000))
                 else:
                     raise ValueError(f"Unknown swipe direction: {direction}")
             else:
@@ -897,16 +1045,16 @@ def execute_action_and_get_details(plan, img_size=(1000, 1000)):
         text = params.get("text", "")
         print(f">> Input Text: {text}")
         if d:
-            d.shell("uitest uiInput keyEvent 2072 2017")
-            d.press_key(2071)
-            d.input_text(text)
+            run_driver_call("Driver.shell(clear_input)", lambda driver: driver.shell("uitest uiInput keyEvent 2072 2017"))
+            run_driver_call("Driver.press_key(2071)", lambda driver: driver.press_key(2071))
+            run_driver_call("Driver.input_text", lambda driver: driver.input_text(text))
             # Press Enter key to confirm input
             try:
                 from hmdriver2.keycode import KeyCode
-                d.press_key(KeyCode.ENTER)
+                run_driver_call("Driver.press_key(ENTER)", lambda driver: driver.press_key(KeyCode.ENTER))
             except ImportError:
                 # fallback to hardcoded ENTER key event or 2054
-                d.press_key(2054)
+                run_driver_call("Driver.press_key(2054)", lambda driver: driver.press_key(2054))
         else:
             os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
 
@@ -978,6 +1126,12 @@ def run_planner(task):
         raise RuntimeError(error_message) from ex
 
 def launch_app(app_name):
+    return run_with_device_control(
+        "launch_app",
+        lambda: _launch_app_impl(app_name)
+    )
+
+def _launch_app_impl(app_name):
     # Planner 可能返回中文 App 名，也可能直接返回 bundleName；两种都兼容。
     if not app_name:
         return False
@@ -988,20 +1142,27 @@ def launch_app(app_name):
         bundle = app_name
     
     if bundle:
-        if d:
-            print(f">> 执行启动命令 (hmdriver2): force_start_app({bundle})")
-            d.force_start_app(bundle)
+        ability_name = get_main_ability_for_bundle(bundle)
+        if start_app_with_explicit_ability(bundle, ability_name):
+            return True
+
+        if ensure_driver_available():
+            print(f">> 执行启动命令 (hmdriver2 fallback): force_start_app({bundle})")
+            run_driver_call("Driver.force_start_app", lambda driver: driver.force_start_app(bundle))
+            return True
+
+        # Last-resort fallback for environments without hmdriver2.
+        if bundle == "com.taobao.taobao4hmos":
+            cmd = f"{hdc_prefix()} shell aa start -b {bundle} -a Taobao_mainAbility"
         else:
-            # 兼容旧的 HDC 启动方式作为 Fallback
-            if bundle == "com.taobao.taobao4hmos":
-                cmd = f"{hdc_prefix()} shell aa start -b {bundle} -a Taobao_mainAbility"
-            else:
-                cmd = f"{hdc_prefix()} shell aa start -b {bundle}"
-            print(f">> 执行启动命令 (hdc): {cmd}")
-            os.system(cmd)
-            
-        time.sleep(1.5)
-        return True
+            cmd = f"{hdc_prefix()} shell aa start -b {bundle}"
+        print(f">> 执行启动命令 (hdc fallback): {cmd}")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            time.sleep(APP_LAUNCH_WAIT_TIME)
+            return True
+        print(result.stderr.strip() or result.stdout.strip() or f">> [启动警告] HDC fallback failed: {result.returncode}")
+        return False
     else:
         print(f">> [警告] 未在 APP_MAPPING 字典中找到 '{app_name}' 的包名映射，将尝试留在当前界面执行。")
         return False
@@ -1165,12 +1326,11 @@ def run_task_in_app(task):
         time.sleep(0.7)
 
 # ===================== Main Loop =====================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
-    args = parser.parse_args()
-    if args.no_reason:
-        NO_REASON_MODE = True
+def run_agent_loop(stop_event=None):
+    global LAST_TASK_COMPLETED
+    if stop_event is None:
+        stop_event = AGENT_LOOP_STOP_EVENT
+    reset_agent_loop_stop()
 
     print("初始化 HDC 端口转发...")
     # 由于该脚本可能被多次重启或前置 HDC 挂载占用，先强制清理端口再映射，防止冲突
@@ -1180,7 +1340,7 @@ if __name__ == "__main__":
     
     active_task = ""
     
-    while True:
+    while not stop_event.is_set() and not AGENT_LOOP_STOP_EVENT.is_set():
         task_finished = False
         try:
             task = poll_task()
@@ -1189,7 +1349,8 @@ if __name__ == "__main__":
                 if active_task:
                     print(">> 任务已被重置或结束。")
                     active_task = ""
-                time.sleep(2)
+                if stop_event.wait(2) or AGENT_LOOP_STOP_EVENT.is_set():
+                    break
                 continue
                 
             if task != active_task:
@@ -1214,7 +1375,7 @@ if __name__ == "__main__":
                     success = launch_app(app_name)
                     if success:
                         print(">> 等待 App 启动加载完成...")
-                        time.sleep(1.3)
+                        time.sleep(0.3)
                     
                     # 3. 再次清空上下文，隔离 Planner 的纯文本历史和后续图文历史。
                     send_request_best_effort({"type": "clear", "preserve_execution": True}, "Planner 后清理上下文")
@@ -1255,4 +1416,14 @@ if __name__ == "__main__":
             active_task = ""
             print(">> 状态已清理，将避免服务完全退出，准备继续接收后续任务。")
             
-        time.sleep(2)
+        if stop_event.wait(2) or AGENT_LOOP_STOP_EVENT.is_set():
+            break
+
+    print(">> Agent loop stopped.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
+    args = parser.parse_args()
+    set_no_reason_mode(args.no_reason)
+    run_agent_loop()

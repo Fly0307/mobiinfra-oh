@@ -169,3 +169,4 @@ struct LogView {
     return 'Gallery Logs'
   }
 }
+

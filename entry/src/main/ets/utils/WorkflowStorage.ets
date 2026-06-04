@@ -649,17 +649,31 @@ export class WorkflowStorage {
 
   static listConfigFiles(filesDir: string): WorkflowManagedFile[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return WorkflowStorage.listManagedFiles(WorkflowStorage.configDir(filesDir), '');
+    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.configDir(filesDir), ''));
   }
 
   static listDailyLogFiles(filesDir: string): WorkflowManagedFile[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return WorkflowStorage.listManagedFiles(WorkflowStorage.dailyLogDir(filesDir), '');
+    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.dailyLogDir(filesDir), ''));
   }
 
   static listRunFiles(filesDir: string): WorkflowManagedFile[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), '');
+    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), ''));
+  }
+
+  static sortManagedFilesForDisplay(files: WorkflowManagedFile[]): WorkflowManagedFile[] {
+    let sorted: WorkflowManagedFile[] = files.slice();
+    sorted.sort((left: WorkflowManagedFile, right: WorkflowManagedFile) => {
+      if (left.modifiedTime !== right.modifiedTime) {
+        return right.modifiedTime - left.modifiedTime;
+      }
+      if (left.name === right.name) {
+        return 0;
+      }
+      return left.name > right.name ? 1 : -1;
+    });
+    return sorted;
   }
 
   private static listManagedFiles(path: string, relativeName: string): WorkflowManagedFile[] {
@@ -670,7 +684,6 @@ export class WorkflowStorage {
         let childName = relativeName.length > 0 ? relativeName + '/' + children[i] : children[i];
         all = all.concat(WorkflowStorage.listManagedFiles(path + '/' + children[i], childName));
       }
-      all.sort((left: WorkflowManagedFile, right: WorkflowManagedFile) => left.name > right.name ? 1 : -1);
       return all;
     } catch (e) {
       try {
@@ -679,7 +692,8 @@ export class WorkflowStorage {
           let fileItem: WorkflowManagedFile = {
             name: relativeName.length > 0 ? relativeName : path,
             path: path,
-            size: stat.size
+            size: stat.size,
+            modifiedTime: stat.mtime
           };
           return [fileItem];
         }
@@ -752,6 +766,18 @@ export class WorkflowStorage {
       }
       return 0;
     }
+  }
+
+  static deleteManagedFile(file: WorkflowManagedFile): number {
+    return WorkflowStorage.deletePathRecursively(file.path);
+  }
+
+  static deleteManagedFiles(files: WorkflowManagedFile[]): number {
+    let deleted = 0;
+    for (let i = 0; i < files.length; i++) {
+      deleted += WorkflowStorage.deleteManagedFile(files[i]);
+    }
+    return deleted;
   }
 
   static deleteConfigs(filesDir: string): number {

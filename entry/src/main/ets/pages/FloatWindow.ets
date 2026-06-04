@@ -165,3 +165,4 @@ struct FloatWindow {
     .backgroundColor('#00000000')
   }
 }
+

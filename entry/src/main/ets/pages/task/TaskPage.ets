@@ -3,23 +3,7 @@ import { promptAction } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowFileStats, WorkflowManagedFile, WorkflowTask } from '../../utils/WorkflowTypes';
-
-interface TaskSceneOption {
-  label: string;
-  index: number;
-  textColor: string;
-  backgroundColor: string;
-}
-
-const TASK_SCENE_OPTIONS: TaskSceneOption[] = [
-  { label: '购物', index: 0, textColor: '#6B5CFF', backgroundColor: '#F8F5FF' },
-  { label: '外卖', index: 1, textColor: '#39BFA3', backgroundColor: '#EFFBF7' },
-  { label: '娱乐', index: 2, textColor: '#8066FF', backgroundColor: '#F2EEFF' },
-  { label: '聊天', index: 3, textColor: '#4B8BFF', backgroundColor: '#EFF5FF' },
-  { label: '生活', index: 4, textColor: '#D97706', backgroundColor: '#FFF7ED' },
-  { label: '社交', index: 5, textColor: '#D9467D', backgroundColor: '#FFF1F5' },
-  { label: '差旅', index: 6, textColor: '#0284C7', backgroundColor: '#EAF7FF' }
-];
+import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 
 // 定时任务页：新版不再使用静态样例任务，而是从 App 沙箱中的 workflow JSON
 // 加载任务配置，并提供编辑、运行、daily-log/运行文件查看和清理能力。
@@ -66,7 +50,7 @@ export struct TaskPage {
   }
 
   private sceneTasks(): WorkflowTask[] {
-    // 任务按购物/外卖/娱乐/聊天/生活/社交/差旅场景分组，taskScene 由 Index.ets 通过 @Link 管理。
+    // 任务按购物/外卖/娱乐/聊天场景分组，taskScene 由 Index.ets 通过 @Link 管理。
     let filtered: WorkflowTask[] = [];
     for (let i = 0; i < this.tasks.length; i++) {
       if (this.tasks[i].sceneId === this.taskScene) {
@@ -292,20 +276,20 @@ export struct TaskPage {
     .margin({ bottom: 18 })
   }
 
-  @Builder TaskSceneTab(label: string, index: number) {
-    // 横向场景筛选器：购物/外卖/娱乐/聊天/生活/社交/差旅。
-    Text(label)
+  @Builder TaskSceneTab(scene: WorkflowSceneConfig) {
+    // 横向场景筛选器：购物/外卖/娱乐/聊天。
+    Text(scene.label)
       .fontSize(14)
-      .fontWeight(this.taskScene === index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.taskScene === index ? Color.White : '#6D7481')
+      .fontWeight(this.taskScene === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.taskScene === scene.sceneId ? Color.White : '#6D7481')
       .height(42)
       .padding({ left: 18, right: 18 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.taskScene === index ? '#765BFF' : Color.White)
+      .backgroundColor(this.taskScene === scene.sceneId ? scene.color : Color.White)
       .borderRadius(21)
-      .margin({ left: index === 0 ? 0 : 10 })
+      .margin({ right: 10 })
       .onClick(() => {
-        this.taskScene = index;
+        this.taskScene = scene.sceneId;
       })
   }
 
@@ -536,15 +520,9 @@ export struct TaskPage {
               Text('选择场景，使用 workflow JSON 采集并整理数据').fontSize(12).fontColor('#6F7584').margin({ top: 7 }).maxLines(1)
               Scroll() {
                 Row() {
-                  ForEach(TASK_SCENE_OPTIONS, (scene: TaskSceneOption) => {
-                    Text(scene.label)
-                      .fontSize(11)
-                      .fontColor(scene.textColor)
-                      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(scene.backgroundColor)
-                      .borderRadius(10)
-                      .margin({ left: scene.index === 0 ? 0 : 8 })
-                  }, (scene: TaskSceneOption) => scene.label)
+                  ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+                    Text(scene.label).fontSize(11).fontColor(scene.color).padding({ left: 8, right: 8, top: 4, bottom: 4 }).backgroundColor('#F8F9FE').borderRadius(10).margin({ right: 8 })
+                  }, (scene: WorkflowSceneConfig) => scene.tabId)
                 }
               }
               .width('100%')
@@ -576,9 +554,9 @@ export struct TaskPage {
 
         Scroll() {
           Row() {
-            ForEach(TASK_SCENE_OPTIONS, (scene: TaskSceneOption) => {
-              this.TaskSceneTab(scene.label, scene.index)
-            }, (scene: TaskSceneOption) => scene.label)
+            ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+              this.TaskSceneTab(scene)
+            }, (scene: WorkflowSceneConfig) => scene.tabId)
           }.padding({ left: 24, right: 24 })
         }
         .width('100%')
@@ -595,3 +573,4 @@ export struct TaskPage {
     }.width('100%').height('100%').backgroundColor('#F4F8FF')
   }
 }
+

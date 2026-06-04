@@ -51,3 +51,4 @@ export struct AppHeader {
     .padding({ left: 22, right: 18, top: 24, bottom: 10 })
   }
 }
+

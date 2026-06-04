@@ -370,7 +370,13 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
-    if (!task.enabled) {
+    this.reloadTasks();
+    let currentTask = this.findTask(task.id);
+    if (!currentTask) {
+      promptAction.showToast({ message: 'Workflow 已不存在，请刷新后重试', duration: 1800 });
+      return;
+    }
+    if (!currentTask.enabled) {
       promptAction.showToast({ message: '任务已停用，请先打开开关', duration: 1500 });
       return;
     }
@@ -378,11 +384,11 @@ export struct TaskPage {
       promptAction.showToast({ message: '已有 workflow 正在执行', duration: 1500 });
       return;
     }
-    this.runningTaskId = task.id;
-    WorkflowStorage.updateTaskRun(this.filesDir, task.id, '运行中', 'Workflow 正在执行');
+    this.runningTaskId = currentTask.id;
+    WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
     this.reloadTasks();
     try {
-      await this.onRunWorkflow(task);
+      await this.onRunWorkflow(currentTask);
       this.reloadTasks();
     } finally {
       this.runningTaskId = '';

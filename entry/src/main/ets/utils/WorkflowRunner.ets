@@ -182,9 +182,19 @@ export class WorkflowRunner {
     this.logHandler = logHandler;
   }
 
+  private workflowJsonForRun(task: WorkflowTask): string {
+    try {
+      return WorkflowStorage.readText(this.workflowFile);
+    } catch (e) {
+      let err = e as Error;
+      this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
+      return task.workflowJson;
+    }
+  }
+
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
-    this.workflow = WorkflowStorage.validateWorkflowJson(task.workflowJson);
+    this.workflow = WorkflowStorage.validateWorkflowJson(this.workflowJsonForRun(task));
     this.runningTask = task;
     this.contextValues = this.workflow.context || {};
     this.stepResults = {};

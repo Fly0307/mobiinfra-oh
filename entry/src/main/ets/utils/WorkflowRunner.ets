@@ -74,6 +74,7 @@ interface GuiActionPayload {
   key?: string;
   seconds?: number;
   package_name?: string;
+  reset_first?: boolean;
 }
 
 interface ToolOutput {
@@ -262,7 +263,7 @@ export class WorkflowRunner {
 
   private async returnToHostApp(): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME);
+      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME, false);
       return true;
     } catch (e) {
       let err = e as Error;
@@ -414,7 +415,7 @@ export class WorkflowRunner {
       this.currentAppName = planner.appName;
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
-      await this.hdcBridge.startApp(planner.appName, planner.packageName);
+      await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
         task_description: taskDescription,
@@ -580,6 +581,9 @@ export class WorkflowRunner {
     }
     if (step.package_name !== undefined) {
       payload.package_name = step.package_name;
+    }
+    if (action === 'app_start') {
+      payload.reset_first = true;
     }
     let response = await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
     output.result = response.message || 'ok';

@@ -131,6 +131,14 @@ def hdc_prefix():
         return harmony_agent.hdc_prefix()
     return 'hdc'
 
+def payload_bool(payload, key, default):
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off')
+    return bool(value)
+
 def workflow_gui_action(payload):
     ensure_workflow_agent_ready()
     return harmony_agent.run_with_device_control(
@@ -209,9 +217,10 @@ def _workflow_gui_action_impl(payload):
 
     if action == 'app_start':
         package_name = str(payload.get('package_name', ''))
+        reset_first = payload_bool(payload, 'reset_first', True)
         if not package_name:
             raise RuntimeError('app_start requires package_name')
-        if not harmony_agent.launch_app(package_name):
+        if not harmony_agent.launch_app(package_name, reset_first=reset_first):
             raise RuntimeError(f'app_start failed: {package_name}')
         return {'status': 'ok', 'message': f'app_start {package_name}', 'package_name': package_name}
 
@@ -267,12 +276,13 @@ def handle_workflow_action(action, payload):
         ensure_workflow_agent_ready()
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
+        reset_first = payload_bool(payload, 'reset_first', True)
         target = app_name or package_name
         if not target:
             raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target)
+        ok = harmony_agent.launch_app(target, reset_first=reset_first)
         if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name)
+            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
         return {
             'status': 'ok' if ok else 'error',
             'message': f'app_start {target}',

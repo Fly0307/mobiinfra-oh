@@ -3,6 +3,7 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import {
   GalleryAnalysisResult,
   GalleryEmbeddingRecord,
+  GalleryLocationCacheRecord,
   GalleryMonthSummaryCacheRecord,
   GalleryScanSession
 } from './GalleryTypes';
@@ -14,6 +15,7 @@ const ITEMS_DIR = 'items';
 const EMBEDDINGS_DIR = 'embeddings';
 const SCAN_SESSION_FILE = 'scan-session.json';
 const MONTHLY_SUMMARIES_FILE = 'monthly-summaries.json';
+const LOCATION_CACHE_FILE = 'location-cache.json';
 const METADATA_START = '<!-- DAILY_LOG_METADATA';
 const METADATA_END = '-->';
 
@@ -49,6 +51,11 @@ export class GalleryStorage {
   // 月度总结单独落盘，避免重新进入图库页时只依赖页面内存导致总结丢失。
   static monthlySummariesPath(filesDir: string): string {
     return GalleryStorage.rootDir(filesDir) + '/' + MONTHLY_SUMMARIES_FILE;
+  }
+
+  // 经纬度逆地理编码缓存独立落盘，避免每次打开详情页都请求第三方地图服务。
+  static locationCachePath(filesDir: string): string {
+    return GalleryStorage.rootDir(filesDir) + '/' + LOCATION_CACHE_FILE;
   }
 
   static itemPath(filesDir: string, result: GalleryAnalysisResult): string {
@@ -211,6 +218,38 @@ export class GalleryStorage {
     }
   }
 
+  static locationCacheKey(latitude: number, longitude: number): string {
+    return latitude.toFixed(6) + ',' + longitude.toFixed(6);
+  }
+
+  static loadLocationCache(filesDir: string): Record<string, GalleryLocationCacheRecord> {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let path = GalleryStorage.locationCachePath(filesDir);
+    try {
+      if (!fs.accessSync(path)) {
+        return {};
+      }
+      return ArkJSON.parse(GalleryStorage.readText(path)) as Record<string, GalleryLocationCacheRecord>;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // 逆地理编码结果按坐标 key 增量写入；页面层只在打开详情页时懒加载缺失坐标。
+  static saveLocationCacheRecord(filesDir: string, record: GalleryLocationCacheRecord): void {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let cache = GalleryStorage.loadLocationCache(filesDir);
+    cache[record.key] = record;
+    GalleryStorage.writeText(GalleryStorage.locationCachePath(filesDir), ArkJSON.stringify(cache, null, 2));
+  }
+
+  static clearLocationCache(filesDir: string): void {
+    try {
+      fs.unlinkSync(GalleryStorage.locationCachePath(filesDir));
+    } catch (e) {
+    }
+  }
+
   static upsertResult(filesDir: string, result: GalleryAnalysisResult): GalleryAnalysisResult[] {
     GalleryStorage.writeResult(filesDir, result);
     return GalleryStorage.loadResults(filesDir);
@@ -293,6 +332,18 @@ export class GalleryStorage {
         if (locationText.length > 0) {
           lines.push('   - 位置：' + locationText);
         }
+        let addressText = GalleryStorage.dailyAddressText(group[j]);
+        if (addressText.length > 0) {
+          lines.push('   - 地理位置：' + addressText);
+        }
+        let poiText = GalleryStorage.dailyPoiText(group[j]);
+        if (poiText.length > 0) {
+          lines.push('   - 附近地点：' + poiText);
+        }
+        let mapText = GalleryStorage.dailyMapText(group[j]);
+        if (mapText.length > 0) {
+          lines.push('   - 地图标注：' + mapText);
+        }
         let captureText = GalleryStorage.dailyCaptureText(group[j]);
         if (captureText.length > 0) {
           lines.push('   - ' + captureText);
@@ -335,6 +386,7 @@ export class GalleryStorage {
     if (longitude === undefined && result.exif && result.exif.longitude !== undefined) {
       longitude = result.exif.longitude;
     }
+    let location = GalleryStorage.normalizedLocation(result.location, latitude, longitude);
     return {
       id: result.id,
       uri: result.uri,
@@ -355,7 +407,40 @@ export class GalleryStorage {
       latitude: latitude,
       longitude: longitude,
       exif: result.exif,
+      location: location,
       createdAt: createdAt
+    };
+  }
+
+  private static normalizedLocation(record: GalleryLocationCacheRecord | undefined,
+    latitude: number | undefined, longitude: number | undefined): GalleryLocationCacheRecord | undefined {
+    if (!record) {
+      return undefined;
+    }
+    let rawLatitude = Number(record.rawLatitude);
+    let rawLongitude = Number(record.rawLongitude);
+    if (!GalleryExifUtils.isValidLocation(rawLatitude, rawLongitude)) {
+      rawLatitude = Number(latitude);
+      rawLongitude = Number(longitude);
+    }
+    if (!GalleryExifUtils.isValidLocation(rawLatitude, rawLongitude)) {
+      return undefined;
+    }
+    return {
+      key: record.key && record.key.length > 0 ? record.key : GalleryStorage.locationCacheKey(rawLatitude, rawLongitude),
+      provider: record.provider && record.provider.length > 0 ? record.provider : 'amap',
+      rawLatitude: rawLatitude,
+      rawLongitude: rawLongitude,
+      amapLatitude: Number(record.amapLatitude),
+      amapLongitude: Number(record.amapLongitude),
+      formattedAddress: record.formattedAddress ? record.formattedAddress : '',
+      province: record.province ? record.province : '',
+      city: record.city ? record.city : '',
+      district: record.district ? record.district : '',
+      township: record.township ? record.township : '',
+      street: record.street ? record.street : '',
+      poiName: record.poiName ? record.poiName : '',
+      updatedAt: record.updatedAt > 0 ? record.updatedAt : new Date().getTime()
     };
   }
 
@@ -373,6 +458,30 @@ export class GalleryStorage {
       return location;
     }
     return GalleryExifUtils.rawGpsLocationText(result.exif);
+  }
+
+  private static dailyAddressText(result: GalleryAnalysisResult): string {
+    if (!result.location) {
+      return '';
+    }
+    return GalleryStorage.dailyInlineText(result.location.formattedAddress);
+  }
+
+  private static dailyPoiText(result: GalleryAnalysisResult): string {
+    if (!result.location) {
+      return '';
+    }
+    return GalleryStorage.dailyInlineText(result.location.poiName);
+  }
+
+  private static dailyMapText(result: GalleryAnalysisResult): string {
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (result.location && GalleryExifUtils.isValidLocation(result.location.amapLatitude, result.location.amapLongitude)) {
+      latitude = result.location.amapLatitude;
+      longitude = result.location.amapLongitude;
+    }
+    return GalleryExifUtils.mapUrl(latitude, longitude);
   }
 
   private static dailyCaptureText(result: GalleryAnalysisResult): string {

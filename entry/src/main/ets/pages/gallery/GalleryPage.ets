@@ -1,7 +1,6 @@
 import { promptAction, router } from '@kit.ArkUI';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { map, mapCommon, MapComponent, sceneMap } from '@kit.MapKit';
 import {
   CloudModelClient,
   GalleryCloudModelConfig,
@@ -17,11 +16,13 @@ import {
   GalleryMonthlyInsights
 } from '../../utils/gallery/GalleryMonthlyInsights';
 import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
+import { GalleryReverseGeocoder } from '../../utils/gallery/GalleryReverseGeocoder';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
 import {
   GalleryAnalysisResult,
   GalleryAnalyzeOutcome,
   GalleryAnalyzerConfig,
+  GalleryLocationCacheRecord,
   GalleryMonthSummaryCacheRecord,
   GalleryPhotoInput,
   GalleryProgress,
@@ -43,6 +44,7 @@ const DEFAULT_GALLERY_EMBEDDING_BASE_URL = 'https://api.siliconflow.cn/v1';
 const DEFAULT_GALLERY_EMBEDDING_API_KEY = 'sk-ftatcmqivwegrrazieeiiwswmotmryswxwhjuakxwsmsudrs';
 const DEFAULT_GALLERY_EMBEDDING_MODEL = 'BAAI/bge-m3';
 const DEFAULT_GALLERY_IMAGE_SCALE = '0.9';
+const DEFAULT_GALLERY_AMAP_WEB_KEY = '';
 const GALLERY_RESULT_PAGE_SIZE = 10;
 
 interface GalleryCoordinate {
@@ -70,6 +72,7 @@ PersistentStorage.persistProp('galleryEmbeddingBaseUrl', DEFAULT_GALLERY_EMBEDDI
 PersistentStorage.persistProp('galleryEmbeddingApiKey', DEFAULT_GALLERY_EMBEDDING_API_KEY);
 PersistentStorage.persistProp('galleryEmbeddingModel', DEFAULT_GALLERY_EMBEDDING_MODEL);
 PersistentStorage.persistProp('galleryImageScale', DEFAULT_GALLERY_IMAGE_SCALE);
+PersistentStorage.persistProp('galleryAmapWebKey', DEFAULT_GALLERY_AMAP_WEB_KEY);
 
 @Entry
 @Component
@@ -112,6 +115,11 @@ struct GalleryPage {
   @State skippedPanelOpen: boolean = false;
   @State skippedPanelItems: GalleryScanItem[] = [];
   @State skippedPanelRevision: number = 0;
+  @State locationCacheRecords: Record<string, GalleryLocationCacheRecord> = {};
+  @State locationResolvingKey: string = '';
+  @State locationResolveErrorKey: string = '';
+  @State locationResolveErrorText: string = '';
+  @State locationResolveRevision: number = 0;
   @StorageLink('galleryApiBaseUrl') galleryApiBaseUrl: string = DEFAULT_GALLERY_API_BASE_URL;
   @StorageLink('galleryApiKey') galleryApiKey: string = DEFAULT_GALLERY_API_KEY;
   @StorageLink('galleryModel') galleryModel: string = DEFAULT_GALLERY_MODEL;
@@ -125,9 +133,11 @@ struct GalleryPage {
   @StorageLink('galleryEmbeddingApiKey') galleryEmbeddingApiKey: string = DEFAULT_GALLERY_EMBEDDING_API_KEY;
   @StorageLink('galleryEmbeddingModel') galleryEmbeddingModel: string = DEFAULT_GALLERY_EMBEDDING_MODEL;
   @StorageLink('galleryImageScale') galleryImageScale: string = DEFAULT_GALLERY_IMAGE_SCALE;
+  @StorageLink('galleryAmapWebKey') galleryAmapWebKey: string = DEFAULT_GALLERY_AMAP_WEB_KEY;
 
   private filesDir: string = '';
   private cloudClient: CloudModelClient = new CloudModelClient();
+  private reverseGeocoder: GalleryReverseGeocoder = new GalleryReverseGeocoder();
   private pauseRequested: boolean = false;
   private lastRunAt: number = 0;
   private lastRunTimerId: number = -1;
@@ -140,6 +150,7 @@ struct GalleryPage {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     this.ensureDefaultSettings();
+    this.locationCacheRecords = GalleryStorage.loadLocationCache(this.filesDir);
     this.replaceResults(GalleryStorage.loadResults(this.filesDir));
     this.restoreLastRunFromResults();
     this.restoreScanSessionState();
@@ -169,6 +180,9 @@ struct GalleryPage {
     }
     if (this.galleryUseOcrKeywordFilter.trim().length === 0) {
       this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
+    }
+    if (this.galleryAmapWebKey.trim().length === 0) {
+      this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
     }
     this.galleryImageScale = this.normalizeScale(this.galleryImageScale, DEFAULT_GALLERY_IMAGE_SCALE);
   }
@@ -1084,8 +1098,14 @@ struct GalleryPage {
       GalleryStorage.clear(this.filesDir);
       GalleryStorage.clearScanSession(this.filesDir);
       GalleryStorage.clearMonthlySummaries(this.filesDir);
+      GalleryStorage.clearLocationCache(this.filesDir);
       this.replaceResults([]);
       this.clearMonthlyAiState();
+      this.locationCacheRecords = {};
+      this.locationResolvingKey = '';
+      this.locationResolveErrorKey = '';
+      this.locationResolveErrorText = '';
+      this.locationResolveRevision += 1;
       this.progress = 0;
       this.selectedFilter = 0;
       this.selectedTimeFilter = 0;
@@ -1343,6 +1363,10 @@ struct GalleryPage {
       this.galleryUseOcrKeywordFilter = value;
       return;
     }
+    if (fieldId === 10) {
+      this.galleryAmapWebKey = value;
+      return;
+    }
     if (fieldId === 5) {
       this.galleryEmbeddingBaseUrl = value;
       return;
@@ -1451,6 +1475,7 @@ struct GalleryPage {
                   this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
                   this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
+                  this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码', 10)
                   this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
                   this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
                   this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding；开启时使用 SiliconFlow / bge-m3', this.galleryEmbeddingMode === 'remote', 4)
@@ -1489,6 +1514,7 @@ struct GalleryPage {
                 this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
                 this.galleryEmbeddingModel = DEFAULT_GALLERY_EMBEDDING_MODEL;
                 this.galleryImageScale = DEFAULT_GALLERY_IMAGE_SCALE;
+                this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
                 this.settingsRevision += 1;
               })
             Button('保存')
@@ -1562,26 +1588,78 @@ struct GalleryPage {
     .onClick(onTap)
   }
 
-  @Builder DetailMapPreview(item: GalleryAnalysisResult) {
+  @Builder DetailLocationPreview(item: GalleryAnalysisResult) {
     Column() {
-      MapComponent({
-        mapOptions: this.captureMapOptions(item),
-        mapCallback: (err: BusinessError, controller: map.MapComponentController) => {
-          if (err && err.code !== 0) {
-            promptAction.showToast({ message: '地图组件初始化失败', duration: 1200 });
-            return;
-          }
-          this.bindCaptureMapMarker(controller, item);
+      Row() {
+        Column() {
+          Text('地址解析')
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+          Text(this.captureLocationPreviewText(item))
+            .fontSize(12)
+            .fontColor('#5E6678')
+            .lineHeight(18)
+            .margin({ top: 6 })
         }
-      })
-        .width('100%')
-        .height('100%')
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .margin({ right: 10 })
+        Text(this.captureLocationActionText(item))
+          .fontSize(12)
+          .fontColor('#5B68FF')
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .backgroundColor('#EEF4FF')
+          .borderRadius(10)
+          .onClick(() => {
+            if (this.galleryAmapWebKey.trim().length === 0) {
+              this.settingsOpen = true;
+              return;
+            }
+            this.resolveCaptureAddressLazy(item, true);
+          })
+      }
+      .width('100%')
+      if (this.captureAddressText(item).length > 0) {
+        Text(this.captureAddressText(item))
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .lineHeight(22)
+          .width('100%')
+          .margin({ top: 10 })
+      }
+      if (this.capturePoiText(item).length > 0) {
+        Text('附近：' + this.capturePoiText(item))
+          .fontSize(12)
+          .fontColor('#6B7280')
+          .width('100%')
+          .margin({ top: 6 })
+      }
+      if (this.captureStaticMapUrl(item).length > 0) {
+        Image(this.captureStaticMapUrl(item))
+          .width('100%')
+          .height(138)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(12)
+          .backgroundColor('#EDF1F7')
+          .margin({ top: 10 })
+      }
+      Row() {
+        Text('查看地图标注')
+          .fontSize(12)
+          .fontColor('#5B68FF')
+          .onClick(() => {
+            this.openCaptureMap(item);
+          })
+      }
+      .width('100%')
+      .margin({ top: 10 })
     }
     .width('100%')
-    .height(150)
-    .clip(true)
-    .borderRadius(12)
-    .backgroundColor('#F2F4F7')
+    .padding(12)
+    .borderRadius(14)
+    .backgroundColor('#F7F9FC')
     .margin({ top: 10 })
   }
 
@@ -1661,11 +1739,16 @@ struct GalleryPage {
                 if (this.captureLocationText(item).length > 0) {
                   this.DetailInfoRow('拍摄位置', this.captureLocationText(item))
                 }
+                ForEach([this.locationResolveRevision], (_revision: number) => {
+                  if (this.captureAddressText(item).length > 0) {
+                    this.DetailInfoRow('地理位置', this.captureAddressText(item))
+                  }
+                  if (this.capturePoiText(item).length > 0) {
+                    this.DetailInfoRow('附近地点', this.capturePoiText(item))
+                  }
+                }, (revision: number) => item.id + '_location_' + revision.toString())
                 if (this.captureMapUrl(item).length > 0) {
-                  this.DetailLinkRow('地图', '查看地图标注', () => {
-                    this.openCaptureMap(item);
-                  })
-                  this.DetailMapPreview(item)
+                  this.DetailLocationPreview(item)
                 }
                 if (this.captureSizeText(item).length > 0) {
                   this.DetailInfoRow('图片尺寸', this.captureSizeText(item))
@@ -1941,6 +2024,7 @@ struct GalleryPage {
 
   private showResultDetail(item: GalleryAnalysisResult): void {
     this.selectedDetailId = item.id;
+    this.resolveCaptureAddressLazy(item, false);
   }
 
   private closeResultDetail(): void {
@@ -2063,6 +2147,7 @@ struct GalleryPage {
       apiBaseUrl: this.galleryApiBaseUrl.trim().length > 0 ? this.galleryApiBaseUrl.trim() : DEFAULT_GALLERY_API_BASE_URL,
       apiKey: this.galleryApiKey.trim().length > 0 ? this.galleryApiKey.trim() : DEFAULT_GALLERY_API_KEY,
       model: this.galleryModel.trim().length > 0 ? this.galleryModel.trim() : DEFAULT_GALLERY_MODEL,
+      amapWebKey: this.galleryAmapWebKey.trim(),
       skipOcr: this.gallerySkipOcr === 'true',
       useOcrKeywordFilter: useOcrKeywordFilter && this.gallerySkipOcr !== 'true' && this.galleryUseOcrKeywordFilter === 'true',
       ocrConcurrency: parseInt(this.galleryOcrConcurrency),
@@ -2411,73 +2496,216 @@ struct GalleryPage {
   }
 
   private captureMapUrl(item: GalleryAnalysisResult): string {
-    let location = this.captureLocationValue(item);
+    let location = this.captureMapLocationValue(item);
     return GalleryExifUtils.mapUrl(location.latitude, location.longitude);
   }
 
-  private captureMapOptions(item: GalleryAnalysisResult): mapCommon.MapOptions {
-    let location = this.captureRawLatLng(item);
-    return {
-      mapType: mapCommon.MapType.STANDARD,
-      position: {
-        target: {
-          latitude: location ? location.latitude : 0,
-          longitude: location ? location.longitude : 0
-        },
-        zoom: 16
-      },
-      zoomControlsEnabled: false,
-      myLocationControlsEnabled: false,
-      compassControlsEnabled: false,
-      scaleControlsEnabled: false,
-      rotateGesturesEnabled: false,
-      tiltGesturesEnabled: false,
-      scrollGesturesEnabled: true,
-      zoomGesturesEnabled: true
-    };
+  private captureStaticMapUrl(item: GalleryAnalysisResult): string {
+    let amapKey = this.galleryAmapWebKey.trim();
+    if (amapKey.length === 0) {
+      return '';
+    }
+    let record = this.captureLocationRecord(item);
+    if (!record) {
+      return '';
+    }
+    let latitude = Number(record.amapLatitude);
+    let longitude = Number(record.amapLongitude);
+    if (!GalleryExifUtils.isValidLocation(latitude, longitude)) {
+      return '';
+    }
+    let coordinate = longitude.toFixed(6) + ',' + latitude.toFixed(6);
+    return 'https://restapi.amap.com/v3/staticmap' +
+      '?location=' + encodeURIComponent(coordinate) +
+      '&zoom=16' +
+      '&size=640*320' +
+      '&markers=' + encodeURIComponent('large,0xF24A4A,A:' + coordinate) +
+      '&key=' + encodeURIComponent(amapKey);
   }
 
-  private async bindCaptureMapMarker(controller: map.MapComponentController, item: GalleryAnalysisResult): Promise<void> {
-    let location = await this.captureMapLatLng(item);
-    if (!location) {
-      return;
-    }
-    try {
-      controller.clear();
-      controller.moveCamera(map.newLatLng(location, 16));
-      controller.addMarker({
-        position: location,
-        title: '拍摄位置',
-        snippet: this.captureLocationText(item),
-        clickable: true
-      }).catch((err: BusinessError) => {
-        console.warn('add capture location marker failed: ' + JSON.stringify(err));
-      });
-    } catch (e) {
-      console.warn('bind capture location marker failed: ' + this.errorMessage(e));
-    }
-  }
-
-  private async openCaptureMap(item: GalleryAnalysisResult): Promise<void> {
-    let location = await this.captureMapLatLng(item);
-    if (!location) {
+  private openCaptureMap(item: GalleryAnalysisResult): void {
+    let location = this.captureMapLocationValue(item);
+    let latitude = Number(location.latitude);
+    let longitude = Number(location.longitude);
+    if (!GalleryExifUtils.isValidLocation(latitude, longitude)) {
       promptAction.showToast({ message: '没有可定位的经纬度', duration: 1200 });
       return;
     }
     let ctx = getContext(this) as common.UIAbilityContext;
-    try {
-      await sceneMap.queryLocation(ctx, {
-        location: location,
-        name: '拍摄位置',
-        address: this.captureLocationText(item),
-        language: 'zh',
-        showBusiness: false
-      });
-    } catch (e) {
-      let err = e as BusinessError;
-      console.warn('sceneMap.queryLocation failed: code=' + err.code + ', message=' + err.message);
-      this.openExternalCaptureMap(ctx, location);
+    this.openExternalCaptureMap(ctx, {
+      latitude: latitude,
+      longitude: longitude
+    });
+  }
+
+  private captureLocationRecord(item: GalleryAnalysisResult): GalleryLocationCacheRecord | undefined {
+    if (item.location && (item.location.formattedAddress.length > 0 || item.location.poiName.length > 0)) {
+      return item.location;
     }
+    let key = this.captureLocationCacheKey(item);
+    if (key.length === 0) {
+      return undefined;
+    }
+    return this.locationCacheRecords[key];
+  }
+
+  private captureAddressText(item: GalleryAnalysisResult): string {
+    let record = this.captureLocationRecord(item);
+    if (!record) {
+      return '';
+    }
+    if (record.formattedAddress && record.formattedAddress.length > 0) {
+      return record.formattedAddress;
+    }
+    return record.poiName ? record.poiName : '';
+  }
+
+  private capturePoiText(item: GalleryAnalysisResult): string {
+    let record = this.captureLocationRecord(item);
+    if (!record || !record.poiName) {
+      return '';
+    }
+    return record.poiName;
+  }
+
+  private captureLocationPreviewText(item: GalleryAnalysisResult): string {
+    let key = this.captureLocationCacheKey(item);
+    if (key.length === 0) {
+      return '当前图片没有可用经纬度。';
+    }
+    if (this.captureLocationRecord(item)) {
+      return '已使用高德 Web 服务解析并缓存。';
+    }
+    if (this.locationResolvingKey === key) {
+      return '正在通过高德 Web 服务解析地址...';
+    }
+    if (this.locationResolveErrorKey === key && this.locationResolveErrorText.length > 0) {
+      return '解析失败：' + this.locationResolveErrorText;
+    }
+    if (this.galleryAmapWebKey.trim().length === 0) {
+      return '配置高德 Web 服务 Key 后，可按需解析具体地理位置。';
+    }
+    return '尚未解析具体地址，点击右侧按钮后会请求一次并写入本地缓存。';
+  }
+
+  private captureLocationActionText(item: GalleryAnalysisResult): string {
+    if (this.galleryAmapWebKey.trim().length === 0) {
+      return '配置';
+    }
+    let key = this.captureLocationCacheKey(item);
+    if (key.length > 0 && this.locationResolvingKey === key) {
+      return '解析中';
+    }
+    return this.captureLocationRecord(item) ? '重试' : '解析';
+  }
+
+  private captureLocationCacheKey(item: GalleryAnalysisResult): string {
+    let rawLocation = this.captureRawLatLng(item);
+    if (!rawLocation) {
+      return '';
+    }
+    return GalleryStorage.locationCacheKey(Number(rawLocation.latitude), Number(rawLocation.longitude));
+  }
+
+  private async resolveCaptureAddressLazy(item: GalleryAnalysisResult, force: boolean): Promise<void> {
+    let rawLocation = this.captureRawLatLng(item);
+    if (!rawLocation) {
+      return;
+    }
+    if (!force && item.location && (item.location.formattedAddress.length > 0 || item.location.poiName.length > 0)) {
+      return;
+    }
+    let rawLatitude = Number(rawLocation.latitude);
+    let rawLongitude = Number(rawLocation.longitude);
+    let key = GalleryStorage.locationCacheKey(rawLatitude, rawLongitude);
+    if (!force && this.locationCacheRecords[key]) {
+      this.persistLocationToResult(item, this.locationCacheRecords[key]);
+      return;
+    }
+    let amapKey = this.galleryAmapWebKey.trim();
+    if (amapKey.length === 0) {
+      this.locationResolveRevision += 1;
+      return;
+    }
+    if (this.locationResolvingKey === key) {
+      return;
+    }
+    this.locationResolvingKey = key;
+    this.locationResolveErrorKey = '';
+    this.locationResolveErrorText = '';
+    this.locationResolveRevision += 1;
+    try {
+      let record = await this.reverseGeocoder.reverse(rawLatitude, rawLongitude, amapKey);
+      GalleryStorage.saveLocationCacheRecord(this.filesDir, record);
+      let next: Record<string, GalleryLocationCacheRecord> = {};
+      let keys = Object.keys(this.locationCacheRecords);
+      for (let i = 0; i < keys.length; i++) {
+        next[keys[i]] = this.locationCacheRecords[keys[i]];
+      }
+      next[record.key] = record;
+      this.locationCacheRecords = next;
+      this.persistLocationToResult(item, record);
+    } catch (e) {
+      this.locationResolveErrorKey = key;
+      this.locationResolveErrorText = this.errorMessage(e);
+      promptAction.showToast({ message: '地址解析失败：' + this.errorMessage(e), duration: 1800 });
+    } finally {
+      if (this.locationResolvingKey === key) {
+        this.locationResolvingKey = '';
+      }
+      this.locationResolveRevision += 1;
+    }
+  }
+
+  private persistLocationToResult(item: GalleryAnalysisResult, record: GalleryLocationCacheRecord): void {
+    item.location = record;
+    let normalized = GalleryStorage.writeResult(this.filesDir, item);
+    GalleryStorage.rebuildDaily(this.filesDir, normalized.date);
+    this.mergeResult(normalized);
+    this.locationResolveRevision += 1;
+  }
+
+  private captureMapLocationValue(item: GalleryAnalysisResult): GalleryCoordinate {
+    let record = this.captureLocationRecord(item);
+    if (record) {
+      return {
+        latitude: record.amapLatitude,
+        longitude: record.amapLongitude
+      };
+    }
+    return this.captureLocationValue(item);
+  }
+
+  private captureRawLatLng(item: GalleryAnalysisResult): GalleryCoordinate | undefined {
+    let location = this.captureLocationValue(item);
+    let latitude = Number(location.latitude);
+    let longitude = Number(location.longitude);
+    if (!GalleryExifUtils.isValidLocation(latitude, longitude)) {
+      return undefined;
+    }
+    return {
+      latitude: latitude,
+      longitude: longitude
+    };
+  }
+
+  private openExternalCaptureMap(ctx: common.UIAbilityContext, location: GalleryCoordinate): void {
+    if (!location) {
+      promptAction.showToast({ message: '无法生成地图链接', duration: 1200 });
+      return;
+    }
+    let mapUrl = GalleryExifUtils.mapUrl(location.latitude, location.longitude);
+    if (mapUrl.length === 0) {
+      promptAction.showToast({ message: '无法生成地图链接', duration: 1200 });
+      return;
+    }
+    ctx.startAbility({
+      action: 'ohos.want.action.viewData',
+      uri: mapUrl
+    }).catch((e: BusinessError) => {
+      console.warn('open external capture map failed: code=' + e.code + ', message=' + e.message);
+      promptAction.showToast({ message: '无法打开地图链接', duration: 1600 });
+    });
   }
 
   private captureLocationValue(item: GalleryAnalysisResult): GalleryCoordinate {
@@ -2493,55 +2721,6 @@ struct GalleryPage {
       latitude: latitude,
       longitude: longitude
     };
-  }
-
-  private captureRawLatLng(item: GalleryAnalysisResult): mapCommon.LatLng | undefined {
-    let location = this.captureLocationValue(item);
-    let latitude = Number(location.latitude);
-    let longitude = Number(location.longitude);
-    if (!GalleryExifUtils.isValidLocation(latitude, longitude)) {
-      return undefined;
-    }
-    return {
-      latitude: latitude,
-      longitude: longitude
-    };
-  }
-
-  private async captureMapLatLng(item: GalleryAnalysisResult): Promise<mapCommon.LatLng | undefined> {
-    let rawLocation = this.captureRawLatLng(item);
-    if (!rawLocation) {
-      return undefined;
-    }
-    try {
-      let ctx = getContext(this) as common.UIAbilityContext;
-      let locations = await map.rectifyCoordinate(ctx, [{
-        coordinateType: mapCommon.CoordinateType.WGS84,
-        location: rawLocation
-      }]);
-      if (locations.length > 0 && locations[0].location) {
-        return locations[0].location;
-      }
-    } catch (e) {
-      let err = e as BusinessError;
-      console.warn('rectify capture location failed: code=' + err.code + ', message=' + err.message);
-    }
-    return rawLocation;
-  }
-
-  private openExternalCaptureMap(ctx: common.UIAbilityContext, location: mapCommon.LatLng): void {
-    let mapUrl = GalleryExifUtils.mapUrl(location.latitude, location.longitude);
-    if (mapUrl.length === 0) {
-      promptAction.showToast({ message: '无法生成地图链接', duration: 1200 });
-      return;
-    }
-    ctx.startAbility({
-      action: 'ohos.want.action.viewData',
-      uri: mapUrl
-    }).catch((e: BusinessError) => {
-      console.warn('open external capture map failed: code=' + e.code + ', message=' + e.message);
-      promptAction.showToast({ message: '无法打开地图链接', duration: 1600 });
-    });
   }
 
   private captureSizeText(item: GalleryAnalysisResult): string {

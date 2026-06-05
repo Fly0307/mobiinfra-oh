@@ -8,6 +8,7 @@ import { GalleryEmbeddingService } from './GalleryEmbeddingService';
 import { GalleryStorage } from './GalleryStorage';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import { GalleryExifUtils } from './GalleryExifUtils';
+import { GalleryReverseGeocoder } from './GalleryReverseGeocoder';
 import {
   GalleryAnalysisResult,
   GalleryAnalyzeOptions,
@@ -15,6 +16,7 @@ import {
   GalleryAnalyzerConfig,
   GalleryEmbeddingRecord,
   GalleryExifMetadata,
+  GalleryLocationCacheRecord,
   GalleryModelJson,
   GalleryPhotoInput,
   GalleryProgress,
@@ -65,11 +67,19 @@ interface GalleryModelParseResult {
   text: string;
 }
 
+interface GalleryLocationEnrichResult {
+  result: GalleryAnalysisResult;
+  updated: boolean;
+}
+
 export class GalleryAnalyzer {
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private ocrService: GalleryOcrService = new GalleryOcrService();
   private embeddingService: GalleryEmbeddingService;
+  private reverseGeocoder: GalleryReverseGeocoder = new GalleryReverseGeocoder();
+  private locationRequests: Record<string, Promise<GalleryLocationCacheRecord | undefined>> = {};
+  private locationFailedKeys: Record<string, boolean> = {};
 
   constructor(filesDir: string, cloudClient: CloudModelClient) {
     this.filesDir = filesDir;
@@ -213,9 +223,18 @@ export class GalleryAnalyzer {
     let resultLatitude = input.latitude;
     let resultLongitude = input.longitude;
     let exifMetadata: GalleryExifMetadata | undefined = undefined;
+    let locationRecord: GalleryLocationCacheRecord | undefined = undefined;
     this.logInfo('item start id=' + id + ' uri=' + uri);
     let cached = GalleryStorage.loadResult(this.filesDir, date, id);
     if (cached && this.isSuccessfulCachedResult(cached)) {
+      let cachedLocation = await this.ensureResultLocation(cached, config, id);
+      if (cachedLocation.updated) {
+        this.logInfo('item cached location enriched id=' + id + ' date=' + cachedLocation.result.date);
+        return {
+          result: cachedLocation.result,
+          cached: false
+        };
+      }
       progress.current = '命中缓存 ' + id;
       progress.ocrDone += 1;
       progress.modelDone += 1;
@@ -251,6 +270,14 @@ export class GalleryAnalyzer {
         }
         let refreshedCached = GalleryStorage.loadResult(this.filesDir, date, id);
         if (refreshedCached && this.isSuccessfulCachedResult(refreshedCached)) {
+          let refreshedLocation = await this.ensureResultLocation(refreshedCached, config, id);
+          if (refreshedLocation.updated) {
+            this.logInfo('item refreshed cache location enriched id=' + id + ' date=' + refreshedLocation.result.date);
+            return {
+              result: refreshedLocation.result,
+              cached: false
+            };
+          }
           progress.current = '命中缓存 ' + id;
           progress.ocrDone += 1;
           progress.modelDone += 1;
@@ -267,6 +294,7 @@ export class GalleryAnalyzer {
       pixelMap = await imageSource.createPixelMap();
       this.logInfo('decode done id=' + id + ' elapsedMs=' + this.elapsed(decodeStartedAt));
       await this.scaleForAnalysis(pixelMap, config.imageScale, id);
+      locationRecord = await this.resolveLocationForCoordinates(resultLatitude, resultLongitude, config, id);
 
       await gates.ocr.acquire();
       let ocrText = '';
@@ -318,6 +346,7 @@ export class GalleryAnalyzer {
             latitude: resultLatitude,
             longitude: resultLongitude,
             exif: exifMetadata,
+            location: locationRecord,
             createdAt: new Date().getTime()
           };
           this.logInfo('item skipped keyword filter id=' + id);
@@ -343,7 +372,7 @@ export class GalleryAnalyzer {
         progress.current = '模型分析 ' + id;
         onProgress(progress);
         rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText,
-          this.exifPromptText(exifMetadata, resultLatitude, resultLongitude), this.toCloudConfig(config));
+          this.exifPromptText(exifMetadata, resultLatitude, resultLongitude, locationRecord), this.toCloudConfig(config));
         this.logInfo('model done id=' + id + ' chars=' + rawModelText.length + ' elapsedMs=' + this.elapsed(modelStartedAt));
       } finally {
         gates.model.release();
@@ -426,6 +455,7 @@ export class GalleryAnalyzer {
         latitude: resultLatitude,
         longitude: resultLongitude,
         exif: exifMetadata,
+        location: locationRecord,
         createdAt: new Date().getTime()
       };
       this.logInfo('item done id=' + id + ' elapsedMs=' + this.elapsed(itemStartedAt));
@@ -457,6 +487,7 @@ export class GalleryAnalyzer {
         latitude: resultLatitude,
         longitude: resultLongitude,
         exif: exifMetadata,
+        location: locationRecord,
         createdAt: new Date().getTime()
       };
       return {
@@ -491,6 +522,74 @@ export class GalleryAnalyzer {
       apiKey: config.apiKey,
       model: config.model
     };
+  }
+
+  private async ensureResultLocation(result: GalleryAnalysisResult, config: GalleryAnalyzerConfig,
+    id: string): Promise<GalleryLocationEnrichResult> {
+    if (this.hasResolvedLocation(result.location)) {
+      return {
+        result: result,
+        updated: false
+      };
+    }
+    let location = await this.resolveLocationForCoordinates(result.latitude, result.longitude, config, id);
+    if (!location) {
+      return {
+        result: result,
+        updated: false
+      };
+    }
+    result.location = location;
+    return {
+      result: result,
+      updated: true
+    };
+  }
+
+  private async resolveLocationForCoordinates(latitude: number | undefined, longitude: number | undefined,
+    config: GalleryAnalyzerConfig, id: string): Promise<GalleryLocationCacheRecord | undefined> {
+    let lat = Number(latitude);
+    let lon = Number(longitude);
+    if (!GalleryExifUtils.isValidLocation(lat, lon)) {
+      return undefined;
+    }
+    let key = GalleryStorage.locationCacheKey(lat, lon);
+    let cached = GalleryStorage.loadLocationCache(this.filesDir)[key];
+    if (cached && this.hasResolvedLocation(cached)) {
+      this.logInfo('location cache hit id=' + id + ' key=' + key);
+      return cached;
+    }
+    if (this.locationFailedKeys[key]) {
+      return undefined;
+    }
+    let amapKey = config.amapWebKey.trim();
+    if (amapKey.length === 0) {
+      return undefined;
+    }
+    if (!this.locationRequests[key]) {
+      this.logInfo('location reverse start id=' + id + ' key=' + key);
+      this.locationRequests[key] = this.reverseGeocoder.reverse(lat, lon, amapKey)
+        .then((record: GalleryLocationCacheRecord) => {
+          GalleryStorage.saveLocationCacheRecord(this.filesDir, record);
+          this.logInfo('location reverse done id=' + id + ' key=' + key);
+          return record;
+        })
+        .catch((e: Error) => {
+          this.locationFailedKeys[key] = true;
+          this.logError('location reverse failed id=' + id + ' key=' + key + ' error=' + this.errorMessage(e));
+          return undefined;
+        });
+    } else {
+      this.logInfo('location reverse reuse pending id=' + id + ' key=' + key);
+    }
+    return await this.locationRequests[key];
+  }
+
+  private hasResolvedLocation(record?: GalleryLocationCacheRecord): boolean {
+    if (!record) {
+      return false;
+    }
+    return record.formattedAddress.length > 0 || record.poiName.length > 0;
   }
 
   private async readExifMetadata(imageSource: image.ImageSource, id: string): Promise<GalleryExifMetadata | undefined> {
@@ -538,7 +637,8 @@ export class GalleryAnalyzer {
       GalleryExifUtils.cleanProperty(metadata.orientation).length > 0;
   }
 
-  private exifPromptText(metadata: GalleryExifMetadata | undefined, latitude: number | undefined, longitude: number | undefined): string {
+  private exifPromptText(metadata: GalleryExifMetadata | undefined, latitude: number | undefined, longitude: number | undefined,
+    locationRecord?: GalleryLocationCacheRecord): string {
     let lines: string[] = [];
     if (metadata) {
       let capturedAt = GalleryExifUtils.displayDateTime(metadata.dateTimeOriginal);
@@ -562,6 +662,12 @@ export class GalleryAnalyzer {
       if (rawGps.length > 0) {
         lines.push('拍摄位置 GPS 原始值：' + rawGps);
       }
+    }
+    if (locationRecord && locationRecord.formattedAddress.length > 0) {
+      lines.push('地理位置：' + locationRecord.formattedAddress);
+    }
+    if (locationRecord && locationRecord.poiName.length > 0) {
+      lines.push('附近地点：' + locationRecord.poiName);
     }
     return lines.length > 0 ? lines.join('\n') : '(无)';
   }

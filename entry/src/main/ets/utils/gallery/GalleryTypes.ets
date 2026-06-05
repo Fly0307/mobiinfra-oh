@@ -2,6 +2,7 @@ export interface GalleryAnalyzerConfig {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  amapWebKey: string;
   skipOcr: boolean;
   useOcrKeywordFilter: boolean;
   ocrConcurrency: number;
@@ -70,6 +71,24 @@ export interface GalleryMonthSummaryCacheRecord {
   updatedAt: number;
 }
 
+// 经纬度逆地理编码缓存。raw 为 EXIF/Gallery 原始坐标，amap 为高德坐标转换后的坐标。
+export interface GalleryLocationCacheRecord {
+  key: string;
+  provider: string;
+  rawLatitude: number;
+  rawLongitude: number;
+  amapLatitude: number;
+  amapLongitude: number;
+  formattedAddress: string;
+  province: string;
+  city: string;
+  district: string;
+  township: string;
+  street: string;
+  poiName: string;
+  updatedAt: number;
+}
+
 export interface GalleryAnalysisResult {
   id: string;
   uri: string;
@@ -90,6 +109,8 @@ export interface GalleryAnalysisResult {
   latitude?: number;
   longitude?: number;
   exif?: GalleryExifMetadata;
+  // 拍摄坐标解析后的实际地址。写入结果文件后，详情页和 daily-log 都可以复用，避免重复请求地图服务。
+  location?: GalleryLocationCacheRecord;
   createdAt: number;
 }
 

@@ -117,6 +117,7 @@ export class GalleryAnalyzer {
     };
     let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency, config.embeddingConcurrency);
     await this.runWithLimit(inputs, limit, async (input: GalleryPhotoInput, index: number): Promise<boolean> => {
+      // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
       if (options && options.shouldPause && options.shouldPause()) {
         return false;
       }
@@ -126,9 +127,12 @@ export class GalleryAnalyzer {
       let result = outcome.result;
       results.push(result);
       if (outcome.cached) {
+        // 缓存命中代表该图片已有可用分析结果，仍应计入已完成；只有关键词预筛命中时才计入跳过。
         progress.processed += 1;
         progress.pending = Math.max(0, progress.selected - progress.processed);
-        progress.skipped += 1;
+        if (outcome.skippedByKeyword === true) {
+          progress.skipped += 1;
+        }
         onProgress(progress);
         if (options && options.onItemDone) {
           options.onItemDone(input, outcome);
@@ -217,7 +221,7 @@ export class GalleryAnalyzer {
       progress.modelDone += 1;
       progress.embeddingDone += 1;
       onProgress(progress);
-      this.logInfo('item skipped cached id=' + id + ' date=' + date + ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
+      this.logInfo('item cached hit id=' + id + ' date=' + date + ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
       return {
         result: cached,
         cached: true
@@ -252,7 +256,7 @@ export class GalleryAnalyzer {
           progress.modelDone += 1;
           progress.embeddingDone += 1;
           onProgress(progress);
-          this.logInfo('item skipped cached after exif id=' + id + ' date=' + date +
+          this.logInfo('item cached hit after exif id=' + id + ' date=' + date +
             ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
           return {
             result: refreshedCached,

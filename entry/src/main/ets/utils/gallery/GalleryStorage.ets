@@ -1,6 +1,11 @@
 import fs from '@ohos.file.fs';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
-import { GalleryAnalysisResult, GalleryEmbeddingRecord, GalleryScanSession } from './GalleryTypes';
+import {
+  GalleryAnalysisResult,
+  GalleryEmbeddingRecord,
+  GalleryMonthSummaryCacheRecord,
+  GalleryScanSession
+} from './GalleryTypes';
 import { GalleryExifUtils } from './GalleryExifUtils';
 
 const GALLERY_LOG_DIR = 'gallery-log';
@@ -8,6 +13,7 @@ const DAILY_LOG_DIR = 'daily-log';
 const ITEMS_DIR = 'items';
 const EMBEDDINGS_DIR = 'embeddings';
 const SCAN_SESSION_FILE = 'scan-session.json';
+const MONTHLY_SUMMARIES_FILE = 'monthly-summaries.json';
 const METADATA_START = '<!-- DAILY_LOG_METADATA';
 const METADATA_END = '-->';
 
@@ -38,6 +44,11 @@ export class GalleryStorage {
 
   static scanSessionPath(filesDir: string): string {
     return GalleryStorage.rootDir(filesDir) + '/' + SCAN_SESSION_FILE;
+  }
+
+  // 月度总结单独落盘，避免重新进入图库页时只依赖页面内存导致总结丢失。
+  static monthlySummariesPath(filesDir: string): string {
+    return GalleryStorage.rootDir(filesDir) + '/' + MONTHLY_SUMMARIES_FILE;
   }
 
   static itemPath(filesDir: string, result: GalleryAnalysisResult): string {
@@ -156,6 +167,7 @@ export class GalleryStorage {
     }
   }
 
+  // 保存全量扫描进度；暂停、恢复和异常退出后都以该文件作为可信恢复来源。
   static saveScanSession(filesDir: string, session: GalleryScanSession): void {
     GalleryStorage.ensureWorkspace(filesDir);
     session.updatedAt = new Date().getTime();
@@ -165,6 +177,36 @@ export class GalleryStorage {
   static clearScanSession(filesDir: string): void {
     try {
       fs.unlinkSync(GalleryStorage.scanSessionPath(filesDir));
+    } catch (e) {
+    }
+  }
+
+  // 读取月度 AI 总结缓存，解析失败时返回空对象，避免缓存损坏影响图库主流程。
+  static loadMonthlySummaries(filesDir: string): Record<string, GalleryMonthSummaryCacheRecord> {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let path = GalleryStorage.monthlySummariesPath(filesDir);
+    try {
+      if (!fs.accessSync(path)) {
+        return {};
+      }
+      return ArkJSON.parse(GalleryStorage.readText(path)) as Record<string, GalleryMonthSummaryCacheRecord>;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // 按月份增量写入总结缓存；页面层负责通过 signature 判断缓存是否仍然匹配当前结果。
+  static saveMonthlySummary(filesDir: string, monthKey: string, record: GalleryMonthSummaryCacheRecord): void {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let summaries = GalleryStorage.loadMonthlySummaries(filesDir);
+    summaries[monthKey] = record;
+    GalleryStorage.writeText(GalleryStorage.monthlySummariesPath(filesDir), ArkJSON.stringify(summaries, null, 2));
+  }
+
+  // 清理图库缓存时同步清理月度总结，避免旧总结引用已删除的分析结果。
+  static clearMonthlySummaries(filesDir: string): void {
+    try {
+      fs.unlinkSync(GalleryStorage.monthlySummariesPath(filesDir));
     } catch (e) {
     }
   }

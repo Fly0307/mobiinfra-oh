@@ -22,6 +22,7 @@ import {
   GalleryAnalysisResult,
   GalleryAnalyzeOutcome,
   GalleryAnalyzerConfig,
+  GalleryMonthSummaryCacheRecord,
   GalleryPhotoInput,
   GalleryProgress,
   GalleryScanItem,
@@ -49,6 +50,13 @@ interface GalleryCoordinate {
   longitude?: number;
 }
 
+// 结果区分类筛选项，count 来自当前时间范围内的可见结果统计。
+interface GalleryCategoryFilter {
+  index: number;
+  label: string;
+  count: number;
+}
+
 PersistentStorage.persistProp('galleryApiBaseUrl', DEFAULT_GALLERY_API_BASE_URL);
 PersistentStorage.persistProp('galleryApiKey', DEFAULT_GALLERY_API_KEY);
 PersistentStorage.persistProp('galleryModel', DEFAULT_GALLERY_MODEL);
@@ -74,6 +82,7 @@ struct GalleryPage {
   @State lastRunText: string = '尚未开始';
   @State settingsOpen: boolean = false;
   @State manualAnalyzing: boolean = false;
+  // 扫描进度展示使用这些运行态字段；它们可能先于 scan-session 落盘状态更新。
   @State autoScanStatus: string = 'idle';
   @State scanTotal: number = 0;
   @State scanProcessed: number = 0;
@@ -85,7 +94,8 @@ struct GalleryPage {
   @State results: GalleryAnalysisResult[] = [];
   @State resultRevision: number = 0;
   @State selectedMonthKey: string = '';
-  @State monthlyAiSummaries: Record<string, GalleryMonthSummaryResult> = {};
+  // 月度 AI 总结会持久化到 GalleryStorage，页面状态只缓存当前有效 signature 的记录。
+  @State monthlyAiSummaries: Record<string, GalleryMonthSummaryCacheRecord> = {};
   @State monthlyAiLoadingKey: string = '';
   @State monthlyAiErrorKey: string = '';
   @State monthlyAiErrorText: string = '';
@@ -99,6 +109,9 @@ struct GalleryPage {
   @State galleryAnswerMeta: string = '';
   @State galleryAnswerLoading: boolean = false;
   @State galleryAnswerError: string = '';
+  @State skippedPanelOpen: boolean = false;
+  @State skippedPanelItems: GalleryScanItem[] = [];
+  @State skippedPanelRevision: number = 0;
   @StorageLink('galleryApiBaseUrl') galleryApiBaseUrl: string = DEFAULT_GALLERY_API_BASE_URL;
   @StorageLink('galleryApiKey') galleryApiKey: string = DEFAULT_GALLERY_API_KEY;
   @StorageLink('galleryModel') galleryModel: string = DEFAULT_GALLERY_MODEL;
@@ -118,6 +131,10 @@ struct GalleryPage {
   private pauseRequested: boolean = false;
   private lastRunAt: number = 0;
   private lastRunTimerId: number = -1;
+  // 恢复暂停任务时，分析器只上报本次 pendingInputs 的增量，需要叠加 baseline 才是全库进度。
+  private autoProgressBaselineProcessed: number = 0;
+  private autoProgressBaselineSkipped: number = 0;
+  private autoProgressBaselineFailed: number = 0;
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -126,6 +143,7 @@ struct GalleryPage {
     this.replaceResults(GalleryStorage.loadResults(this.filesDir));
     this.restoreLastRunFromResults();
     this.restoreScanSessionState();
+    this.restoreMonthlyAiSummaries();
     this.startLastRunTimer();
   }
 
@@ -292,7 +310,7 @@ struct GalleryPage {
       this.selectedFilter = 0;
       this.selectedTimeFilter = 0;
       this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
-      this.clearMonthlyAiState();
+      this.clearMonthlyAiRuntimeState();
       this.setLastRunLabel('分析中');
       let analyzer = new GalleryAnalyzer(this.filesDir, this.cloudClient);
       let finalResults = await analyzer.analyzeUris(uris, this.buildAnalyzerConfig(false), (next: GalleryProgress) => {
@@ -343,8 +361,9 @@ struct GalleryPage {
         promptAction.showToast({ message: '未扫描到图库图片', duration: 1200 });
         return;
       }
+      // 每次全量扫描先创建新的会话快照；后续暂停/恢复都从该快照继续。
       let session = this.createScanSession(inputs);
-      this.clearMonthlyAiState();
+      this.clearMonthlyAiRuntimeState();
       GalleryStorage.saveScanSession(this.filesDir, session);
       await this.runScanSession(session);
     } catch (e) {
@@ -379,13 +398,22 @@ struct GalleryPage {
     if (!this.analyzing) {
       return;
     }
+    if (this.pauseRequested || this.autoScanStatus === 'pausing') {
+      promptAction.showToast({ message: '正在暂停，已开始处理的图片完成后会停止', duration: 1600 });
+      return;
+    }
+    // 并发分析无法立刻终止已进入流水线的图片，因此先进入 pausing 状态并给用户明确反馈。
     this.pauseRequested = true;
     this.autoScanStatus = 'pausing';
+    this.setLastRunLabel('暂停中');
+    this.scanRevision += 1;
+    this.progressRevision += 1;
     let session = GalleryStorage.loadScanSession(this.filesDir);
     if (session) {
       session.status = 'pausing';
       GalleryStorage.saveScanSession(this.filesDir, session);
     }
+    promptAction.showToast({ message: '正在暂停，已开始处理的图片完成后会停止', duration: 1800 });
   }
 
   private async runScanSession(session: GalleryScanSession): Promise<void> {
@@ -409,18 +437,28 @@ struct GalleryPage {
     session.status = 'running';
     GalleryStorage.saveScanSession(this.filesDir, session);
     this.applyScanSession(session);
+    // 保存恢复前的累计值；分析器回调中的 processed/skipped/failed 只代表本轮 pending 增量。
+    this.autoProgressBaselineProcessed = session.processed;
+    this.autoProgressBaselineSkipped = session.skipped;
+    this.autoProgressBaselineFailed = session.failed;
 
     let analyzer = new GalleryAnalyzer(this.filesDir, this.cloudClient);
-    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(true), (_next: GalleryProgress) => {
-      this.updateAutoProgress(session);
+    let finalResults = await analyzer.analyzeInputs(pendingInputs, this.buildAnalyzerConfig(true), (next: GalleryProgress) => {
+      this.updateAutoProgress(session, next);
     }, (result: GalleryAnalysisResult) => {
       this.mergeResult(result);
     }, {
       shouldPause: (): boolean => this.pauseRequested,
       onItemDone: (input: GalleryPhotoInput, outcome: GalleryAnalyzeOutcome) => {
-        this.markScanItem(session, input, outcome.cached, outcome.result.error);
+        // 单项完成后立即更新并保存会话，确保暂停或退出后可以从最后完成项继续。
+        let marked = this.markScanItem(session, input, outcome.cached, outcome.result.error, outcome.skippedByKeyword === true);
+        if (this.pauseRequested && session.status === 'running') {
+          session.status = 'pausing';
+        }
         GalleryStorage.saveScanSession(this.filesDir, session);
-        this.applyScanSession(session);
+        if (marked) {
+          this.applyScanSession(session);
+        }
       }
     });
     let storedResults = GalleryStorage.loadResults(this.filesDir);
@@ -504,7 +542,10 @@ struct GalleryPage {
     this.sortResultsByRecent(nextResults);
     this.results = nextResults;
     this.resultRevision += 1;
+    this.ensureSelectedFilterAvailable();
     this.ensureSelectedMonth();
+    // 结果变化后重新筛选月度总结缓存，只保留 signature 与当前结果一致的记录。
+    this.restoreMonthlyAiSummaries();
   }
 
   private refreshAnalyzeStats(): void {
@@ -552,7 +593,7 @@ struct GalleryPage {
     return [insight];
   }
 
-  private monthlyAiSummary(insight: GalleryMonthlyInsight): GalleryMonthSummaryResult | undefined {
+  private monthlyAiSummary(insight: GalleryMonthlyInsight): GalleryMonthSummaryCacheRecord | undefined {
     return this.monthlyAiSummaries[insight.key];
   }
 
@@ -601,6 +642,46 @@ struct GalleryPage {
     this.monthlyAiErrorText = '';
   }
 
+  private clearMonthlyAiRuntimeState(): void {
+    this.monthlyAiLoadingKey = '';
+    this.monthlyAiErrorKey = '';
+    this.monthlyAiErrorText = '';
+  }
+
+  private restoreMonthlyAiSummaries(): void {
+    if (this.filesDir.length === 0) {
+      return;
+    }
+    let cached = GalleryStorage.loadMonthlySummaries(this.filesDir);
+    let next: Record<string, GalleryMonthSummaryCacheRecord> = {};
+    let insights = this.monthlyInsights();
+    for (let i = 0; i < insights.length; i++) {
+      let record = cached[insights[i].key];
+      // signature 不一致说明该月图片结果发生过变化，需要让用户重新生成 AI 总结。
+      if (record && record.signature === this.monthlyInsightSignature(insights[i])) {
+        next[insights[i].key] = record;
+      }
+    }
+    this.monthlyAiSummaries = next;
+  }
+
+  private monthlyInsightSignature(insight: GalleryMonthlyInsight): string {
+    // 使用参与总结的核心字段生成稳定签名，避免复用过期的月度 AI 总结。
+    let parts: string[] = [insight.key, insight.totalCount.toString()];
+    for (let i = 0; i < insight.entriesForLlm.length; i++) {
+      let item = insight.entriesForLlm[i];
+      parts.push([
+        item.id,
+        item.date,
+        item.category,
+        item.title,
+        item.summary,
+        item.createdAt.toString()
+      ].join('|'));
+    }
+    return this.stableId(parts.join('\n'));
+  }
+
   private galleryCloudModelConfig(): GalleryCloudModelConfig {
     return {
       baseUrl: this.galleryApiBaseUrl.trim().length > 0 ? this.galleryApiBaseUrl.trim() : DEFAULT_GALLERY_API_BASE_URL,
@@ -619,12 +700,22 @@ struct GalleryPage {
     try {
       let result = await this.cloudClient.summarizeGalleryMonth(this.galleryCloudModelConfig(),
         GalleryMonthlyInsights.buildLlmInput(insight));
-      let next: Record<string, GalleryMonthSummaryResult> = {};
+      let record: GalleryMonthSummaryCacheRecord = {
+        signature: this.monthlyInsightSignature(insight),
+        title: result.title,
+        summary: result.summary,
+        suggestion: result.suggestion,
+        rawText: result.rawText,
+        updatedAt: new Date().getTime()
+      };
+      GalleryStorage.saveMonthlySummary(this.filesDir, insight.key, record);
+      // ArkUI 对对象深层变更不总是触发刷新，这里构造新对象保证页面同步更新。
+      let next: Record<string, GalleryMonthSummaryCacheRecord> = {};
       let keys = Object.keys(this.monthlyAiSummaries);
       for (let i = 0; i < keys.length; i++) {
         next[keys[i]] = this.monthlyAiSummaries[keys[i]];
       }
-      next[insight.key] = result;
+      next[insight.key] = record;
       this.monthlyAiSummaries = next;
     } catch (e) {
       this.monthlyAiErrorKey = insight.key;
@@ -712,6 +803,7 @@ struct GalleryPage {
 
   private createScanSession(inputs: GalleryPhotoInput[]): GalleryScanSession {
     let items: GalleryScanItem[] = [];
+    let seen: Record<string, boolean> = {};
     for (let i = 0; i < inputs.length; i++) {
       let input = inputs[i];
       let id = this.stableId(input.uri);
@@ -724,12 +816,18 @@ struct GalleryPage {
       if (inputDate !== undefined && inputDate.length > 0) {
         date = inputDate;
       }
+      // 媒体库偶尔可能返回重复 uri/id，扫描会话内按 id 去重，避免总数和跳过数重复累计。
+      if (seen[id]) {
+        continue;
+      }
+      seen[id] = true;
       items.push({
         uri: input.uri,
         id: id,
         date: date,
         status: 'queued',
-        error: ''
+        error: '',
+        skipReason: ''
       });
     }
     let now = new Date().getTime();
@@ -750,9 +848,11 @@ struct GalleryPage {
     let inputs: GalleryPhotoInput[] = [];
     for (let i = 0; i < session.items.length; i++) {
       if (session.items[i].status === 'queued' || session.items[i].status === 'failed') {
+        // 恢复扫描时允许失败项重新进入队列，避免一次模型或网络失败永久卡住任务。
         if (session.items[i].status === 'failed') {
           session.items[i].status = 'queued';
           session.items[i].error = '';
+          session.items[i].skipReason = '';
         }
         inputs.push({
           uri: session.items[i].uri,
@@ -765,25 +865,32 @@ struct GalleryPage {
     return inputs;
   }
 
-  private markScanItem(session: GalleryScanSession, input: GalleryPhotoInput, cached: boolean, error: string): void {
-    let inputId = input.id;
-    let inputDate = input.date;
-    if (inputId === undefined || inputDate === undefined) {
-      return;
-    }
+  private markScanItem(session: GalleryScanSession, input: GalleryPhotoInput, cached: boolean, error: string, skippedByKeyword: boolean): boolean {
+    let inputId = input.id !== undefined && input.id.length > 0 ? input.id : this.stableId(input.uri);
+    let inputDate = input.date !== undefined && input.date.length > 0 ? input.date : '';
     for (let i = 0; i < session.items.length; i++) {
-      if (session.items[i].id === inputId && session.items[i].date === inputDate) {
+      let sameIdentity = session.items[i].id === inputId && (inputDate.length === 0 || session.items[i].date === inputDate);
+      if (sameIdentity || session.items[i].uri === input.uri) {
         if (error && error.length > 0) {
           session.items[i].status = 'failed';
           session.items[i].error = error;
+          session.items[i].skipReason = '';
         } else {
-          session.items[i].status = cached ? 'skipped' : 'done';
+          // 缓存命中不再视为跳过；只有 OCR 关键词预筛未命中才进入 skipped，便于跳过面板准确解释。
+          session.items[i].status = cached && skippedByKeyword ? 'skipped' : 'done';
           session.items[i].error = '';
+          if (cached && skippedByKeyword) {
+            session.items[i].skipReason = 'OCR 关键词预筛未命中';
+          } else {
+            session.items[i].skipReason = '';
+          }
         }
-        break;
+        session.updatedAt = new Date().getTime();
+        this.recountScanSession(session);
+        return true;
       }
     }
-    this.recountScanSession(session);
+    return false;
   }
 
   private recountScanSession(session: GalleryScanSession): void {
@@ -791,6 +898,7 @@ struct GalleryPage {
     let skipped = 0;
     let failed = 0;
     for (let i = 0; i < session.items.length; i++) {
+      this.normalizeScanItemStatus(session.items[i]);
       if (session.items[i].status === 'done' || session.items[i].status === 'skipped') {
         processed += 1;
       }
@@ -807,16 +915,34 @@ struct GalleryPage {
     session.failed = failed;
   }
 
+  private normalizeScanItemStatus(item: GalleryScanItem): void {
+    // 兼容旧版本会话：历史上“已有缓存”曾被记为 skipped，这里迁移为 done，避免每次全扫重复计入跳过。
+    if (item.status === 'skipped' && item.skipReason === '已存在可用缓存') {
+      item.status = 'done';
+      item.error = '';
+      item.skipReason = '';
+    }
+  }
+
   private applyScanSession(session: GalleryScanSession): void {
+    // 将落盘会话同步到页面展示；所有进度卡片和顶部“已分析 x/y”都从这些状态读取。
     this.recountScanSession(session);
     this.scanTotal = session.total;
     this.scanProcessed = session.processed;
     this.scanSkipped = session.skipped;
     this.scanFailed = session.failed;
     this.scanPending = Math.max(0, session.total - session.processed);
-    this.autoScanStatus = session.status;
+    this.autoScanStatus = this.effectiveScanStatus(session.status);
     this.progress = this.progressPercentFromUnits(session.processed, session.total);
     this.scanRevision += 1;
+  }
+
+  private effectiveScanStatus(status: string): string {
+    // 用户点击暂停后，session 可能仍是 running；页面应优先展示“暂停中”的用户意图。
+    if (this.analyzing && this.pauseRequested && status === 'running') {
+      return 'pausing';
+    }
+    return status;
   }
 
   private restoreScanSessionState(): void {
@@ -826,7 +952,9 @@ struct GalleryPage {
       return;
     }
     this.applyScanSession(session);
+    GalleryStorage.saveScanSession(this.filesDir, session);
     if (this.scanPending > 0 && session.status === 'completed') {
+      // 防御旧会话异常：状态 completed 但仍有未完成项时，降级为 paused 允许用户继续。
       session.status = 'paused';
       GalleryStorage.saveScanSession(this.filesDir, session);
       this.applyScanSession(session);
@@ -834,6 +962,43 @@ struct GalleryPage {
     if (this.scanPending > 0 && (session.status === 'paused' || session.status === 'pausing' || session.status === 'running')) {
       this.setLastRunLabel('已暂停');
     }
+  }
+
+  private skippedScanItems(): GalleryScanItem[] {
+    // 跳过面板只展示真正被 OCR 关键词预筛过滤的图片，不展示缓存命中的已完成图片。
+    let session = GalleryStorage.loadScanSession(this.filesDir);
+    if (!session) {
+      return [];
+    }
+    let items: GalleryScanItem[] = [];
+    for (let i = 0; i < session.items.length; i++) {
+      if (session.items[i].status === 'skipped') {
+        items.push(session.items[i]);
+      }
+    }
+    return items;
+  }
+
+  private openSkippedPanel(): void {
+    let items = this.skippedScanItems();
+    if (items.length === 0) {
+      promptAction.showToast({ message: '当前没有跳过的图片', duration: 1200 });
+      return;
+    }
+    this.skippedPanelItems = items;
+    this.skippedPanelOpen = true;
+    this.skippedPanelRevision += 1;
+  }
+
+  private closeSkippedPanel(): void {
+    this.skippedPanelOpen = false;
+  }
+
+  private skippedReason(item: GalleryScanItem): string {
+    if (item.skipReason !== undefined && item.skipReason.length > 0) {
+      return item.skipReason;
+    }
+    return '已跳过';
   }
 
   private stableId(uri: string): string {
@@ -918,6 +1083,7 @@ struct GalleryPage {
     if (!this.analyzing) {
       GalleryStorage.clear(this.filesDir);
       GalleryStorage.clearScanSession(this.filesDir);
+      GalleryStorage.clearMonthlySummaries(this.filesDir);
       this.replaceResults([]);
       this.clearMonthlyAiState();
       this.progress = 0;
@@ -1002,28 +1168,31 @@ struct GalleryPage {
       .onClick(() => { this.runAction(actionId); })
   }
 
-  @Builder ActionToolbar(analyzedText: string, lastRunText: string, revision: number) {
+  @Builder ActionToolbar() {
     Column() {
-      Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
-      Row() {
-        this.StatCell('已分析', analyzedText, '#2F5BEA')
-        Divider().vertical(true).height(38).color('#E5E8F0')
-        this.StatCell('最近分析', lastRunText, '#202636')
-      }.width('100%')
+      ForEach([this.scanRevision + this.progressRevision + this.resultRevision], (_revision: number) => {
+        Column() {
+          Row() {
+            this.StatCell('已分析', this.analyzedCountText(), '#2F5BEA')
+            Divider().vertical(true).height(38).color('#E5E8F0')
+            this.StatCell('最近分析', this.lastRunText, '#202636')
+          }.width('100%')
 
-      Row() {
-        this.ToolbarAction('选择图片', '#FFFFFF', '#2F5BEA', 1)
-        Blank().width(8)
-        this.ToolbarAction(this.autoActionTitle(), '#2F5BEA', '#EEF3FF', 0)
-        Blank().width(8)
-        if (this.analyzing) {
-          this.ToolbarAction(this.autoScanStatus === 'pausing' ? '暂停中' : '暂停', '#B55A00', '#FFF4E8', 3)
-        } else {
-          this.ToolbarAction('清理缓存', '#B55A00', '#FFF4E8', 2)
-        }
-      }
-      .width('100%')
-      .margin({ top: 14 })
+          Row() {
+            this.ToolbarAction('选择图片', '#FFFFFF', '#2F5BEA', 1)
+            Blank().width(8)
+            this.ToolbarAction(this.autoActionTitle(), '#2F5BEA', '#EEF3FF', 0)
+            Blank().width(8)
+            if (this.analyzing) {
+              this.ToolbarAction(this.autoScanStatus === 'pausing' ? '暂停中' : '暂停', '#B55A00', '#FFF4E8', 3)
+            } else {
+              this.ToolbarAction('清理缓存', '#B55A00', '#FFF4E8', 2)
+            }
+          }
+          .width('100%')
+          .margin({ top: 14 })
+        }.width('100%')
+      }, (revision: number) => revision.toString())
     }
     .width('90%')
     .padding(14)
@@ -1052,35 +1221,38 @@ struct GalleryPage {
     return '分析进度';
   }
 
-  @Builder ProgressStrip(scanTotal: number, scanProcessed: number, scanPending: number, scanSkipped: number,
-    scanFailed: number, progressValue: number, title: string, analyzing: boolean, revision: number) {
+  @Builder ProgressStrip() {
     Column() {
-      Row() {
-        Text(title)
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#202636')
-          .layoutWeight(1)
-        Text(this.progressPercentText(progressValue))
-          .fontSize(12)
-          .fontColor('#667085')
-      }.width('100%')
-      Stack({ alignContent: Alignment.Start }) {
-        Row()
+      ForEach([this.scanRevision + this.progressRevision + this.resultRevision], (_revision: number) => {
+        Column() {
+          Row() {
+            Text(this.progressTitle())
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#202636')
+              .layoutWeight(1)
+            Text(this.progressPercentText(this.progress))
+              .fontSize(12)
+              .fontColor('#667085')
+          }.width('100%')
+          Stack({ alignContent: Alignment.Start }) {
+            Row()
+              .width('100%')
+              .height(6)
+              .backgroundColor('#E8EDF7')
+              .borderRadius(3)
+            Row()
+              .width(this.progressFillWidth(this.progress))
+              .height(6)
+              .backgroundColor('#2F5BEA')
+              .borderRadius(3)
+          }
           .width('100%')
           .height(6)
-          .backgroundColor('#E8EDF7')
-          .borderRadius(3)
-        Row()
-          .width(this.progressFillWidth(progressValue))
-          .height(6)
-          .backgroundColor('#2F5BEA')
-          .borderRadius(3)
-      }
-      .width('100%')
-      .height(6)
-      .margin({ top: 8 })
-      this.ScanStatsPanel(scanTotal, scanProcessed, scanPending, scanSkipped, scanFailed, analyzing, revision)
+          .margin({ top: 8 })
+          this.ScanStatsPanel()
+        }.width('100%')
+      }, (revision: number) => revision.toString())
     }
     .width('90%')
     .padding(14)
@@ -1107,13 +1279,18 @@ struct GalleryPage {
     .onClick(() => { this.runAction(actionId); })
   }
 
-  @Builder ScanStatCell(label: string, value: number, color: string) {
+  @Builder ScanStatCell(label: string, value: number, color: string, actionId: number) {
     Column() {
-      Text(label).fontSize(11).fontColor('#7C8494').maxLines(1)
+      Text(actionId === 1 && value > 0 ? label + ' >' : label).fontSize(11).fontColor('#7C8494').maxLines(1)
       Text(value.toString()).fontSize(16).fontWeight(FontWeight.Bold).fontColor(color).margin({ top: 3 }).maxLines(1)
     }
     .layoutWeight(1)
     .alignItems(HorizontalAlign.Start)
+    .onClick(() => {
+      if (actionId === 1) {
+        this.openSkippedPanel();
+      }
+    })
   }
 
   @Builder ScanStatTextCell(label: string, value: string, color: string) {
@@ -1125,17 +1302,15 @@ struct GalleryPage {
     .alignItems(HorizontalAlign.Start)
   }
 
-  @Builder ScanStatsPanel(scanTotal: number, scanProcessed: number, scanPending: number,
-    scanSkipped: number, scanFailed: number, analyzing: boolean, revision: number) {
-    if (scanTotal > 0 || analyzing) {
+  @Builder ScanStatsPanel() {
+    if (this.scanTotal > 0 || this.analyzing) {
       Column() {
-        Text(revision.toString()).fontSize(0).width(0).height(0).opacity(0)
         Row() {
-          this.ScanStatCell('总数', scanTotal, '#151A28')
-          this.ScanStatCell('已完成', scanProcessed, '#5B68FF')
-          this.ScanStatCell('未完成', scanPending, '#FF8A3D')
-          this.ScanStatCell('跳过', scanSkipped, '#39BFA3')
-          this.ScanStatCell('失败', scanFailed, '#E5484D')
+          this.ScanStatCell('总数', this.scanTotal, '#151A28', 0)
+          this.ScanStatCell('已完成', this.scanProcessed, '#5B68FF', 0)
+          this.ScanStatCell('未完成', this.scanPending, '#FF8A3D', 0)
+          this.ScanStatCell('跳过', this.scanSkipped, '#39BFA3', 1)
+          this.ScanStatCell('失败', this.scanFailed, '#E5484D', 0)
         }.width('100%')
       }
       .width('100%')
@@ -1565,19 +1740,115 @@ struct GalleryPage {
     }
   }
 
-  @Builder FilterChip(label: string, index: number) {
-    Text(label)
+  @Builder SkippedItemRow(item: GalleryScanItem) {
+    Row() {
+      Image(item.uri)
+        .width(72)
+        .height(72)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor('#F2F4F7')
+        .borderRadius(10)
+      Column() {
+        Text(this.skippedReason(item))
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(item.date)
+          .fontSize(12)
+          .fontColor('#7C8494')
+          .margin({ top: 6 })
+          .maxLines(1)
+        Text(item.id)
+          .fontSize(11)
+          .fontColor('#9AA3B2')
+          .margin({ top: 5 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+    }
+    .width('100%')
+    .padding(10)
+    .backgroundColor('#F7F9FC')
+    .borderRadius(14)
+    .margin({ top: 10 })
+  }
+
+  @Builder SkippedItemsPanel() {
+    if (this.skippedPanelOpen) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => { this.closeSkippedPanel(); })
+
+        Column() {
+          Row() {
+            Column() {
+              Text('跳过图片')
+                .fontSize(18)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#11182F')
+                .maxLines(1)
+              Text('OCR 关键词预筛未命中的图片会计入跳过')
+                .fontSize(12)
+                .fontColor('#717684')
+                .margin({ top: 5 })
+                .maxLines(2)
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            .margin({ right: 12 })
+            Text('关闭')
+              .fontSize(13)
+              .fontColor('#5B68FF')
+              .onClick(() => { this.closeSkippedPanel(); })
+          }
+          .width('100%')
+
+          Scroll() {
+            Column() {
+              ForEach(this.skippedPanelItems, (item: GalleryScanItem) => {
+                this.SkippedItemRow(item)
+              }, (item: GalleryScanItem, index: number) => item.id + '_' + item.date + '_' + index.toString() + '_' + this.skippedPanelRevision.toString())
+              Blank().height(8)
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .margin({ top: 12 })
+        }
+        .width('88%')
+        .height('72%')
+        .padding(18)
+        .backgroundColor(Color.White)
+        .borderRadius(18)
+        .shadow({ radius: 24, color: '#24000000', offsetX: 0, offsetY: 10 })
+      }
+      .width('100%')
+      .height('100%')
+    }
+  }
+
+  @Builder FilterChip(item: GalleryCategoryFilter) {
+    Text(this.categoryChipText(item))
       .fontSize(13)
-      .fontWeight(this.selectedFilter === index ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.selectedFilter === index ? Color.White : '#596071')
+      .fontWeight(this.selectedFilter === item.index ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.selectedFilter === item.index ? Color.White : '#596071')
       .height(36)
       .padding({ left: 14, right: 14 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.selectedFilter === index ? '#5B68FF' : '#F1F4FA')
+      .backgroundColor(this.selectedFilter === item.index ? '#5B68FF' : '#F1F4FA')
       .borderRadius(18)
-      .margin({ right: 8 })
+      .margin({ right: 8, bottom: 8 })
       .onClick(() => {
-        this.selectedFilter = index;
+        this.selectedFilter = item.index;
         this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
       })
   }
@@ -1806,6 +2077,7 @@ struct GalleryPage {
   }
 
   private updateProgress(next: GalleryProgress): void {
+    // 手动选择图片分析没有 scan-session baseline，直接采用分析器上报的本批次进度。
     let completed = Math.max(0, next.processed - next.failed);
     this.scanTotal = next.selected;
     this.scanProcessed = next.processed;
@@ -1816,15 +2088,29 @@ struct GalleryPage {
     this.progressRevision += 1;
   }
 
-  private updateAutoProgress(session: GalleryScanSession): void {
+  private updateAutoProgress(session: GalleryScanSession, next?: GalleryProgress): void {
+    // 自动全量分析会跨暂停恢复，必须用 session 的历史值加上本轮进度增量来实时刷新页面。
     this.recountScanSession(session);
+    if (this.pauseRequested && session.status === 'running') {
+      session.status = 'pausing';
+    }
     this.scanTotal = session.total;
-    this.scanProcessed = session.processed;
-    this.scanSkipped = session.skipped;
-    this.scanFailed = session.failed;
+    if (next) {
+      this.scanProcessed = Math.min(session.total, this.autoProgressBaselineProcessed + next.processed);
+      this.scanSkipped = Math.min(this.scanProcessed, this.autoProgressBaselineSkipped + next.skipped);
+      this.scanFailed = Math.min(this.scanProcessed, this.autoProgressBaselineFailed + next.failed);
+    } else {
+      this.scanProcessed = session.processed;
+      this.scanSkipped = session.skipped;
+      this.scanFailed = session.failed;
+    }
     this.scanPending = Math.max(0, session.total - session.processed);
-    this.autoScanStatus = session.status;
-    this.progress = this.progressPercentFromUnits(session.processed, session.total);
+    if (next) {
+      this.scanPending = Math.max(0, session.total - this.scanProcessed);
+    }
+    this.autoScanStatus = this.effectiveScanStatus(session.status);
+    this.progress = this.progressPercentFromUnits(this.scanProcessed, session.total);
+    // ArkUI 对复杂异步状态变化偶尔不会重建子 Builder，revision 用作显式刷新信号。
     this.scanRevision += 1;
     this.progressRevision += 1;
   }
@@ -1880,18 +2166,70 @@ struct GalleryPage {
   }
 
   private analyzedCountText(): string {
+    // 自动扫描中显示 scan-session 进度；普通浏览时显示已落盘结果数。
     if (this.scanTotal > 0 && (this.analyzing || this.hasPausedScan() || this.autoScanStatus === 'completed')) {
       return this.scanProcessed.toString() + '/' + this.scanTotal.toString() + ' 张';
     }
     return this.results.length.toString() + ' 张';
   }
 
-  private filteredResults(): GalleryAnalysisResult[] {
+  private categoryChipText(item: GalleryCategoryFilter): string {
+    if (item.index === 0) {
+      return item.label;
+    }
+    return item.label + ' ' + item.count.toString();
+  }
+
+  private categoryFilterItems(): GalleryCategoryFilter[] {
+    // 分类标签按当前时间范围重新统计，只保留有结果的分类，避免空标签占位和横向滚动。
+    let items = this.timeFilteredResults(this.results);
+    let counts: Record<string, number> = {};
+    for (let i = 0; i < items.length; i++) {
+      let category = this.normalizeCategory(items[i].category);
+      counts[category] = counts[category] ? counts[category] + 1 : 1;
+    }
+    let filters: GalleryCategoryFilter[] = [{
+      index: 0,
+      label: '全部',
+      count: items.length
+    }];
+    for (let i = 1; i <= 8; i++) {
+      let label = this.filterCategory(i);
+      let count = counts[label] ? counts[label] : 0;
+      if (count > 0) {
+        filters.push({
+          index: i,
+          label: label,
+          count: count
+        });
+      }
+    }
+    return filters;
+  }
+
+  private ensureSelectedFilterAvailable(): void {
+    // 切换时间范围后，如果原分类在当前范围无结果，自动回退到“全部”。
     if (this.selectedFilter === 0) {
-      return this.results.slice(0);
+      return;
     }
     let target = this.filterCategory(this.selectedFilter);
-    return this.results.filter((item: GalleryAnalysisResult) => this.matchCategory(item.category, target));
+    let items = this.timeFilteredResults(this.results);
+    for (let i = 0; i < items.length; i++) {
+      if (this.matchCategory(items[i].category, target)) {
+        return;
+      }
+    }
+    this.selectedFilter = 0;
+    this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
+  }
+
+  private filteredResults(): GalleryAnalysisResult[] {
+    let timeResults = this.timeFilteredResults(this.results);
+    if (this.selectedFilter === 0) {
+      return timeResults;
+    }
+    let target = this.filterCategory(this.selectedFilter);
+    return timeResults.filter((item: GalleryAnalysisResult) => this.matchCategory(item.category, target));
   }
 
   private filterCategory(index: number): string {
@@ -1934,9 +2272,15 @@ struct GalleryPage {
 
   private visibleResults(): GalleryAnalysisResult[] {
     let categoryResults = this.filteredResults();
+    this.sortResultsByRecent(categoryResults);
+    return categoryResults;
+  }
+
+  private timeFilteredResults(items: GalleryAnalysisResult[]): GalleryAnalysisResult[] {
     if (this.selectedTimeFilter === 0) {
-      this.sortResultsByRecent(categoryResults);
-      return categoryResults;
+      let result = items.slice(0);
+      this.sortResultsByRecent(result);
+      return result;
     }
     let now = new Date().getTime();
     let startTs = 0;
@@ -1948,7 +2292,7 @@ struct GalleryPage {
       let yearStart = new Date(new Date().getFullYear(), 0, 1);
       startTs = yearStart.getTime();
     }
-    let results = categoryResults.filter((item: GalleryAnalysisResult) => this.itemTime(item) >= startTs);
+    let results = items.filter((item: GalleryAnalysisResult) => this.itemTime(item) >= startTs);
     this.sortResultsByRecent(results);
     return results;
   }
@@ -1962,7 +2306,15 @@ struct GalleryPage {
 
   private resultPanelCountText(): string {
     let visibleItems = this.visibleResults();
-    return this.displayedResults(visibleItems).length.toString() + '/' + visibleItems.length.toString();
+    let displayedCount = this.displayedResults(visibleItems).length;
+    if (visibleItems.length === 0) {
+      return '0 条可见';
+    }
+    if (displayedCount < visibleItems.length) {
+      return visibleItems.length.toString() + ' 条可见 · 已显示 ' + displayedCount.toString() + '/' +
+        visibleItems.length.toString() + ' 条';
+    }
+    return visibleItems.length.toString() + ' 条可见';
   }
 
   private itemTime(item: GalleryAnalysisResult): number {
@@ -2338,7 +2690,7 @@ struct GalleryPage {
   }
 
   @Builder MonthlyInsightsPanel(revision: number) {
-    if (!this.analyzing && this.monthlyInsights().length > 0) {
+    if (this.monthlyInsights().length > 0) {
       Column() {
         Row() {
           Text('月度洞察').fontSize(19).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
@@ -2635,6 +2987,7 @@ struct GalleryPage {
       .margin({ right: 8 })
       .onClick(() => {
         this.selectedTimeFilter = index;
+        this.ensureSelectedFilterAvailable();
         this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
       })
   }
@@ -2644,27 +2997,17 @@ struct GalleryPage {
       Row() {
         Column() {
           Text('图库结果').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F')
-          Text(this.resultPanelCountText() + ' 条可见').fontSize(12).fontColor('#7F8592').margin({ top: 3 })
+          Text(this.resultPanelCountText()).fontSize(12).fontColor('#7F8592').margin({ top: 3 })
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
       }.width('100%')
-      Scroll() {
-        Row() {
-          this.FilterChip('全部', 0)
-          this.FilterChip('聊天', 1)
-          this.FilterChip('文档', 2)
-          this.FilterChip('餐饮', 3)
-          this.FilterChip('购物', 4)
-          this.FilterChip('出行', 5)
-          this.FilterChip('健康', 6)
-          this.FilterChip('工作', 7)
-          this.FilterChip('其他', 8)
-        }
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(this.categoryFilterItems(), (item: GalleryCategoryFilter) => {
+          this.FilterChip(item)
+        }, (item: GalleryCategoryFilter) => revision.toString() + '_' + item.index.toString() + '_' + item.count.toString())
       }
       .width('100%')
-      .height(40)
-      .scrollable(ScrollDirection.Horizontal)
       .margin({ top: 12 })
       Scroll() {
         Row() {
@@ -2751,11 +3094,9 @@ struct GalleryPage {
         .width('90%')
         .margin({ top: 24 })
 
-        this.ActionToolbar(this.analyzedCountText(), this.lastRunText, this.scanRevision + this.resultRevision)
+        this.ActionToolbar()
         if (this.shouldShowProgressStrip()) {
-        this.ProgressStrip(this.scanTotal, this.scanProcessed, this.scanPending, this.scanSkipped, this.scanFailed,
-            this.progress, this.progressTitle(), this.analyzing,
-            this.scanRevision + this.resultRevision + this.progressRevision)
+          this.ProgressStrip()
         }
         this.MonthlyInsightsPanel(this.resultRevision)
         this.GalleryQuestionPanel(this.gallerySearchRevision + this.resultRevision)
@@ -2770,6 +3111,7 @@ struct GalleryPage {
 
       this.SettingsPanel()
       this.ResultDetailPanel()
+      this.SkippedItemsPanel()
     }
     .width('100%')
     .height('100%')

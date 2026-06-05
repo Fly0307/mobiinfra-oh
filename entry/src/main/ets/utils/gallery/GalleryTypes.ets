@@ -37,14 +37,17 @@ export interface GalleryExifMetadata {
   longitude?: number;
 }
 
+// 全量图库扫描的单项状态。status 只描述流程状态，skipReason 用于解释真正跳过的原因。
 export interface GalleryScanItem {
   uri: string;
   id: string;
   date: string;
   status: string;
   error: string;
+  skipReason?: string;
 }
 
+// 全量扫描会话的落盘快照，用于暂停、恢复和页面重新进入后的进度恢复。
 export interface GalleryScanSession {
   id: string;
   status: string;
@@ -55,6 +58,16 @@ export interface GalleryScanSession {
   skipped: number;
   failed: number;
   items: GalleryScanItem[];
+}
+
+// 月度 AI 总结缓存。signature 绑定当月分析结果，结果变化时旧总结会自动失效。
+export interface GalleryMonthSummaryCacheRecord {
+  signature: string;
+  title: string;
+  summary: string;
+  suggestion: string;
+  rawText: string;
+  updatedAt: number;
 }
 
 export interface GalleryAnalysisResult {
@@ -80,6 +93,7 @@ export interface GalleryAnalysisResult {
   createdAt: number;
 }
 
+// 单张图片分析返回值。cached 表示复用已有结果，skippedByKeyword 才表示被 OCR 关键词预筛跳过。
 export interface GalleryAnalyzeOutcome {
   result: GalleryAnalysisResult;
   cached: boolean;
@@ -103,6 +117,7 @@ export interface GalleryEmbeddingRecord {
   createdAt: number;
 }
 
+// 分析器运行态进度。它只记录本次批处理增量，页面会叠加扫描会话 baseline 得到全量进度。
 export interface GalleryProgress {
   selected: number;
   processed: number;

@@ -54,6 +54,7 @@ GROUNDER_MAX_TOKENS = 128
 DEVICE_WAIT_TIME = 0.5
 APP_LAUNCH_WAIT_TIME = 0.8
 APP_STOP_WAIT = 3
+APP_FRESH_START_WAIT_TIME = 0.8
 
 # 滑动坐标缩放比例
 SWIPE_V_START = 0.3
@@ -225,6 +226,26 @@ def start_app_with_explicit_ability(bundle, ability_name):
     except Exception as ex:
         print(f">> [启动警告] 显式 Ability 启动失败，准备回退: {ex}")
         return False
+
+def stop_app_before_launch(bundle):
+    if not bundle:
+        return
+    print(f">> [Planner] Stop target App before launch for a clean start: {bundle}")
+    stopped = False
+    if ensure_driver_available():
+        try:
+            run_driver_call("Driver.stop_app", lambda driver: driver.stop_app(bundle))
+            stopped = True
+        except Exception as ex:
+            print(f">> [launch warning] Driver.stop_app failed; fallback to HDC force-stop: {ex}")
+    if not stopped:
+        cmd = f"{hdc_prefix()} shell aa force-stop {bundle}"
+        try:
+            print(f">> Run stop command (hdc force-stop): {cmd}")
+            _run_timed_command("launch_app force-stop", cmd)
+        except Exception as ex:
+            print(f">> [launch warning] HDC force-stop failed; continue launching {bundle}: {ex}")
+    time.sleep(APP_FRESH_START_WAIT_TIME)
 
 def bring_llm_app_to_foreground():
     return run_with_device_control(
@@ -1125,13 +1146,13 @@ def run_planner(task):
         logging.error(error_message)
         raise RuntimeError(error_message) from ex
 
-def launch_app(app_name):
+def launch_app(app_name, reset_first=True):
     return run_with_device_control(
         "launch_app",
-        lambda: _launch_app_impl(app_name)
+        lambda: _launch_app_impl(app_name, reset_first)
     )
 
-def _launch_app_impl(app_name):
+def _launch_app_impl(app_name, reset_first=True):
     # Planner 可能返回中文 App 名，也可能直接返回 bundleName；两种都兼容。
     if not app_name:
         return False
@@ -1143,6 +1164,8 @@ def _launch_app_impl(app_name):
     
     if bundle:
         ability_name = get_main_ability_for_bundle(bundle)
+        if reset_first:
+            stop_app_before_launch(bundle)
         if start_app_with_explicit_ability(bundle, ability_name):
             return True
 

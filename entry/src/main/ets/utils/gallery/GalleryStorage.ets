@@ -1,6 +1,7 @@
 import fs from '@ohos.file.fs';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { GalleryAnalysisResult, GalleryEmbeddingRecord, GalleryScanSession } from './GalleryTypes';
+import { GalleryExifUtils } from './GalleryExifUtils';
 
 const GALLERY_LOG_DIR = 'gallery-log';
 const DAILY_LOG_DIR = 'daily-log';
@@ -250,6 +251,10 @@ export class GalleryStorage {
         if (locationText.length > 0) {
           lines.push('   - 位置：' + locationText);
         }
+        let captureText = GalleryStorage.dailyCaptureText(group[j]);
+        if (captureText.length > 0) {
+          lines.push('   - ' + captureText);
+        }
         lines.push('');
       }
       GalleryStorage.writeText(GalleryStorage.dailyCategoryPath(filesDir, safeDate, category), lines.join('\n'));
@@ -280,6 +285,14 @@ export class GalleryStorage {
     let createdAt = result.createdAt > 0 ? result.createdAt : new Date().getTime();
     let category = GalleryStorage.safeCategory(result.category);
     let date = result.date && result.date.length > 0 ? GalleryStorage.safeDate(result.date) : GalleryStorage.formatDate(createdAt);
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (latitude === undefined && result.exif && result.exif.latitude !== undefined) {
+      latitude = result.exif.latitude;
+    }
+    if (longitude === undefined && result.exif && result.exif.longitude !== undefined) {
+      longitude = result.exif.longitude;
+    }
     return {
       id: result.id,
       uri: result.uri,
@@ -297,28 +310,43 @@ export class GalleryStorage {
       embeddingStatus: result.embeddingStatus,
       embeddingDimension: result.embeddingDimension,
       error: result.error,
-      latitude: result.latitude,
-      longitude: result.longitude,
+      latitude: latitude,
+      longitude: longitude,
+      exif: result.exif,
       createdAt: createdAt
     };
   }
 
   private static dailyLocationText(result: GalleryAnalysisResult): string {
-    if (result.latitude === undefined || result.longitude === undefined) {
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (latitude === undefined && result.exif && result.exif.latitude !== undefined) {
+      latitude = result.exif.latitude;
+    }
+    if (longitude === undefined && result.exif && result.exif.longitude !== undefined) {
+      longitude = result.exif.longitude;
+    }
+    let location = GalleryExifUtils.directedLocationText(latitude, longitude);
+    if (location.length > 0) {
+      return location;
+    }
+    return GalleryExifUtils.rawGpsLocationText(result.exif);
+  }
+
+  private static dailyCaptureText(result: GalleryAnalysisResult): string {
+    if (!result.exif) {
       return '';
     }
-    let latitude = Number(result.latitude);
-    let longitude = Number(result.longitude);
-    if (isNaN(latitude) || isNaN(longitude)) {
-      return '';
+    let parts: string[] = [];
+    let capturedAt = GalleryExifUtils.displayDateTime(result.exif.dateTimeOriginal);
+    if (capturedAt.length > 0) {
+      parts.push('拍摄时间：' + capturedAt);
     }
-    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-      return '';
+    let device = GalleryExifUtils.deviceText(result.exif);
+    if (device.length > 0) {
+      parts.push('拍摄设备：' + device);
     }
-    if (latitude === 0 && longitude === 0) {
-      return '';
-    }
-    return latitude.toFixed(6) + ', ' + longitude.toFixed(6);
+    return parts.join('；');
   }
 
   private static collectItems(dir: string, results: GalleryAnalysisResult[]): void {

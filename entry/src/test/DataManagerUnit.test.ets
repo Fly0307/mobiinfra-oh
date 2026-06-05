@@ -15,6 +15,7 @@ import {
   heuristicCollectionGroups,
   normalizeCollectionGroups
 } from '../main/ets/datamanager/CollectionGroupingService';
+import { GalleryExifUtils } from '../main/ets/utils/gallery/GalleryExifUtils';
 import {
   isQueryResultTruncated,
   resolveQueryLimit
@@ -230,6 +231,47 @@ export default function dataManagerUnitTest() {
       expect(resolveQueryLimit(2, 1)).assertEqual(1);
       expect(isQueryResultTruncated(2, 1)).assertTrue();
     });
+
+    it('galleryExifCoordinateParsesDmsAndRef', 0, () => {
+      let latitude = GalleryExifUtils.coordinateFromExif('31/1, 12/1, 3000/100', 'N');
+      let longitude = GalleryExifUtils.coordinateFromExif('121, 30, 0', 'E');
+      expect(latitude !== undefined).assertTrue();
+      expect(longitude !== undefined).assertTrue();
+      expect(Math.abs((latitude as number) - 31.208333) < 0.00001).assertTrue();
+      expect(Math.abs((longitude as number) - 121.5) < 0.00001).assertTrue();
+
+      let west = GalleryExifUtils.coordinateFromExif('73/1, 59/1, 0/1', 'W');
+      expect(west !== undefined).assertTrue();
+      expect((west as number) < 0).assertTrue();
+
+      let symbolLatitude = GalleryExifUtils.coordinateFromExif('31°12′30″', 'N');
+      expect(symbolLatitude !== undefined).assertTrue();
+      expect(Math.abs((symbolLatitude as number) - 31.208333) < 0.00001).assertTrue();
+    });
+
+    it('galleryExifRawGpsLocationFallback', 0, () => {
+      let text = GalleryExifUtils.rawGpsLocationText({
+        gpsLatitude: '31/1, 12/1, 3000/100',
+        gpsLongitude: '121/1, 30/1, 0/1',
+        gpsLatitudeRef: 'N',
+        gpsLongitudeRef: 'E'
+      });
+      expect(text).assertEqual('31/1, 12/1, 3000/100 N, 121/1, 30/1, 0/1 E');
+    });
+
+    it('galleryExifLocationDirectionAndMapUrl', 0, () => {
+      expect(GalleryExifUtils.directedLocationText(31.024267, 121.437828))
+        .assertEqual('北纬 31.024267，东经 121.437828');
+      expect(GalleryExifUtils.directedLocationText(-31.024267, -121.437828))
+        .assertEqual('南纬 31.024267，西经 121.437828');
+      let url = GalleryExifUtils.mapUrl(31.024267, 121.437828);
+      expect(url.indexOf('position=121.437828,31.024267') >= 0).assertTrue();
+    });
+
+    it('galleryExifDateNormalizesOriginalTime', 0, () => {
+      expect(GalleryExifUtils.dateFromExifDateTime('2024:06:17 14:03:02')).assertEqual('2024-06-17');
+      expect(GalleryExifUtils.displayDateTime('2024:06:17 14:03:02')).assertEqual('2024-06-17 14:03:02');
+      expect(GalleryExifUtils.dateFromExifDateTime('')).assertEqual('');
+    });
   });
 }
-

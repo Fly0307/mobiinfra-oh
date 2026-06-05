@@ -22,6 +22,21 @@ export interface GalleryPhotoInput {
   longitude?: number;
 }
 
+export interface GalleryExifMetadata {
+  dateTimeOriginal?: string;
+  deviceMake?: string;
+  deviceModel?: string;
+  imageWidth?: string;
+  imageHeight?: string;
+  orientation?: string;
+  gpsLatitude?: string;
+  gpsLongitude?: string;
+  gpsLatitudeRef?: string;
+  gpsLongitudeRef?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
 export interface GalleryScanItem {
   uri: string;
   id: string;
@@ -61,6 +76,7 @@ export interface GalleryAnalysisResult {
   error: string;
   latitude?: number;
   longitude?: number;
+  exif?: GalleryExifMetadata;
   createdAt: number;
 }
 

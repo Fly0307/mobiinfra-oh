@@ -219,7 +219,8 @@ struct WorkflowFileViewer {
 
   private deleteManagedFile(file: WorkflowManagedFile): void {
     let title = this.fileDisplayTitle(file);
-    let deleted = WorkflowStorage.deleteManagedFile(file);
+    let deleted = this.category === 'config' ?
+      WorkflowStorage.deleteConfigManagedFile(this.filesDir, file) : WorkflowStorage.deleteManagedFile(file);
     this.setFileSelected(file, false);
     this.loadFiles();
     promptAction.showToast({
@@ -243,7 +244,8 @@ struct WorkflowFileViewer {
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
-        let deleted = WorkflowStorage.deleteManagedFiles(selected);
+        let deleted = this.category === 'config' ?
+          WorkflowStorage.deleteConfigManagedFiles(this.filesDir, selected) : WorkflowStorage.deleteManagedFiles(selected);
         this.manageMode = false;
         this.selectedDeletePaths = [];
         this.loadFiles();

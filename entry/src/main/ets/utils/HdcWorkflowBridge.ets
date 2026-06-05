@@ -10,6 +10,7 @@ interface HdcBridgeRequest {
 interface StartAppPayload {
   app_name: string;
   package_name: string;
+  reset_first: boolean;
 }
 
 interface ScreenshotPayload {
@@ -86,10 +87,11 @@ export class HdcWorkflowBridge {
     return response.status === 'ok';
   }
 
-  async startApp(appName: string, packageName: string): Promise<void> {
+  async startApp(appName: string, packageName: string, resetFirst: boolean = true): Promise<void> {
     let payload: StartAppPayload = {
       app_name: appName,
-      package_name: packageName
+      package_name: packageName,
+      reset_first: resetFirst
     };
     let response = await this.request('app_start', payload as Object as WorkflowJsonMap);
     if (response.status !== 'ok') {

@@ -18,6 +18,7 @@ const CONFIG_DIR = 'configs';
 const RUN_DIR = 'runs';
 const DAILY_LOG_DIR = 'daily-log';
 const TASK_INDEX_FILE = 'task-index.json';
+const DELETED_DEFAULT_TASKS_FILE = 'deleted-default-tasks.json';
 
 interface VlmJsonSchemaField {
   type: string;
@@ -27,6 +28,10 @@ interface VlmJsonSchemaField {
 interface WeixinTodayJsonSchema {
   summary: VlmJsonSchemaField;
   contains_today_chat: VlmJsonSchemaField;
+}
+
+interface DeletedDefaultTaskIndex {
+  ids: string[];
 }
 
 function nowText(): string {
@@ -52,6 +57,14 @@ export class WorkflowStorage {
 
   static indexPath(filesDir: string): string {
     return WorkflowStorage.rootDir(filesDir) + '/' + TASK_INDEX_FILE;
+  }
+
+  static configPath(filesDir: string, configFileName: string): string {
+    return WorkflowStorage.configDir(filesDir) + '/' + configFileName;
+  }
+
+  static deletedDefaultsPath(filesDir: string): string {
+    return WorkflowStorage.rootDir(filesDir) + '/' + DELETED_DEFAULT_TASKS_FILE;
   }
 
   static ensureDirectory(path: string): void {
@@ -97,9 +110,12 @@ export class WorkflowStorage {
     }
   }
 
-  static validateWorkflowJson(rawJson: string): WorkflowDefinition {
+  static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
     let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
-    if (!parsed.steps || parsed.steps.length === 0) {
+    if (!parsed.steps) {
+      throw new Error('workflow.steps 不能为空');
+    }
+    if (requireSteps && parsed.steps.length === 0) {
       throw new Error('workflow.steps 不能为空');
     }
     let seen: Record<string, boolean> = {};
@@ -133,65 +149,224 @@ export class WorkflowStorage {
     let path = WorkflowStorage.indexPath(filesDir);
     try {
       if (!fs.accessSync(path)) {
+        let recovered = WorkflowStorage.recoverTasksFromConfigFiles(filesDir);
+        if (recovered.length > 0) {
+          let syncedRecovered = WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, recovered);
+          WorkflowStorage.saveTasks(filesDir, syncedRecovered);
+          return syncedRecovered;
+        }
         let defaults = WorkflowStorage.createDefaultTasks(filesDir);
         WorkflowStorage.saveTasks(filesDir, defaults);
         return defaults;
       }
       let parsed = ArkJSON.parse(WorkflowStorage.readText(path)) as WorkflowTaskIndex;
       let tasks = parsed.tasks || [];
-      let syncedTasks = WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, tasks);
+      let syncedTasks = WorkflowStorage.syncTaskWorkflowJsonFromConfigFiles(filesDir,
+        WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, tasks));
       if (!WorkflowStorage.areTaskListsEqual(tasks, syncedTasks)) {
         WorkflowStorage.saveTasks(filesDir, syncedTasks);
       }
       return syncedTasks;
     } catch (e) {
-      let defaults = WorkflowStorage.createDefaultTasks(filesDir);
-      WorkflowStorage.saveTasks(filesDir, defaults);
-      return defaults;
+      WorkflowStorage.backupBrokenTaskIndex(filesDir);
+      let recovered = WorkflowStorage.recoverTasksFromConfigFiles(filesDir);
+      if (recovered.length > 0) {
+        let syncedRecovered = WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, recovered);
+        WorkflowStorage.saveTasks(filesDir, syncedRecovered);
+        return syncedRecovered;
+      }
+      return WorkflowStorage.createDefaultTasks(filesDir);
     }
   }
 
   private static syncCodeDefinedDefaultTasks(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
     let defaults = WorkflowStorage.createDefaultTasks(filesDir);
+    let deletedDefaults = WorkflowStorage.readDeletedDefaultTaskSet(filesDir);
     let defaultById: Record<string, WorkflowTask> = {};
     for (let i = 0; i < defaults.length; i++) {
       defaultById[defaults[i].id] = defaults[i];
     }
 
     let nextTasks: WorkflowTask[] = [];
-    let knownIds: Record<string, boolean> = {};
+    let storedDefaultIds: Record<string, boolean> = {};
     for (let i = 0; i < tasks.length; i++) {
       let task = tasks[i];
       let defaultTask = defaultById[task.id];
       if (defaultTask) {
+        storedDefaultIds[task.id] = true;
         nextTasks.push(WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task));
       } else if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id)) {
         continue;
       } else {
         nextTasks.push(task);
       }
-      knownIds[task.id] = true;
     }
-
     for (let i = 0; i < defaults.length; i++) {
-      if (!knownIds[defaults[i].id]) {
+      let defaultId = defaults[i].id;
+      if (!storedDefaultIds[defaultId] && !deletedDefaults[defaultId]) {
         nextTasks.push(defaults[i]);
       }
     }
     return nextTasks;
   }
 
+  private static syncTaskWorkflowJsonFromConfigFiles(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
+    let synced: WorkflowTask[] = [];
+    for (let i = 0; i < tasks.length; i++) {
+      synced.push(WorkflowStorage.taskWithLatestValidConfig(filesDir, tasks[i]));
+    }
+    return synced;
+  }
+
+  private static taskWithLatestValidConfig(filesDir: string, task: WorkflowTask): WorkflowTask {
+    if (task.configFileName.length === 0) {
+      return task;
+    }
+    try {
+      let rawJson = WorkflowStorage.readText(WorkflowStorage.configPath(filesDir, task.configFileName));
+      WorkflowStorage.validateWorkflowJson(rawJson, false);
+      if (rawJson === task.workflowJson) {
+        return task;
+      }
+      return {
+        id: task.id,
+        sceneId: task.sceneId,
+        icon: task.icon,
+        iconColor: task.iconColor,
+        title: task.title,
+        source: task.source,
+        enabled: task.enabled,
+        configFileName: task.configFileName,
+        workflowJson: rawJson,
+        lastStatus: task.lastStatus,
+        lastRun: task.lastRun,
+        lastMessage: task.lastMessage
+      };
+    } catch (e) {
+      return task;
+    }
+  }
+
+  static readTaskWorkflowJson(filesDir: string, task: WorkflowTask): string {
+    if (task.configFileName.length > 0) {
+      try {
+        return WorkflowStorage.readText(WorkflowStorage.configPath(filesDir, task.configFileName));
+      } catch (e) {
+      }
+    }
+    return task.workflowJson;
+  }
+
+  private static backupBrokenTaskIndex(filesDir: string): void {
+    let path = WorkflowStorage.indexPath(filesDir);
+    try {
+      if (fs.accessSync(path)) {
+        WorkflowStorage.writeText(path + '.broken.' + String(new Date().getTime()), WorkflowStorage.readText(path));
+      }
+    } catch (e) {
+    }
+  }
+
+  private static recoverTasksFromConfigFiles(filesDir: string): WorkflowTask[] {
+    let files = WorkflowStorage.listConfigFiles(filesDir);
+    let recovered: WorkflowTask[] = [];
+    for (let i = 0; i < files.length; i++) {
+      try {
+        let rawJson = WorkflowStorage.readText(files[i].path);
+        let taskId = WorkflowStorage.taskIdFromConfigName(files[i].name);
+        let defaultTask = WorkflowStorage.findDefaultTask(filesDir, taskId);
+        let sceneId = defaultTask ? defaultTask.sceneId : 0;
+        let task = WorkflowStorage.createTaskFromJson(filesDir, sceneId, rawJson, taskId);
+        task.configFileName = files[i].name;
+        if (defaultTask) {
+          task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
+        }
+        recovered.push(task);
+      } catch (e) {
+      }
+    }
+    return recovered;
+  }
+
+  private static taskIdFromConfigName(configName: string): string {
+    let name = configName;
+    let slash = name.lastIndexOf('/');
+    if (slash >= 0 && slash < name.length - 1) {
+      name = name.substring(slash + 1);
+    }
+    if (name.endsWith('.json')) {
+      return name.substring(0, name.length - 5);
+    }
+    return name;
+  }
+
+  private static readDeletedDefaultTaskSet(filesDir: string): Record<string, boolean> {
+    let deleted: Record<string, boolean> = {};
+    try {
+      let parsed = ArkJSON.parse(WorkflowStorage.readText(WorkflowStorage.deletedDefaultsPath(filesDir))) as DeletedDefaultTaskIndex;
+      let ids = parsed.ids || [];
+      for (let i = 0; i < ids.length; i++) {
+        deleted[ids[i]] = true;
+      }
+    } catch (e) {
+    }
+    return deleted;
+  }
+
+  private static writeDeletedDefaultTaskSet(filesDir: string, deleted: Record<string, boolean>): void {
+    let ids = Object.keys(deleted);
+    let index: DeletedDefaultTaskIndex = {
+      ids: ids
+    };
+    WorkflowStorage.writeText(WorkflowStorage.deletedDefaultsPath(filesDir), ArkJSON.stringify(index, null, 2));
+  }
+
+  private static markDefaultTaskDeleted(filesDir: string, taskId: string): void {
+    if (!WorkflowStorage.isCodeDefinedDefaultTaskId(taskId)) {
+      return;
+    }
+    let deleted = WorkflowStorage.readDeletedDefaultTaskSet(filesDir);
+    deleted[taskId] = true;
+    WorkflowStorage.writeDeletedDefaultTaskSet(filesDir, deleted);
+  }
+
+  private static unmarkDefaultTaskDeleted(filesDir: string, taskId: string): void {
+    if (!WorkflowStorage.isCodeDefinedDefaultTaskId(taskId)) {
+      return;
+    }
+    let deleted = WorkflowStorage.readDeletedDefaultTaskSet(filesDir);
+    if (!deleted[taskId]) {
+      return;
+    }
+    let nextDeleted: Record<string, boolean> = {};
+    let ids = Object.keys(deleted);
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i] !== taskId) {
+        nextDeleted[ids[i]] = true;
+      }
+    }
+    WorkflowStorage.writeDeletedDefaultTaskSet(filesDir, nextDeleted);
+  }
+
+  private static clearDeletedDefaultTaskSet(filesDir: string): void {
+    try {
+      fs.unlinkSync(WorkflowStorage.deletedDefaultsPath(filesDir));
+    } catch (e) {
+    }
+  }
+
   private static mergeStoredStateIntoDefaultTask(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
+    let sceneId = storedTask.sceneId >= 0 ? storedTask.sceneId : defaultTask.sceneId;
     return {
       id: defaultTask.id,
-      sceneId: defaultTask.sceneId,
-      icon: defaultTask.icon,
-      iconColor: defaultTask.iconColor,
-      title: defaultTask.title,
-      source: defaultTask.source,
-      enabled: storedTask.enabled === false ? false : defaultTask.enabled,
-      configFileName: defaultTask.configFileName,
-      workflowJson: defaultTask.workflowJson,
+      sceneId: sceneId,
+      icon: WorkflowStorage.nonEmptyOrDefault(storedTask.icon, WorkflowStorage.iconForScene(sceneId)),
+      iconColor: WorkflowStorage.nonEmptyOrDefault(storedTask.iconColor, WorkflowStorage.colorForScene(sceneId)),
+      title: WorkflowStorage.nonEmptyOrDefault(storedTask.title, defaultTask.title),
+      source: WorkflowStorage.nonEmptyOrDefault(storedTask.source, defaultTask.source),
+      enabled: storedTask.enabled === false ? false : storedTask.enabled === true ? true : defaultTask.enabled,
+      configFileName: WorkflowStorage.nonEmptyOrDefault(storedTask.configFileName, defaultTask.configFileName),
+      workflowJson: WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson),
       lastStatus: WorkflowStorage.nonEmptyOrDefault(storedTask.lastStatus, defaultTask.lastStatus),
       lastRun: WorkflowStorage.nonEmptyOrDefault(storedTask.lastRun, defaultTask.lastRun),
       lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage)
@@ -237,13 +412,14 @@ export class WorkflowStorage {
 
   static writeConfig(filesDir: string, task: WorkflowTask): void {
     WorkflowStorage.ensureWorkspace(filesDir);
-    WorkflowStorage.writeText(WorkflowStorage.configDir(filesDir) + '/' + task.configFileName, task.workflowJson);
+    WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, task.configFileName), task.workflowJson);
   }
 
   static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
     let tasks = WorkflowStorage.loadTasks(filesDir);
     let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
     if (defaultTask) {
+      WorkflowStorage.unmarkDefaultTaskDeleted(filesDir, task.id);
       task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
     }
     let found = false;
@@ -258,7 +434,29 @@ export class WorkflowStorage {
       tasks.push(task);
     }
     WorkflowStorage.saveTasks(filesDir, tasks);
-    return tasks;
+    return WorkflowStorage.loadTasks(filesDir);
+  }
+
+  static deleteTask(filesDir: string, taskId: string): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let nextTasks: WorkflowTask[] = [];
+    let configFileName = '';
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        configFileName = tasks[i].configFileName;
+      } else {
+        nextTasks.push(tasks[i]);
+      }
+    }
+    WorkflowStorage.markDefaultTaskDeleted(filesDir, taskId);
+    WorkflowStorage.saveTasks(filesDir, nextTasks);
+    if (configFileName.length > 0) {
+      try {
+        fs.unlinkSync(WorkflowStorage.configPath(filesDir, configFileName));
+      } catch (e) {
+      }
+    }
+    return nextTasks;
   }
 
   static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): void {
@@ -275,7 +473,7 @@ export class WorkflowStorage {
   }
 
   static createTaskFromJson(filesDir: string, sceneId: number, rawJson: string, existingId?: string): WorkflowTask {
-    let workflow = WorkflowStorage.validateWorkflowJson(rawJson);
+    let workflow = WorkflowStorage.validateWorkflowJson(rawJson, false);
     let metadata = workflow.metadata;
     let title = metadata && metadata.description ? metadata.description : '自定义 Workflow';
     let source = metadata && metadata.name ? metadata.name : 'workflow';
@@ -780,9 +978,33 @@ export class WorkflowStorage {
     return deleted;
   }
 
+  private static taskMatchesConfigFile(filesDir: string, task: WorkflowTask, file: WorkflowManagedFile): boolean {
+    return task.configFileName === file.name || WorkflowStorage.configPath(filesDir, task.configFileName) === file.path;
+  }
+
+  static deleteConfigManagedFile(filesDir: string, file: WorkflowManagedFile): number {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    for (let i = 0; i < tasks.length; i++) {
+      if (WorkflowStorage.taskMatchesConfigFile(filesDir, tasks[i], file)) {
+        WorkflowStorage.deleteTask(filesDir, tasks[i].id);
+        return 1;
+      }
+    }
+    return WorkflowStorage.deleteManagedFile(file);
+  }
+
+  static deleteConfigManagedFiles(filesDir: string, files: WorkflowManagedFile[]): number {
+    let deleted = 0;
+    for (let i = 0; i < files.length; i++) {
+      deleted += WorkflowStorage.deleteConfigManagedFile(filesDir, files[i]);
+    }
+    return deleted;
+  }
+
   static deleteConfigs(filesDir: string): number {
     let deleted = WorkflowStorage.deletePathRecursively(WorkflowStorage.configDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.configDir(filesDir));
+    WorkflowStorage.clearDeletedDefaultTaskSet(filesDir);
     let tasks = WorkflowStorage.createDefaultTasks(filesDir);
     WorkflowStorage.saveTasks(filesDir, tasks);
     return deleted;

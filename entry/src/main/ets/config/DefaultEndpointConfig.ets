@@ -41,7 +41,7 @@ export interface LegacyEndpointConfig {
 }
 
 export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
-  wirelessHdcTarget: '192.168.137.205:33117',
+  wirelessHdcTarget: '192.168.137.81:33117',
   modelDownloadServerUrl: 'http://166.111.53.96:9123',
   hdcServerUrl: 'http://192.168.137.1:9124',
   cloudPlannerBaseUrl: 'http://166.111.53.96:7003',
@@ -53,7 +53,7 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
 
 export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
   wirelessHdcTargets: [
-    '192.168.137.195:33117',
+    '192.168.137.21:33117',
     '101.5.155.98:35729',
     '192.168.137.172:35963',
     '192.168.137.55:35963',

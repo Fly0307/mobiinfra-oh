@@ -1831,8 +1831,7 @@ struct Index {
         TabContent() {
           TaskPage({
             taskScene: $taskScene,
-            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
-            onOpenCloudLog: () => { this.currentTab = 3; }
+            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
           })
         }.tabBar(this.TabItem('T', '任务', 4))
       }

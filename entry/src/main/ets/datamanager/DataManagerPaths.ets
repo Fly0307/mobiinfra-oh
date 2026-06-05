@@ -5,6 +5,7 @@ import {
   INDEXES_DIR_NAME,
   OUTPUTS_DIR_NAME,
   PROFILE_CONSOLIDATION_DIR_NAME,
+  HOME_RECOMMENDATIONS_FILE_NAME,
   WORKFLOW_RUNS_DIR_NAME
 } from './DataManagerTypes';
 import { DataManagerStorage } from './DataManagerStorage';
@@ -72,6 +73,10 @@ export class DataManagerPaths {
 
   collectionGroupsPath(tabId: string): string {
     return this.storage.join(this.collectionGroupsRoot, tabId + '.json');
+  }
+
+  homeRecommendationsPath(): string {
+    return this.storage.join(this.indexesRoot, HOME_RECOMMENDATIONS_FILE_NAME);
   }
 
   relativeToDataManager(path: string): string {

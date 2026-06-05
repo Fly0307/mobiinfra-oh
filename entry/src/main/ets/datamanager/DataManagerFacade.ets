@@ -4,21 +4,23 @@ import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { ConsolidationService } from './ConsolidationService';
 import { IndexService } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
+import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
+import { DataManagerImageResolver } from './DataManagerImageResolver';
 import {
   CollectionEventViewModel,
   CollectionGroupState,
   CollectionGroupViewModel,
+  CollectionImageViewModel,
   CollectionInsightViewModel,
   CollectionRowViewModel,
   CollectionViewModel,
   ConsolidatedState,
   DataManagerModelConfig,
   DOMAIN_DISPLAY_NAMES,
-  DOMAIN_KEYS,
-  DATA_MANAGER_CLEAR_REQUEST_FILE_NAME,
   HomeDomainViewModel,
   HomeProfileViewModel,
+  HomeRecommendationState,
   HomeRecommendationViewModel,
   IndexedEvent,
   ProfileClaim,
@@ -33,6 +35,7 @@ import {
 } from './DataManagerTypes';
 import {
   displayDomainName,
+  monthKeyFromDate,
   normalizeFreeText,
   nowIsoLocal,
   parseDailyLogDocument,
@@ -40,8 +43,8 @@ import {
   profileShortSummaryFromText,
   sourceAppDisplayName,
   sourceDisplayName,
-  stableUnique,
-  summarizeText
+  sourceRef,
+  stableUnique
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -85,10 +88,7 @@ function defaultHomeDomains(): HomeDomainViewModel[] {
 }
 
 function defaultRecommendations(): HomeRecommendationViewModel[] {
-  let eat: HomeRecommendationViewModel = { id: 'empty-eat', domain: 'eat', tag: '画像待更新', title: '导入 daily-log 后生成画像', desc: '同步后展示真实偏好', meta: '0 条证据', color: '#39C2A2' };
-  let travel: HomeRecommendationViewModel = { id: 'empty-travel', domain: 'travel', tag: '采集待整理', title: '采集记录会在这里汇总', desc: '按吃穿住行生成推荐', meta: '本地索引', color: '#4B9BFF' };
-  let work: HomeRecommendationViewModel = { id: 'empty-work', domain: 'work', tag: '隐私本地', title: '数据保存在应用内部空间', desc: '导入导出不依赖绝对路径', meta: 'workflows', color: '#8066FF' };
-  return [eat, travel, work];
+  return [];
 }
 
 function emptyCollectionViewModel(index: number): CollectionViewModel {
@@ -120,6 +120,8 @@ export class DataManagerFacade {
   private consolidationService: ConsolidationService;
   private indexService: IndexService;
   private collectionGroupingService: CollectionGroupingService;
+  private homeRecommendationService: HomeRecommendationService;
+  private imageResolver: DataManagerImageResolver;
 
   constructor(filesDir: string) {
     this.storage = new DataManagerStorage();
@@ -128,11 +130,12 @@ export class DataManagerFacade {
     this.consolidationService = new ConsolidationService(this.paths, this.storage, this.modelClient);
     this.indexService = new IndexService(this.paths, this.storage, this.modelClient);
     this.collectionGroupingService = new CollectionGroupingService(this.paths, this.storage, this.modelClient, this.indexService);
+    this.homeRecommendationService = new HomeRecommendationService(this.paths, this.storage, this.modelClient, this.indexService);
+    this.imageResolver = new DataManagerImageResolver(this.paths, this.storage);
   }
 
   ensureReady(): void {
     this.paths.ensureBaseDirs();
-    this.applyPendingClearRequest();
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
   }
 
@@ -149,20 +152,6 @@ export class DataManagerFacade {
     return false;
   }
 
-  private applyPendingClearRequest(): void {
-    let markerPath = this.storage.join(this.paths.rootDir, DATA_MANAGER_CLEAR_REQUEST_FILE_NAME);
-    if (!this.storage.exists(markerPath)) {
-      return;
-    }
-    dataManagerInfo('DataManagerFacade clear request detected: ' + markerPath);
-    this.storage.removeFile(markerPath);
-    this.storage.removeTree(this.paths.dailyLogRoot);
-    this.storage.removeTree(this.paths.consolidationRoot);
-    this.storage.removeTree(this.paths.workflowRunsRoot);
-    this.paths.ensureBaseDirs();
-    dataManagerInfo('DataManagerFacade clear request applied');
-  }
-
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
     this.ensureReady();
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
@@ -173,11 +162,38 @@ export class DataManagerFacade {
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
       this.emitProgress(progress, '索引', '正在更新采集分组', 96, 100, 96);
       let groups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
+      let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
-      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}`);
+      if (groups.updatedGroupDocs > 0 || !recommendations.reused) {
+        skipped.skipped = false;
+        skipped.message = `daily-log 无新增，补充更新 ${groups.updatedGroupDocs} 个采集分组，生成 ${recommendations.recommendationCount} 条待办推荐`;
+      }
+      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}`);
       this.emitProgress(progress, '完成', 'daily-log 无新增', 100, 100, 100);
       return skipped;
+    }
+    if (this.canRecoverIndexesFromConsolidatedOutputs(previousSnapshot, currentSnapshot)) {
+      this.emitProgress(progress, '索引', '已整理日志存在，正在重建索引', 0, 100, 60);
+      dataManagerInfo(`DataManagerFacade index recovery start: dailyEntries=${currentSnapshot.entry_count}, outputsRoot=${this.paths.outputsRoot}`);
+      let index = await this.indexService.build(modelConfig, progress);
+      dataManagerInfo(`DataManagerFacade index recovery done: sourceFiles=${index.sourceFiles}, eventCount=${index.eventCount}, profileClaimCount=${index.profileClaimCount}`);
+      this.emitProgress(progress, '索引', '正在生成采集分组', 96, 100, 96);
+      let collectionGroups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
+      dataManagerInfo(`DataManagerFacade recovery collection groups done: tabs=${collectionGroups.tabCount}, groups=${collectionGroups.groupCount}, events=${collectionGroups.eventCount}, reused=${collectionGroups.reusedGroupDocs}, updated=${collectionGroups.updatedGroupDocs}`);
+      let recommendations: HomeRecommendationBuildResult = await this.homeRecommendationService.build(groupingConfig, progress);
+      dataManagerInfo(`DataManagerFacade recovery home recommendations done: events=${recommendations.totalEvents}, recommendations=${recommendations.recommendationCount}, reused=${recommendations.reused}`);
+      this.writeDailyLogSnapshot(currentSnapshot);
+      this.emitProgress(progress, '完成', `重建 ${index.eventCount} 条索引事件`, 100, 100, 100);
+      return {
+        dailyEntryCount: currentSnapshot.entry_count,
+        consolidatedRecordCount: this.countConsolidatedRecords(),
+        eventCount: index.eventCount,
+        profileClaimCount: index.profileClaimCount,
+        updatedAt: index.updatedAt,
+        message: `基于已整理日志重建 ${index.eventCount} 条索引事件`,
+        skipped: false
+      };
     }
     let consolidation = await this.consolidationService.consolidateAll(modelConfig, 5, progress);
     this.emitProgress(progress, '索引', '开始构建索引', 0, 100, 60);
@@ -187,6 +203,8 @@ export class DataManagerFacade {
     this.emitProgress(progress, '索引', '正在生成采集分组', 96, 100, 96);
     let collectionGroups = await this.collectionGroupingService.buildAll(groupingConfig, progress);
     dataManagerInfo(`DataManagerFacade collection groups done: tabs=${collectionGroups.tabCount}, groups=${collectionGroups.groupCount}, events=${collectionGroups.eventCount}, reused=${collectionGroups.reusedGroupDocs}, updated=${collectionGroups.updatedGroupDocs}`);
+    let recommendations: HomeRecommendationBuildResult = await this.homeRecommendationService.build(groupingConfig, progress);
+    dataManagerInfo(`DataManagerFacade home recommendations done: events=${recommendations.totalEvents}, recommendations=${recommendations.recommendationCount}, reused=${recommendations.reused}`);
     this.writeDailyLogSnapshot(currentSnapshot);
     this.emitProgress(progress, '完成', `生成 ${index.eventCount} 条索引事件`, 100, 100, 100);
     return {
@@ -218,6 +236,10 @@ export class DataManagerFacade {
   }
 
   private dailyLogSnapshotPath(): string {
+    return this.storage.join(this.paths.consolidationRoot, DAILY_LOG_SNAPSHOT_FILE_NAME);
+  }
+
+  private legacyDailyLogSnapshotPath(): string {
     return this.storage.join(this.paths.indexesRoot, DAILY_LOG_SNAPSHOT_FILE_NAME);
   }
 
@@ -262,6 +284,9 @@ export class DataManagerFacade {
 
   private loadDailyLogSnapshot(): DailyLogSnapshot {
     let snapshot = this.storage.readJson<DailyLogSnapshot>(this.dailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
+    if (snapshot.tree_hash.length === 0 && !this.storage.exists(this.dailyLogSnapshotPath())) {
+      snapshot = this.storage.readJson<DailyLogSnapshot>(this.legacyDailyLogSnapshotPath(), this.emptyDailyLogSnapshot());
+    }
     if (!snapshot || !Array.isArray(snapshot.files)) {
       return this.emptyDailyLogSnapshot();
     }
@@ -289,6 +314,117 @@ export class DataManagerFacade {
     let profile = this.indexService.loadProfileState();
     let eventCount = Object.keys(this.indexService.loadEvents()).length;
     return eventCount > 0 && profile.event_count > 0;
+  }
+
+  private canRecoverIndexesFromConsolidatedOutputs(previous: DailyLogSnapshot, snapshot: DailyLogSnapshot): boolean {
+    if (snapshot.entry_count === 0) {
+      return false;
+    }
+    if (this.sameDailyLogSnapshot(previous, snapshot) && this.hasConsolidatedOutputFilesForSnapshot(snapshot)) {
+      dataManagerInfo(`DataManagerFacade index recovery available from persisted snapshot: entries=${snapshot.entry_count}`);
+      return true;
+    }
+    let coveredEntries = 0;
+    let stateCache: Record<string, ConsolidatedState> = new Object() as Record<string, ConsolidatedState>;
+    let dayDirs = this.storage.listDir(this.paths.dailyLogRoot)
+      .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name));
+    for (let day of dayDirs) {
+      let month = monthKeyFromDate(day);
+      if (month.length === 0) {
+        return false;
+      }
+      let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
+      let files = this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md'));
+      for (let fileName of files) {
+        let stateKey = month + '\u001f' + fileName;
+        if (!stateCache[stateKey]) {
+          let statePath = this.paths.outputStatePath(month, fileName);
+          if (!this.storage.exists(statePath)) {
+            dataManagerInfo(`DataManagerFacade index recovery unavailable: missing state=${statePath}`);
+            return false;
+          }
+          stateCache[stateKey] = this.readConsolidatedStateForCoverage(statePath);
+        }
+        let state = stateCache[stateKey];
+        let processed = state.metadata.processed_entry_hashes || createStringMap();
+        let processedRefs: Record<string, boolean> = new Object() as Record<string, boolean>;
+        (state.records || []).forEach((record) => {
+          (record.source_refs || []).forEach((ref: string) => processedRefs[ref] = true);
+        });
+        let path = this.storage.join(dayDir, fileName);
+        let content = this.storage.readText(path, '');
+        if (content.length === 0) {
+          continue;
+        }
+        let document = parseDailyLogDocument(content);
+        let numberedEntries = parseNumberedEntries(document.body);
+        for (let item of numberedEntries) {
+          let index = Number(item.index);
+          let text = normalizeFreeText(item.text);
+          if (text.length === 0 || isNaN(index)) {
+            continue;
+          }
+          let ref = sourceRef(day, fileName, index);
+          let currentHash = this.storage.sha256Text(text);
+          let previousHash = processed[ref] || '';
+          let covered = previousHash.length > 0 ? previousHash === currentHash : processedRefs[ref] === true;
+          if (!covered) {
+            dataManagerInfo(`DataManagerFacade index recovery unavailable: uncovered ref=${ref}, hasHash=${previousHash.length > 0}`);
+            return false;
+          }
+          coveredEntries++;
+        }
+      }
+    }
+    let canRecover = coveredEntries === snapshot.entry_count && coveredEntries > 0;
+    if (canRecover) {
+      dataManagerInfo(`DataManagerFacade index recovery available: coveredEntries=${coveredEntries}`);
+    }
+    return canRecover;
+  }
+
+  private sameDailyLogSnapshot(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+    return previous.tree_hash.length > 0 && previous.tree_hash === current.tree_hash &&
+      previous.file_count === current.file_count && previous.entry_count === current.entry_count;
+  }
+
+  private hasConsolidatedOutputFilesForSnapshot(snapshot: DailyLogSnapshot): boolean {
+    for (let file of snapshot.files || []) {
+      let parts = file.path.split('/');
+      if (parts.length < 2) {
+        return false;
+      }
+      let day = parts[0];
+      let fileName = parts[parts.length - 1];
+      let month = monthKeyFromDate(day);
+      if (month.length === 0) {
+        return false;
+      }
+      let statePath = this.paths.outputStatePath(month, fileName);
+      if (!this.storage.exists(statePath)) {
+        dataManagerInfo(`DataManagerFacade index recovery unavailable: snapshot state missing=${statePath}`);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private readConsolidatedStateForCoverage(statePath: string): ConsolidatedState {
+    return this.storage.readJson<ConsolidatedState>(statePath, {
+      metadata: {
+        source_date_range: createStringMap(),
+        source_files: [],
+        processed_entry_hashes: createStringMap(),
+        latest_record_index: 0,
+        dedup_window_size: 0,
+        updated_at: '',
+        total_records: 0,
+        month: '',
+        recent_match_days: 7,
+        recent_match_max_records: 100
+      },
+      records: []
+    });
   }
 
   private skippedRefreshSummary(snapshot: DailyLogSnapshot): RefreshSummary {
@@ -347,13 +483,13 @@ export class DataManagerFacade {
       };
       return domain;
     });
-    let recommendations = this.profileRecommendations(profile);
+    let recommendations = this.homeRecommendations();
     return {
       updatedLabel: this.lastSyncLabel([]),
       completeness: this.profileCompleteness(profile),
       totalEvents: profile.event_count,
       domains: domains,
-      recommendations: recommendations.length > 0 ? recommendations : defaultRecommendations(),
+      recommendations: recommendations,
       empty: false
     };
   }
@@ -433,15 +569,28 @@ export class DataManagerFacade {
     let primaryDomain = event.domains.length > 0 ? event.domains[0] : 'other';
     let fullText = normalizeFreeText(event.normalized_fact || event.summary);
     let summary = normalizeFreeText(event.summary || event.normalized_fact);
+    let images: CollectionImageViewModel[] = this.imageResolver.resolveAll(event.image_paths || []);
+    let thumbnailUri = '';
+    for (let image of images) {
+      if (image.available && image.uri.length > 0) {
+        thumbnailUri = image.uri;
+        break;
+      }
+    }
     let row: CollectionEventViewModel = {
       id: event.event_id,
       summary: summary,
       fullText: fullText.length > 0 ? fullText : summary,
+      normalizedFact: fullText.length > 0 ? fullText : summary,
       source: event.sources.length > 0 ? event.sources.join('、') : sourceDisplayName(event.source_state_file),
       time: event.event_date,
+      firstSeenTime: event.event_date,
+      lastSeenTime: event.last_seen_date,
       meta: this.eventMeta(event),
       status: '已整理',
-      domain: primaryDomain
+      domain: primaryDomain,
+      imageRefs: images,
+      thumbnailUri: thumbnailUri
     };
     return row;
   }
@@ -461,6 +610,7 @@ export class DataManagerFacade {
       }
       events.push(this.collectionEventView(event));
     });
+    let thumbnailUri = this.collectionGroupThumbnail(events);
     let view: CollectionGroupViewModel = {
       id: group.group_id,
       title: group.title,
@@ -470,9 +620,19 @@ export class DataManagerFacade {
       status: group.status.length > 0 ? group.status : '已整理',
       domain: group.domain,
       eventCount: events.length,
+      thumbnailUri: thumbnailUri,
       events: events
     };
     return view;
+  }
+
+  private collectionGroupThumbnail(events: CollectionEventViewModel[]): string {
+    for (let event of events) {
+      if (event.thumbnailUri.length > 0) {
+        return event.thumbnailUri;
+      }
+    }
+    return '';
   }
 
   private collectionGroupAppSource(group: CollectionGroupState, eventMap: Record<string, IndexedEvent>): string {
@@ -658,7 +818,7 @@ export class DataManagerFacade {
     return Math.min(100, score);
   }
 
-  private profileRecommendations(profile: ProfileState): HomeRecommendationViewModel[] {
+  private homeRecommendations(): HomeRecommendationViewModel[] {
     let colors: StringMap = createStringMap();
     colors['eat'] = '#39C2A2';
     colors['wear'] = '#7669FF';
@@ -666,27 +826,201 @@ export class DataManagerFacade {
     colors['travel'] = '#4B9BFF';
     colors['work'] = '#8066FF';
     colors['other'] = '#8B93A4';
-    let result: HomeRecommendationViewModel[] = [];
-    DOMAIN_KEYS.forEach((domain: string) => {
-      let doc = profile.domains[domain];
-      let claims = doc ? (doc.claims || []) : [];
-      if (!doc || claims.length === 0) {
-        return;
-      }
-      claims.slice(0, 2).forEach((claim: ProfileClaim, index: number) => {
-        let recommendation: HomeRecommendationViewModel = {
-          id: domain + '-' + index,
-          domain: domain,
-          tag: `${DOMAIN_DISPLAY_NAMES[domain] || domain}画像`,
-          title: summarizeText(claim.statement, 18),
-          desc: normalizeFreeText(claim.example) || doc.summary || `${doc.event_count} 条事件支持`,
-          meta: `${claim.evidence_count} 条证据`,
-          color: colors[domain] || '#8066FF'
-        };
-        result.push(recommendation);
-      });
+    let document = this.homeRecommendationService.loadDocument();
+    let allEventIds: string[] = [];
+    (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      allEventIds = allEventIds.concat(item.source_event_ids || []);
     });
-    return result.slice(0, 6);
+    let eventMap = this.indexService.loadEventsByIds(stableUnique(allEventIds));
+    let result: HomeRecommendationViewModel[] = [];
+    (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      let domain = normalizeFreeText(item.domain) || 'other';
+      let recommendation: HomeRecommendationViewModel = {
+        id: normalizeFreeText(item.id),
+        domain: domain,
+        tag: this.recommendationTag(item.tag, item.source_event_ids || [], eventMap),
+        title: normalizeFreeText(item.title),
+        desc: normalizeFreeText(item.desc),
+        meta: this.recommendationMeta(item.meta),
+        color: colors[domain] || '#8066FF',
+        thumbnailUri: this.recommendationThumbnail(item, eventMap),
+        sourceEventIds: (item.source_event_ids || []).slice(),
+        detail: this.recommendationDetail(item, eventMap)
+      };
+      if (recommendation.id.length > 0 && recommendation.title.length > 0) {
+        result.push(recommendation);
+      }
+    });
+    return result;
+  }
+
+  private recommendationTag(value: string, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
+    let tag = normalizeFreeText(value);
+    if (tag.length >= 2 && tag.length <= 6) {
+      return tag;
+    }
+    return this.todoTypeTag(this.firstTodoType(eventIds, eventMap), this.hasRecommendationDeadline(eventIds, eventMap));
+  }
+
+  private firstTodoType(eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
+    for (let id of eventIds) {
+      let event = eventMap[id];
+      let type = event ? normalizeFreeText(event.todo.type) : '';
+      if (type.length > 0) {
+        return type;
+      }
+    }
+    return '';
+  }
+
+  private todoTypeTag(type: string, hasDeadline: boolean): string {
+    if (type === 'buy') {
+      return '待购买';
+    }
+    if (type === 'compare') {
+      return '待比价';
+    }
+    if (type === 'pay') {
+      return '待付款';
+    }
+    if (type === 'refund') {
+      return '待退款';
+    }
+    if (type === 'pickup') {
+      return '待取件';
+    }
+    if (type === 'after_sale') {
+      return '售后跟进';
+    }
+    if (type === 'order') {
+      return '待下单';
+    }
+    if (type === 'reorder') {
+      return '待复购';
+    }
+    if (type === 'complain') {
+      return '待反馈';
+    }
+    if (type === 'watch') {
+      return '待观看';
+    }
+    if (type === 'renew') {
+      return '待续费';
+    }
+    if (type === 'book') {
+      return '待预订';
+    }
+    if (type === 'join') {
+      return '待参与';
+    }
+    if (type === 'repair') {
+      return '待维修';
+    }
+    if (type === 'appointment') {
+      return '待预约';
+    }
+    if (type === 'prepare') {
+      return '待准备';
+    }
+    if (type === 'contact') {
+      return '待联系';
+    }
+    if (type === 'gift') {
+      return '待送礼';
+    }
+    if (type === 'plan') {
+      return '待安排';
+    }
+    if (type === 'attend') {
+      return '待出席';
+    }
+    if (type === 'depart') {
+      return '待出发';
+    }
+    if (type === 'check_in') {
+      return '待入住';
+    }
+    if (type === 'reimburse') {
+      return '待报销';
+    }
+    if (type === 'follow_up') {
+      return '待跟进';
+    }
+    if (hasDeadline) {
+      return '日程提醒';
+    }
+    return '待处理';
+  }
+
+  private hasRecommendationDeadline(eventIds: string[], eventMap: Record<string, IndexedEvent>): boolean {
+    for (let id of eventIds) {
+      let event = eventMap[id];
+      if (event && /^\d{4}-\d{2}-\d{2}$/.test(normalizeFreeText(event.todo.deadline))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private recommendationMeta(value: string): string {
+    let meta = normalizeFreeText(value);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(meta) || /^\d{1,2}-\d{1,2}(\s+\d{1,2}:\d{2})?$/.test(meta)) {
+      return '';
+    }
+    return meta;
+  }
+
+  private recommendationDetail(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string {
+    let lines: string[] = [];
+    let desc = normalizeFreeText(item.desc);
+    if (desc.length > 0) {
+      lines.push(desc);
+    }
+    let meta = this.recommendationMeta(item.meta);
+    if (meta.length > 0) {
+      lines.push('信息：' + meta);
+    }
+    let evidence: string[] = [];
+    for (let eventId of item.source_event_ids || []) {
+      let event = eventMap[eventId];
+      if (!event) {
+        continue;
+      }
+      let todoText = normalizeFreeText(event.todo.text);
+      if (todoText.length > 0) {
+        evidence.push(todoText);
+      }
+      let text = normalizeFreeText(event.normalized_fact || event.summary);
+      if (text.length > 0) {
+        evidence.push(text);
+      }
+      if (evidence.length >= 3) {
+        break;
+      }
+    }
+    if (evidence.length > 0) {
+      lines.push('相关记录');
+      evidence.forEach((text: string) => {
+        lines.push(text);
+      });
+    }
+    return lines.join('\n');
+  }
+
+  private recommendationThumbnail(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string {
+    for (let eventId of item.source_event_ids || []) {
+      let event = eventMap[eventId];
+      if (!event) {
+        continue;
+      }
+      let images: CollectionImageViewModel[] = this.imageResolver.resolveAll(event.image_paths || []);
+      for (let image of images) {
+        if (image.available && image.uri.length > 0) {
+          return image.uri;
+        }
+      }
+    }
+    return '';
   }
 }
 

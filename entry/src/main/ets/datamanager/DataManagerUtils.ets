@@ -1028,3 +1028,37 @@ export function displayDomainName(domain: string): string {
   return DOMAIN_DISPLAY_NAMES[domain] || domain;
 }
 
+export type DataManagerAsyncTask<T> = () => Promise<T>;
+
+interface DataManagerTaskCursor {
+  nextIndex: number;
+}
+
+async function runLimitedTaskWorker<T>(tasks: DataManagerAsyncTask<T>[], results: T[], cursor: DataManagerTaskCursor): Promise<void> {
+  while (true) {
+    let index = cursor.nextIndex;
+    cursor.nextIndex++;
+    if (index >= tasks.length) {
+      return;
+    }
+    results[index] = await tasks[index]();
+  }
+}
+
+export async function runLimitedTasks<T>(tasks: DataManagerAsyncTask<T>[], concurrency: number): Promise<T[]> {
+  let results: T[] = [];
+  if (tasks.length === 0) {
+    return results;
+  }
+  let limit = Math.max(1, Math.min(concurrency, tasks.length));
+  let cursor: DataManagerTaskCursor = {
+    nextIndex: 0
+  };
+  let workers: Promise<void>[] = [];
+  for (let index = 0; index < limit; index++) {
+    workers.push(runLimitedTaskWorker(tasks, results, cursor));
+  }
+  await Promise.all(workers);
+  return results;
+}
+

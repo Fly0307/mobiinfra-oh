@@ -17,6 +17,7 @@ import {
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
 const MAX_GUI_STEPS = 15;
+const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 interface PlannerResult {
   appName: string;
@@ -86,6 +87,7 @@ interface ToolOutput {
   daily_log_path?: string;
   structured_output?: WorkflowJsonMap;
   deferred?: boolean;
+  deferred_error?: string;
 }
 
 interface SummaryJobResult {
@@ -93,6 +95,13 @@ interface SummaryJobResult {
   actual_id: string;
   response: string;
   error: string;
+}
+
+interface PendingSummaryJob {
+  actual_id: string;
+  prompt: string;
+  image: string;
+  promise: Promise<SummaryJobResult>;
 }
 
 interface LoopRuntimeValue {
@@ -172,7 +181,7 @@ export class WorkflowRunner {
   private currentAppName: string = '';
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
-  private pendingSummaryJobs: Promise<SummaryJobResult>[] = [];
+  private pendingSummaryJobs: PendingSummaryJob[] = [];
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
     hdcServerIp: string, logHandler: (message: string) => void) {
@@ -230,14 +239,7 @@ export class WorkflowRunner {
       this.log('Workflow 失败：' + message);
     }
 
-    let summary: WorkflowRunSummary = {
-      workflow_file: this.workflowFile,
-      run_dir: this.runDir,
-      context: this.contextValues,
-      status: status,
-      steps: this.stepResults
-    };
-    WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
+    this.writeRunSummary(status);
 
     returnedToApp = await this.returnToHostApp();
     if (returnedToApp) {
@@ -259,6 +261,20 @@ export class WorkflowRunner {
       dailyLogPath: this.latestDailyLogPath,
       returnedToApp: returnedToApp
     };
+  }
+
+  private writeRunSummary(status: string): void {
+    if (this.runDir.length === 0) {
+      return;
+    }
+    let summary: WorkflowRunSummary = {
+      workflow_file: this.workflowFile,
+      run_dir: this.runDir,
+      context: this.contextValues,
+      status: status,
+      steps: this.stepResults
+    };
+    WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
   }
 
   private async returnToHostApp(): Promise<boolean> {
@@ -613,7 +629,7 @@ export class WorkflowRunner {
     }
     if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
-      this.pendingSummaryJobs.push(this.startSummaryJob(actualId, prompt, image));
+      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, image));
       let deferredOutput: ToolOutput = {
         step_dir: this.stepDir(actualId),
         tool_name: toolName,
@@ -646,15 +662,24 @@ export class WorkflowRunner {
     return output as Object as WorkflowJsonMap;
   }
 
+  private createSummaryJob(actualId: string, prompt: string, image: string): PendingSummaryJob {
+    return {
+      actual_id: actualId,
+      prompt: prompt,
+      image: image,
+      promise: this.startSummaryJob(actualId, prompt, image)
+    };
+  }
+
   private async startSummaryJob(actualId: string, prompt: string, image: string): Promise<SummaryJobResult> {
     try {
       let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
-      return {
+      return this.normalizeSummaryJobResult({
         ok: true,
         actual_id: actualId,
         response: response,
         error: ''
-      };
+      });
     } catch (e) {
       let err = e as Error;
       return {
@@ -666,6 +691,29 @@ export class WorkflowRunner {
     }
   }
 
+  private normalizeSummaryJobResult(result: SummaryJobResult): SummaryJobResult {
+    if (result.ok && result.response.trim().length === 0) {
+      return {
+        ok: false,
+        actual_id: result.actual_id,
+        response: '',
+        error: 'empty VLM summary response'
+      };
+    }
+    return result;
+  }
+
+  private async resolveSummaryJob(job: PendingSummaryJob): Promise<SummaryJobResult> {
+    let result = await job.promise;
+    let retries = 0;
+    while (!result.ok && retries < SUMMARY_JOB_RETRY_LIMIT && !AgentExecutionController.isCancelRequested()) {
+      retries++;
+      this.log('VLM QA deferred retry (' + job.actual_id + ') #' + String(retries) + ': ' + result.error);
+      result = await this.startSummaryJob(job.actual_id, job.prompt, job.image);
+    }
+    return result;
+  }
+
   private async flushPendingSummaryJobs(): Promise<void> {
     if (this.pendingSummaryJobs.length === 0) {
       return;
@@ -674,15 +722,31 @@ export class WorkflowRunner {
     AgentExecutionController.updateFloatText('Workflow 写入 summary daily-log');
     let jobs = this.pendingSummaryJobs;
     this.pendingSummaryJobs = [];
+    let failures: string[] = [];
     for (let i = 0; i < jobs.length; i++) {
-      let result = await jobs[i];
+      let result = await this.resolveSummaryJob(jobs[i]);
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
         let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(result.response));
-        this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
+        if (dailyLogPath.length > 0) {
+          this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
+          this.writeRunSummary('running');
+        } else {
+          let error = 'empty daily-log path after VLM summary';
+          this.log('VLM QA deferred failed (' + result.actual_id + '): ' + error);
+          this.markDeferredSummaryFailed(result.actual_id, error);
+          this.writeRunSummary('running');
+          failures.push(result.actual_id + ': ' + error);
+        }
       } else {
         this.log('VLM QA deferred failed (' + result.actual_id + '): ' + result.error);
+        this.markDeferredSummaryFailed(result.actual_id, result.error);
+        this.writeRunSummary('running');
+        failures.push(result.actual_id + ': ' + result.error);
       }
+    }
+    if (failures.length > 0) {
+      throw new Error('VLM QA deferred summary failed: ' + failures.join('; '));
     }
   }
 
@@ -695,7 +759,31 @@ export class WorkflowRunner {
     output.response = response;
     output.daily_log_path = dailyLogPath;
     output.deferred = false;
+    output.deferred_error = '';
     result.output = output as Object as WorkflowJsonMap;
+    this.refreshStepFinishedTime(result);
+  }
+
+  private markDeferredSummaryFailed(actualId: string, error: string): void {
+    let result = this.stepResults[actualId];
+    if (!result) {
+      return;
+    }
+    let output = result.output as Object as ToolOutput;
+    output.response = 'summary_failed';
+    output.daily_log_path = '';
+    output.deferred = false;
+    output.deferred_error = error;
+    result.output = output as Object as WorkflowJsonMap;
+    result.status = 'failed';
+    result.error = 'Deferred VLM summary failed: ' + error;
+    this.refreshStepFinishedTime(result);
+  }
+
+  private refreshStepFinishedTime(result: WorkflowStepResult): void {
+    let finished = new Date().getTime() / 1000;
+    result.finished_at = finished;
+    result.duration_sec = Math.round((finished - result.started_at) * 1000) / 1000;
   }
 
   private async runLoop(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {

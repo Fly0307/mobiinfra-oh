@@ -634,11 +634,13 @@ export class WorkflowRunner {
       question: question,
       response: response
     };
+    let structuredOutput: WorkflowJsonMap | undefined = undefined;
     if (requiresStructuredOutput) {
-      output.structured_output = this.extractJsonMap(response);
+      structuredOutput = this.extractJsonMap(response);
+      output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
-      let dailyLogPath = this.appendDailySummaryLog(response);
+      let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(response, structuredOutput));
       output.daily_log_path = dailyLogPath;
     }
     return output as Object as WorkflowJsonMap;
@@ -676,7 +678,7 @@ export class WorkflowRunner {
       let result = await jobs[i];
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
-        let dailyLogPath = this.appendDailySummaryLog(result.response);
+        let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(result.response));
         this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
       } else {
         this.log('VLM QA deferred failed (' + result.actual_id + '): ' + result.error);
@@ -985,6 +987,35 @@ export class WorkflowRunner {
     this.latestDailyLogPath = path;
     this.log('daily-log 已写入：' + path);
     return path;
+  }
+
+  private summaryLogText(response: string, structuredOutput?: WorkflowJsonMap): string {
+    let structuredSummary = this.structuredSummaryText(structuredOutput);
+    if (structuredSummary.length > 0) {
+      return structuredSummary;
+    }
+    let jsonSummary = this.summaryFromJsonText(response);
+    if (jsonSummary.length > 0) {
+      return jsonSummary;
+    }
+    return response.trim();
+  }
+
+  private structuredSummaryText(output?: WorkflowJsonMap): string {
+    if (!output) {
+      return '';
+    }
+    let summary = output['summary'];
+    return typeof summary === 'string' ? summary.trim() : '';
+  }
+
+  private summaryFromJsonText(raw: string): string {
+    try {
+      let parsed = ArkJSON.parse(this.normalizeJsonText(raw)) as WorkflowJsonMap;
+      return this.structuredSummaryText(parsed);
+    } catch (e) {
+      return '';
+    }
   }
 
   private buildDailyLogFileName(): string {

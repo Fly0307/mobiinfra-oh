@@ -1,7 +1,8 @@
 import { AppHeader } from '../../components/AppHeader';
 import {
   HomeDomainViewModel,
-  HomeProfileViewModel
+  HomeProfileViewModel,
+  HomeRecommendationViewModel
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
 import { promptAction } from '@kit.ArkUI';
@@ -10,6 +11,8 @@ import { promptAction } from '@kit.ArkUI';
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @State recommendationBatchIndex: number = 0;
+  @State selectedRecommendationId: string = '';
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -76,66 +79,204 @@ export struct HomePage {
     })
   }
 
-  private recommendationImage(domain: string): Resource {
-    if (domain === 'eat') {
-      return $r('app.media.rec_food');
+  @Builder RecommendationImage(item: HomeRecommendationViewModel) {
+    if (item.thumbnailUri.length > 0) {
+      Image(item.thumbnailUri)
+        .width('100%')
+        .height(82)
+        .objectFit(ImageFit.Cover)
+    } else {
+      Column() {
+        Text('暂无图片')
+          .fontSize(12)
+          .fontColor('#8B93A4')
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+      .height(82)
+      .backgroundColor('#EEF2F7')
     }
-    if (domain === 'travel' || domain === 'live') {
-      return $r('app.media.rec_travel');
-    }
-    return $r('app.media.rec_sport');
   }
 
-  @Builder RecommendCard(image: Resource, tag: string, title: string, desc: string, meta: string, color: string) {
+  @Builder RecommendCard(item: HomeRecommendationViewModel) {
     // 推荐卡片横滑列表，统一图片、标签、标题和元信息的布局。
     Column() {
       Stack({ alignContent: Alignment.TopStart }) {
-        Image(image).width('100%').height(116).objectFit(ImageFit.Cover)
-        Text(tag)
-          .fontSize(12)
+        this.RecommendationImage(item)
+        Text(item.tag)
+          .fontSize(11)
           .fontWeight(FontWeight.Bold)
           .fontColor(Color.White)
-          .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-          .backgroundColor(color)
+          .maxLines(1)
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor(item.color)
           .borderRadius(8)
-          .margin({ left: 10, top: 10 })
-      }.width('100%').height(116)
+          .margin({ left: 8, top: 8 })
+      }.width('100%').height(82)
       Column() {
-        Text(title)
-          .fontSize(16)
+        Text(item.title)
+          .fontSize(14)
           .fontWeight(FontWeight.Bold)
           .fontColor('#151A28')
           .width('100%')
-          .maxLines(2)
+          .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(desc)
-          .fontSize(12)
+        Text(item.desc)
+          .fontSize(11)
           .fontColor('#787F8E')
           .width('100%')
-          .margin({ top: 5 })
+          .margin({ top: 4 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Row() {
-          Text(meta).fontSize(12).fontColor('#7C8494').layoutWeight(1).maxLines(1)
-          Text('>').fontSize(18).fontColor(Color.White).textAlign(TextAlign.Center).width(30).height(30).backgroundColor(color).borderRadius(15)
-        }.width('100%').margin({ top: 14 })
+          if (item.meta.length > 0) {
+            Text(item.meta).fontSize(11).fontColor('#7C8494').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          } else {
+            Blank().layoutWeight(1)
+          }
+          Text('>').fontSize(16).fontColor(Color.White).textAlign(TextAlign.Center).width(28).height(28).backgroundColor(item.color).borderRadius(14)
+        }.width('100%').margin({ top: 10 })
       }
       .width('100%')
-      .padding({ left: 14, right: 14, top: 12, bottom: 14 })
+      .padding({ left: 12, right: 12, top: 10, bottom: 12 })
     }
     .alignItems(HorizontalAlign.Start)
-    .width(158)
-    .height(234)
+    .width('100%')
+    .height(178)
     .backgroundColor(Color.White)
     .borderRadius(16)
     .clip(true)
     .shadow({ radius: 18, color: '#16000000', offsetX: 0, offsetY: 8 })
+    .onClick(() => {
+      this.selectedRecommendationId = item.id;
+    })
+  }
+
+  @Builder EmptyRecommendationCard() {
+    Row() {
+      Text('暂无待办事项')
+        .fontSize(14)
+        .fontColor('#7C8494')
+    }
+    .width('92%')
+    .margin({ top: 2 })
+  }
+
+  private recommendationPageCount(): number {
+    return Math.max(1, Math.ceil(this.profile.recommendations.length / 4));
+  }
+
+  private recommendationPageItems(): HomeRecommendationViewModel[] {
+    if (this.profile.recommendations.length === 0) {
+      return [];
+    }
+    let page = this.recommendationBatchIndex % this.recommendationPageCount();
+    let start = page * 4;
+    return this.profile.recommendations.slice(start, start + 4);
+  }
+
+  private nextRecommendationBatch(): void {
+    if (this.profile.recommendations.length <= 4) {
+      return;
+    }
+    this.recommendationBatchIndex = (this.recommendationBatchIndex + 1) % this.recommendationPageCount();
+  }
+
+  private selectedRecommendationItems(): HomeRecommendationViewModel[] {
+    if (this.selectedRecommendationId.length === 0) {
+      return [];
+    }
+    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.id === this.selectedRecommendationId).slice(0, 1);
+  }
+
+  @Builder RecommendationDetailImage(item: HomeRecommendationViewModel) {
+    if (item.thumbnailUri.length > 0) {
+      Scroll() {
+        Row() {
+          Image(item.thumbnailUri)
+            .width(128)
+            .height(260)
+            .objectFit(ImageFit.Contain)
+            .borderRadius(12)
+        }
+        .alignItems(VerticalAlign.Top)
+      }
+      .width('100%')
+      .height(270)
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .margin({ top: 14 })
+    } else {
+      Column() {
+        Text('暂无图片')
+          .fontSize(13)
+          .fontColor('#7C8494')
+          .maxLines(1)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+      .height(86)
+      .backgroundColor('#F7F9FC')
+      .borderRadius(12)
+      .margin({ top: 14 })
+    }
+  }
+
+  @Builder RecommendationDetailOverlay(item: HomeRecommendationViewModel) {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.selectedRecommendationId = '';
+        })
+      Column() {
+        Row() {
+          Text(item.tag)
+            .fontSize(12)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+            .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+            .backgroundColor(item.color)
+            .borderRadius(8)
+          Text('关闭')
+            .fontSize(13)
+            .fontColor('#7C8494')
+            .margin({ left: 12 })
+            .onClick(() => {
+              this.selectedRecommendationId = '';
+            })
+        }.width('100%').justifyContent(FlexAlign.SpaceBetween)
+        Text(item.title)
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .width('100%')
+          .margin({ top: 14 })
+        this.RecommendationDetailImage(item)
+        Text(item.desc.length > 0 ? item.desc : '暂无描述')
+          .fontSize(14)
+          .fontColor('#4E5668')
+          .width('100%')
+          .margin({ top: 14 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width('88%')
+      .padding({ left: 18, right: 18, top: 18, bottom: 20 })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 22, color: '#26000000', offsetX: 0, offsetY: 12 })
+    }
+    .width('100%')
+    .height('100%')
   }
 
   build() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '数据归家' })
+    Stack() {
+      Scroll() {
+        Column() {
+          AppHeader({ title: '数据归家' })
 
         Column() {
           Image($r('app.media.digital_avatar'))
@@ -204,28 +345,42 @@ export struct HomePage {
         .padding({ left: 12, right: 12 })
         .margin({ top: 14 })
 
-        Row() {
-          Text('为你推荐').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
-          Text('换一批').fontSize(14).fontColor('#858B98')
-        }.width('92%').margin({ top: 24, bottom: 14 })
-
-        Scroll() {
           Row() {
-            this.RecommendCard($r('app.media.rec_food'), '美食推荐', '健康轻食餐厅', '连续推荐 3 家优质餐厅', '1.2km', '#39C2A2')
-            Blank().width(14)
-            this.RecommendCard($r('app.media.rec_sport'), '健康提醒', '晚间运动提醒', '建议 20:30 开始运动', '20:30', '#8066FF')
-            Blank().width(14)
-            this.RecommendCard($r('app.media.rec_travel'), '出行建议', '周末出行建议', '2 条适合你的周末路线', '约 120km', '#4B9BFF')
-          }
-          .padding({ left: 18, right: 18, bottom: 6 })
-        }
-        .width('100%')
-        .height(250)
-        .scrollable(ScrollDirection.Horizontal)
+            Text('为你推荐').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+            Text('换一批')
+              .fontSize(14)
+              .fontColor(this.profile.recommendations.length > 4 ? '#8066FF' : '#C0C5D0')
+              .onClick(() => {
+                this.nextRecommendationBatch();
+              })
+          }.width('92%').margin({ top: 24, bottom: 14 })
 
-        Blank().height(88)
-      }.width('100%')
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+          if (this.profile.recommendations.length === 0) {
+            this.EmptyRecommendationCard()
+          } else {
+            Grid() {
+              ForEach(this.recommendationPageItems(), (item: HomeRecommendationViewModel) => {
+                GridItem() {
+                  this.RecommendCard(item)
+                }
+              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title)
+            }
+            .columnsTemplate('1fr 1fr')
+            .columnsGap(12)
+            .rowsGap(12)
+            .width('92%')
+            .height(368)
+          }
+
+          Blank().height(88)
+        }.width('100%')
+      }.width('100%').height('100%').backgroundColor('#F4F8FF')
+
+      ForEach(this.selectedRecommendationItems(), (item: HomeRecommendationViewModel) => {
+        this.RecommendationDetailOverlay(item)
+      }, (item: HomeRecommendationViewModel) => item.id)
+    }
+    .width('100%')
+    .height('100%')
   }
 }
-

@@ -4,8 +4,8 @@ export const PROFILE_CONSOLIDATION_DIR_NAME: string = 'profile-consolidation';
 export const OUTPUTS_DIR_NAME: string = 'outputs';
 export const INDEXES_DIR_NAME: string = 'indexes';
 export const COLLECTION_GROUPS_DIR_NAME: string = 'collection-groups';
+export const HOME_RECOMMENDATIONS_FILE_NAME: string = 'home-recommendations.json';
 export const WORKFLOW_RUNS_DIR_NAME: string = 'runs';
-export const DATA_MANAGER_CLEAR_REQUEST_FILE_NAME: string = '.clear-workflows-request.json';
 
 export const DOMAIN_KEYS: string[] = ['eat', 'wear', 'live', 'travel', 'work', 'other'];
 
@@ -197,6 +197,12 @@ export interface EntityMention {
   aliases: string[];
 }
 
+export interface IndexedEventTodo {
+  type: string;
+  deadline: string;
+  text: string;
+}
+
 export interface IndexedEvent {
   event_id: string;
   source_state_file: string;
@@ -210,6 +216,7 @@ export interface IndexedEvent {
   sources: string[];
   workflow_scene_ids: number[];
   image_paths: string[];
+  todo: IndexedEventTodo;
   keywords: string[];
   domains: string[];
   entity_mentions: EntityMention[];
@@ -313,6 +320,40 @@ export interface HomeRecommendationViewModel {
   desc: string;
   meta: string;
   color: string;
+  thumbnailUri: string;
+  sourceEventIds: string[];
+  detail: string;
+}
+
+export interface HomeRecommendationState {
+  id: string;
+  tag: string;
+  title: string;
+  desc: string;
+  meta: string;
+  domain: string;
+  source_event_ids: string[];
+}
+
+export interface HomeRecommendationsDocument {
+  generated_at: string;
+  input_hash: string;
+  total_events: number;
+  recommendations: HomeRecommendationState[];
+}
+
+export interface HomeRecommendationPlannerEvent {
+  event_id: string;
+  date: string;
+  todo_type: string;
+  todo_deadline: string;
+  todo_text: string;
+  summary: string;
+  normalized_fact: string;
+  sources: string[];
+  domains: string[];
+  keywords: string[];
+  image_paths: string[];
 }
 
 export interface HomeProfileViewModel {
@@ -334,15 +375,27 @@ export interface CollectionRowViewModel {
   domain: string;
 }
 
+export interface CollectionImageViewModel {
+  ref: string;
+  uri: string;
+  available: boolean;
+  label: string;
+}
+
 export interface CollectionEventViewModel {
   id: string;
   summary: string;
   fullText: string;
+  normalizedFact: string;
   source: string;
   time: string;
+  firstSeenTime: string;
+  lastSeenTime: string;
   meta: string;
   status: string;
   domain: string;
+  imageRefs: CollectionImageViewModel[];
+  thumbnailUri: string;
 }
 
 export interface CollectionGroupViewModel {
@@ -354,6 +407,7 @@ export interface CollectionGroupViewModel {
   status: string;
   domain: string;
   eventCount: number;
+  thumbnailUri: string;
   events: CollectionEventViewModel[];
 }
 

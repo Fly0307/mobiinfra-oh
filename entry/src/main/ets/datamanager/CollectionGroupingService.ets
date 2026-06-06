@@ -25,6 +25,7 @@ import {
   normalizeFreeText,
   normalizeLookupText,
   nowIsoLocal,
+  runLimitedTasks,
   sourceDisplayName,
   stableUnique,
   summarizeText
@@ -51,6 +52,14 @@ type EventGroupMap = Record<string, IndexedEvent[]>;
 type CollectionGroupMap = Record<string, CollectionGroupState[]>;
 
 const MAX_GROUPS_PER_TAB: number = 12;
+const DEFAULT_COLLECTION_TAB_CONCURRENCY: number = 3;
+
+interface CollectionTabBuildResult {
+  groupCount: number;
+  eventCount: number;
+  reusedGroupDocs: number;
+  updatedGroupDocs: number;
+}
 
 export function collectionTabSpecs(): CollectionTabSpec[] {
   let scenes = workflowSceneConfigs();
@@ -181,35 +190,57 @@ export class CollectionGroupingService {
     let eventCount = 0;
     let reusedGroupDocs = 0;
     let updatedGroupDocs = 0;
-    for (let index = 0; index < specs.length; index++) {
-      let spec = specs[index];
-      this.emitProgress(progress, '采集分组', `生成${spec.title}分组`, index, specs.length, 96 + Math.round(index * 2 / Math.max(1, specs.length)));
-      let result = this.indexService.query(spec.query);
-      let events = result.events;
-      eventCount += events.length;
-      let inputHash = this.inputHash(spec, events, modelConfig);
-      let previous = this.loadGroupsDocumentBySpec(spec);
-      if (!force && previous.input_hash === inputHash && previous.groups.length > 0) {
-        groupCount += previous.groups.length;
-        reusedGroupDocs++;
-        dataManagerInfo(`Collection groups reused: tab=${spec.tabId}, events=${events.length}, groups=${previous.groups.length}`);
-        continue;
-      }
-      let groups = await this.buildGroupsForTab(spec, events, modelConfig);
-      let document: CollectionGroupsDocument = {
-        generated_at: nowIsoLocal(),
-        tab_id: spec.tabId,
-        title: spec.title,
-        query: spec.query,
-        input_hash: inputHash,
-        total_events: events.length,
-        groups: groups
+    let completedTabs = 0;
+    let tasks = specs.map((spec: CollectionTabSpec): (() => Promise<CollectionTabBuildResult>) => {
+      return async (): Promise<CollectionTabBuildResult> => {
+        this.emitProgress(progress, '采集分组', `生成${spec.title}分组`, completedTabs, specs.length,
+          96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
+        let result = this.indexService.query(spec.query);
+        let events = result.events;
+        let inputHash = this.inputHash(spec, events, modelConfig);
+        let previous = this.loadGroupsDocumentBySpec(spec);
+        if (!force && previous.input_hash === inputHash && (previous.groups.length > 0 || events.length === 0)) {
+          completedTabs++;
+          this.emitProgress(progress, '采集分组', `已生成 ${completedTabs}/${specs.length} 个场景分组`, completedTabs, specs.length,
+            96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
+          dataManagerInfo(`Collection groups reused: tab=${spec.tabId}, events=${events.length}, groups=${previous.groups.length}`);
+          return {
+            groupCount: previous.groups.length,
+            eventCount: events.length,
+            reusedGroupDocs: 1,
+            updatedGroupDocs: 0
+          };
+        }
+        let groups = await this.buildGroupsForTab(spec, events, modelConfig);
+        let document: CollectionGroupsDocument = {
+          generated_at: nowIsoLocal(),
+          tab_id: spec.tabId,
+          title: spec.title,
+          query: spec.query,
+          input_hash: inputHash,
+          total_events: events.length,
+          groups: groups
+        };
+        this.storage.writeJsonAtomic(this.paths.collectionGroupsPath(spec.tabId), document as Object);
+        completedTabs++;
+        this.emitProgress(progress, '采集分组', `已生成 ${completedTabs}/${specs.length} 个场景分组`, completedTabs, specs.length,
+          96 + Math.round(completedTabs * 2 / Math.max(1, specs.length)));
+        dataManagerInfo(`Collection groups built: tab=${spec.tabId}, events=${events.length}, groups=${groups.length}`);
+        return {
+          groupCount: groups.length,
+          eventCount: events.length,
+          reusedGroupDocs: 0,
+          updatedGroupDocs: 1
+        };
       };
-      this.storage.writeJsonAtomic(this.paths.collectionGroupsPath(spec.tabId), document as Object);
-      groupCount += groups.length;
-      updatedGroupDocs++;
-      dataManagerInfo(`Collection groups built: tab=${spec.tabId}, events=${events.length}, groups=${groups.length}`);
-    }
+    });
+    let results = await runLimitedTasks<CollectionTabBuildResult>(tasks, DEFAULT_COLLECTION_TAB_CONCURRENCY);
+    results.forEach((result: CollectionTabBuildResult) => {
+      groupCount += result.groupCount;
+      eventCount += result.eventCount;
+      reusedGroupDocs += result.reusedGroupDocs;
+      updatedGroupDocs += result.updatedGroupDocs;
+    });
     this.emitProgress(progress, '采集分组', '采集分组完成', specs.length, specs.length, 99);
     return {
       tabCount: specs.length,

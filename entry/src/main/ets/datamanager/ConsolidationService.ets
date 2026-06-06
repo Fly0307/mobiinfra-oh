@@ -30,6 +30,7 @@ import {
   RECENT_MATCH_DAYS,
   RECENT_MATCH_MAX_RECORDS,
   renderConsolidatedMarkdown,
+  runLimitedTasks,
   selectRecentScopeRecords,
   sourceRef,
   stableUnique,
@@ -50,6 +51,19 @@ interface EntryGroup {
   fileName: string;
   entries: SourceEntry[];
 }
+
+interface ConsolidationGroupResult {
+  recordCount: number;
+  outputFileCount: number;
+}
+
+interface EntryGroupPlan {
+  group: EntryGroup;
+  pendingEntryCount: number;
+  existingRecordCount: number;
+}
+
+const DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY: number = 4;
 
 export class ConsolidationService {
   private paths: DataManagerPaths;
@@ -73,19 +87,49 @@ export class ConsolidationService {
     if (entries.length === 0) {
       dataManagerWarn('Consolidation found no daily-log entries. Check fixture import path and file format.');
     }
-    let totalRecords = 0;
-    let outputFiles = 0;
-    let groupIndex = 0;
-    for (let group of groups) {
-      let basePercent = 10 + Math.round(groupIndex * 45 / Math.max(1, groups.length));
-      this.emitProgress(progress, '整理日志', `整理 ${group.fileName}`, groupIndex, groups.length, basePercent);
-      dataManagerInfo(`Consolidation group start: month=${group.month}, file=${group.fileName}, entries=${group.entries.length}`);
-      let result = await this.consolidateGroup(group, modelConfig, dedupWindow, progress, basePercent, 10 + Math.round((groupIndex + 1) * 45 / Math.max(1, groups.length)));
-      dataManagerInfo(`Consolidation group done: month=${group.month}, file=${group.fileName}, records=${result.records.length}`);
-      totalRecords += result.records.length;
-      outputFiles++;
-      groupIndex++;
+    let plans = this.planEntryGroups(groups);
+    let pendingPlans = plans.filter((plan: EntryGroupPlan) => plan.pendingEntryCount > 0);
+    let skippedRecords = 0;
+    plans.forEach((plan: EntryGroupPlan) => {
+      if (plan.pendingEntryCount === 0) {
+        skippedRecords += plan.existingRecordCount;
+      }
+    });
+    dataManagerInfo(`Consolidation pending groups: pending=${pendingPlans.length}, skipped=${groups.length - pendingPlans.length}`);
+    if (pendingPlans.length === 0) {
+      this.emitProgress(progress, '整理日志', 'daily-log 无新增整理项', groups.length, Math.max(1, groups.length), 58);
+      return {
+        sourceEntries: entries.length,
+        outputFiles: groups.length,
+        totalRecords: skippedRecords,
+        updatedAt: nowIsoLocal()
+      };
     }
+    let completedGroups = 0;
+    let detailedProgress = pendingPlans.length === 1 ? progress : undefined;
+    let tasks = pendingPlans.map((plan: EntryGroupPlan): (() => Promise<ConsolidationGroupResult>) => {
+      return async (): Promise<ConsolidationGroupResult> => {
+        this.emitProgress(progress, '整理日志', `整理 ${plan.group.fileName}`, completedGroups, pendingPlans.length,
+          10 + Math.round(completedGroups * 45 / Math.max(1, pendingPlans.length)));
+        dataManagerInfo(`Consolidation group start: month=${plan.group.month}, file=${plan.group.fileName}, entries=${plan.group.entries.length}, pending=${plan.pendingEntryCount}`);
+        let result = await this.consolidateGroup(plan.group, modelConfig, dedupWindow, detailedProgress);
+        completedGroups++;
+        dataManagerInfo(`Consolidation group done: month=${plan.group.month}, file=${plan.group.fileName}, records=${result.records.length}, completed=${completedGroups}/${pendingPlans.length}`);
+        this.emitProgress(progress, '整理日志', `已整理 ${completedGroups}/${pendingPlans.length} 个新增日志文件`, completedGroups, pendingPlans.length,
+          10 + Math.round(completedGroups * 45 / Math.max(1, pendingPlans.length)));
+        return {
+          recordCount: result.records.length,
+          outputFileCount: 1
+        };
+      };
+    });
+    let results = await runLimitedTasks<ConsolidationGroupResult>(tasks, DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY);
+    let totalRecords = skippedRecords;
+    let outputFiles = groups.length - pendingPlans.length;
+    results.forEach((result: ConsolidationGroupResult) => {
+      totalRecords += result.recordCount;
+      outputFiles += result.outputFileCount;
+    });
     this.emitProgress(progress, '整理日志', `整理完成，生成 ${totalRecords} 条记录`, 100, 100, 58);
     return {
       sourceEntries: entries.length,
@@ -158,6 +202,19 @@ export class ConsolidationService {
       groups[key].entries.push(entry);
     }
     return Object.keys(groups).sort().map((key: string) => groups[key]);
+  }
+
+  private planEntryGroups(groups: EntryGroup[]): EntryGroupPlan[] {
+    return groups.map((group: EntryGroup): EntryGroupPlan => {
+      let statePath = this.paths.outputStatePath(group.month, group.fileName);
+      let state = this.readConsolidatedState(statePath);
+      let pending = this.pendingEntries(group.entries, state);
+      return {
+        group: group,
+        pendingEntryCount: pending.length,
+        existingRecordCount: state.records.length
+      };
+    });
   }
 
   private async consolidateGroup(group: EntryGroup, modelConfig: DataManagerModelConfig, dedupWindow: number, progress?: DataManagerProgressCallback, startPercent: number = 12, endPercent: number = 55): Promise<ConsolidatedState> {

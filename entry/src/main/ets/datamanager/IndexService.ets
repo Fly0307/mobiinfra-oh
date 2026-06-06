@@ -877,7 +877,7 @@ export class IndexService {
             parseNumberedEntries(body).forEach((entry: NumberedEntry) => {
               let entryText = normalizeFreeText(entry.text);
               for (let candidate of available) {
-                if (!candidate.used && candidate.summary === entryText) {
+                if (!candidate.used && this.summaryTextsMatch(candidate.summary, entryText)) {
                   candidate.used = true;
                   imageReferences[relative + '#' + entry.index] = [candidate.image_path];
                   break;
@@ -1041,6 +1041,58 @@ export class IndexService {
       }
     }
     return normalizeFreeText(output['response']);
+  }
+
+  private summaryTextsMatch(left: string, right: string): boolean {
+    let leftKeys = this.summaryTextKeys(left);
+    let rightKeys = this.summaryTextKeys(right);
+    for (let leftKey of leftKeys) {
+      for (let rightKey of rightKeys) {
+        if (leftKey === rightKey) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private summaryTextKeys(value: Object | string | number | boolean | null | undefined): string[] {
+    let raw = normalizeFreeText(value);
+    let keys: string[] = [];
+    if (raw.length > 0) {
+      keys.push(raw);
+    }
+    let jsonSummary = this.summaryFromJsonText(raw);
+    if (jsonSummary.length > 0) {
+      keys.push(jsonSummary);
+    }
+    return stableUnique(keys);
+  }
+
+  private summaryFromJsonText(raw: string): string {
+    let text = raw.trim();
+    if (text.length === 0) {
+      return '';
+    }
+    let block = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (block && block.length > 1) {
+      text = block[1].trim();
+    }
+    text = text.replace(/^```(?:json)?\s*/i, '');
+    text = text.replace(/\s*```$/, '');
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      text = text.substring(start, end + 1);
+    }
+    try {
+      let parsed = ArkJSON.parse(text) as JsonMap;
+      if (parsed && typeof parsed === 'object') {
+        return normalizeFreeText(parsed['summary']);
+      }
+    } catch (e) {
+    }
+    return '';
   }
 
   private imagePathsForSourceRefs(sourceRefs: string[], imageReferences: StringArrayMap): string[] {
@@ -2132,4 +2184,3 @@ export class IndexService {
     return state;
   }
 }
-

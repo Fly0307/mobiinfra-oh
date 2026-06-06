@@ -21,3 +21,6 @@ mobiagent/
 build-profile.json5*
 *.diff
 *.bak
+.codex-log/
+.sandbox_dump/
+.vscode/

@@ -2,6 +2,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowStorage } from './WorkflowStorage';
 import {
   WorkflowCondition,
@@ -1098,10 +1099,19 @@ export class WorkflowRunner {
   }
 
   private summaryFromJsonText(raw: string): string {
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
-      let parsed = ArkJSON.parse(this.normalizeJsonText(raw)) as WorkflowJsonMap;
+      let parsed = ArkJSON.parse(text) as WorkflowJsonMap;
       return this.structuredSummaryText(parsed);
     } catch (e) {
+      let candidates = WorkflowJsonRepair.repairCandidates(text);
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          return this.structuredSummaryText(parsed);
+        } catch {
+        }
+      }
       return '';
     }
   }
@@ -1141,12 +1151,27 @@ export class WorkflowRunner {
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {
-    let text = this.normalizeJsonText(raw);
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
       return ArkJSON.parse(text) as WorkflowJsonMap;
     } catch (e) {
       let err = e as Error;
+      let candidates = WorkflowJsonRepair.repairCandidates(text);
+      let repairMessage = '';
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          this.log('JSON parse repaired after model returned non-strict JSON');
+          return parsed;
+        } catch (repairError) {
+          let repairErr = repairError as Error;
+          repairMessage = repairErr.message || String(repairError);
+        }
+      }
       let message = 'JSON parse failed, raw response preserved: ' + (err.message || String(e));
+      if (repairMessage.length > 0) {
+        message += '; repair failed: ' + repairMessage;
+      }
       this.log(message);
       if (failOnParseError) {
         throw new Error('Planner JSON 解析失败，终止执行，不再进入 Decider：' + (err.message || String(e)));
@@ -1154,28 +1179,6 @@ export class WorkflowRunner {
       let fallback: RawResponseMap = { raw_response: raw };
       return fallback as Object as WorkflowJsonMap;
     }
-  }
-
-  private normalizeJsonText(raw: string): string {
-    let text = raw.trim();
-    let block = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (block && block.length > 1) {
-      text = block[1].trim();
-    }
-    text = text.replace(/^```(?:json)?\s*/i, '');
-    text = text.replace(/\s*```$/, '');
-    let start = text.indexOf('{');
-    let end = text.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      text = text.substring(start, end + 1);
-    }
-    return this.repairLeadingBrokenObjectQuote(text.trim());
-  }
-
-  private repairLeadingBrokenObjectQuote(text: string): string {
-    // 兼容模型偶发输出：```json\n{"\n  "reasoning": ...}\n```
-    // 只删除 { 后面多出来的那个引号；合法的 {"reasoning": ...} 不会命中该规则。
-    return text.replace(/^(\{\s*)"\s*(?="[^"]+"\s*:)/, '$1');
   }
 
   private getMapString(map: WorkflowJsonMap, key: string): string {

@@ -1,12 +1,21 @@
 import fs from '@ohos.file.fs';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
-import { GalleryAnalysisResult, GalleryEmbeddingRecord, GalleryScanSession } from './GalleryTypes';
+import {
+  GalleryAnalysisResult,
+  GalleryEmbeddingRecord,
+  GalleryLocationCacheRecord,
+  GalleryMonthSummaryCacheRecord,
+  GalleryScanSession
+} from './GalleryTypes';
+import { GalleryExifUtils } from './GalleryExifUtils';
 
 const GALLERY_LOG_DIR = 'gallery-log';
 const DAILY_LOG_DIR = 'daily-log';
 const ITEMS_DIR = 'items';
 const EMBEDDINGS_DIR = 'embeddings';
 const SCAN_SESSION_FILE = 'scan-session.json';
+const MONTHLY_SUMMARIES_FILE = 'monthly-summaries.json';
+const LOCATION_CACHE_FILE = 'location-cache.json';
 const METADATA_START = '<!-- DAILY_LOG_METADATA';
 const METADATA_END = '-->';
 
@@ -37,6 +46,16 @@ export class GalleryStorage {
 
   static scanSessionPath(filesDir: string): string {
     return GalleryStorage.rootDir(filesDir) + '/' + SCAN_SESSION_FILE;
+  }
+
+  // 月度总结单独落盘，避免重新进入图库页时只依赖页面内存导致总结丢失。
+  static monthlySummariesPath(filesDir: string): string {
+    return GalleryStorage.rootDir(filesDir) + '/' + MONTHLY_SUMMARIES_FILE;
+  }
+
+  // 经纬度逆地理编码缓存独立落盘，避免每次打开详情页都请求第三方地图服务。
+  static locationCachePath(filesDir: string): string {
+    return GalleryStorage.rootDir(filesDir) + '/' + LOCATION_CACHE_FILE;
   }
 
   static itemPath(filesDir: string, result: GalleryAnalysisResult): string {
@@ -155,6 +174,7 @@ export class GalleryStorage {
     }
   }
 
+  // 保存全量扫描进度；暂停、恢复和异常退出后都以该文件作为可信恢复来源。
   static saveScanSession(filesDir: string, session: GalleryScanSession): void {
     GalleryStorage.ensureWorkspace(filesDir);
     session.updatedAt = new Date().getTime();
@@ -164,6 +184,68 @@ export class GalleryStorage {
   static clearScanSession(filesDir: string): void {
     try {
       fs.unlinkSync(GalleryStorage.scanSessionPath(filesDir));
+    } catch (e) {
+    }
+  }
+
+  // 读取月度 AI 总结缓存，解析失败时返回空对象，避免缓存损坏影响图库主流程。
+  static loadMonthlySummaries(filesDir: string): Record<string, GalleryMonthSummaryCacheRecord> {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let path = GalleryStorage.monthlySummariesPath(filesDir);
+    try {
+      if (!fs.accessSync(path)) {
+        return {};
+      }
+      return ArkJSON.parse(GalleryStorage.readText(path)) as Record<string, GalleryMonthSummaryCacheRecord>;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // 按月份增量写入总结缓存；页面层负责通过 signature 判断缓存是否仍然匹配当前结果。
+  static saveMonthlySummary(filesDir: string, monthKey: string, record: GalleryMonthSummaryCacheRecord): void {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let summaries = GalleryStorage.loadMonthlySummaries(filesDir);
+    summaries[monthKey] = record;
+    GalleryStorage.writeText(GalleryStorage.monthlySummariesPath(filesDir), ArkJSON.stringify(summaries, null, 2));
+  }
+
+  // 清理图库缓存时同步清理月度总结，避免旧总结引用已删除的分析结果。
+  static clearMonthlySummaries(filesDir: string): void {
+    try {
+      fs.unlinkSync(GalleryStorage.monthlySummariesPath(filesDir));
+    } catch (e) {
+    }
+  }
+
+  static locationCacheKey(latitude: number, longitude: number): string {
+    return latitude.toFixed(6) + ',' + longitude.toFixed(6);
+  }
+
+  static loadLocationCache(filesDir: string): Record<string, GalleryLocationCacheRecord> {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let path = GalleryStorage.locationCachePath(filesDir);
+    try {
+      if (!fs.accessSync(path)) {
+        return {};
+      }
+      return ArkJSON.parse(GalleryStorage.readText(path)) as Record<string, GalleryLocationCacheRecord>;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // 逆地理编码结果按坐标 key 增量写入；页面层只在打开详情页时懒加载缺失坐标。
+  static saveLocationCacheRecord(filesDir: string, record: GalleryLocationCacheRecord): void {
+    GalleryStorage.ensureWorkspace(filesDir);
+    let cache = GalleryStorage.loadLocationCache(filesDir);
+    cache[record.key] = record;
+    GalleryStorage.writeText(GalleryStorage.locationCachePath(filesDir), ArkJSON.stringify(cache, null, 2));
+  }
+
+  static clearLocationCache(filesDir: string): void {
+    try {
+      fs.unlinkSync(GalleryStorage.locationCachePath(filesDir));
     } catch (e) {
     }
   }
@@ -250,6 +332,22 @@ export class GalleryStorage {
         if (locationText.length > 0) {
           lines.push('   - 位置：' + locationText);
         }
+        let addressText = GalleryStorage.dailyAddressText(group[j]);
+        if (addressText.length > 0) {
+          lines.push('   - 地理位置：' + addressText);
+        }
+        let poiText = GalleryStorage.dailyPoiText(group[j]);
+        if (poiText.length > 0) {
+          lines.push('   - 附近地点：' + poiText);
+        }
+        let mapText = GalleryStorage.dailyMapText(group[j]);
+        if (mapText.length > 0) {
+          lines.push('   - 地图标注：' + mapText);
+        }
+        let captureText = GalleryStorage.dailyCaptureText(group[j]);
+        if (captureText.length > 0) {
+          lines.push('   - ' + captureText);
+        }
         lines.push('');
       }
       GalleryStorage.writeText(GalleryStorage.dailyCategoryPath(filesDir, safeDate, category), lines.join('\n'));
@@ -280,6 +378,15 @@ export class GalleryStorage {
     let createdAt = result.createdAt > 0 ? result.createdAt : new Date().getTime();
     let category = GalleryStorage.safeCategory(result.category);
     let date = result.date && result.date.length > 0 ? GalleryStorage.safeDate(result.date) : GalleryStorage.formatDate(createdAt);
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (latitude === undefined && result.exif && result.exif.latitude !== undefined) {
+      latitude = result.exif.latitude;
+    }
+    if (longitude === undefined && result.exif && result.exif.longitude !== undefined) {
+      longitude = result.exif.longitude;
+    }
+    let location = GalleryStorage.normalizedLocation(result.location, latitude, longitude);
     return {
       id: result.id,
       uri: result.uri,
@@ -297,28 +404,100 @@ export class GalleryStorage {
       embeddingStatus: result.embeddingStatus,
       embeddingDimension: result.embeddingDimension,
       error: result.error,
-      latitude: result.latitude,
-      longitude: result.longitude,
+      latitude: latitude,
+      longitude: longitude,
+      exif: result.exif,
+      location: location,
       createdAt: createdAt
     };
   }
 
+  private static normalizedLocation(record: GalleryLocationCacheRecord | undefined,
+    latitude: number | undefined, longitude: number | undefined): GalleryLocationCacheRecord | undefined {
+    if (!record) {
+      return undefined;
+    }
+    let rawLatitude = Number(record.rawLatitude);
+    let rawLongitude = Number(record.rawLongitude);
+    if (!GalleryExifUtils.isValidLocation(rawLatitude, rawLongitude)) {
+      rawLatitude = Number(latitude);
+      rawLongitude = Number(longitude);
+    }
+    if (!GalleryExifUtils.isValidLocation(rawLatitude, rawLongitude)) {
+      return undefined;
+    }
+    return {
+      key: record.key && record.key.length > 0 ? record.key : GalleryStorage.locationCacheKey(rawLatitude, rawLongitude),
+      provider: record.provider && record.provider.length > 0 ? record.provider : 'amap',
+      rawLatitude: rawLatitude,
+      rawLongitude: rawLongitude,
+      amapLatitude: Number(record.amapLatitude),
+      amapLongitude: Number(record.amapLongitude),
+      formattedAddress: record.formattedAddress ? record.formattedAddress : '',
+      province: record.province ? record.province : '',
+      city: record.city ? record.city : '',
+      district: record.district ? record.district : '',
+      township: record.township ? record.township : '',
+      street: record.street ? record.street : '',
+      poiName: record.poiName ? record.poiName : '',
+      updatedAt: record.updatedAt > 0 ? record.updatedAt : new Date().getTime()
+    };
+  }
+
   private static dailyLocationText(result: GalleryAnalysisResult): string {
-    if (result.latitude === undefined || result.longitude === undefined) {
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (latitude === undefined && result.exif && result.exif.latitude !== undefined) {
+      latitude = result.exif.latitude;
+    }
+    if (longitude === undefined && result.exif && result.exif.longitude !== undefined) {
+      longitude = result.exif.longitude;
+    }
+    let location = GalleryExifUtils.directedLocationText(latitude, longitude);
+    if (location.length > 0) {
+      return location;
+    }
+    return GalleryExifUtils.rawGpsLocationText(result.exif);
+  }
+
+  private static dailyAddressText(result: GalleryAnalysisResult): string {
+    if (!result.location) {
       return '';
     }
-    let latitude = Number(result.latitude);
-    let longitude = Number(result.longitude);
-    if (isNaN(latitude) || isNaN(longitude)) {
+    return GalleryStorage.dailyInlineText(result.location.formattedAddress);
+  }
+
+  private static dailyPoiText(result: GalleryAnalysisResult): string {
+    if (!result.location) {
       return '';
     }
-    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return GalleryStorage.dailyInlineText(result.location.poiName);
+  }
+
+  private static dailyMapText(result: GalleryAnalysisResult): string {
+    let latitude = result.latitude;
+    let longitude = result.longitude;
+    if (result.location && GalleryExifUtils.isValidLocation(result.location.amapLatitude, result.location.amapLongitude)) {
+      latitude = result.location.amapLatitude;
+      longitude = result.location.amapLongitude;
+    }
+    return GalleryExifUtils.mapUrl(latitude, longitude);
+  }
+
+  private static dailyCaptureText(result: GalleryAnalysisResult): string {
+    if (!result.exif) {
       return '';
     }
-    if (latitude === 0 && longitude === 0) {
-      return '';
+    let parts: string[] = [];
+    let capturedAt = GalleryExifUtils.displayDateTime(result.exif.dateTimeOriginal);
+    if (capturedAt.length > 0) {
+      parts.push('拍摄时间：' + capturedAt);
     }
-    return latitude.toFixed(6) + ', ' + longitude.toFixed(6);
+    let device = GalleryExifUtils.deviceText(result.exif);
+    if (device.length > 0) {
+      parts.push('拍摄设备：' + device);
+    }
+    return parts.join('；');
   }
 
   private static collectItems(dir: string, results: GalleryAnalysisResult[]): void {

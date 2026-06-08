@@ -7,12 +7,16 @@ import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryEmbeddingService } from './GalleryEmbeddingService';
 import { GalleryStorage } from './GalleryStorage';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
+import { GalleryExifUtils } from './GalleryExifUtils';
+import { GalleryReverseGeocoder } from './GalleryReverseGeocoder';
 import {
   GalleryAnalysisResult,
   GalleryAnalyzeOptions,
   GalleryAnalyzeOutcome,
   GalleryAnalyzerConfig,
   GalleryEmbeddingRecord,
+  GalleryExifMetadata,
+  GalleryLocationCacheRecord,
   GalleryModelJson,
   GalleryPhotoInput,
   GalleryProgress,
@@ -63,11 +67,19 @@ interface GalleryModelParseResult {
   text: string;
 }
 
+interface GalleryLocationEnrichResult {
+  result: GalleryAnalysisResult;
+  updated: boolean;
+}
+
 export class GalleryAnalyzer {
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private ocrService: GalleryOcrService = new GalleryOcrService();
   private embeddingService: GalleryEmbeddingService;
+  private reverseGeocoder: GalleryReverseGeocoder = new GalleryReverseGeocoder();
+  private locationRequests: Record<string, Promise<GalleryLocationCacheRecord | undefined>> = {};
+  private locationFailedKeys: Record<string, boolean> = {};
 
   constructor(filesDir: string, cloudClient: CloudModelClient) {
     this.filesDir = filesDir;
@@ -115,6 +127,7 @@ export class GalleryAnalyzer {
     };
     let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency, config.embeddingConcurrency);
     await this.runWithLimit(inputs, limit, async (input: GalleryPhotoInput, index: number): Promise<boolean> => {
+      // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
       if (options && options.shouldPause && options.shouldPause()) {
         return false;
       }
@@ -124,9 +137,12 @@ export class GalleryAnalyzer {
       let result = outcome.result;
       results.push(result);
       if (outcome.cached) {
+        // 缓存命中代表该图片已有可用分析结果，仍应计入已完成；只有关键词预筛命中时才计入跳过。
         progress.processed += 1;
         progress.pending = Math.max(0, progress.selected - progress.processed);
-        progress.skipped += 1;
+        if (outcome.skippedByKeyword === true) {
+          progress.skipped += 1;
+        }
         onProgress(progress);
         if (options && options.onItemDone) {
           options.onItemDone(input, outcome);
@@ -199,18 +215,32 @@ export class GalleryAnalyzer {
     let itemStartedAt = new Date().getTime();
     let date = this.resolveImageDate(uri, itemStartedAt);
     let inputDate = input.date;
+    let hasInputDate = false;
     if (inputDate !== undefined && inputDate.length > 0) {
       date = inputDate;
+      hasInputDate = true;
     }
+    let resultLatitude = input.latitude;
+    let resultLongitude = input.longitude;
+    let exifMetadata: GalleryExifMetadata | undefined = undefined;
+    let locationRecord: GalleryLocationCacheRecord | undefined = undefined;
     this.logInfo('item start id=' + id + ' uri=' + uri);
     let cached = GalleryStorage.loadResult(this.filesDir, date, id);
     if (cached && this.isSuccessfulCachedResult(cached)) {
+      let cachedLocation = await this.ensureResultLocation(cached, config, id);
+      if (cachedLocation.updated) {
+        this.logInfo('item cached location enriched id=' + id + ' date=' + cachedLocation.result.date);
+        return {
+          result: cachedLocation.result,
+          cached: false
+        };
+      }
       progress.current = '命中缓存 ' + id;
       progress.ocrDone += 1;
       progress.modelDone += 1;
       progress.embeddingDone += 1;
       onProgress(progress);
-      this.logInfo('item skipped cached id=' + id + ' date=' + date + ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
+      this.logInfo('item cached hit id=' + id + ' date=' + date + ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
       return {
         result: cached,
         cached: true
@@ -226,9 +256,45 @@ export class GalleryAnalyzer {
       onProgress(progress);
       imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
       imageSource = image.createImageSource(imageFile.fd);
+      exifMetadata = await this.readExifMetadata(imageSource, id);
+      if (exifMetadata) {
+        let exifDate = GalleryExifUtils.dateFromExifDateTime(exifMetadata.dateTimeOriginal);
+        if (!hasInputDate && exifDate.length > 0) {
+          date = exifDate;
+        }
+        if (resultLatitude === undefined && exifMetadata.latitude !== undefined) {
+          resultLatitude = exifMetadata.latitude;
+        }
+        if (resultLongitude === undefined && exifMetadata.longitude !== undefined) {
+          resultLongitude = exifMetadata.longitude;
+        }
+        let refreshedCached = GalleryStorage.loadResult(this.filesDir, date, id);
+        if (refreshedCached && this.isSuccessfulCachedResult(refreshedCached)) {
+          let refreshedLocation = await this.ensureResultLocation(refreshedCached, config, id);
+          if (refreshedLocation.updated) {
+            this.logInfo('item refreshed cache location enriched id=' + id + ' date=' + refreshedLocation.result.date);
+            return {
+              result: refreshedLocation.result,
+              cached: false
+            };
+          }
+          progress.current = '命中缓存 ' + id;
+          progress.ocrDone += 1;
+          progress.modelDone += 1;
+          progress.embeddingDone += 1;
+          onProgress(progress);
+          this.logInfo('item cached hit after exif id=' + id + ' date=' + date +
+            ' path=' + GalleryStorage.itemPathById(this.filesDir, date, id));
+          return {
+            result: refreshedCached,
+            cached: true
+          };
+        }
+      }
       pixelMap = await imageSource.createPixelMap();
       this.logInfo('decode done id=' + id + ' elapsedMs=' + this.elapsed(decodeStartedAt));
       await this.scaleForAnalysis(pixelMap, config.imageScale, id);
+      locationRecord = await this.resolveLocationForCoordinates(resultLatitude, resultLongitude, config, id);
 
       await gates.ocr.acquire();
       let ocrText = '';
@@ -277,8 +343,10 @@ export class GalleryAnalyzer {
             embeddingStatus: 'skipped',
             embeddingDimension: 0,
             error: '',
-            latitude: input.latitude,
-            longitude: input.longitude,
+            latitude: resultLatitude,
+            longitude: resultLongitude,
+            exif: exifMetadata,
+            location: locationRecord,
             createdAt: new Date().getTime()
           };
           this.logInfo('item skipped keyword filter id=' + id);
@@ -303,7 +371,8 @@ export class GalleryAnalyzer {
         this.logInfo('model start id=' + id + ' baseUrl=' + config.apiBaseUrl + ' model=' + config.model);
         progress.current = '模型分析 ' + id;
         onProgress(progress);
-        rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, this.toCloudConfig(config));
+        rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText,
+          this.exifPromptText(exifMetadata, resultLatitude, resultLongitude, locationRecord), this.toCloudConfig(config));
         this.logInfo('model done id=' + id + ' chars=' + rawModelText.length + ' elapsedMs=' + this.elapsed(modelStartedAt));
       } finally {
         gates.model.release();
@@ -383,8 +452,10 @@ export class GalleryAnalyzer {
         embeddingStatus: embeddingStatus,
         embeddingDimension: embeddingDimension,
         error: '',
-        latitude: input.latitude,
-        longitude: input.longitude,
+        latitude: resultLatitude,
+        longitude: resultLongitude,
+        exif: exifMetadata,
+        location: locationRecord,
         createdAt: new Date().getTime()
       };
       this.logInfo('item done id=' + id + ' elapsedMs=' + this.elapsed(itemStartedAt));
@@ -413,6 +484,10 @@ export class GalleryAnalyzer {
         embeddingStatus: 'skipped',
         embeddingDimension: 0,
         error: this.errorMessage(e),
+        latitude: resultLatitude,
+        longitude: resultLongitude,
+        exif: exifMetadata,
+        location: locationRecord,
         createdAt: new Date().getTime()
       };
       return {
@@ -447,6 +522,163 @@ export class GalleryAnalyzer {
       apiKey: config.apiKey,
       model: config.model
     };
+  }
+
+  private async ensureResultLocation(result: GalleryAnalysisResult, config: GalleryAnalyzerConfig,
+    id: string): Promise<GalleryLocationEnrichResult> {
+    if (this.hasResolvedLocation(result.location)) {
+      return {
+        result: result,
+        updated: false
+      };
+    }
+    let location = await this.resolveLocationForCoordinates(result.latitude, result.longitude, config, id);
+    if (!location) {
+      return {
+        result: result,
+        updated: false
+      };
+    }
+    result.location = location;
+    return {
+      result: result,
+      updated: true
+    };
+  }
+
+  private async resolveLocationForCoordinates(latitude: number | undefined, longitude: number | undefined,
+    config: GalleryAnalyzerConfig, id: string): Promise<GalleryLocationCacheRecord | undefined> {
+    let lat = Number(latitude);
+    let lon = Number(longitude);
+    if (!GalleryExifUtils.isValidLocation(lat, lon)) {
+      return undefined;
+    }
+    let key = GalleryStorage.locationCacheKey(lat, lon);
+    let cached = GalleryStorage.loadLocationCache(this.filesDir)[key];
+    if (cached && this.hasResolvedLocation(cached)) {
+      this.logInfo('location cache hit id=' + id + ' key=' + key);
+      return cached;
+    }
+    if (this.locationFailedKeys[key]) {
+      return undefined;
+    }
+    let amapKey = config.amapWebKey.trim();
+    if (amapKey.length === 0) {
+      return undefined;
+    }
+    if (!this.locationRequests[key]) {
+      this.logInfo('location reverse start id=' + id + ' key=' + key);
+      this.locationRequests[key] = this.reverseGeocoder.reverse(lat, lon, amapKey)
+        .then((record: GalleryLocationCacheRecord) => {
+          GalleryStorage.saveLocationCacheRecord(this.filesDir, record);
+          this.logInfo('location reverse done id=' + id + ' key=' + key);
+          return record;
+        })
+        .catch((e: Error) => {
+          this.locationFailedKeys[key] = true;
+          this.logError('location reverse failed id=' + id + ' key=' + key + ' error=' + this.errorMessage(e));
+          return undefined;
+        });
+    } else {
+      this.logInfo('location reverse reuse pending id=' + id + ' key=' + key);
+    }
+    return await this.locationRequests[key];
+  }
+
+  private hasResolvedLocation(record?: GalleryLocationCacheRecord): boolean {
+    if (!record) {
+      return false;
+    }
+    return record.formattedAddress.length > 0 || record.poiName.length > 0;
+  }
+
+  private async readExifMetadata(imageSource: image.ImageSource, id: string): Promise<GalleryExifMetadata | undefined> {
+    let metadata: GalleryExifMetadata = {};
+    metadata.dateTimeOriginal = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'DateTimeOriginal'));
+    metadata.deviceMake = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'Make'));
+    metadata.deviceModel = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'Model'));
+    metadata.imageWidth = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'ImageWidth'));
+    metadata.imageHeight = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'ImageLength'));
+    metadata.orientation = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'Orientation'));
+    metadata.gpsLatitude = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'GPSLatitude'));
+    metadata.gpsLongitude = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'GPSLongitude'));
+    metadata.gpsLatitudeRef = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'GPSLatitudeRef'));
+    metadata.gpsLongitudeRef = GalleryExifUtils.cleanProperty(await this.readImageProperty(imageSource, 'GPSLongitudeRef'));
+    metadata.latitude = GalleryExifUtils.coordinateFromExif(metadata.gpsLatitude, metadata.gpsLatitudeRef);
+    metadata.longitude = GalleryExifUtils.coordinateFromExif(metadata.gpsLongitude, metadata.gpsLongitudeRef);
+
+    if (!this.hasExifMetadata(metadata)) {
+      this.logInfo('exif empty id=' + id);
+      return undefined;
+    }
+    this.logInfo('exif read id=' + id +
+      ' time=' + GalleryExifUtils.displayDateTime(metadata.dateTimeOriginal) +
+      ' device=' + GalleryExifUtils.deviceText(metadata) +
+      ' location=' + GalleryExifUtils.locationText(metadata.latitude, metadata.longitude) +
+      ' rawGps=' + GalleryExifUtils.rawGpsLocationText(metadata));
+    return metadata;
+  }
+
+  private async readImageProperty(imageSource: image.ImageSource, key: string): Promise<string> {
+    try {
+      return await imageSource.getImageProperty(key, { index: 0, defaultValue: '' });
+    } catch (e) {
+      return '';
+    }
+  }
+
+  private hasExifMetadata(metadata: GalleryExifMetadata): boolean {
+    return GalleryExifUtils.cleanProperty(metadata.dateTimeOriginal).length > 0 ||
+      GalleryExifUtils.deviceText(metadata).length > 0 ||
+      GalleryExifUtils.locationText(metadata.latitude, metadata.longitude).length > 0 ||
+      GalleryExifUtils.rawGpsLocationText(metadata).length > 0 ||
+      GalleryExifUtils.cleanProperty(metadata.imageWidth).length > 0 ||
+      GalleryExifUtils.cleanProperty(metadata.imageHeight).length > 0 ||
+      GalleryExifUtils.cleanProperty(metadata.orientation).length > 0;
+  }
+
+  private exifPromptText(metadata: GalleryExifMetadata | undefined, latitude: number | undefined, longitude: number | undefined,
+    locationRecord?: GalleryLocationCacheRecord): string {
+    let lines: string[] = [];
+    if (metadata) {
+      let capturedAt = GalleryExifUtils.displayDateTime(metadata.dateTimeOriginal);
+      if (capturedAt.length > 0) {
+        lines.push('拍摄时间：' + capturedAt);
+      }
+      let device = GalleryExifUtils.deviceText(metadata);
+      if (device.length > 0) {
+        lines.push('拍摄设备：' + device);
+      }
+      let size = this.exifSizeText(metadata);
+      if (size.length > 0) {
+        lines.push('图片尺寸：' + size);
+      }
+    }
+    let location = GalleryExifUtils.directedLocationText(latitude, longitude);
+    if (location.length > 0) {
+      lines.push('拍摄位置：' + location);
+    } else if (metadata) {
+      let rawGps = GalleryExifUtils.rawGpsLocationText(metadata);
+      if (rawGps.length > 0) {
+        lines.push('拍摄位置 GPS 原始值：' + rawGps);
+      }
+    }
+    if (locationRecord && locationRecord.formattedAddress.length > 0) {
+      lines.push('地理位置：' + locationRecord.formattedAddress);
+    }
+    if (locationRecord && locationRecord.poiName.length > 0) {
+      lines.push('附近地点：' + locationRecord.poiName);
+    }
+    return lines.length > 0 ? lines.join('\n') : '(无)';
+  }
+
+  private exifSizeText(metadata: GalleryExifMetadata): string {
+    let width = GalleryExifUtils.cleanProperty(metadata.imageWidth);
+    let height = GalleryExifUtils.cleanProperty(metadata.imageHeight);
+    if (width.length > 0 && height.length > 0) {
+      return width + ' x ' + height;
+    }
+    return '';
   }
 
   private async pixelMapToJpegBase64(pixelMap: image.PixelMap): Promise<string> {

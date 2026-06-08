@@ -20,7 +20,10 @@ AGENTS.md*
 mobiagent/
 build-profile.json5*
 *.diff
+/mock/workflows-source
 *.bak
 .codex-log/
 .sandbox_dump/
 .vscode/
+/.codex-tmp/
+/.codex

@@ -11,11 +11,13 @@ import { promptAction } from '@kit.ArkUI';
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  onSetRecommendationCompleted: (id: string, completed: boolean) => void = (id: string, completed: boolean) => {};
   onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
   @State recommendationBatchIndex: number = 0;
   @State selectedRecommendationId: string = '';
   @State agentTaskDraft: string = '';
   @State agentTaskSubmitting: boolean = false;
+  @State showAllRecommendations: boolean = false;
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -137,6 +139,13 @@ export struct HomePage {
           } else {
             Blank().layoutWeight(1)
           }
+          if (item.completed) {
+            Text('已完成')
+              .fontSize(11)
+              .fontColor('#7C8494')
+              .margin({ right: 8 })
+              .maxLines(1)
+          }
           Text('>').fontSize(16).fontColor(Color.White).textAlign(TextAlign.Center).width(28).height(28).backgroundColor(item.color).borderRadius(14)
         }.width('100%').margin({ top: 10 })
       }
@@ -158,7 +167,7 @@ export struct HomePage {
 
   @Builder EmptyRecommendationCard() {
     Row() {
-      Text('暂无待办事项')
+      Text(this.showAllRecommendations ? '暂无待办事项' : '暂无未完成待办')
         .fontSize(14)
         .fontColor('#7C8494')
     }
@@ -167,20 +176,28 @@ export struct HomePage {
   }
 
   private recommendationPageCount(): number {
-    return Math.max(1, Math.ceil(this.profile.recommendations.length / 4));
+    return Math.max(1, Math.ceil(this.visibleRecommendations().length / 4));
+  }
+
+  private visibleRecommendations(): HomeRecommendationViewModel[] {
+    if (this.showAllRecommendations) {
+      return this.profile.recommendations;
+    }
+    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
   }
 
   private recommendationPageItems(): HomeRecommendationViewModel[] {
-    if (this.profile.recommendations.length === 0) {
+    let items = this.visibleRecommendations();
+    if (items.length === 0) {
       return [];
     }
     let page = this.recommendationBatchIndex % this.recommendationPageCount();
     let start = page * 4;
-    return this.profile.recommendations.slice(start, start + 4);
+    return items.slice(start, start + 4);
   }
 
   private nextRecommendationBatch(): void {
-    if (this.profile.recommendations.length <= 4) {
+    if (this.visibleRecommendations().length <= 4) {
       return;
     }
     this.recommendationBatchIndex = (this.recommendationBatchIndex + 1) % this.recommendationPageCount();
@@ -191,6 +208,21 @@ export struct HomePage {
       return [];
     }
     return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.id === this.selectedRecommendationId).slice(0, 1);
+  }
+
+  private setRecommendationFilter(showAll: boolean): void {
+    this.showAllRecommendations = showAll;
+    this.recommendationBatchIndex = 0;
+    if (!showAll) {
+      this.selectedRecommendationId = '';
+    }
+  }
+
+  private setRecommendationCompleted(item: HomeRecommendationViewModel, completed: boolean): void {
+    this.onSetRecommendationCompleted(item.id, completed);
+    if (completed && !this.showAllRecommendations) {
+      this.selectedRecommendationId = '';
+    }
   }
 
   private async executeAgentTask(): Promise<void> {
@@ -212,6 +244,21 @@ export struct HomePage {
     } finally {
       this.agentTaskSubmitting = false;
     }
+  }
+
+  @Builder RecommendationFilterButton(label: string, showAll: boolean) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.showAllRecommendations === showAll ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.showAllRecommendations === showAll ? Color.White : '#6D7481')
+      .height(30)
+      .padding({ left: 12, right: 12 })
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.showAllRecommendations === showAll ? '#8066FF' : '#F1F3F8')
+      .borderRadius(15)
+      .onClick(() => {
+        this.setRecommendationFilter(showAll);
+      })
   }
 
   @Builder RecommendationDetailImage(item: HomeRecommendationViewModel) {
@@ -247,6 +294,30 @@ export struct HomePage {
     }
   }
 
+  @Builder RecommendationCompletedCheckbox(item: HomeRecommendationViewModel) {
+    Row() {
+      Checkbox({ name: 'homeRecommendationCompleted-' + item.id })
+        .select(item.completed)
+        .selectedColor(item.color)
+        .margin({ right: 10 })
+        .onChange((checked: boolean) => {
+          this.setRecommendationCompleted(item, checked);
+        })
+      Text(item.completed ? '已完成' : '标记为已完成')
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(item.completed ? item.color : '#4E5668')
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .height(44)
+    .padding({ left: 12, right: 12 })
+    .backgroundColor(item.completed ? '#F7F3FF' : '#F7F9FC')
+    .borderRadius(12)
+    .border({ width: 1, color: item.completed ? item.color : '#E5E8F0' })
+    .margin({ top: 16 })
+  }
+
   @Builder RecommendationDetailOverlay(item: HomeRecommendationViewModel) {
     Stack({ alignContent: Alignment.Center }) {
       Column()
@@ -265,10 +336,18 @@ export struct HomePage {
             .padding({ left: 9, right: 9, top: 5, bottom: 5 })
             .backgroundColor(item.color)
             .borderRadius(8)
+          if (item.completed) {
+            Text('已完成')
+              .fontSize(12)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#7C8494')
+              .margin({ left: 10 })
+          }
           Text('关闭')
             .fontSize(13)
             .fontColor('#7C8494')
-            .margin({ left: 12 })
+            .layoutWeight(1)
+            .textAlign(TextAlign.End)
             .onClick(() => {
               this.selectedRecommendationId = '';
             })
@@ -285,6 +364,7 @@ export struct HomePage {
           .fontColor('#4E5668')
           .width('100%')
           .margin({ top: 14 })
+        this.RecommendationCompletedCheckbox(item)
         if (item.agentTask.length > 0) {
           Column() {
             Text('执行任务')
@@ -409,15 +489,22 @@ export struct HomePage {
 
           Row() {
             Text('为你推荐').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+            this.RecommendationFilterButton('未完成', false)
+            Blank().width(8)
+            this.RecommendationFilterButton('全部', true)
+          }.width('92%').margin({ top: 24 })
+
+          Row() {
+            Blank().layoutWeight(1)
             Text('换一批')
               .fontSize(14)
-              .fontColor(this.profile.recommendations.length > 4 ? '#8066FF' : '#C0C5D0')
+              .fontColor(this.visibleRecommendations().length > 4 ? '#8066FF' : '#C0C5D0')
               .onClick(() => {
                 this.nextRecommendationBatch();
               })
-          }.width('92%').margin({ top: 24, bottom: 14 })
+          }.width('92%').margin({ top: 8, bottom: 14 })
 
-          if (this.profile.recommendations.length === 0) {
+          if (this.visibleRecommendations().length === 0) {
             this.EmptyRecommendationCard()
           } else {
             Grid() {
@@ -425,7 +512,7 @@ export struct HomePage {
                 GridItem() {
                   this.RecommendCard(item)
                 }
-              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title)
+              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + String(item.completed))
             }
             .columnsTemplate('1fr 1fr')
             .columnsGap(12)

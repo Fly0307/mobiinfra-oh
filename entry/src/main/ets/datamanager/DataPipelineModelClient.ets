@@ -731,7 +731,8 @@ export class DataPipelineModelClient {
         meta: '',
         domain: domains.length > 0 ? domains[0] : 'other',
         source_event_ids: sourceEventIds,
-        source_input_hash: ''
+        source_input_hash: '',
+        completed: false
       };
       result.push(item);
     });

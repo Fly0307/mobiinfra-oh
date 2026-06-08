@@ -29,10 +29,13 @@ import {
   resolveQueryLimit
 } from '../main/ets/datamanager/IndexService';
 import { shouldKeepTodoAgentTask } from '../main/ets/datamanager/DataPipelineModelClient';
+import { setHomeRecommendationCompletedInDocument } from '../main/ets/datamanager/DataManagerFacade';
 import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupState,
+  HomeRecommendationsDocument,
+  HomeRecommendationState,
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
@@ -82,6 +85,20 @@ function demoPlannerEvent(id: string, deadline: string, todoType: string = 'buy'
     domains: ['eat'],
     keywords: ['咖啡豆'],
     image_paths: []
+  };
+}
+
+function demoRecommendationState(id: string, completed: boolean): HomeRecommendationState {
+  return {
+    id: id,
+    tag: '待购买',
+    title: '购买咖啡豆',
+    desc: '记得购买咖啡豆',
+    meta: '',
+    domain: 'eat',
+    source_event_ids: ['e1'],
+    source_input_hash: 'hash-' + id,
+    completed: completed
   };
 }
 
@@ -292,6 +309,21 @@ export default function dataManagerUnitTest() {
       expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e2'], [])).assertFalse();
       expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e1', 'e2'], ['e1'])).assertFalse();
       expect(isHomeRecommendationSourceReusable('', 'hash-1', ['e1'], ['e1'], [])).assertFalse();
+    });
+
+    it('homeRecommendationCompletionDocumentToggle', 0, () => {
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'input',
+        total_events: 1,
+        recommendations: [demoRecommendationState('todo-1', false)]
+      };
+      expect(setHomeRecommendationCompletedInDocument(document, 'todo-1', true)).assertTrue();
+      expect(document.recommendations[0].completed).assertTrue();
+      expect(setHomeRecommendationCompletedInDocument(document, 'todo-1', false)).assertTrue();
+      expect(document.recommendations[0].completed).assertFalse();
+      expect(setHomeRecommendationCompletedInDocument(document, 'missing', true)).assertFalse();
+      expect(document.recommendations[0].completed).assertFalse();
     });
 
     it('homeTodoIndexAllowsChatBuyWithoutDeadline', 0, () => {

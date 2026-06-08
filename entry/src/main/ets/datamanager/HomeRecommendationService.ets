@@ -282,7 +282,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: currentHash
+        source_input_hash: currentHash,
+        completed: item.completed === true
       };
       result.push(recommendation);
       usedIds[id] = true;
@@ -330,7 +331,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: this.recommendationSourceInputHash(eventIds, context)
+        source_input_hash: this.recommendationSourceInputHash(eventIds, context),
+        completed: false
       };
       result.push(recommendation);
       eventIds.forEach((eventId: string) => covered[eventId] = true);

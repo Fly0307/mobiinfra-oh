@@ -20,6 +20,7 @@ import {
   DOMAIN_DISPLAY_NAMES,
   HomeDomainViewModel,
   HomeProfileViewModel,
+  HomeRecommendationsDocument,
   HomeRecommendationState,
   HomeRecommendationViewModel,
   IndexedEvent,
@@ -89,6 +90,22 @@ function defaultHomeDomains(): HomeDomainViewModel[] {
 
 function defaultRecommendations(): HomeRecommendationViewModel[] {
   return [];
+}
+
+export function setHomeRecommendationCompletedInDocument(document: HomeRecommendationsDocument, id: string, completed: boolean): boolean {
+  let targetId = normalizeFreeText(id);
+  if (targetId.length === 0) {
+    return false;
+  }
+  let matched = false;
+  (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+    if (normalizeFreeText(item.id) !== targetId) {
+      return;
+    }
+    matched = true;
+    item.completed = completed;
+  });
+  return matched;
 }
 
 function emptyCollectionViewModel(index: number): CollectionViewModel {
@@ -494,6 +511,30 @@ export class DataManagerFacade {
     };
   }
 
+  setHomeRecommendationCompleted(id: string, completed: boolean): boolean {
+    let targetId = normalizeFreeText(id);
+    if (targetId.length === 0) {
+      return false;
+    }
+    let document = this.homeRecommendationService.loadDocument();
+    let beforeCompleted = false;
+    (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      if (normalizeFreeText(item.id) === targetId) {
+        beforeCompleted = item.completed === true;
+      }
+    });
+    let matched = setHomeRecommendationCompletedInDocument(document, targetId, completed);
+    if (!matched) {
+      return false;
+    }
+    if (beforeCompleted === completed) {
+      return true;
+    }
+    this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), document as Object);
+    dataManagerInfo(`Home recommendation completed updated: id=${targetId}, completed=${completed}`);
+    return true;
+  }
+
   loadCollectionViewModels(): CollectionViewModel[] {
     return collectionTabSpecs().map((spec) => this.loadCollectionViewModel(spec.tabIndex));
   }
@@ -846,7 +887,8 @@ export class DataManagerFacade {
         thumbnailUri: this.recommendationThumbnail(item, eventMap),
         sourceEventIds: (item.source_event_ids || []).slice(),
         detail: this.recommendationDetail(item, eventMap),
-        agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap)
+        agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap),
+        completed: item.completed === true
       };
       if (recommendation.id.length > 0 && recommendation.title.length > 0) {
         result.push(recommendation);

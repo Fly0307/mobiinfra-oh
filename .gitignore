@@ -25,3 +25,5 @@ build-profile.json5*
 .codex-log/
 .sandbox_dump/
 .vscode/
+/.codex-tmp/
+/.codex

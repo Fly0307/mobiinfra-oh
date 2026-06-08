@@ -65,6 +65,11 @@ interface HdcConnectAttempt {
   health?: HdcHealthResponse;
 }
 
+interface CloudAgentTaskSubmitResult {
+  success: boolean;
+  error: string;
+}
+
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
@@ -1425,6 +1430,30 @@ struct Index {
     return await this.ensurePcAgentLoopReady(true);
   }
 
+  private async runHomeRecommendationAgentTask(taskText: string): Promise<void> {
+    let result = await this.submitDirectCloudAgentTask(taskText);
+    if (!result.success) {
+      throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
+    }
+    this.currentTab = 3;
+  }
+
+  private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
+    let task = taskText.trim();
+    if (task.length === 0) {
+      return { success: false, error: '请先输入云端 Agent 任务。' };
+    }
+    if (!await this.ensureCloudAgentBackend()) {
+      return { success: false, error: '' };
+    }
+    this.agentRouter.submitCloudTask(task);
+    AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
+    this.resetCloudLog('任务已下发：' + task);
+    this.appendCloudLog(`等待 PC 侧 harmony_agent.py 轮询 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。`);
+    this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
+    return { success: true, error: '' };
+  }
+
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -2083,18 +2112,10 @@ struct Index {
           .fontWeight(FontWeight.Bold)
           .margin({ top: 16 })
           .onClick(async () => {
-            if (this.cloudUserInput.trim().length === 0) {
-              this.appendCloudLog('请先输入云端 Agent 任务。');
-              return;
+            let result = await this.submitDirectCloudAgentTask(this.cloudUserInput);
+            if (!result.success && result.error.length > 0) {
+              this.appendCloudLog(result.error);
             }
-            if (!await this.ensureCloudAgentBackend()) {
-              return;
-            }
-            this.agentRouter.submitCloudTask(this.cloudUserInput);
-            AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
-            this.resetCloudLog(`任务已下发：${this.cloudUserInput}`);
-            this.appendCloudLog(`等待 PC 侧 harmony_agent.py 轮询 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。`);
-            this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
           })
 
         Row() {
@@ -2217,7 +2238,14 @@ struct Index {
   build() {
     Stack() {
       Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-        TabContent() { HomePage({ profile: this.homeProfile }) }.tabBar(this.TabItem('H', '首页', 0))
+        TabContent() {
+          HomePage({
+            profile: this.homeProfile,
+            onExecuteAgentTask: async (taskDescription: string) => {
+              await this.runHomeRecommendationAgentTask(taskDescription);
+            }
+          })
+        }.tabBar(this.TabItem('H', '首页', 0))
         TabContent() {
           CollectionPage({
             collectionModule: $collectionModule,

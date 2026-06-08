@@ -9,7 +9,8 @@ import {
   parseNumberedEntries,
   profileShortSummaryFromText,
   sourceAppDisplayName,
-  sourceDisplayName
+  sourceDisplayName,
+  weekdayLabelFromDate
 } from '../main/ets/datamanager/DataManagerUtils';
 import {
   heuristicCollectionGroups,
@@ -17,18 +18,26 @@ import {
 } from '../main/ets/datamanager/CollectionGroupingService';
 import { GalleryExifUtils } from '../main/ets/utils/gallery/GalleryExifUtils';
 import {
+  homeRecommendationSourceInputFingerprint,
+  isHomeRecommendationSourceReusable,
   isFutureTodoDeadline,
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
+  eventEnrichInputFingerprint,
+  isEventEnrichInputReusable,
+  isHomeTodoIndexCandidate,
   isQueryResultTruncated,
   resolveQueryLimit
 } from '../main/ets/datamanager/IndexService';
+import { shouldKeepTodoAgentTask } from '../main/ets/datamanager/DataPipelineModelClient';
 import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupState,
   IndexedEvent,
+  IndexedEventTodo,
+  HomeRecommendationPlannerEvent,
   SourceEntry,
   createJsonMap
 } from '../main/ets/datamanager/DataManagerTypes';
@@ -50,7 +59,8 @@ function demoIndexedEvent(id: string, summary: string, source: string, domain: s
     todo: {
       type: '',
       deadline: '',
-      text: ''
+      text: '',
+      agent_task: ''
     },
     keywords: [keyword],
     domains: [domain],
@@ -58,6 +68,22 @@ function demoIndexedEvent(id: string, summary: string, source: string, domain: s
     enrichment_method: 'test',
     entities: [],
     profile_domains: [domain]
+  };
+}
+
+function demoPlannerEvent(id: string, deadline: string, todoType: string = 'buy'): HomeRecommendationPlannerEvent {
+  return {
+    event_id: id,
+    date: '2026-06-05',
+    todo_type: todoType,
+    todo_deadline: deadline,
+    todo_text: '购买咖啡豆',
+    summary: '微信里提到要买咖啡豆',
+    normalized_fact: '用户想购买咖啡豆',
+    sources: ['微信'],
+    domains: ['eat'],
+    keywords: ['咖啡豆'],
+    image_paths: []
   };
 }
 
@@ -109,6 +135,13 @@ export default function dataManagerUnitTest() {
     it('indexTerms', 0, () => {
       let terms = indexTerms('高德顺风车订单');
       expect(terms.indexOf('顺风') >= 0).assertTrue();
+    });
+
+    it('weekdayLabelFromDate', 0, () => {
+      expect(weekdayLabelFromDate('2026-06-05')).assertEqual('星期五');
+      expect(weekdayLabelFromDate('2026-06-06')).assertEqual('星期六');
+      expect(weekdayLabelFromDate('bad-date')).assertEqual('');
+      expect(weekdayLabelFromDate('2026-02-31')).assertEqual('');
     });
 
     it('profileShortSummaryNormalization', 0, () => {
@@ -289,6 +322,79 @@ export default function dataManagerUnitTest() {
       expect(isFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
       expect(isFutureTodoDeadline('', '2026-06-05')).assertFalse();
       expect(recommendationTodoDeadlineMeta('2026-06-06')).assertEqual('6月6日截止');
+    });
+
+    it('homeRecommendationSourceFingerprintTracksPlannerInputs', 0, () => {
+      let event = demoPlannerEvent('e1', '2026-06-06');
+      let fingerprint = homeRecommendationSourceInputFingerprint([event]);
+      let changedTodo = demoPlannerEvent('e1', '2026-06-06');
+      changedTodo.todo_text = '购买咖啡豆和滤纸';
+      expect(homeRecommendationSourceInputFingerprint([changedTodo]) !== fingerprint).assertTrue();
+      let changedSummary = demoPlannerEvent('e1', '2026-06-06');
+      changedSummary.summary = '微信里提到要买咖啡豆和滤纸';
+      expect(homeRecommendationSourceInputFingerprint([changedSummary]) !== fingerprint).assertTrue();
+      let sameContent = demoPlannerEvent('e1', '2026-06-06');
+      expect(homeRecommendationSourceInputFingerprint([sameContent])).assertEqual(fingerprint);
+    });
+
+    it('homeRecommendationSourceReuseRequiresCandidateHashAndNoOverlap', 0, () => {
+      expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e1', 'e2'], [])).assertTrue();
+      expect(isHomeRecommendationSourceReusable('hash-1', 'hash-2', ['e1'], ['e1', 'e2'], [])).assertFalse();
+      expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e2'], [])).assertFalse();
+      expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e1', 'e2'], ['e1'])).assertFalse();
+      expect(isHomeRecommendationSourceReusable('', 'hash-1', ['e1'], ['e1'], [])).assertFalse();
+    });
+
+    it('homeTodoIndexAllowsChatBuyWithoutDeadline', 0, () => {
+      let todo: IndexedEventTodo = { type: 'buy', deadline: '', text: '购买咖啡豆', agent_task: '在淘宝中购买咖啡豆' };
+      expect(isHomeTodoIndexCandidate(todo, [3], [3])).assertTrue();
+    });
+
+    it('homeTodoIndexRejectsNonBuyChatWithoutDeadline', 0, () => {
+      let todo: IndexedEventTodo = { type: 'plan', deadline: '', text: '安排周末聚餐', agent_task: '' };
+      expect(isHomeTodoIndexCandidate(todo, [3], [3])).assertFalse();
+    });
+
+    it('agentTaskOnlyKeptForPureChatBuyTodo', 0, () => {
+      expect(shouldKeepTodoAgentTask('buy', ['聊天'])).assertTrue();
+      expect(shouldKeepTodoAgentTask('buy', ['聊天', '购物'])).assertFalse();
+      expect(shouldKeepTodoAgentTask('buy', ['购物'])).assertFalse();
+      expect(shouldKeepTodoAgentTask('plan', ['聊天'])).assertFalse();
+    });
+
+    it('eventEnrichInputFingerprintIgnoresGeneratedTodo', 0, () => {
+      let event = demoIndexedEvent('e1', '微信里提到要买咖啡豆', '微信', 'eat', '咖啡豆');
+      event.source_refs = ['2026-06-05/demo.md#1'];
+      event.workflow_scene_ids = [3];
+      let fingerprint = eventEnrichInputFingerprint(event);
+      event.todo = { type: 'buy', deadline: '', text: '购买咖啡豆', agent_task: '在淘宝中购买咖啡豆' };
+      expect(eventEnrichInputFingerprint(event)).assertEqual(fingerprint);
+    });
+
+    it('eventEnrichInputFingerprintChangesWhenEnrichInputsChange', 0, () => {
+      let event = demoIndexedEvent('e1', '微信里提到要买咖啡豆', '微信', 'eat', '咖啡豆');
+      event.source_refs = ['2026-06-05/demo.md#1'];
+      event.workflow_scene_ids = [3];
+      event.image_paths = ['workflows/runs/demo/a.png'];
+      let fingerprint = eventEnrichInputFingerprint(event);
+      event.summary = '微信里提到要买咖啡豆和滤纸';
+      expect(eventEnrichInputFingerprint(event) !== fingerprint).assertTrue();
+      event.summary = '微信里提到要买咖啡豆';
+      event.source_refs = ['2026-06-05/demo.md#1', '2026-06-05/demo.md#2'];
+      expect(eventEnrichInputFingerprint(event) !== fingerprint).assertTrue();
+      event.source_refs = ['2026-06-05/demo.md#1'];
+      event.workflow_scene_ids = [3, 4];
+      expect(eventEnrichInputFingerprint(event) !== fingerprint).assertTrue();
+      event.workflow_scene_ids = [3];
+      event.image_paths = ['workflows/runs/demo/b.png'];
+      expect(eventEnrichInputFingerprint(event) !== fingerprint).assertTrue();
+    });
+
+    it('eventEnrichInputReuseRequiresMatchingHashAndPreviousEvent', 0, () => {
+      expect(isEventEnrichInputReusable('hash-1', 'hash-1', true)).assertTrue();
+      expect(isEventEnrichInputReusable('hash-1', 'hash-2', true)).assertFalse();
+      expect(isEventEnrichInputReusable('hash-1', 'hash-1', false)).assertFalse();
+      expect(isEventEnrichInputReusable('', 'hash-1', true)).assertFalse();
     });
   });
 }

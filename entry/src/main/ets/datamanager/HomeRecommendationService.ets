@@ -28,12 +28,50 @@ export interface HomeRecommendationBuildResult {
 
 interface HomeRecommendationPlanningContext {
   plannerEvents: HomeRecommendationPlannerEvent[];
+  plannerEventsById: Record<string, HomeRecommendationPlannerEvent>;
   events: Record<string, IndexedEvent>;
   candidateEventIds: string[];
   today: string;
 }
 
 const HOME_TODO_NO_DEADLINE_LIMIT: number = 80;
+
+export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
+  let parts: string[] = ['home_recommendation_source_v1'];
+  events.forEach((event: HomeRecommendationPlannerEvent) => {
+    parts.push([
+      event.event_id,
+      event.date,
+      event.todo_type,
+      event.todo_deadline,
+      event.todo_text,
+      event.summary,
+      event.normalized_fact,
+      event.sources.join(','),
+      event.domains.join(','),
+      event.keywords.join(','),
+      event.image_paths.join(',')
+    ].join('\u001f'));
+  });
+  return parts.join('\u001e');
+}
+
+export function isHomeRecommendationSourceReusable(storedHash: string, currentHash: string, sourceEventIds: string[],
+  candidateEventIds: string[], coveredEventIds: string[]): boolean {
+  if (sourceEventIds.length === 0 || normalizeFreeText(storedHash).length === 0 || storedHash !== currentHash) {
+    return false;
+  }
+  let candidates: Record<string, boolean> = new Object() as Record<string, boolean>;
+  candidateEventIds.forEach((id: string) => candidates[id] = true);
+  let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
+  coveredEventIds.forEach((id: string) => covered[id] = true);
+  for (let id of sourceEventIds) {
+    if (candidates[id] !== true || covered[id] === true) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export function isFutureTodoDeadline(deadline: string, today: string): boolean {
   return isIsoDate(deadline) && isIsoDate(today) && deadline > today;
@@ -91,16 +129,7 @@ export class HomeRecommendationService {
     if (shouldRebuildEmpty) {
       dataManagerInfo(`Home recommendations empty, rebuild requested: events=${context.candidateEventIds.length}`);
     }
-    let recommendations: HomeRecommendationState[] = [];
-    if (modelConfig.enabled && context.plannerEvents.length > 0) {
-      try {
-        let planned = await this.modelClient.planHomeRecommendations(context.plannerEvents, context.today, modelConfig);
-        recommendations = this.normalizeRecommendations(planned, context);
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError(`Home recommendation planner failed: ${err.message}`);
-      }
-    }
+    let recommendations = await this.buildIncrementalRecommendations(previous, context, modelConfig);
     let document: HomeRecommendationsDocument = {
       generated_at: nowIsoLocal(),
       input_hash: inputHash,
@@ -152,6 +181,7 @@ export class HomeRecommendationService {
       return left.event_id.localeCompare(right.event_id);
     });
     let eventMap: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
+    let plannerEventsById: Record<string, HomeRecommendationPlannerEvent> = new Object() as Record<string, HomeRecommendationPlannerEvent>;
     let plannerEvents: HomeRecommendationPlannerEvent[] = [];
     candidates.forEach((event: IndexedEvent) => {
       eventMap[event.event_id] = event;
@@ -169,9 +199,11 @@ export class HomeRecommendationService {
         image_paths: (event.image_paths || []).slice()
       };
       plannerEvents.push(plannerEvent);
+      plannerEventsById[event.event_id] = plannerEvent;
     });
     return {
       plannerEvents: plannerEvents,
+      plannerEventsById: plannerEventsById,
       events: eventMap,
       candidateEventIds: candidates.map((event: IndexedEvent): string => event.event_id),
       today: today
@@ -207,12 +239,80 @@ export class HomeRecommendationService {
     return nowIsoLocal().substring(0, 10);
   }
 
-  private normalizeRecommendations(planned: HomeRecommendationState[], context: HomeRecommendationPlanningContext): HomeRecommendationState[] {
+  private async buildIncrementalRecommendations(previous: HomeRecommendationsDocument, context: HomeRecommendationPlanningContext,
+    modelConfig: DataManagerModelConfig): Promise<HomeRecommendationState[]> {
+    let usedIds: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let recommendations = this.reusePreviousRecommendations(previous.recommendations || [], context, usedIds, covered);
+    let remainingContext = this.remainingPlanningContext(context, covered);
+    if (modelConfig.enabled && remainingContext.plannerEvents.length > 0) {
+      try {
+        let planned = await this.modelClient.planHomeRecommendations(remainingContext.plannerEvents, remainingContext.today, modelConfig);
+        recommendations = recommendations.concat(this.normalizeRecommendations(planned, remainingContext, usedIds));
+      } catch (e) {
+        let err = e as Error;
+        dataManagerError(`Home recommendation planner failed: ${err.message}`);
+      }
+    }
+    dataManagerInfo(`Home recommendations incremental: reused=${Object.keys(covered).length}, plannedEvents=${remainingContext.plannerEvents.length}, recommendations=${recommendations.length}`);
+    return recommendations;
+  }
+
+  private reusePreviousRecommendations(previous: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
+    usedIds: Record<string, boolean>, covered: Record<string, boolean>): HomeRecommendationState[] {
+    let result: HomeRecommendationState[] = [];
+    previous.forEach((item: HomeRecommendationState) => {
+      let eventIds = stableUnique(item.source_event_ids || []);
+      let currentHash = this.recommendationSourceInputHash(eventIds, context);
+      if (!isHomeRecommendationSourceReusable(normalizeFreeText(item.source_input_hash), currentHash, eventIds,
+        context.candidateEventIds, Object.keys(covered))) {
+        return;
+      }
+      let id = normalizeFreeText(item.id);
+      let title = normalizeFreeText(item.title);
+      if (id.length === 0 || title.length === 0) {
+        return;
+      }
+      let domain = normalizeFreeText(item.domain) || this.firstEventDomain(eventIds, context.events);
+      let recommendation: HomeRecommendationState = {
+        id: id,
+        tag: normalizeFreeText(item.tag),
+        title: title,
+        desc: normalizeFreeText(item.desc),
+        meta: this.deadlineMeta(eventIds, context.events),
+        domain: domain,
+        source_event_ids: eventIds,
+        source_input_hash: currentHash
+      };
+      result.push(recommendation);
+      usedIds[id] = true;
+      eventIds.forEach((eventId: string) => covered[eventId] = true);
+    });
+    return result;
+  }
+
+  private remainingPlanningContext(context: HomeRecommendationPlanningContext, covered: Record<string, boolean>): HomeRecommendationPlanningContext {
+    let plannerEvents = context.plannerEvents.filter((event: HomeRecommendationPlannerEvent): boolean => covered[event.event_id] !== true);
+    let plannerEventsById: Record<string, HomeRecommendationPlannerEvent> = new Object() as Record<string, HomeRecommendationPlannerEvent>;
+    plannerEvents.forEach((event: HomeRecommendationPlannerEvent) => plannerEventsById[event.event_id] = event);
+    return {
+      plannerEvents: plannerEvents,
+      plannerEventsById: plannerEventsById,
+      events: context.events,
+      candidateEventIds: plannerEvents.map((event: HomeRecommendationPlannerEvent): string => event.event_id),
+      today: context.today
+    };
+  }
+
+  private normalizeRecommendations(planned: HomeRecommendationState[], context: HomeRecommendationPlanningContext,
+    usedIds: Record<string, boolean>): HomeRecommendationState[] {
     let result: HomeRecommendationState[] = [];
     let allowed: Record<string, boolean> = new Object() as Record<string, boolean>;
     context.candidateEventIds.forEach((id: string) => allowed[id] = true);
+    let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
     planned.forEach((item: HomeRecommendationState) => {
-      let eventIds = stableUnique((item.source_event_ids || []).filter((id: string): boolean => allowed[id] === true));
+      let eventIds = stableUnique((item.source_event_ids || [])
+        .filter((id: string): boolean => allowed[id] === true && covered[id] !== true));
       if (eventIds.length === 0) {
         return;
       }
@@ -223,18 +323,41 @@ export class HomeRecommendationService {
       let domains = normalizeDomains([normalizeFreeText(item.domain)]);
       let domain = domains.length > 0 ? domains[0] : this.firstEventDomain(eventIds, context.events);
       let recommendation: HomeRecommendationState = {
-        id: 'todo-' + String(result.length + 1),
+        id: this.nextRecommendationId(usedIds),
         tag: this.normalizeRecommendationTag(item.tag, eventIds, context.events),
         title: title,
         desc: this.recommendationDesc(item, eventIds, context.events),
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
-        source_event_ids: eventIds
+        source_event_ids: eventIds,
+        source_input_hash: this.recommendationSourceInputHash(eventIds, context)
       };
       result.push(recommendation);
+      eventIds.forEach((eventId: string) => covered[eventId] = true);
     });
-    this.appendMissingRecommendations(result, allowed, context);
     return result;
+  }
+
+  private recommendationSourceInputHash(eventIds: string[], context: HomeRecommendationPlanningContext): string {
+    let events: HomeRecommendationPlannerEvent[] = [];
+    for (let id of eventIds) {
+      let event = context.plannerEventsById[id];
+      if (!event) {
+        return '';
+      }
+      events.push(event);
+    }
+    return this.storage.sha256Text(homeRecommendationSourceInputFingerprint(events));
+  }
+
+  private nextRecommendationId(usedIds: Record<string, boolean>): string {
+    let index = 1;
+    while (usedIds['todo-' + String(index)] === true) {
+      index++;
+    }
+    let id = 'todo-' + String(index);
+    usedIds[id] = true;
+    return id;
   }
 
   private recommendationTitle(item: HomeRecommendationState, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
@@ -243,38 +366,6 @@ export class HomeRecommendationService {
 
   private recommendationDesc(item: HomeRecommendationState, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
     return normalizeFreeText(item.desc) || this.firstTodoText(eventIds, eventMap) || this.firstEventText(eventIds, eventMap);
-  }
-
-  private appendMissingRecommendations(result: HomeRecommendationState[], allowed: Record<string, boolean>, context: HomeRecommendationPlanningContext): void {
-    let covered: Record<string, boolean> = new Object() as Record<string, boolean>;
-    result.forEach((item: HomeRecommendationState) => {
-      (item.source_event_ids || []).forEach((id: string) => covered[id] = true);
-    });
-    context.candidateEventIds.forEach((eventId: string) => {
-      if (allowed[eventId] !== true || covered[eventId] === true) {
-        return;
-      }
-      let event = context.events[eventId];
-      if (!event) {
-        return;
-      }
-      let eventIds = [eventId];
-      let todoText = this.firstTodoText(eventIds, context.events);
-      let title = todoText || normalizeFreeText(event.summary || event.normalized_fact);
-      if (title.length === 0) {
-        return;
-      }
-      let recommendation: HomeRecommendationState = {
-        id: 'todo-' + String(result.length + 1),
-        tag: this.todoTypeTag(normalizeFreeText(event.todo.type), isIsoDate(event.todo.deadline)),
-        title: title,
-        desc: todoText || normalizeFreeText(event.normalized_fact || event.summary),
-        meta: this.deadlineMeta(eventIds, context.events),
-        domain: event.domains.length > 0 ? event.domains[0] : 'other',
-        source_event_ids: eventIds
-      };
-      result.push(recommendation);
-    });
   }
 
   private normalizeRecommendationTag(value: string, eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
@@ -311,32 +402,14 @@ export class HomeRecommendationService {
     if (type === 'buy') {
       return '待购买';
     }
-    if (type === 'compare') {
-      return '待比价';
-    }
     if (type === 'pay') {
       return '待付款';
-    }
-    if (type === 'refund') {
-      return '待退款';
     }
     if (type === 'pickup') {
       return '待取件';
     }
-    if (type === 'after_sale') {
-      return '售后跟进';
-    }
     if (type === 'order') {
       return '待下单';
-    }
-    if (type === 'reorder') {
-      return '待复购';
-    }
-    if (type === 'complain') {
-      return '待反馈';
-    }
-    if (type === 'watch') {
-      return '待观看';
     }
     if (type === 'renew') {
       return '待续费';
@@ -344,23 +417,11 @@ export class HomeRecommendationService {
     if (type === 'book') {
       return '待预订';
     }
-    if (type === 'join') {
-      return '待参与';
-    }
     if (type === 'repair') {
       return '待维修';
     }
     if (type === 'appointment') {
       return '待预约';
-    }
-    if (type === 'prepare') {
-      return '待准备';
-    }
-    if (type === 'contact') {
-      return '待联系';
-    }
-    if (type === 'gift') {
-      return '待送礼';
     }
     if (type === 'plan') {
       return '待安排';
@@ -376,9 +437,6 @@ export class HomeRecommendationService {
     }
     if (type === 'reimburse') {
       return '待报销';
-    }
-    if (type === 'follow_up') {
-      return '待跟进';
     }
     if (hasDeadline) {
       return '日程提醒';

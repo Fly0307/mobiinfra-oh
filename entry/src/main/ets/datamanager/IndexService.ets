@@ -78,6 +78,7 @@ type ObjectMap = Record<string, Object>;
 interface SourceManifestEntry {
   sha256: string;
   event_ids: string[];
+  event_input_hashes: StringMap;
 }
 
 type SourceManifestMap = Record<string, SourceManifestEntry>;
@@ -201,6 +202,47 @@ export function isQueryResultTruncated(selectedLength: number, requestedLimit: n
   return requestedLimit > 0 && selectedLength > requestedLimit;
 }
 
+export function isHomeTodoIndexCandidate(todo: IndexedEventTodo, eventSceneIds: number[], chatSceneIds: number[]): boolean {
+  let type = normalizeFreeText(todo.type);
+  let deadline = normalizeFreeText(todo.deadline);
+  if (type.length === 0 && !isIsoDate(deadline)) {
+    return false;
+  }
+  if (!isIsoDate(deadline) && hasAnySceneId(eventSceneIds, chatSceneIds) && type !== 'buy') {
+    return false;
+  }
+  return true;
+}
+
+function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
+  for (let sceneId of selectedSceneIds) {
+    if (eventSceneIds.indexOf(sceneId) >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function eventEnrichInputFingerprint(event: IndexedEvent): string {
+  let fields: string[] = [
+    'event_enrich_input_v1',
+    event.event_id,
+    event.event_date,
+    event.last_seen_date,
+    normalizeFreeText(event.summary),
+    normalizeFreeText(event.normalized_fact),
+    stableUnique(event.tags || []).sort().join('\u001d'),
+    stableUnique(event.source_refs || []).sort().join('\u001d'),
+    stableUniqueNumbers(event.workflow_scene_ids || []).map((sceneId: number): string => String(sceneId)).join('\u001d'),
+    stableUnique(event.image_paths || []).sort().join('\u001d')
+  ];
+  return fields.join('\u001f');
+}
+
+export function isEventEnrichInputReusable(previousHash: string, currentHash: string, previousEventExists: boolean): boolean {
+  return previousEventExists && normalizeFreeText(previousHash).length > 0 && previousHash === currentHash;
+}
+
 export class IndexService {
   private paths: DataManagerPaths;
   private storage: DataManagerStorage;
@@ -237,33 +279,55 @@ export class IndexService {
       let indexPercent = 62 + Math.round(stateIndex * 22 / Math.max(1, statePaths.length));
       this.emitProgress(progress, '索引增强', `批量增强 ${relativePath}`, stateIndex, statePaths.length, indexPercent);
       let eventIds: string[] = [];
+      let eventInputHashes: StringMap = createStringMap();
       let previousSource = previousManifest.sources ? previousManifest.sources[relativePath] : undefined;
       let canReuseSource = this.canReuseSource(previousSource, digest, previousEvents);
       if (reuseAllowed && canReuseSource && previousSource) {
         for (let eventId of previousSource.event_ids) {
-          let reused = this.copyEvent(previousEvents[eventId]);
-          reused.sources = eventSourceNames(reused.source_refs || [], relativePath);
-          reused.image_paths = this.imagePathsForSourceRefs(reused.source_refs || [], imageReferences);
-          reused.profile_domains = deriveProfileDomains(reused);
+          let reused = this.copyReusableEvent(previousEvents[eventId], relativePath, imageReferences);
           events[reused.event_id] = reused;
           eventIds.push(reused.event_id);
+          eventInputHashes[reused.event_id] = this.eventEnrichInputHash(reused);
         }
         reusedEvents += eventIds.length;
         dataManagerInfo(`Index source reused: relative=${relativePath}, events=${eventIds.length}`);
       } else {
         let baseEvents = this.baseEventsFromState(statePath, relativePath, imageReferences);
         dataManagerInfo(`Index source state: relative=${relativePath}, baseEvents=${baseEvents.length}`);
-        let enrichedEvents = await this.modelClient.enrichEvents(baseEvents, modelConfig);
+        let eventsById: EventMap = {};
+        let eventsToEnrich: IndexedEvent[] = [];
+        baseEvents.forEach((event: IndexedEvent) => {
+          let inputHash = this.eventEnrichInputHash(event);
+          eventInputHashes[event.event_id] = inputHash;
+          if (reuseAllowed && this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents)) {
+            eventsById[event.event_id] = this.copyReusableEvent(previousEvents[event.event_id], relativePath, imageReferences);
+            reusedEvents++;
+          } else {
+            eventsToEnrich.push(event);
+          }
+        });
+        let enrichedEvents = await this.modelClient.enrichEvents(eventsToEnrich, modelConfig);
         for (let enriched of enrichedEvents) {
           enriched.profile_domains = deriveProfileDomains(enriched);
-          events[enriched.event_id] = enriched;
-          eventIds.push(enriched.event_id);
+          eventsById[enriched.event_id] = enriched;
         }
-        enrichedEventsCount += eventIds.length;
+        baseEvents.forEach((event: IndexedEvent) => {
+          let current = eventsById[event.event_id];
+          if (!current) {
+            return;
+          }
+          events[current.event_id] = current;
+          eventIds.push(current.event_id);
+        });
+        if (eventsToEnrich.length > 0 || baseEvents.length > 0) {
+          dataManagerInfo(`Index source event reuse: relative=${relativePath}, reused=${baseEvents.length - eventsToEnrich.length}, enriched=${eventsToEnrich.length}`);
+        }
+        enrichedEventsCount += enrichedEvents.length;
       }
       let sourceEntry: SourceManifestEntry = {
         sha256: digest,
-        event_ids: eventIds
+        event_ids: eventIds,
+        event_input_hashes: eventInputHashes
       };
       sources[relativePath] = sourceEntry;
       stateIndex++;
@@ -682,7 +746,7 @@ export class IndexService {
 
   private currentEnrichment(modelConfig: DataManagerModelConfig): EnrichmentManifest {
     let enrichment: EnrichmentManifest = {
-      schema: 'todo_signal_detail',
+      schema: 'todo_signal_agent_task',
       mode: modelConfig.enabled ? 'model' : 'heuristic',
       base_url: modelConfig.baseUrl
     };
@@ -706,15 +770,23 @@ export class IndexService {
   }
 
   private canReuseSource(previousSource: SourceManifestEntry | undefined, digest: string, previousEvents: EventMap): boolean {
-    if (!previousSource || previousSource.sha256 !== digest || !Array.isArray(previousSource.event_ids) || previousSource.event_ids.length === 0) {
+    if (!previousSource || previousSource.sha256 !== digest || !Array.isArray(previousSource.event_ids) || previousSource.event_ids.length === 0 ||
+      !previousSource.event_input_hashes) {
       return false;
     }
     for (let eventId of previousSource.event_ids) {
-      if (!previousEvents[eventId]) {
+      if (!previousEvents[eventId] || normalizeFreeText(previousSource.event_input_hashes[eventId]).length === 0) {
         return false;
       }
     }
     return true;
+  }
+
+  private canReuseEvent(previousSource: SourceManifestEntry | undefined, eventId: string, currentInputHash: string, previousEvents: EventMap): boolean {
+    if (!previousSource || !previousSource.event_input_hashes) {
+      return false;
+    }
+    return isEventEnrichInputReusable(previousSource.event_input_hashes[eventId], currentInputHash, previousEvents[eventId] !== undefined);
   }
 
   private sameStringArrays(left: string[], right: string[]): boolean {
@@ -754,11 +826,24 @@ export class IndexService {
     return copied;
   }
 
+  private copyReusableEvent(event: IndexedEvent, relativePath: string, imageReferences: StringArrayMap): IndexedEvent {
+    let reused = this.copyEvent(event);
+    reused.sources = eventSourceNames(reused.source_refs || [], relativePath);
+    reused.image_paths = this.imagePathsForSourceRefs(reused.source_refs || [], imageReferences);
+    reused.profile_domains = deriveProfileDomains(reused);
+    return reused;
+  }
+
+  private eventEnrichInputHash(event: IndexedEvent): string {
+    return this.storage.sha256Text(eventEnrichInputFingerprint(event));
+  }
+
   private emptyTodo(): IndexedEventTodo {
     return {
       type: '',
       deadline: '',
-      text: ''
+      text: '',
+      agent_task: ''
     };
   }
 
@@ -766,13 +851,15 @@ export class IndexService {
     let type = normalizeFreeText(todo.type);
     let deadline = isIsoDate(normalizeFreeText(todo.deadline)) ? normalizeFreeText(todo.deadline) : '';
     let text = normalizeFreeText(todo.text);
+    let agentTask = normalizeFreeText(todo.agent_task);
     if (type.length === 0 && deadline.length === 0) {
       return this.emptyTodo();
     }
     let copied: IndexedEventTodo = {
       type: type,
       deadline: deadline,
-      text: text
+      text: text,
+      agent_task: agentTask
     };
     return copied;
   }
@@ -1193,10 +1280,7 @@ export class IndexService {
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
       let todo = this.copyTodo(event.todo);
-      if (todo.type.length === 0 && !isIsoDate(todo.deadline)) {
-        return;
-      }
-      if (!isIsoDate(todo.deadline) && this.hasAnyWorkflowScene(event, chatSceneIds)) {
+      if (!isHomeTodoIndexCandidate(todo, event.workflow_scene_ids || [], chatSceneIds)) {
         return;
       }
       if (todo.type.length > 0) {
@@ -1223,7 +1307,7 @@ export class IndexService {
       return right.event_id.localeCompare(left.event_id);
     });
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; deadline_postings include absolute YYYY-MM-DD deadlines; no_deadline_event_ids are newest first; chat scene requires deadline',
+      normalization: 'home recommendation todo candidates; deadline_postings include absolute YYYY-MM-DD deadlines; no_deadline_event_ids are newest first; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: noDeadlineEvents.map((event: IndexedEvent): string => event.event_id),
       type_postings: typePostings
@@ -1239,16 +1323,6 @@ export class IndexService {
       }
     });
     return ids;
-  }
-
-  private hasAnyWorkflowScene(event: IndexedEvent, sceneIds: number[]): boolean {
-    let eventSceneIds = event.workflow_scene_ids || [];
-    for (let sceneId of sceneIds) {
-      if (eventSceneIds.indexOf(sceneId) >= 0) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private buildDomainDocument(events: EventMap): DomainDocument {
@@ -2089,7 +2163,7 @@ export class IndexService {
     let deadlinePostings: StringArrayMap = {};
     let typePostings: StringArrayMap = {};
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; chat scene requires deadline',
+      normalization: 'home recommendation todo candidates; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: [],
       type_postings: typePostings

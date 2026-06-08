@@ -9,7 +9,8 @@ import {
   parseNumberedEntries,
   profileShortSummaryFromText,
   sourceAppDisplayName,
-  sourceDisplayName
+  sourceDisplayName,
+  weekdayLabelFromDate
 } from '../main/ets/datamanager/DataManagerUtils';
 import {
   heuristicCollectionGroups,
@@ -134,6 +135,13 @@ export default function dataManagerUnitTest() {
     it('indexTerms', 0, () => {
       let terms = indexTerms('高德顺风车订单');
       expect(terms.indexOf('顺风') >= 0).assertTrue();
+    });
+
+    it('weekdayLabelFromDate', 0, () => {
+      expect(weekdayLabelFromDate('2026-06-05')).assertEqual('星期五');
+      expect(weekdayLabelFromDate('2026-06-06')).assertEqual('星期六');
+      expect(weekdayLabelFromDate('bad-date')).assertEqual('');
+      expect(weekdayLabelFromDate('2026-02-31')).assertEqual('');
     });
 
     it('profileShortSummaryNormalization', 0, () => {

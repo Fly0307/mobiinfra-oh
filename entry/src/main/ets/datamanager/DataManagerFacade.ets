@@ -889,32 +889,14 @@ export class DataManagerFacade {
     if (type === 'buy') {
       return '待购买';
     }
-    if (type === 'compare') {
-      return '待比价';
-    }
     if (type === 'pay') {
       return '待付款';
-    }
-    if (type === 'refund') {
-      return '待退款';
     }
     if (type === 'pickup') {
       return '待取件';
     }
-    if (type === 'after_sale') {
-      return '售后跟进';
-    }
     if (type === 'order') {
       return '待下单';
-    }
-    if (type === 'reorder') {
-      return '待复购';
-    }
-    if (type === 'complain') {
-      return '待反馈';
-    }
-    if (type === 'watch') {
-      return '待观看';
     }
     if (type === 'renew') {
       return '待续费';
@@ -922,23 +904,11 @@ export class DataManagerFacade {
     if (type === 'book') {
       return '待预订';
     }
-    if (type === 'join') {
-      return '待参与';
-    }
     if (type === 'repair') {
       return '待维修';
     }
     if (type === 'appointment') {
       return '待预约';
-    }
-    if (type === 'prepare') {
-      return '待准备';
-    }
-    if (type === 'contact') {
-      return '待联系';
-    }
-    if (type === 'gift') {
-      return '待送礼';
     }
     if (type === 'plan') {
       return '待安排';
@@ -954,9 +924,6 @@ export class DataManagerFacade {
     }
     if (type === 'reimburse') {
       return '待报销';
-    }
-    if (type === 'follow_up') {
-      return '待跟进';
     }
     if (hasDeadline) {
       return '日程提醒';
@@ -1035,4 +1002,3 @@ export class DataManagerFacade {
     return '';
   }
 }
-

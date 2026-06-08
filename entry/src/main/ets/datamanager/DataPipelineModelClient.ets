@@ -39,7 +39,8 @@ import {
   selectCandidateRecords,
   sourceDisplayName,
   stableUnique,
-  summarizeText
+  summarizeText,
+  weekdayLabelFromDate
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
 import { workflowSceneLabel } from '../utils/WorkflowSceneConfig';
@@ -78,14 +79,6 @@ interface DedupPromptPayload {
   existing_records: DedupExistingPayload[];
 }
 
-interface EventPromptPayload {
-  event_date: string;
-  workflow_scene_ids: number[];
-  workflow_scene_labels: string[];
-  summary: string;
-  normalized_fact: string;
-}
-
 interface SummaryPromptPayload {
   level: string;
   event_count: number;
@@ -95,6 +88,7 @@ interface SummaryPromptPayload {
 interface BatchEventPromptPayload {
   event_id: string;
   event_date: string;
+  event_weekday: string;
   workflow_scene_ids: number[];
   workflow_scene_labels: string[];
   summary: string;
@@ -217,17 +211,11 @@ const DEDUP_SYSTEM_PROMPT: string =
   '返回严格 JSON：{"decision":"new | duplicate | merge_with_existing | skip_ambiguous","matched_record_ids":[1],"reason":"简短理由","merged_summary":"","merged_fact":"","merged_tags":["标签1"]}。' +
   'matched_record_ids 最多返回一个最相关历史记录。不要把多笔账单或多段聊天合并成一个大记录。不要输出 markdown。';
 
-const ENRICH_SYSTEM_PROMPT: string =
-  '你是本地个人数据索引助手。请为事件提取关键词、领域、实体和可能的待办信号。输入包含 event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。返回严格 JSON：' +
-  '{"keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}。' +
-  'todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
-  '有明确相对日期时，必须以 event_date 为基准把“今天/明天/后天/周末/下周”等换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
-
 const BATCH_ENRICH_SYSTEM_PROMPT: string =
-  '你是本地个人数据索引助手。请批量为事件提取关键词、领域、实体和可能的待办信号。输入包含 events，每条都有 event_id/event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。' +
+  '你是本地个人数据索引助手。请批量为输入事件提取关键词、领域、实体和可能的待办事项信号。输入包含 events，每条都有 event_id/event_date/event_weekday/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。' +
   '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}]}。' +
   '必须为每个输入 event_id 返回一个结果。todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
-  '有明确相对日期时，必须以该事件 event_date 为基准换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '有明确相对日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算。没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
 
 const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。' +
@@ -280,12 +268,12 @@ const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '你是用户待办事项推荐助手。输入中的事件每条都有上游提取出的待办事项信号；todo_text 是具体待办行动内容；todo_deadline 为截止日期（可能为空）；' +
-  'todo_type 是待办类型（可能为空），含义包括：buy购买、compare比价、pay付款、refund退款、pickup取货/收货、after_sale售后、order下单、reorder复购、complain反馈投诉、watch观看/追更、renew续费/权益恢复、book预订、join参与、repair维修、appointment预约、prepare准备、contact联系、gift送礼、plan安排计划、attend参加、depart出发、check_in入住/值机、reimburse报销、follow_up跟进。' +
+  'todo_type 是待办类型（可能为空），只会来自精简集合：buy购买、pay付款、pickup取货/收货/取餐、order下单、renew续费/权益恢复、book预订/订票、repair维修、appointment预约、attend参加/赴约、plan安排计划、depart出发、check_in入住/值机、reimburse报销、other其他待处理事项。' +
   '不要重新判断输入事件是不是 todo，也不要丢弃任何输入事件，你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并，并生成适合在应用首页展示给用户的推荐卡片文案。' +
   '返回严格 JSON：' +
   '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。' +
   'source_event_ids 必须来自输入事件，至少 1 个，每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中；每个推荐要能让用户知道接下来具体要做什么。不要编造输入里没有的人名、地点、商品、金额或行动。' +
-  'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待准备”“待出发”“待购买”“待跟进”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。' +
+  'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待出发”“待购买”“待预约”“待付款”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。' +
   'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。' +
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
@@ -392,28 +380,6 @@ export class DataPipelineModelClient {
     }
   }
 
-  async enrichEvent(event: IndexedEvent, config: DataManagerModelConfig): Promise<IndexedEvent> {
-    let enriched: IndexedEvent = this.heuristicEnrichEvent(event, 'heuristic');
-    if (!this.isEnabled(config)) {
-      return enriched;
-    }
-    let eventPayload: EventPromptPayload = {
-      event_date: event.event_date,
-      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
-      workflow_scene_labels: this.workflowSceneLabels(event.workflow_scene_ids || []),
-      summary: event.summary,
-      normalized_fact: event.normalized_fact
-    };
-    let prompt = ArkJSON.stringify(eventPayload, null, 2);
-    try {
-      let payload = await this.callJson(config, 'enrich.single', this.enrichSystemPrompt([event], false), prompt);
-      return this.enrichEventFromPayload(event, payload, 'model');
-    } catch (e) {
-      enriched.enrichment_method = 'heuristic_fallback';
-      return enriched;
-    }
-  }
-
   async enrichEvents(events: IndexedEvent[], config: DataManagerModelConfig): Promise<IndexedEvent[]> {
     let result: Record<string, IndexedEvent> = {};
     events.forEach((event: IndexedEvent) => {
@@ -430,6 +396,7 @@ export class DataPipelineModelClient {
         let item: BatchEventPromptPayload = {
           event_id: event.event_id,
           event_date: event.event_date,
+          event_weekday: weekdayLabelFromDate(event.event_date),
           workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
           workflow_scene_labels: this.workflowSceneLabels(event.workflow_scene_ids || []),
           summary: event.summary,
@@ -442,7 +409,7 @@ export class DataPipelineModelClient {
       };
       try {
         dataManagerInfo(`Batch enrich request: events=${chunk.length}`);
-        let payload = await this.callJson(config, 'enrich.batch', this.enrichSystemPrompt(chunk, true), ArkJSON.stringify(promptPayload, null, 2));
+        let payload = await this.callJson(config, 'enrich.batch', this.enrichSystemPrompt(chunk), ArkJSON.stringify(promptPayload, null, 2));
         let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
         rawEvents.forEach((rawEvent: JsonMap) => {
           let eventId = normalizeFreeText(rawEvent['event_id']);
@@ -878,12 +845,9 @@ export class DataPipelineModelClient {
   private normalizeTodoType(value: Object | string | number | boolean | null | undefined): string {
     let type = normalizeFreeText(value);
     let allowed = [
-      'buy', 'compare', 'pay', 'refund', 'pickup', 'after_sale',
-      'order', 'reorder', 'complain',
-      'watch', 'renew', 'book', 'join',
-      'repair', 'appointment', 'prepare', 'follow_up',
-      'contact', 'gift', 'plan', 'attend',
-      'depart', 'check_in', 'reimburse',
+      'buy', 'pay', 'pickup', 'order',
+      'renew', 'book', 'repair', 'appointment',
+      'attend', 'plan', 'depart', 'check_in', 'reimburse',
       'other'
     ];
     return allowed.indexOf(type) >= 0 ? type : '';
@@ -899,8 +863,8 @@ export class DataPipelineModelClient {
     return stableUnique(labels);
   }
 
-  private enrichSystemPrompt(events: IndexedEvent[], batch: boolean): string {
-    return (batch ? BATCH_ENRICH_SYSTEM_PROMPT : ENRICH_SYSTEM_PROMPT) + this.todoGuideForEvents(events);
+  private enrichSystemPrompt(events: IndexedEvent[]): string {
+    return BATCH_ENRICH_SYSTEM_PROMPT + this.todoGuideForEvents(events);
   }
 
   private todoGuideForEvents(events: IndexedEvent[]): string {
@@ -918,24 +882,27 @@ export class DataPipelineModelClient {
       guides.push('聊天：提取两类待办。第一类是有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间，此时 todo.type 写空字符串，只填写 deadline 和 text，没有可换算日期时写空 todo。第二类是用户明确表达要购买某商品或让对方帮忙购买某商品，此时允许 type=buy，deadline 可以为空，text 写购买行动，agent_task 写可直接执行的 GUI Agent 任务，例如“在淘宝中购买xxx商品”；如果聊天明确指定京东、淘宝、美团等平台则使用该平台，否则默认淘宝。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 和 agent_task 只描述该待办本身，不要写同条事件里的文件或技术讨论。');
     }
     if (labels.indexOf('购物') >= 0) {
-      guides.push('购物：允许 type=buy|compare|pay|refund|pickup|after_sale|other，分别表示购买、比价决策、付款、退款、取货/收货、售后、其他购物后续。');
+      guides.push('购物：允许 type=buy|pay|pickup|other，分别表示购买、付款、取货/收货、其他。');
     }
     if (labels.indexOf('外卖') >= 0) {
-      guides.push('外卖：允许 type=order|reorder|pay|refund|pickup|complain|other，分别表示下单、复购、付款、退款、取餐/配送、投诉反馈、其他外卖后续。');
+      guides.push('外卖：允许 type=order|pay|pickup|other，分别表示下单、付款、取餐、其他。');
     }
     if (labels.indexOf('娱乐') >= 0) {
-      guides.push('娱乐：允许 type=watch|renew|book|buy|join|follow_up|other，分别表示观看/追更、续费、预约/订票、购买内容或会员、参与活动、后续关注、其他娱乐事项。');
+      guides.push('娱乐：允许 type=renew|book|other，分别表示续费、预约/订票、其他。');
     }
     if (labels.indexOf('生活') >= 0) {
-      guides.push('生活：允许 type=pay|repair|appointment|renew|prepare|follow_up|other，分别表示缴费、维修、预约、续期、准备材料/物品、后续跟进、其他生活事项。');
+      guides.push('生活：允许 type=pay|repair|appointment|other，分别表示缴费、维修、预约、其他。');
     }
     if (labels.indexOf('社交') >= 0) {
-      guides.push('社交：允许 type=attend|contact|gift|plan|book|follow_up|other，分别表示赴约/参加、联系某人、礼物/心意、安排计划、预订、后续跟进、其他社交事项。');
+      guides.push('社交：允许 type=attend|plan|book|other，分别表示赴约/参加、安排计划、预订、其他。');
     }
     if (labels.indexOf('差旅') >= 0) {
-      guides.push('差旅：允许 type=book|depart|check_in|prepare|pay|reimburse|follow_up|other，分别表示预订、出发、入住/值机、准备证件物品、付款、报销、后续跟进、其他差旅事项。');
+      guides.push('差旅：允许 type=book|depart|check_in|pay|reimburse|other，分别表示预订、出发、入住/值机、付款、其他。');
     }
-    guides.push('如果事件同时属于多个场景，优先使用最具体的非聊天场景规则；聊天规则只用于纯聊天场景。不要输出规则外的 type。');
+    if (labels.length > 1) {
+      guides.push('如果事件同时属于多个场景，优先使用最具体的非聊天场景规则；聊天规则只用于纯聊天场景。');
+    }
+    guides.push('不要输出规则外的 type。');
     return guides.join('');
   }
 

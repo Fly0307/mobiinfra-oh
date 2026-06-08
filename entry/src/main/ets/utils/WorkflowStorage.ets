@@ -828,7 +828,7 @@ export class WorkflowStorage {
     };
     let containsTodayChat: VlmJsonSchemaField = {
       type: 'boolean',
-      description: '如果当前截图中的聊天记录仍然属于今天则为 true；如果已经出现更早日期的聊天记录则为 false'
+      description: '如果当前截图中的聊天记录属于任务执行日期对应的今天则为 true；如果截图中已经出现早于任务执行日期的聊天日期分隔符、明确更早日期内容，或当前可见聊天记录已经不属于任务执行日期，则为 false'
     };
     return {
       summary: summary,
@@ -844,7 +844,7 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
-        question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容，并判断当前截图中的聊天记录是否仍然属于今天；如果已经出现更早日期的聊天记录，则应判定为 false。',
+        question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容，并以任务执行日期作为“今天”的判断基准，判断当前截图中的聊天记录是否仍然属于今天；如果已经出现更早日期的聊天记录，则应判定为 false。',
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };

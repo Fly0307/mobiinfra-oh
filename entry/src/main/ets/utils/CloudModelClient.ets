@@ -562,7 +562,7 @@ export class CloudModelClient {
       config.apiKey, config.deciderModel, 1024, 60000);
   }
 
-  async analyzeGalleryImage(imageBase64: string, ocrText: string, config: GalleryCloudModelConfig): Promise<string> {
+  async analyzeGalleryImage(imageBase64: string, ocrText: string, exifText: string, config: GalleryCloudModelConfig): Promise<string> {
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64
     };
@@ -579,8 +579,10 @@ export class CloudModelClient {
         '\ncategory 必须从"聊天、文档、餐饮、购物、出行、健康、工作、其他"中选择' +
         '\nsummary 用 1 句概括这张图的核心信息。' +
         '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
+        '\n如果 EXIF 元数据提供了拍摄时间、设备或经纬度，可作为可核查细节使用；不要把经纬度臆测成具体地址。' +
         '\ntags 输出 3 到 8 个中文两字标签，优先从候选标签中选择。候选tag：聊天、待办、会议、工作、项目、客户、通知、截图、账单、消费、外卖、餐饮、购物、快递、售后、健康、体检、用药、运动、睡眠、饮食、医疗、文档、合同、笔记、课程、作业、证件、资料、发票、家庭、朋友、聚会、亲子、宠物、节日、纪念、账号、安全、配置、报错、登录、密码' +
         '\nimportance 是 0 到 1 的数字。' +
+        '\n图片 EXIF 元数据：\n' + (exifText.length > 0 ? exifText : '(无)') +
         '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)') +
         '\n请返回 JSON'
     };

@@ -89,6 +89,18 @@ gallery-log/
   "embeddingStatus": "ok",
   "embeddingDimension": 1024,
   "error": "",
+  "latitude": 31.207123,
+  "longitude": 121.473701,
+  "exif": {
+    "dateTimeOriginal": "2026:06:01 08:12:20",
+    "deviceMake": "HUAWEI",
+    "deviceModel": "HUAWEI Mate 60 Pro",
+    "imageWidth": "4096",
+    "imageHeight": "3072",
+    "orientation": "Top-left",
+    "latitude": 31.207123,
+    "longitude": 121.473701
+  },
   "createdAt": 1780316461000
 }
 ```
@@ -98,11 +110,13 @@ gallery-log/
 - `category` 是稳定分桶字段，当前支持 `聊天`、`文档`、`餐饮`、`购物`、`出行`、`健康`、`工作`、`其他`。
 - `summary` 是给 daily-log 文件和列表页展示的短摘要。
 - `details` 是具体细节数组，用于记录人物、地点、商户、金额、时间、订单号、聊天事项、待办等可核查信息。
-- `date` 是图片归档日期，第一版使用分析日期；接入图库 asset 元数据后应使用拍摄或创建日期。
+- `date` 是图片归档日期，自动扫描优先使用图库 asset 日期；手动选择图片如果 EXIF 中有 `DateTimeOriginal`，则使用拍摄日期。
 - `ocrText` 是鸿蒙本地 OCR 文本；跳过 OCR 时为空。
 - `rawModelText` 保留大模型原始返回，便于调试和重新解析。
 - `keywords` 来自模型 tags 和 OCR 文本的轻量关键词。
 - `embeddingRef` 指向向量文件；如果 embedding 失败或跳过则为空。
+- `latitude` / `longitude` 是可用于列表、daily-log 和详情页展示的经纬度。自动扫描优先来自图库 asset 元数据，缺失时由图片 EXIF GPS 字段兜底。
+- `exif` 保存从 `ImageSource.getImageProperty()` 读取的图片元数据，当前包含拍摄时间、设备厂商/型号、图片尺寸、方向和 GPS 原始字段/解析坐标。EXIF 读取失败或图片不包含对应字段时可为空。
 
 ## Cache Key
 

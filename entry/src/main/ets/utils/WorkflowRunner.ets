@@ -2,6 +2,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowStorage } from './WorkflowStorage';
 import {
   WorkflowCondition,
@@ -17,6 +18,7 @@ import {
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
 const MAX_GUI_STEPS = 15;
+const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 interface PlannerResult {
   appName: string;
@@ -74,6 +76,7 @@ interface GuiActionPayload {
   key?: string;
   seconds?: number;
   package_name?: string;
+  reset_first?: boolean;
 }
 
 interface ToolOutput {
@@ -85,6 +88,7 @@ interface ToolOutput {
   daily_log_path?: string;
   structured_output?: WorkflowJsonMap;
   deferred?: boolean;
+  deferred_error?: string;
 }
 
 interface SummaryJobResult {
@@ -92,6 +96,13 @@ interface SummaryJobResult {
   actual_id: string;
   response: string;
   error: string;
+}
+
+interface PendingSummaryJob {
+  actual_id: string;
+  prompt: string;
+  image: string;
+  promise: Promise<SummaryJobResult>;
 }
 
 interface LoopRuntimeValue {
@@ -171,7 +182,7 @@ export class WorkflowRunner {
   private currentAppName: string = '';
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
-  private pendingSummaryJobs: Promise<SummaryJobResult>[] = [];
+  private pendingSummaryJobs: PendingSummaryJob[] = [];
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
     hdcServerIp: string, logHandler: (message: string) => void) {
@@ -182,9 +193,19 @@ export class WorkflowRunner {
     this.logHandler = logHandler;
   }
 
+  private workflowJsonForRun(task: WorkflowTask): string {
+    try {
+      return WorkflowStorage.readText(this.workflowFile);
+    } catch (e) {
+      let err = e as Error;
+      this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
+      return task.workflowJson;
+    }
+  }
+
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
     this.workflowFile = WorkflowStorage.configDir(this.filesDir) + '/' + task.configFileName;
-    this.workflow = WorkflowStorage.validateWorkflowJson(task.workflowJson);
+    this.workflow = WorkflowStorage.validateWorkflowJson(this.workflowJsonForRun(task));
     this.runningTask = task;
     this.contextValues = this.workflow.context || {};
     this.stepResults = {};
@@ -219,14 +240,7 @@ export class WorkflowRunner {
       this.log('Workflow 失败：' + message);
     }
 
-    let summary: WorkflowRunSummary = {
-      workflow_file: this.workflowFile,
-      run_dir: this.runDir,
-      context: this.contextValues,
-      status: status,
-      steps: this.stepResults
-    };
-    WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
+    this.writeRunSummary(status);
 
     returnedToApp = await this.returnToHostApp();
     if (returnedToApp) {
@@ -250,9 +264,23 @@ export class WorkflowRunner {
     };
   }
 
+  private writeRunSummary(status: string): void {
+    if (this.runDir.length === 0) {
+      return;
+    }
+    let summary: WorkflowRunSummary = {
+      workflow_file: this.workflowFile,
+      run_dir: this.runDir,
+      context: this.contextValues,
+      status: status,
+      steps: this.stepResults
+    };
+    WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
+  }
+
   private async returnToHostApp(): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME);
+      await this.hdcBridge.startApp(WorkflowRunner.APP_BUNDLE_NAME, WorkflowRunner.APP_BUNDLE_NAME, false);
       return true;
     } catch (e) {
       let err = e as Error;
@@ -404,7 +432,7 @@ export class WorkflowRunner {
       this.currentAppName = planner.appName;
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
-      await this.hdcBridge.startApp(planner.appName, planner.packageName);
+      await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
         task_description: taskDescription,
@@ -571,6 +599,9 @@ export class WorkflowRunner {
     if (step.package_name !== undefined) {
       payload.package_name = step.package_name;
     }
+    if (action === 'app_start') {
+      payload.reset_first = true;
+    }
     let response = await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
     output.result = response.message || 'ok';
     return output as Object as WorkflowJsonMap;
@@ -599,7 +630,7 @@ export class WorkflowRunner {
     }
     if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
-      this.pendingSummaryJobs.push(this.startSummaryJob(actualId, prompt, image));
+      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, image));
       let deferredOutput: ToolOutput = {
         step_dir: this.stepDir(actualId),
         tool_name: toolName,
@@ -620,25 +651,36 @@ export class WorkflowRunner {
       question: question,
       response: response
     };
+    let structuredOutput: WorkflowJsonMap | undefined = undefined;
     if (requiresStructuredOutput) {
-      output.structured_output = this.extractJsonMap(response);
+      structuredOutput = this.extractJsonMap(response);
+      output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
-      let dailyLogPath = this.appendDailySummaryLog(response);
+      let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(response, structuredOutput));
       output.daily_log_path = dailyLogPath;
     }
     return output as Object as WorkflowJsonMap;
   }
 
+  private createSummaryJob(actualId: string, prompt: string, image: string): PendingSummaryJob {
+    return {
+      actual_id: actualId,
+      prompt: prompt,
+      image: image,
+      promise: this.startSummaryJob(actualId, prompt, image)
+    };
+  }
+
   private async startSummaryJob(actualId: string, prompt: string, image: string): Promise<SummaryJobResult> {
     try {
       let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
-      return {
+      return this.normalizeSummaryJobResult({
         ok: true,
         actual_id: actualId,
         response: response,
         error: ''
-      };
+      });
     } catch (e) {
       let err = e as Error;
       return {
@@ -650,6 +692,29 @@ export class WorkflowRunner {
     }
   }
 
+  private normalizeSummaryJobResult(result: SummaryJobResult): SummaryJobResult {
+    if (result.ok && result.response.trim().length === 0) {
+      return {
+        ok: false,
+        actual_id: result.actual_id,
+        response: '',
+        error: 'empty VLM summary response'
+      };
+    }
+    return result;
+  }
+
+  private async resolveSummaryJob(job: PendingSummaryJob): Promise<SummaryJobResult> {
+    let result = await job.promise;
+    let retries = 0;
+    while (!result.ok && retries < SUMMARY_JOB_RETRY_LIMIT && !AgentExecutionController.isCancelRequested()) {
+      retries++;
+      this.log('VLM QA deferred retry (' + job.actual_id + ') #' + String(retries) + ': ' + result.error);
+      result = await this.startSummaryJob(job.actual_id, job.prompt, job.image);
+    }
+    return result;
+  }
+
   private async flushPendingSummaryJobs(): Promise<void> {
     if (this.pendingSummaryJobs.length === 0) {
       return;
@@ -658,15 +723,31 @@ export class WorkflowRunner {
     AgentExecutionController.updateFloatText('Workflow 写入 summary daily-log');
     let jobs = this.pendingSummaryJobs;
     this.pendingSummaryJobs = [];
+    let failures: string[] = [];
     for (let i = 0; i < jobs.length; i++) {
-      let result = await jobs[i];
+      let result = await this.resolveSummaryJob(jobs[i]);
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
-        let dailyLogPath = this.appendDailySummaryLog(result.response);
-        this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
+        let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(result.response));
+        if (dailyLogPath.length > 0) {
+          this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
+          this.writeRunSummary('running');
+        } else {
+          let error = 'empty daily-log path after VLM summary';
+          this.log('VLM QA deferred failed (' + result.actual_id + '): ' + error);
+          this.markDeferredSummaryFailed(result.actual_id, error);
+          this.writeRunSummary('running');
+          failures.push(result.actual_id + ': ' + error);
+        }
       } else {
         this.log('VLM QA deferred failed (' + result.actual_id + '): ' + result.error);
+        this.markDeferredSummaryFailed(result.actual_id, result.error);
+        this.writeRunSummary('running');
+        failures.push(result.actual_id + ': ' + result.error);
       }
+    }
+    if (failures.length > 0) {
+      throw new Error('VLM QA deferred summary failed: ' + failures.join('; '));
     }
   }
 
@@ -679,7 +760,31 @@ export class WorkflowRunner {
     output.response = response;
     output.daily_log_path = dailyLogPath;
     output.deferred = false;
+    output.deferred_error = '';
     result.output = output as Object as WorkflowJsonMap;
+    this.refreshStepFinishedTime(result);
+  }
+
+  private markDeferredSummaryFailed(actualId: string, error: string): void {
+    let result = this.stepResults[actualId];
+    if (!result) {
+      return;
+    }
+    let output = result.output as Object as ToolOutput;
+    output.response = 'summary_failed';
+    output.daily_log_path = '';
+    output.deferred = false;
+    output.deferred_error = error;
+    result.output = output as Object as WorkflowJsonMap;
+    result.status = 'failed';
+    result.error = 'Deferred VLM summary failed: ' + error;
+    this.refreshStepFinishedTime(result);
+  }
+
+  private refreshStepFinishedTime(result: WorkflowStepResult): void {
+    let finished = new Date().getTime() / 1000;
+    result.finished_at = finished;
+    result.duration_sec = Math.round((finished - result.started_at) * 1000) / 1000;
   }
 
   private async runLoop(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
@@ -973,6 +1078,44 @@ export class WorkflowRunner {
     return path;
   }
 
+  private summaryLogText(response: string, structuredOutput?: WorkflowJsonMap): string {
+    let structuredSummary = this.structuredSummaryText(structuredOutput);
+    if (structuredSummary.length > 0) {
+      return structuredSummary;
+    }
+    let jsonSummary = this.summaryFromJsonText(response);
+    if (jsonSummary.length > 0) {
+      return jsonSummary;
+    }
+    return response.trim();
+  }
+
+  private structuredSummaryText(output?: WorkflowJsonMap): string {
+    if (!output) {
+      return '';
+    }
+    let summary = output['summary'];
+    return typeof summary === 'string' ? summary.trim() : '';
+  }
+
+  private summaryFromJsonText(raw: string): string {
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
+    try {
+      let parsed = ArkJSON.parse(text) as WorkflowJsonMap;
+      return this.structuredSummaryText(parsed);
+    } catch (e) {
+      let candidates = WorkflowJsonRepair.repairCandidates(text);
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          return this.structuredSummaryText(parsed);
+        } catch {
+        }
+      }
+      return '';
+    }
+  }
+
   private buildDailyLogFileName(): string {
     let workflowName = 'workflow';
     if (this.workflow && this.workflow.metadata && this.workflow.metadata.name) {
@@ -1008,12 +1151,27 @@ export class WorkflowRunner {
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {
-    let text = this.normalizeJsonText(raw);
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
       return ArkJSON.parse(text) as WorkflowJsonMap;
     } catch (e) {
       let err = e as Error;
+      let candidates = WorkflowJsonRepair.repairCandidates(text);
+      let repairMessage = '';
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          this.log('JSON parse repaired after model returned non-strict JSON');
+          return parsed;
+        } catch (repairError) {
+          let repairErr = repairError as Error;
+          repairMessage = repairErr.message || String(repairError);
+        }
+      }
       let message = 'JSON parse failed, raw response preserved: ' + (err.message || String(e));
+      if (repairMessage.length > 0) {
+        message += '; repair failed: ' + repairMessage;
+      }
       this.log(message);
       if (failOnParseError) {
         throw new Error('Planner JSON 解析失败，终止执行，不再进入 Decider：' + (err.message || String(e)));
@@ -1021,28 +1179,6 @@ export class WorkflowRunner {
       let fallback: RawResponseMap = { raw_response: raw };
       return fallback as Object as WorkflowJsonMap;
     }
-  }
-
-  private normalizeJsonText(raw: string): string {
-    let text = raw.trim();
-    let block = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (block && block.length > 1) {
-      text = block[1].trim();
-    }
-    text = text.replace(/^```(?:json)?\s*/i, '');
-    text = text.replace(/\s*```$/, '');
-    let start = text.indexOf('{');
-    let end = text.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      text = text.substring(start, end + 1);
-    }
-    return this.repairLeadingBrokenObjectQuote(text.trim());
-  }
-
-  private repairLeadingBrokenObjectQuote(text: string): string {
-    // 兼容模型偶发输出：```json\n{"\n  "reasoning": ...}\n```
-    // 只删除 { 后面多出来的那个引号；合法的 {"reasoning": ...} 不会命中该规则。
-    return text.replace(/^(\{\s*)"\s*(?="[^"]+"\s*:)/, '$1');
   }
 
   private getMapString(map: WorkflowJsonMap, key: string): string {

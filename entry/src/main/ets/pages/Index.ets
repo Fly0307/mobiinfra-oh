@@ -33,13 +33,36 @@ import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/Defau
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
 // 下沉到 home/collection/task，避免 Index.ets 继续膨胀。
+const AUTO_HDC_SERVER_URL: string = 'http://127.0.0.1:19124';
+
 interface ServerFile {
   name: string;
   size: number;
 }
 
-interface RunCmdRequest {
-  cmd: string;
+interface HdcConnectRequest {
+  target: string;
+  kill_others: boolean;
+}
+
+interface HdcHealthResponse {
+  status: string;
+  message?: string;
+  hdc_connected?: boolean;
+  target?: string;
+  tunnel_ready?: boolean;
+  fport_ready?: boolean;
+  rport_ready?: boolean;
+  app_server_url?: string;
+  loop_alive?: boolean;
+}
+
+interface HdcConnectAttempt {
+  ok: boolean;
+  responseCode: number;
+  body: string;
+  message: string;
+  health?: HdcHealthResponse;
 }
 
 type JsonValue = Object | string | number | boolean | null;
@@ -48,6 +71,7 @@ type JsonMap = Record<string, JsonValue>;
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
+PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
@@ -82,6 +106,7 @@ struct Index {
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
+  @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
@@ -93,6 +118,10 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State hdcAutoConnected: boolean = false;
+  @State hdcAutoConnecting: boolean = false;
+  @State hdcManualPairing: boolean = false;
+  @State hdcAutoStatus: string = 'HDC Server will be auto-discovered after startup.';
   @State dataManagerRefreshing: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
@@ -214,6 +243,9 @@ struct Index {
   aboutToAppear() {
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
+    if (this.manualHdcServerIp.trim().length === 0 && !this.isAutoHdcUrl(this.hdcServerIp)) {
+      this.manualHdcServerIp = this.hdcServerIp;
+    }
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
@@ -289,6 +321,9 @@ struct Index {
       }
       await this.agentRouter.requestTaskCancellation();
       this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
+    });
+    this.discoverHdcServer(false, false).catch(() => {
+      this.hdcAutoConnecting = false;
     });
   }
 
@@ -700,40 +735,25 @@ struct Index {
       this.output = '请先填写当前手机的无线 HDC 地址，例如 192.168.x.x:端口';
       return;
     }
-    this.output = `正在请求远程服务执行 HDC 连接测试: ${this.wirelessIp}...`;
-    let httpReq = http.createHttp();
-    try {
-      // 构造 Python 脚本，在远端执行 HDC 连接测试。
-      let pyScript = `import os; targets = os.popen('hdc list targets').read().split(); ` + 
-                     `[os.system('hdc kill ' + t) for t in targets if t and t != '${this.wirelessIp}' and '[Empty]' not in t]; ` +
-                     `os.system('hdc tconn ${this.wirelessIp}')`;
-
-      let runCmdPayload: RunCmdRequest = {
-        cmd: `python -c "${pyScript}"`
-      };
-      let runCmdHeader: Record<string, string> = {
-        'Content-Type': 'application/json'
-      };
-      let runCmdOptions: http.HttpRequestOptions = {
-        method: http.RequestMethod.POST,
-        header: runCmdHeader,
-        extraData: ArkJSON.stringify(runCmdPayload),
-        connectTimeout: 5000,
-        readTimeout: 10000,
-        expectDataType: http.HttpDataType.STRING,
-      };
-      let resp = await httpReq.request(`${this.hdcServerIp}/api/run_cmd`, runCmdOptions);
-      if (resp.responseCode === 200) {
-        this.output = `远程连接测试请求成功!\n${resp.result}`;
-      } else {
-        this.output = `请求失败: HTTP ${resp.responseCode}`;
-      }
-    } catch(err) {
-      let e = err as BusinessError;
-      this.output = `HDC 请求出错: ${e.message}\n请确认远端服务 ${this.hdcServerIp}/api/run_cmd 已运行。`;
-    } finally {
-      httpReq.destroy();
+    let serverUrl = this.manualHdcServerUrl();
+    if (serverUrl.length === 0) {
+      this.output = '请先填写 PC HDC Server 地址。';
+      return;
     }
+    this.hdcServerIp = serverUrl;
+    this.manualHdcServerIp = serverUrl;
+    this.hdcManualPairing = true;
+    this.hdcAutoConnected = false;
+    this.hdcAutoStatus = 'Manual HDC pairing is running...';
+    this.output = `正在请求远程服务执行 HDC 连接测试: ${this.wirelessIp}...`;
+    let attempt = await this.requestManualHdcConnect(serverUrl, this.wirelessIp.trim());
+    if (attempt.ok && attempt.health) {
+      this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC pairing succeeded');
+      this.output = `远程连接测试请求成功!\n${attempt.body}`;
+      return;
+    }
+    this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC pairing failed');
+    this.output = `HDC 请求出错: ${attempt.message}\n请确认远端服务 ${serverUrl}/api/hdc/connect 已运行。`;
   }
 
   // ========== Step 1: Check connection, list files ==========
@@ -985,11 +1005,302 @@ struct Index {
   }
 
   private hdcServerApiUrl(path: string): string {
-    let url = this.hdcServerIp.trim();
+    return this.hdcApiUrl(this.hdcServerIp, path);
+  }
+
+  private normalizeHdcUrl(rawUrl: string): string {
+    let url = rawUrl.trim();
+    if (url.length === 0) {
+      return '';
+    }
+    if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
+      url = 'http://' + url;
+    }
     while (url.endsWith('/')) {
       url = url.substring(0, url.length - 1);
     }
+    return url;
+  }
+
+  private hdcApiUrl(baseUrl: string, path: string): string {
+    let url = this.normalizeHdcUrl(baseUrl);
     return url + path;
+  }
+
+  private hdcInputEditable(): boolean {
+    return this.hdcManualPairing || !this.hdcAutoConnected;
+  }
+
+  private hdcInputBackgroundColor(): string {
+    return this.hdcInputEditable() ? '#F2F5FC' : '#E6EAF2';
+  }
+
+  private hdcInputTextColor(): string {
+    return this.hdcInputEditable() ? '#11182F' : '#7A8494';
+  }
+
+  private hdcStatusColor(): string {
+    if (this.hdcAutoConnected) {
+      return '#2D9B73';
+    }
+    if (this.hdcAutoConnecting) {
+      return '#4F68FF';
+    }
+    return '#D26B31';
+  }
+
+  private addHdcCandidate(candidates: string[], value: string): void {
+    let normalized = this.normalizeHdcUrl(value);
+    if (normalized.length > 0 && candidates.indexOf(normalized) < 0) {
+      candidates.push(normalized);
+    }
+  }
+
+  private hdcDiscoveryCandidates(): string[] {
+    let candidates: string[] = [];
+    this.addHdcCandidate(candidates, AUTO_HDC_SERVER_URL);
+    this.addHdcCandidate(candidates, 'http://localhost:19124');
+    return candidates;
+  }
+
+  private isAutoHdcUrl(value: string): boolean {
+    let normalized = this.normalizeHdcUrl(value);
+    return normalized === this.normalizeHdcUrl(AUTO_HDC_SERVER_URL) ||
+      normalized === this.normalizeHdcUrl('http://localhost:19124');
+  }
+
+  private manualHdcServerUrl(): string {
+    let savedManual = this.normalizeHdcUrl(this.manualHdcServerIp);
+    if (savedManual.length > 0 && !this.isAutoHdcUrl(savedManual)) {
+      return savedManual;
+    }
+
+    let current = this.normalizeHdcUrl(this.hdcServerIp);
+    if (current.length > 0 && !this.isAutoHdcUrl(current)) {
+      return current;
+    }
+
+    let configured = this.normalizeHdcUrl(DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
+    if (configured.length > 0 && !this.isAutoHdcUrl(configured)) {
+      return configured;
+    }
+    return '';
+  }
+
+  private async requestHdcHealth(baseUrl: string): Promise<HdcHealthResponse | null> {
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        connectTimeout: 2500,
+        readTimeout: 5000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(this.hdcApiUrl(baseUrl, '/api/health'), options);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        return null;
+      }
+      return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
+    } catch (e) {
+      return null;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  private hdcHealthReady(health: HdcHealthResponse): boolean {
+    return health.status === 'ok' && health.hdc_connected === true && health.tunnel_ready !== false;
+  }
+
+  private hdcHealthMessage(health: HdcHealthResponse, fallback: string): string {
+    if (health.message && health.message.length > 0) {
+      return health.message;
+    }
+    return fallback;
+  }
+
+  private async requestManualHdcConnect(serverUrl: string, target: string): Promise<HdcConnectAttempt> {
+    let httpReq = http.createHttp();
+    try {
+      let connectPayload: HdcConnectRequest = {
+        target: target,
+        kill_others: true
+      };
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: ArkJSON.stringify(connectPayload),
+        connectTimeout: 5000,
+        readTimeout: 20000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(this.hdcApiUrl(serverUrl, '/api/hdc/connect'), options);
+      let body = String(resp.result);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        return {
+          ok: false,
+          responseCode: resp.responseCode,
+          body: body,
+          message: 'HTTP ' + resp.responseCode + ' ' + body
+        };
+      }
+
+      try {
+        let parsed = ArkJSON.parse(body) as HdcHealthResponse;
+        if (parsed.status !== 'ok') {
+          return {
+            ok: false,
+            responseCode: resp.responseCode,
+            body: body,
+            message: parsed.message || body,
+            health: parsed
+          };
+        }
+        return {
+          ok: true,
+          responseCode: resp.responseCode,
+          body: body,
+          message: parsed.message || body,
+          health: parsed
+        };
+      } catch (parseErr) {
+        let e = parseErr as Error;
+        return {
+          ok: false,
+          responseCode: resp.responseCode,
+          body: body,
+          message: 'Invalid HDC connect response: ' + e.message
+        };
+      }
+    } catch (err) {
+      let e = err as Error;
+      return {
+        ok: false,
+        responseCode: 0,
+        body: '',
+        message: e.message
+      };
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  private applyManualHdcSuccess(serverUrl: string, health: HdcHealthResponse, statusPrefix: string): void {
+    this.manualHdcServerIp = serverUrl;
+    if (health.tunnel_ready === true && health.app_server_url && health.app_server_url.length > 0) {
+      this.hdcServerIp = health.app_server_url;
+      this.hdcAutoConnected = true;
+      this.hdcManualPairing = false;
+      let targetText = health.target && health.target.length > 0 ? ', target=' + health.target : '';
+      this.hdcAutoStatus = statusPrefix + ' and auto tunnel is ready: ' + this.hdcServerIp + targetText;
+      return;
+    }
+
+    this.hdcServerIp = serverUrl;
+    this.hdcAutoConnected = false;
+    this.hdcManualPairing = true;
+    this.hdcAutoStatus = statusPrefix + '; using PC Server URL.';
+  }
+
+  private applyManualHdcFailure(serverUrl: string, message: string, statusPrefix: string): void {
+    this.hdcServerIp = serverUrl;
+    this.manualHdcServerIp = serverUrl;
+    this.hdcAutoConnected = false;
+    this.hdcManualPairing = true;
+    this.hdcAutoStatus = statusPrefix + ': ' + message;
+  }
+
+  private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
+    let serverUrl = this.manualHdcServerUrl();
+    let target = this.wirelessIp.trim();
+    if (serverUrl.length === 0) {
+      this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.', useCloudLog);
+      return false;
+    }
+    if (target.length === 0) {
+      this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.', useCloudLog);
+      return false;
+    }
+
+    this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
+    this.hdcAutoStatus = 'Manual HDC fallback is running...';
+    let attempt = await this.requestManualHdcConnect(serverUrl, target);
+    if (!attempt.ok || !attempt.health) {
+      this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      return false;
+    }
+
+    this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC fallback succeeded');
+    this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+    return true;
+  }
+
+  private setHdcManualPairing(): void {
+    this.hdcManualPairing = true;
+    this.hdcAutoConnected = false;
+    if (this.normalizeHdcUrl(this.hdcServerIp) === this.normalizeHdcUrl(AUTO_HDC_SERVER_URL)) {
+      this.hdcServerIp = this.manualHdcServerUrl();
+    }
+    this.hdcAutoStatus = 'Manual HDC pairing enabled. Enter PC HDC Server and phone wireless HDC target.';
+  }
+
+  private markHdcManualEditing(): void {
+    if (!this.hdcManualPairing) {
+      this.hdcManualPairing = true;
+    }
+    this.hdcAutoConnected = false;
+    this.hdcAutoStatus = 'Manual HDC pairing is being edited.';
+  }
+
+  private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
+    if (this.hdcAutoConnecting && !force) {
+      return this.hdcAutoConnected;
+    }
+
+    this.hdcAutoConnecting = true;
+    this.hdcAutoStatus = 'Auto-discovering HDC Server...';
+    let candidates = this.hdcDiscoveryCandidates();
+    let lastMessage = '';
+    try {
+      for (let i = 0; i < candidates.length; i++) {
+        let candidate = candidates[i];
+        let health = await this.requestHdcHealth(candidate);
+        if (!health) {
+          lastMessage = 'No response from ' + candidate;
+          continue;
+        }
+        if (this.hdcHealthReady(health)) {
+          this.hdcServerIp = candidate;
+          this.hdcAutoConnected = true;
+          this.hdcManualPairing = false;
+          let targetText = health.target && health.target.length > 0 ? ', target=' + health.target : '';
+          this.hdcAutoStatus = 'Auto HDC connected: ' + candidate + targetText;
+          this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+          return true;
+        }
+        lastMessage = this.hdcHealthMessage(health, 'HDC target is not connected');
+      }
+      this.hdcAutoConnected = false;
+      this.hdcAutoStatus = 'Auto HDC discovery failed. Use manual pairing if needed. ' + lastMessage;
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      return false;
+    } finally {
+      this.hdcAutoConnecting = false;
+    }
+  }
+
+  private async ensureHdcServerReadyForTask(useCloudLog: boolean): Promise<boolean> {
+    if (await this.discoverHdcServer(useCloudLog, true)) {
+      return true;
+    }
+
+    if (await this.connectManualHdcTarget(useCloudLog)) {
+      return true;
+    }
+
+    this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.', useCloudLog);
+    return false;
   }
 
   private logAgentLoopReady(message: string, useCloudLog: boolean): void {
@@ -1001,6 +1312,9 @@ struct Index {
   }
 
   private async ensurePcAgentLoopReady(useCloudLog: boolean): Promise<boolean> {
+    if (!await this.ensureHdcServerReadyForTask(useCloudLog)) {
+      return false;
+    }
     if (this.hdcServerIp.trim().length === 0) {
       this.logAgentLoopReady('HDC Server 未配置，无法恢复 PC Agent loop。', useCloudLog);
       return false;
@@ -1115,6 +1429,10 @@ struct Index {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('Workflow 无法启动：请先填写 Planner / Decider 的服务地址和 API Key。');
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, '失败', '云端模型配置不完整');
+      return;
+    }
+    if (!await this.ensureHdcServerReadyForTask(true)) {
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', 'HDC Server auto-discovery failed');
       return;
     }
     if (this.hdcServerIp.trim().length === 0) {
@@ -1359,11 +1677,46 @@ struct Index {
           .height(42)
           .width('100%')
           .fontSize(13)
-          .backgroundColor('#F2F5FC')
+          .fontColor(this.hdcInputTextColor())
+          .backgroundColor(this.hdcInputBackgroundColor())
           .borderRadius(12)
           .padding({ left: 12, right: 12 })
-          .margin({ top: 6, bottom: 12 })
-          .onChange((val: string) => { this.hdcServerIp = val; })
+          .margin({ top: 6, bottom: 8 })
+          .enabled(this.hdcInputEditable())
+          .onChange((val: string) => {
+            this.hdcServerIp = val;
+            this.manualHdcServerIp = val;
+            this.markHdcManualEditing();
+          })
+        Text(this.hdcAutoStatus)
+          .fontSize(12)
+          .fontColor(this.hdcStatusColor())
+          .width('100%')
+          .maxLines(2)
+          .margin({ bottom: 8 })
+        Row() {
+          Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
+            .height(38)
+            .layoutWeight(1)
+            .fontSize(12)
+            .backgroundColor('#4F68FF')
+            .borderRadius(12)
+            .enabled(!this.hdcAutoConnecting)
+            .onClick(async () => {
+              this.hdcManualPairing = false;
+              await this.discoverHdcServer(false, true);
+            })
+          Button('手动配对')
+            .height(38)
+            .layoutWeight(1)
+            .fontSize(12)
+            .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
+            .borderRadius(12)
+            .margin({ left: 10 })
+            .onClick(() => { this.setHdcManualPairing(); })
+        }
+        .width('100%')
+        .margin({ bottom: 12 })
         Text('无线 HDC 目标')
           .fontSize(13)
           .fontColor('#6F7684')
@@ -1373,10 +1726,15 @@ struct Index {
             .height(42)
             .layoutWeight(1)
             .fontSize(13)
-            .backgroundColor('#F2F5FC')
+            .fontColor(this.hdcInputTextColor())
+            .backgroundColor(this.hdcInputBackgroundColor())
             .borderRadius(12)
             .padding({ left: 12, right: 12 })
-            .onChange((val: string) => { this.wirelessIp = val; })
+            .enabled(this.hdcInputEditable())
+            .onChange((val: string) => {
+              this.wirelessIp = val;
+              this.markHdcManualEditing();
+            })
           Button('连接测试')
             .height(42)
             .width(92)
@@ -1384,6 +1742,7 @@ struct Index {
             .backgroundColor('#765BFF')
             .borderRadius(12)
             .margin({ left: 10 })
+            .enabled(this.hdcInputEditable())
             .onClick(() => { this.testAndConnectHdc(); })
         }
         .width('100%')
@@ -1622,20 +1981,60 @@ struct Index {
             .height(42)
             .width('100%')
             .fontSize(13)
-            .backgroundColor('#F2F5FC')
+            .fontColor(this.hdcInputTextColor())
+            .backgroundColor(this.hdcInputBackgroundColor())
             .borderRadius(12)
             .padding({ left: 12, right: 12 })
-            .margin({ bottom: 10 })
-            .onChange((val: string) => { this.hdcServerIp = val; })
+            .margin({ bottom: 8 })
+            .enabled(this.hdcInputEditable())
+            .onChange((val: string) => {
+              this.hdcServerIp = val;
+              this.manualHdcServerIp = val;
+              this.markHdcManualEditing();
+            })
+          Text(this.hdcAutoStatus)
+            .fontSize(12)
+            .fontColor(this.hdcStatusColor())
+            .width('100%')
+            .maxLines(2)
+            .margin({ bottom: 8 })
+          Row() {
+            Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
+              .height(38)
+              .layoutWeight(1)
+              .fontSize(12)
+              .backgroundColor('#4F68FF')
+              .borderRadius(12)
+              .enabled(!this.hdcAutoConnecting)
+              .onClick(async () => {
+                this.hdcManualPairing = false;
+                await this.discoverHdcServer(true, true);
+              })
+            Button('手动配对')
+              .height(38)
+              .layoutWeight(1)
+              .fontSize(12)
+              .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
+              .borderRadius(12)
+              .margin({ left: 10 })
+              .onClick(() => { this.setHdcManualPairing(); })
+          }
+          .width('100%')
+          .margin({ bottom: 10 })
           Row() {
             TextInput({ placeholder: '无线 HDC 地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
               .height(42)
               .layoutWeight(1)
               .fontSize(13)
-              .backgroundColor('#F2F5FC')
+              .fontColor(this.hdcInputTextColor())
+              .backgroundColor(this.hdcInputBackgroundColor())
               .borderRadius(12)
               .padding({ left: 12, right: 12 })
-              .onChange((val: string) => { this.wirelessIp = val; })
+              .enabled(this.hdcInputEditable())
+              .onChange((val: string) => {
+                this.wirelessIp = val;
+                this.markHdcManualEditing();
+              })
             Button('连接测试')
               .height(42)
               .width(92)
@@ -1643,6 +2042,7 @@ struct Index {
               .backgroundColor('#765BFF')
               .borderRadius(12)
               .margin({ left: 10 })
+              .enabled(this.hdcInputEditable())
               .onClick(async () => {
                 this.appendCloudLog(`请求 HDC 连接测试：server=${this.hdcServerIp}, target=${this.wirelessIp}`);
                 await this.testAndConnectHdc();
@@ -1831,8 +2231,7 @@ struct Index {
         TabContent() {
           TaskPage({
             taskScene: $taskScene,
-            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
-            onOpenCloudLog: () => { this.currentTab = 3; }
+            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
           })
         }.tabBar(this.TabItem('T', '任务', 4))
       }
@@ -1847,4 +2246,3 @@ struct Index {
     .height('100%')
   }
 }
-

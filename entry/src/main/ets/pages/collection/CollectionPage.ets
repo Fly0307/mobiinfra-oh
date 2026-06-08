@@ -38,37 +38,47 @@ export struct CollectionPage {
 
   @Builder CollectTab(scene: WorkflowSceneConfig) {
     // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
-    Row() {
-      Text(scene.label)
-        .fontSize(14)
-        .fontWeight(this.collectionModule === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
-        .fontColor(this.collectionModule === scene.sceneId ? Color.White : '#596071')
-        .maxLines(1)
-    }
-    .justifyContent(FlexAlign.Center)
-    .width(74)
-    .height(48)
-    .backgroundColor(this.collectionModule === scene.sceneId ? scene.color : '#00FFFFFF')
-    .borderRadius(24)
-    .margin({ right: 8 })
-    .onClick(() => {
-      this.collectionModule = scene.sceneId;
-    })
+    Text(scene.label)
+      .fontSize(14)
+      .fontWeight(this.collectionModule === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.collectionModule === scene.sceneId ? Color.White : '#6D7481')
+      .height(42)
+      .padding({ left: 18, right: 18 })
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.collectionModule === scene.sceneId ? scene.color : Color.White)
+      .borderRadius(21)
+      .margin({ right: 10 })
+      .onClick(() => {
+        this.collectionModule = scene.sceneId;
+      })
   }
 
-  private rowImage(domain: string): Resource {
-    if (domain === 'eat') {
-      return $r('app.media.rec_food');
+  @Builder GroupThumbnail(group: CollectionGroupViewModel) {
+    if (group.thumbnailUri.length > 0) {
+      Image(group.thumbnailUri)
+        .width(58)
+        .height(58)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor('#EEF2F7')
+        .borderRadius(11)
+    } else {
+      Column() {
+        Text('暂无图片')
+          .fontSize(10)
+          .fontColor('#8A92A3')
+          .maxLines(1)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width(58)
+      .height(58)
+      .backgroundColor('#EEF2F7')
+      .borderRadius(11)
     }
-    if (domain === 'travel' || domain === 'live') {
-      return $r('app.media.rec_travel');
-    }
-    return $r('app.media.rec_sport');
   }
 
   @Builder GroupRow(group: CollectionGroupViewModel) {
     Row() {
-      Image(this.rowImage(group.domain)).width(58).height(58).objectFit(ImageFit.Cover).borderRadius(11)
+      this.GroupThumbnail(group)
       Column() {
         Text(group.title).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#151A28').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(group.source).fontSize(12).fontColor('#7C8494').margin({ top: 5 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -126,20 +136,17 @@ export struct CollectionPage {
             ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
               this.CollectTab(scene)
             }, (scene: WorkflowSceneConfig) => scene.tabId)
-          }.padding({ left: 4, right: 4 })
+          }.padding({ left: 24, right: 24 })
         }
-        .width('86%')
-        .height(56)
+        .width('100%')
+        .height(46)
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
-        .backgroundColor('#EFFFFFFF')
-        .borderRadius(28)
-        .margin({ top: 24 })
-        .shadow({ radius: 12, color: '#0C000000', offsetX: 0, offsetY: 6 })
+        .margin({ top: 22, bottom: 18 })
 
         Row() {
           Column() {
-            Text('今日新增').fontSize(12).fontColor('#737987').maxLines(1)
+            Text('已整理').fontSize(12).fontColor('#737987').maxLines(1)
             Text(this.getCollectionCount()).fontSize(24).fontWeight(FontWeight.Bold).fontColor('#8066FF').margin({ top: 3 }).maxLines(1)
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
           Divider().vertical(true).height(44).color('#E7E9F0')

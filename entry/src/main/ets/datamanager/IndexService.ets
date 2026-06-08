@@ -15,6 +15,7 @@ import {
   EntityMention,
   EventPartition,
   IndexedEvent,
+  IndexedEventTodo,
   JsonMap,
   NumberedEntry,
   ProfileClaim,
@@ -82,6 +83,7 @@ interface SourceManifestEntry {
 type SourceManifestMap = Record<string, SourceManifestEntry>;
 
 interface EnrichmentManifest {
+  schema: string;
   mode: string;
   base_url: string;
 }
@@ -125,6 +127,13 @@ interface DomainDocument {
 interface WorkflowSceneDocument {
   scenes: StringMap;
   postings: StringArrayMap;
+}
+
+interface HomeTodoDocument {
+  normalization: string;
+  deadline_postings: StringArrayMap;
+  no_deadline_event_ids: string[];
+  type_postings: StringArrayMap;
 }
 
 interface EntityDefinition {
@@ -267,6 +276,8 @@ export class IndexService {
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'domain', 'index.json'), this.buildDomainDocument(events));
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'workflow-scene'));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.buildWorkflowSceneDocument(events));
+    this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'home-todo'));
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.buildHomeTodoDocument(events));
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
     let currentIds = Object.keys(events).sort();
     let previousIds = Object.keys(previousEvents).sort();
@@ -428,6 +439,20 @@ export class IndexService {
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
     return result;
+  }
+
+  loadHomeTodoCandidateEvents(today: string, noDeadlineLimit: number): EventMap {
+    let document = this.storage.readJson<HomeTodoDocument>(
+      this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
+    let eventIds: string[] = [];
+    let deadlinePostings = document.deadline_postings || {};
+    Object.keys(deadlinePostings).sort().forEach((deadline: string) => {
+      if (isIsoDate(deadline) && isIsoDate(today) && deadline > today) {
+        eventIds = eventIds.concat(deadlinePostings[deadline] || []);
+      }
+    });
+    eventIds = eventIds.concat((document.no_deadline_event_ids || []).slice(0, Math.max(0, noDeadlineLimit)));
+    return this.loadEventsByIds(stableUnique(eventIds));
   }
 
   private queryCandidateIds(options: QueryOptions): string[] {
@@ -657,6 +682,7 @@ export class IndexService {
 
   private currentEnrichment(modelConfig: DataManagerModelConfig): EnrichmentManifest {
     let enrichment: EnrichmentManifest = {
+      schema: 'todo_signal_detail',
       mode: modelConfig.enabled ? 'model' : 'heuristic',
       base_url: modelConfig.baseUrl
     };
@@ -673,6 +699,7 @@ export class IndexService {
     }
     return previousManifest.input_root === 'workflows/profile-consolidation/outputs' &&
       previousManifest.index_dir === 'workflows/profile-consolidation/indexes' &&
+      previousManifest.enrichment.schema === enrichment.schema &&
       previousManifest.enrichment.mode === enrichment.mode &&
       previousManifest.enrichment.base_url === enrichment.base_url &&
       this.sameStringArrays(previousManifest.entity_types || [], ENTITY_TYPE_KEYS);
@@ -716,12 +743,36 @@ export class IndexService {
       sources: (event.sources || []).slice(),
       workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
       image_paths: (event.image_paths || []).slice(),
+      todo: this.copyTodo(event.todo),
       keywords: (event.keywords || []).slice(),
       domains: (event.domains || []).slice(),
       entity_mentions: (event.entity_mentions || []).slice(),
       enrichment_method: event.enrichment_method,
       entities: (event.entities || []).slice(),
       profile_domains: (event.profile_domains || []).slice()
+    };
+    return copied;
+  }
+
+  private emptyTodo(): IndexedEventTodo {
+    return {
+      type: '',
+      deadline: '',
+      text: ''
+    };
+  }
+
+  private copyTodo(todo: IndexedEventTodo): IndexedEventTodo {
+    let type = normalizeFreeText(todo.type);
+    let deadline = isIsoDate(normalizeFreeText(todo.deadline)) ? normalizeFreeText(todo.deadline) : '';
+    let text = normalizeFreeText(todo.text);
+    if (type.length === 0 && deadline.length === 0) {
+      return this.emptyTodo();
+    }
+    let copied: IndexedEventTodo = {
+      type: type,
+      deadline: deadline,
+      text: text
     };
     return copied;
   }
@@ -755,6 +806,7 @@ export class IndexService {
         sources: eventSourceNames(record.source_refs || [], relativePath),
         workflow_scene_ids: stableUniqueNumbers(record.workflow_scene_ids || []),
         image_paths: this.imagePathsForSourceRefs(record.source_refs || [], imageReferences),
+        todo: this.emptyTodo(),
         keywords: [],
         domains: [],
         entity_mentions: [],
@@ -825,7 +877,7 @@ export class IndexService {
             parseNumberedEntries(body).forEach((entry: NumberedEntry) => {
               let entryText = normalizeFreeText(entry.text);
               for (let candidate of available) {
-                if (!candidate.used && candidate.summary === entryText) {
+                if (!candidate.used && this.summaryTextsMatch(candidate.summary, entryText)) {
                   candidate.used = true;
                   imageReferences[relative + '#' + entry.index] = [candidate.image_path];
                   break;
@@ -991,6 +1043,58 @@ export class IndexService {
     return normalizeFreeText(output['response']);
   }
 
+  private summaryTextsMatch(left: string, right: string): boolean {
+    let leftKeys = this.summaryTextKeys(left);
+    let rightKeys = this.summaryTextKeys(right);
+    for (let leftKey of leftKeys) {
+      for (let rightKey of rightKeys) {
+        if (leftKey === rightKey) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private summaryTextKeys(value: Object | string | number | boolean | null | undefined): string[] {
+    let raw = normalizeFreeText(value);
+    let keys: string[] = [];
+    if (raw.length > 0) {
+      keys.push(raw);
+    }
+    let jsonSummary = this.summaryFromJsonText(raw);
+    if (jsonSummary.length > 0) {
+      keys.push(jsonSummary);
+    }
+    return stableUnique(keys);
+  }
+
+  private summaryFromJsonText(raw: string): string {
+    let text = raw.trim();
+    if (text.length === 0) {
+      return '';
+    }
+    let block = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (block && block.length > 1) {
+      text = block[1].trim();
+    }
+    text = text.replace(/^```(?:json)?\s*/i, '');
+    text = text.replace(/\s*```$/, '');
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      text = text.substring(start, end + 1);
+    }
+    try {
+      let parsed = ArkJSON.parse(text) as JsonMap;
+      if (parsed && typeof parsed === 'object') {
+        return normalizeFreeText(parsed['summary']);
+      }
+    } catch (e) {
+    }
+    return '';
+  }
+
   private imagePathsForSourceRefs(sourceRefs: string[], imageReferences: StringArrayMap): string[] {
     let paths: string[] = [];
     sourceRefs.forEach((sourceRef: string) => {
@@ -1079,6 +1183,72 @@ export class IndexService {
       postings: postings
     };
     return document;
+  }
+
+  private buildHomeTodoDocument(events: EventMap): HomeTodoDocument {
+    let deadlinePostings: StringArrayMap = {};
+    let typePostings: StringArrayMap = {};
+    let noDeadlineEvents: IndexedEvent[] = [];
+    let chatSceneIds = this.chatSceneIds();
+    Object.keys(events).forEach((eventId: string) => {
+      let event = events[eventId];
+      let todo = this.copyTodo(event.todo);
+      if (todo.type.length === 0 && !isIsoDate(todo.deadline)) {
+        return;
+      }
+      if (!isIsoDate(todo.deadline) && this.hasAnyWorkflowScene(event, chatSceneIds)) {
+        return;
+      }
+      if (todo.type.length > 0) {
+        if (!typePostings[todo.type]) {
+          typePostings[todo.type] = [];
+        }
+        typePostings[todo.type].push(eventId);
+      }
+      if (isIsoDate(todo.deadline)) {
+        if (!deadlinePostings[todo.deadline]) {
+          deadlinePostings[todo.deadline] = [];
+        }
+        deadlinePostings[todo.deadline].push(eventId);
+      } else {
+        noDeadlineEvents.push(event);
+      }
+    });
+    Object.keys(deadlinePostings).forEach((deadline: string) => deadlinePostings[deadline] = stableUnique(deadlinePostings[deadline]).sort());
+    Object.keys(typePostings).forEach((type: string) => typePostings[type] = stableUnique(typePostings[type]).sort());
+    noDeadlineEvents.sort((left: IndexedEvent, right: IndexedEvent) => {
+      if (left.event_date !== right.event_date) {
+        return right.event_date.localeCompare(left.event_date);
+      }
+      return right.event_id.localeCompare(left.event_id);
+    });
+    let document: HomeTodoDocument = {
+      normalization: 'home recommendation todo candidates; deadline_postings include absolute YYYY-MM-DD deadlines; no_deadline_event_ids are newest first; chat scene requires deadline',
+      deadline_postings: deadlinePostings,
+      no_deadline_event_ids: noDeadlineEvents.map((event: IndexedEvent): string => event.event_id),
+      type_postings: typePostings
+    };
+    return document;
+  }
+
+  private chatSceneIds(): number[] {
+    let ids: number[] = [];
+    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+      if (scene.tabId === 'chat') {
+        ids.push(scene.sceneId);
+      }
+    });
+    return ids;
+  }
+
+  private hasAnyWorkflowScene(event: IndexedEvent, sceneIds: number[]): boolean {
+    let eventSceneIds = event.workflow_scene_ids || [];
+    for (let sceneId of sceneIds) {
+      if (eventSceneIds.indexOf(sceneId) >= 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private buildDomainDocument(events: EventMap): DomainDocument {
@@ -1883,6 +2053,7 @@ export class IndexService {
   private emptyManifest(): IndexManifest {
     let sources: SourceManifestMap = {};
     let enrichment: EnrichmentManifest = {
+      schema: '',
       mode: '',
       base_url: ''
     };
@@ -1910,6 +2081,18 @@ export class IndexService {
     let document: InvertedDocument = {
       normalization: '',
       postings: postings
+    };
+    return document;
+  }
+
+  private emptyHomeTodoDocument(): HomeTodoDocument {
+    let deadlinePostings: StringArrayMap = {};
+    let typePostings: StringArrayMap = {};
+    let document: HomeTodoDocument = {
+      normalization: 'home recommendation todo candidates; chat scene requires deadline',
+      deadline_postings: deadlinePostings,
+      no_deadline_event_ids: [],
+      type_postings: typePostings
     };
     return document;
   }
@@ -2001,4 +2184,3 @@ export class IndexService {
     return state;
   }
 }
-

@@ -15,19 +15,45 @@ except Exception as ex:
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 HDC_HEALTH_CACHE_TTL = 2.0
+HDC_COMMAND_TIMEOUT = 20
+SERVER_PORT = 9124
+APP_AGENT_PORT = 9126
+APP_REVERSE_HDC_PORT = 19124
+APP_REVERSE_HDC_URL = f"http://127.0.0.1:{APP_REVERSE_HDC_PORT}"
+HDC_TARGET_OVERRIDE = os.environ.get("HDC_TARGET", "").strip()
 
 _hdc_health_checked_at = 0.0
 _hdc_health_connected = False
+_hdc_health_target = ""
+_hdc_tunnel_checked_at = 0.0
+_hdc_tunnel_status = {
+    "status": "unknown",
+    "message": "HDC tunnel has not been checked",
+    "target": "",
+    "tunnel_ready": False,
+    "fport_ready": False,
+    "rport_ready": False,
+}
 
 # PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
 # workflow bridge 直接通过 /api/workflow 执行动作；9126 轮询 Agent 默认启动，
 # 供 App 端本地/云端智能体按钮取任务使用，可用 --workflow_only 关闭。
 class HDCServerHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/api/health':
+            self.handle_health_request()
+            return
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b"Not Found")
+
     def do_POST(self):
         if self.path == '/api/workflow':
             self.handle_workflow_request()
         elif self.path == '/api/agent_loop/ensure':
             self.handle_agent_loop_ensure()
+        elif self.path == '/api/hdc/connect':
+            self.handle_hdc_connect()
         elif self.path == '/api/run_cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
@@ -41,6 +67,7 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                     
                     # 确保 9126 轮询 Agent 处于运行状态；workflow bridge 不依赖它。
                     if LEGACY_LOOP_ENABLED and is_hdc_connected(force=True):
+                        ensure_hdc_tunnels(force=True, reset_reverse=True)
                         start_harmony_agent()
 
                     # 将 stdout 和 stderr 合并返回给手机 App，便于用户在 App 内直接诊断连接问题。
@@ -87,6 +114,40 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 'message': str(e)
             })
 
+    def handle_health_request(self):
+        try:
+            result = hdc_health_payload(force=False)
+            self.write_json(200, result)
+        except Exception as e:
+            print(f">> [HdcHealthError] {e}")
+            self.write_json(500, {
+                'status': 'error',
+                'message': str(e),
+                'hdc_connected': False,
+                'tunnel_ready': False,
+                'app_server_url': APP_REVERSE_HDC_URL
+            })
+
+    def handle_hdc_connect(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        try:
+            request = json.loads(post_data or b'{}')
+            target = str(request.get('target', '')).strip()
+            kill_others = bool(request.get('kill_others', True))
+            result = connect_hdc_target(target, kill_others=kill_others)
+            status_code = 200 if result.get('status') == 'ok' else 500
+            self.write_json(status_code, result)
+        except Exception as e:
+            print(f">> [HdcConnectError] {e}")
+            self.write_json(500, {
+                'status': 'error',
+                'message': str(e),
+                'hdc_connected': False,
+                'tunnel_ready': False,
+                'app_server_url': APP_REVERSE_HDC_URL
+            })
+
     def handle_agent_loop_ensure(self):
         try:
             result = ensure_agent_loop_ready()
@@ -101,6 +162,246 @@ class HDCServerHandler(BaseHTTPRequestHandler):
 
 agent_thread = None
 agent_stop_event = threading.Event()
+
+def run_process(args, check=False):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=HDC_COMMAND_TIMEOUT)
+    except subprocess.TimeoutExpired as ex:
+        stderr = f"command timed out after {HDC_COMMAND_TIMEOUT}s: {' '.join(args)}"
+        result = subprocess.CompletedProcess(args, 124, ex.stdout or "", stderr)
+    if check and result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(args)}"
+        raise RuntimeError(message)
+    return result
+
+def hdc_args(target=""):
+    args = ["hdc"]
+    if target:
+        args.extend(["-t", target])
+    return args
+
+def parse_hdc_targets(output):
+    targets = []
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "[Empty]" in text:
+            continue
+        lower = text.lower()
+        if "not found" in lower or "list targets" in lower:
+            continue
+        target = text.split()[0].strip()
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+def list_hdc_targets():
+    result = run_process(["hdc", "list", "targets"])
+    if result.returncode != 0:
+        return [], result.stderr.strip() or result.stdout.strip()
+    return parse_hdc_targets(result.stdout), ""
+
+def choose_hdc_target(targets):
+    if not targets:
+        return ""
+    if HDC_TARGET_OVERRIDE:
+        if HDC_TARGET_OVERRIDE in targets:
+            return HDC_TARGET_OVERRIDE
+        print(f">> [HDC] HDC_TARGET is set but not connected: {HDC_TARGET_OVERRIDE}")
+        return ""
+    wireless_targets = [target for target in targets if ":" in target]
+    if wireless_targets:
+        return wireless_targets[0]
+    return targets[0]
+
+def set_harmony_agent_target(target):
+    global _hdc_health_target
+    _hdc_health_target = target
+    if harmony_agent is not None:
+        harmony_agent.HDC_TARGET = target
+
+def get_active_hdc_target(force=False):
+    global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
+    now = time.monotonic()
+    if (not force and _hdc_health_checked_at > 0 and
+            now - _hdc_health_checked_at < HDC_HEALTH_CACHE_TTL):
+        return _hdc_health_target if _hdc_health_connected else ""
+
+    targets, error = list_hdc_targets()
+    if not targets:
+        _hdc_health_checked_at = now
+        _hdc_health_connected = False
+        _hdc_health_target = ""
+        if error:
+            print(f">> [HDC] list targets failed: {error}")
+        return ""
+
+    target = choose_hdc_target(targets)
+    if not target:
+        _hdc_health_checked_at = now
+        _hdc_health_connected = False
+        _hdc_health_target = ""
+        return ""
+    set_harmony_agent_target(target)
+    _hdc_health_checked_at = now
+    _hdc_health_connected = True
+    return target
+
+def reset_hdc_tunnel_cache():
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    _hdc_tunnel_checked_at = 0.0
+    _hdc_tunnel_status = {
+        "status": "unknown",
+        "message": "HDC tunnel has not been checked",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
+
+def hdc_port_error_is_existing_mapping(message):
+    lower = message.lower()
+    return "exist" in lower or "already" in lower or "duplicate" in lower or "存在" in message
+
+def ensure_hdc_tunnels(force=False, reset_reverse=False):
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    now = time.monotonic()
+    if (not force and _hdc_tunnel_checked_at > 0 and
+            now - _hdc_tunnel_checked_at < HDC_HEALTH_CACHE_TTL):
+        return dict(_hdc_tunnel_status)
+
+    target = get_active_hdc_target(force=force)
+    if not target:
+        _hdc_tunnel_checked_at = now
+        _hdc_tunnel_status = {
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        }
+        return dict(_hdc_tunnel_status)
+
+    errors = []
+    fport_errors = []
+    rport_errors = []
+    commands = [
+        (hdc_args(target) + ["fport", "rm", f"tcp:{APP_AGENT_PORT}", f"tcp:{APP_AGENT_PORT}"], False),
+        (hdc_args(target) + ["fport", f"tcp:{APP_AGENT_PORT}", f"tcp:{APP_AGENT_PORT}"], True),
+    ]
+    if reset_reverse:
+        commands.append((hdc_args(target) + ["rport", "rm", f"tcp:{APP_REVERSE_HDC_PORT}", f"tcp:{SERVER_PORT}"], False))
+    commands.append((hdc_args(target) + ["rport", f"tcp:{APP_REVERSE_HDC_PORT}", f"tcp:{SERVER_PORT}"], True))
+    for args, required in commands:
+        result = run_process(args)
+        if required and result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or " ".join(args)
+            if hdc_port_error_is_existing_mapping(message):
+                continue
+            if "rport" in args:
+                rport_errors.append(message)
+            else:
+                fport_errors.append(message)
+
+    _hdc_tunnel_checked_at = now
+    errors = fport_errors + rport_errors
+    fport_ready = len(fport_errors) == 0
+    rport_ready = len(rport_errors) == 0
+    if errors:
+        _hdc_tunnel_status = {
+            "status": "error",
+            "message": "; ".join(errors),
+            "target": target,
+            "tunnel_ready": fport_ready and rport_ready,
+            "fport_ready": fport_ready,
+            "rport_ready": rport_ready,
+        }
+    else:
+        _hdc_tunnel_status = {
+            "status": "ok",
+            "message": (
+                f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
+                f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
+            ),
+            "target": target,
+            "tunnel_ready": True,
+            "fport_ready": True,
+            "rport_ready": True,
+        }
+    return dict(_hdc_tunnel_status)
+
+def hdc_health_payload(force=False):
+    target = get_active_hdc_target(force=force)
+    tunnel = ensure_hdc_tunnels(force=force) if target else {
+        "status": "error",
+        "message": "HDC target is not connected",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
+    hdc_connected = bool(target)
+    tunnel_ready = bool(tunnel.get("tunnel_ready"))
+    fport_ready = bool(tunnel.get("fport_ready"))
+    rport_ready = bool(tunnel.get("rport_ready"))
+    return {
+        "status": "ok" if hdc_connected and tunnel_ready else "error",
+        "message": tunnel.get("message", ""),
+        "hdc_connected": hdc_connected,
+        "target": target,
+        "tunnel_ready": tunnel_ready,
+        "fport_ready": fport_ready,
+        "rport_ready": rport_ready,
+        "app_server_url": APP_REVERSE_HDC_URL,
+        "server_port": SERVER_PORT,
+        "agent_router_port": APP_AGENT_PORT,
+        "reverse_server_port": APP_REVERSE_HDC_PORT,
+        "loop_enabled": LEGACY_LOOP_ENABLED,
+        "loop_alive": agent_thread is not None and agent_thread.is_alive(),
+    }
+
+def connect_hdc_target(target, kill_others=True):
+    if not target:
+        return {
+            "status": "error",
+            "message": "target is required, for example 192.168.x.x:port",
+            "hdc_connected": False,
+            "tunnel_ready": False,
+            "app_server_url": APP_REVERSE_HDC_URL,
+        }
+
+    if kill_others:
+        targets, _ = list_hdc_targets()
+        for old_target in targets:
+            if old_target != target:
+                run_process(["hdc", "kill", old_target])
+
+    result = run_process(["hdc", "tconn", target])
+    invalidate_hdc_health_cache()
+    reset_hdc_tunnel_cache()
+    if result.returncode != 0:
+        return {
+            "status": "error",
+            "message": result.stderr.strip() or result.stdout.strip() or f"hdc tconn failed: {target}",
+            "hdc_connected": False,
+            "target": target,
+            "tunnel_ready": False,
+            "app_server_url": APP_REVERSE_HDC_URL,
+        }
+
+    set_harmony_agent_target(target)
+    tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
+    if LEGACY_LOOP_ENABLED and tunnel.get("fport_ready"):
+        start_harmony_agent()
+    payload = hdc_health_payload(force=True)
+    if payload.get("hdc_connected") and payload.get("fport_ready"):
+        payload["status"] = "ok"
+        if not payload.get("tunnel_ready"):
+            payload["message"] = (
+                "HDC target connected and fport ready; reverse rport is unavailable, "
+                "so keep using the manual PC HDC Server URL."
+            )
+    return payload
 
 def ensure_workflow_agent_ready():
     if harmony_agent is None:
@@ -130,6 +431,14 @@ def hdc_prefix():
     if harmony_agent is not None:
         return harmony_agent.hdc_prefix()
     return 'hdc'
+
+def payload_bool(payload, key, default):
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off')
+    return bool(value)
 
 def workflow_gui_action(payload):
     ensure_workflow_agent_ready()
@@ -209,9 +518,10 @@ def _workflow_gui_action_impl(payload):
 
     if action == 'app_start':
         package_name = str(payload.get('package_name', ''))
+        reset_first = payload_bool(payload, 'reset_first', True)
         if not package_name:
             raise RuntimeError('app_start requires package_name')
-        if not harmony_agent.launch_app(package_name):
+        if not harmony_agent.launch_app(package_name, reset_first=reset_first):
             raise RuntimeError(f'app_start failed: {package_name}')
         return {'status': 'ok', 'message': f'app_start {package_name}', 'package_name': package_name}
 
@@ -232,9 +542,7 @@ def handle_workflow_action(action, payload):
     payload = payload or {}
 
     if action == 'health':
-        if not is_hdc_connected():
-            return {'status': 'error', 'message': 'HDC target is not connected'}
-        return {'status': 'ok', 'message': 'HDC connected'}
+        return hdc_health_payload(force=True)
 
     if action == 'load_prompt_template':
         if harmony_agent is None:
@@ -267,12 +575,13 @@ def handle_workflow_action(action, payload):
         ensure_workflow_agent_ready()
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
+        reset_first = payload_bool(payload, 'reset_first', True)
         target = app_name or package_name
         if not target:
             raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target)
+        ok = harmony_agent.launch_app(target, reset_first=reset_first)
         if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name)
+            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
         return {
             'status': 'ok' if ok else 'error',
             'message': f'app_start {target}',
@@ -298,32 +607,14 @@ def handle_workflow_action(action, payload):
     raise RuntimeError(f'Unsupported workflow action: {action}')
 
 def invalidate_hdc_health_cache():
-    global _hdc_health_checked_at, _hdc_health_connected
+    global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
     _hdc_health_checked_at = 0.0
     _hdc_health_connected = False
+    _hdc_health_target = ""
+    reset_hdc_tunnel_cache()
 
 def is_hdc_connected(force=False):
-    global _hdc_health_checked_at, _hdc_health_connected
-    now = time.monotonic()
-    if not force and _hdc_health_checked_at > 0 and now - _hdc_health_checked_at < HDC_HEALTH_CACHE_TTL:
-        return _hdc_health_connected
-
-    try:
-        # 当只有一行 [Empty] 时表示空，正常应该输出设备 IP 或者序列号。
-        result = subprocess.run("hdc list targets", shell=True, capture_output=True, text=True)
-        output = result.stdout.strip()
-        if not output or "[Empty]" in output or "not found" in output:
-            _hdc_health_checked_at = now
-            _hdc_health_connected = False
-            return False
-        _hdc_health_checked_at = now
-        _hdc_health_connected = True
-        return True
-    except Exception as e:
-        print(f">> [警告] 检查 HDC 连接失败: {e}")
-        _hdc_health_checked_at = now
-        _hdc_health_connected = False
-        return False
+    return bool(get_active_hdc_target(force=force))
 
 def _run_harmony_agent_thread(stop_event):
     try:
@@ -365,17 +656,41 @@ def ensure_agent_loop_ready():
             'message': 'harmony_agent.py is unavailable'
         }
 
-    start_harmony_agent()
     if not is_hdc_connected(force=True):
         return {
             'status': 'error',
-            'message': 'HDC target is not connected'
+            'message': 'HDC target is not connected',
+            'hdc_connected': False,
+            'tunnel_ready': False,
+            'app_server_url': APP_REVERSE_HDC_URL
         }
 
-    harmony_agent.refresh_hdc_forwarding()
+    tunnel = ensure_hdc_tunnels(force=True)
+    if not tunnel.get("fport_ready"):
+        return {
+            'status': 'error',
+            'message': tunnel.get("message", "HDC fport refresh failed"),
+            'hdc_connected': True,
+            'target': tunnel.get("target", ""),
+            'tunnel_ready': bool(tunnel.get("tunnel_ready")),
+            'fport_ready': False,
+            'rport_ready': bool(tunnel.get("rport_ready")),
+            'app_server_url': APP_REVERSE_HDC_URL
+        }
+
+    start_harmony_agent()
+    message = 'agent loop is running and HDC fport/rport refreshed'
+    if not tunnel.get("rport_ready"):
+        message = 'agent loop is running and HDC fport refreshed; reverse rport is unavailable'
     return {
         'status': 'ok',
-        'message': 'agent loop is running and 9126 fport refreshed',
+        'message': message,
+        'hdc_connected': True,
+        'target': tunnel.get("target", ""),
+        'tunnel_ready': bool(tunnel.get("tunnel_ready")),
+        'fport_ready': True,
+        'rport_ready': bool(tunnel.get("rport_ready")),
+        'app_server_url': APP_REVERSE_HDC_URL,
         'loop_alive': agent_thread is not None and agent_thread.is_alive()
     }
 
@@ -412,8 +727,11 @@ if __name__ == '__main__':
         print(">> 旧版 harmony_agent 轮询未启用；workflow bridge 将按请求直接控制设备。")
         
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
-    PORT = 9124
+    PORT = SERVER_PORT
     server = HTTPServer(('0.0.0.0', PORT), HDCServerHandler)
+    if is_hdc_connected(force=True):
+        tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
+        print(f">> [HDC] {tunnel.get('message', '')}")
     print(f"HDC 远程控制服务端已启动，监听端口: {PORT}...")
     print(f"等待手机 App 发送连接指令...")
     

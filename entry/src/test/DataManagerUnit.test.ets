@@ -17,6 +17,10 @@ import {
 } from '../main/ets/datamanager/CollectionGroupingService';
 import { GalleryExifUtils } from '../main/ets/utils/gallery/GalleryExifUtils';
 import {
+  isFutureTodoDeadline,
+  recommendationTodoDeadlineMeta
+} from '../main/ets/datamanager/HomeRecommendationService';
+import {
   isQueryResultTruncated,
   resolveQueryLimit
 } from '../main/ets/datamanager/IndexService';
@@ -43,6 +47,11 @@ function demoIndexedEvent(id: string, summary: string, source: string, domain: s
     sources: [source],
     workflow_scene_ids: [3],
     image_paths: [],
+    todo: {
+      type: '',
+      deadline: '',
+      text: ''
+    },
     keywords: [keyword],
     domains: [domain],
     entity_mentions: [],
@@ -272,6 +281,14 @@ export default function dataManagerUnitTest() {
       expect(GalleryExifUtils.dateFromExifDateTime('2024:06:17 14:03:02')).assertEqual('2024-06-17');
       expect(GalleryExifUtils.displayDateTime('2024:06:17 14:03:02')).assertEqual('2024-06-17 14:03:02');
       expect(GalleryExifUtils.dateFromExifDateTime('')).assertEqual('');
+    });
+
+    it('homeRecommendationTodoDeadlineFilter', 0, () => {
+      expect(isFutureTodoDeadline('2026-06-06', '2026-06-05')).assertTrue();
+      expect(isFutureTodoDeadline('2026-06-05', '2026-06-05')).assertFalse();
+      expect(isFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
+      expect(isFutureTodoDeadline('', '2026-06-05')).assertFalse();
+      expect(recommendationTodoDeadlineMeta('2026-06-06')).assertEqual('6月6日截止');
     });
   });
 }

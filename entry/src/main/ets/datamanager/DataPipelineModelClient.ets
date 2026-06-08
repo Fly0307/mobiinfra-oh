@@ -9,7 +9,10 @@ import {
   DataManagerModelConfig,
   DedupDecision,
   EntityMention,
+  HomeRecommendationPlannerEvent,
+  HomeRecommendationState,
   IndexedEvent,
+  IndexedEventTodo,
   JsonMap,
   NumberMap,
   ProfileClaim,
@@ -39,6 +42,7 @@ import {
   summarizeText
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
+import { workflowSceneLabel } from '../utils/WorkflowSceneConfig';
 
 interface BatchSplitEntryPromptPayload {
   source_date: string;
@@ -75,6 +79,9 @@ interface DedupPromptPayload {
 }
 
 interface EventPromptPayload {
+  event_date: string;
+  workflow_scene_ids: number[];
+  workflow_scene_labels: string[];
   summary: string;
   normalized_fact: string;
 }
@@ -87,6 +94,9 @@ interface SummaryPromptPayload {
 
 interface BatchEventPromptPayload {
   event_id: string;
+  event_date: string;
+  workflow_scene_ids: number[];
+  workflow_scene_labels: string[];
   summary: string;
   normalized_fact: string;
 }
@@ -173,6 +183,25 @@ interface CollectionPlannerMergePromptPayload {
   groups: CollectionPlannerMergeGroupPromptPayload[];
 }
 
+interface HomeRecommendationEventPromptPayload {
+  event_id: string;
+  date: string;
+  todo_type: string;
+  todo_deadline: string;
+  todo_text: string;
+  summary: string;
+  normalized_fact: string;
+  sources: string[];
+  domains: string[];
+  keywords: string[];
+  image_paths: string[];
+}
+
+interface HomeRecommendationPromptPayload {
+  current_date: string;
+  events: HomeRecommendationEventPromptPayload[];
+}
+
 const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。' +
   '输入包含 entries，每条都有 source_ref/source_date/file_name/entry_index/workflow_metadata/entry_text。返回严格 JSON：' +
@@ -185,14 +214,16 @@ const DEDUP_SYSTEM_PROMPT: string =
   'matched_record_ids 最多返回一个最相关历史记录。不要把多笔账单或多段聊天合并成一个大记录。不要输出 markdown。';
 
 const ENRICH_SYSTEM_PROMPT: string =
-  '你是本地个人数据索引助手。请为事件提取关键词、领域和实体。返回严格 JSON：' +
-  '{"keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}]}。' +
-  'domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '你是本地个人数据索引助手。请为事件提取关键词、领域、实体和可能的待办信号。输入包含 event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。返回严格 JSON：' +
+  '{"keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串"}}。' +
+  'todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的三个字段都写空。' +
+  '有明确相对日期时，必须以 event_date 为基准把“今天/明天/后天/周末/下周”等换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
 
 const BATCH_ENRICH_SYSTEM_PROMPT: string =
-  '你是本地个人数据索引助手。请批量为事件提取关键词、领域和实体。输入包含 events，每条都有 event_id/summary/normalized_fact。' +
-  '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}]}]}。' +
-  '必须为每个输入 event_id 返回一个结果。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '你是本地个人数据索引助手。请批量为事件提取关键词、领域、实体和可能的待办信号。输入包含 events，每条都有 event_id/event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。' +
+  '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串"}}]}。' +
+  '必须为每个输入 event_id 返回一个结果。todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的三个字段都写空。' +
+  '有明确相对日期时，必须以该事件 event_date 为基准换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
 
 const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。' +
@@ -243,8 +274,21 @@ const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
   '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。' +
   '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；分组数量最多 12 个。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
 
+const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
+  '你是首页待办推荐 Planner。输入中的事件已经过索引过滤：每条都有待办信号；todo_text 是上游提取出的具体待办行动内容；todo_deadline 为空表示没有明确截止日期，非空时一定晚于 current_date。聊天计划可能只有 todo_deadline，todo_type 为空。' +
+  'todo_type 是上游按 workflow 场景提取的行动信号，含义包括：buy购买、compare比价、pay付款、refund退款、pickup取货/收货、after_sale售后、order下单、reorder复购、complain反馈投诉、watch观看/追更、renew续费/权益恢复、book预订、join参与、repair维修、appointment预约、prepare准备、contact联系、gift送礼、plan安排计划、attend参加、depart出发、check_in入住/值机、reimburse报销、follow_up跟进。' +
+  '不要重新判断输入事件是不是 todo，也不要根据重要性、价值、来源、是否有 deadline 来丢弃任何输入事件；上游已经完成候选筛选。你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并成卡片，并生成适合首页展示的文案。' +
+  '每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中。聊天候选的 todo_type 可能为空；同一事件里的文件分享、技术讨论、页面状态等背景信息不要盖过 todo_text 指向的未来行动。' +
+  '返回严格 JSON：' +
+  '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。' +
+  'source_event_ids 必须来自输入事件，至少 1 个；每个推荐要能让用户知道接下来具体要做什么。不要编造输入里没有的人名、地点、商品、金额或行动。' +
+  'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待准备”“待出发”“待购买”“待跟进”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。' +
+  '不要输出日期状态、meta、today/tomorrow 等相对时间文案，截止日期由应用根据 todo_deadline 生成；title 和 desc 不要使用省略号或“...”截断内容。' +
+  '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
+
 export class DataPipelineModelClient {
   private cloudClient: CloudModelClient = new CloudModelClient();
+  private requestSequence: number = 0;
 
   async splitEntryIntoFacts(entry: SourceEntry, config: DataManagerModelConfig): Promise<CandidateFact[]> {
     let batch = await this.splitEntriesIntoFacts([entry], config);
@@ -259,7 +303,7 @@ export class DataPipelineModelClient {
     if (!this.isEnabled(config) || entries.length === 0) {
       return result;
     }
-    let chunks = this.chunkSourceEntries(entries, 12);
+    let chunks = this.chunkSourceEntries(entries, 24);
     for (let chunk of chunks) {
       let entryMap: Record<string, SourceEntry> = {};
       let promptEntries: BatchSplitEntryPromptPayload[] = chunk.map((entry: SourceEntry): BatchSplitEntryPromptPayload => {
@@ -279,7 +323,7 @@ export class DataPipelineModelClient {
       };
       try {
         dataManagerInfo(`Batch split request: entries=${chunk.length}`);
-        let payload = await this.callJson(config, BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+        let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
         let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
         rawItems.forEach((rawItem: JsonMap) => {
           let sourceRef = normalizeFreeText(rawItem['source_ref']);
@@ -326,7 +370,7 @@ export class DataPipelineModelClient {
     };
     let prompt = ArkJSON.stringify(promptPayload, null, 2);
     try {
-      let payload = await this.callJson(config, DEDUP_SYSTEM_PROMPT, prompt);
+      let payload = await this.callJson(config, 'dedup', DEDUP_SYSTEM_PROMPT, prompt);
       let decision = normalizeFreeText(payload['decision']);
       if (['new', 'duplicate', 'merge_with_existing', 'skip_ambiguous'].indexOf(decision) < 0) {
         decision = 'new';
@@ -351,12 +395,15 @@ export class DataPipelineModelClient {
       return enriched;
     }
     let eventPayload: EventPromptPayload = {
+      event_date: event.event_date,
+      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
+      workflow_scene_labels: this.workflowSceneLabels(event.workflow_scene_ids || []),
       summary: event.summary,
       normalized_fact: event.normalized_fact
     };
     let prompt = ArkJSON.stringify(eventPayload, null, 2);
     try {
-      let payload = await this.callJson(config, ENRICH_SYSTEM_PROMPT, prompt);
+      let payload = await this.callJson(config, 'enrich.single', this.enrichSystemPrompt([event], false), prompt);
       return this.enrichEventFromPayload(event, payload, 'model');
     } catch (e) {
       enriched.enrichment_method = 'heuristic_fallback';
@@ -372,13 +419,16 @@ export class DataPipelineModelClient {
     if (!this.isEnabled(config) || events.length === 0) {
       return events.map((event: IndexedEvent) => result[event.event_id]);
     }
-    let chunks = this.chunkEvents(events, 16);
+    let chunks = this.chunkEventsByTodoGuide(events, 32);
     for (let chunk of chunks) {
       let eventMap: Record<string, IndexedEvent> = {};
       let promptEvents: BatchEventPromptPayload[] = chunk.map((event: IndexedEvent): BatchEventPromptPayload => {
         eventMap[event.event_id] = event;
         let item: BatchEventPromptPayload = {
           event_id: event.event_id,
+          event_date: event.event_date,
+          workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
+          workflow_scene_labels: this.workflowSceneLabels(event.workflow_scene_ids || []),
           summary: event.summary,
           normalized_fact: event.normalized_fact
         };
@@ -389,7 +439,7 @@ export class DataPipelineModelClient {
       };
       try {
         dataManagerInfo(`Batch enrich request: events=${chunk.length}`);
-        let payload = await this.callJson(config, BATCH_ENRICH_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+        let payload = await this.callJson(config, 'enrich.batch', this.enrichSystemPrompt(chunk, true), ArkJSON.stringify(promptPayload, null, 2));
         let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
         rawEvents.forEach((rawEvent: JsonMap) => {
           let eventId = normalizeFreeText(rawEvent['event_id']);
@@ -417,7 +467,7 @@ export class DataPipelineModelClient {
       items: items.map((item: string) => summarizeText(item, 280))
     };
     try {
-      let payload = await this.callJson(config, SUMMARY_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload));
+      let payload = await this.callJson(config, 'summary', SUMMARY_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload));
       return normalizeFreeText(payload['summary']);
     } catch (e) {
       let err = e as Error;
@@ -435,7 +485,7 @@ export class DataPipelineModelClient {
       mentions: mentions
     };
     try {
-      let payload = await this.callJson(config, ENTITY_RESOLUTION_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+      let payload = await this.callJson(config, 'entity.resolve', ENTITY_RESOLUTION_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
       let rawEntities = Array.isArray(payload['entities']) ? payload['entities'] as JsonMap[] : [];
       let resolved: EntityMention[] = [];
       rawEntities.forEach((raw: JsonMap) => {
@@ -465,7 +515,7 @@ export class DataPipelineModelClient {
     try {
       let promptPayloads = this.profileModelPromptChunks(domain, events, previousClaims);
       if (promptPayloads.length === 1) {
-        let payload = await this.callJson(config, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayloads[0]));
+        let payload = await this.callJson(config, 'profile.generate.' + domain, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayloads[0]));
         let parsed = this.normalizeProfilePayload(payload);
         let claims = this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8);
         if (claims.length === 0) {
@@ -480,7 +530,7 @@ export class DataPipelineModelClient {
       }
       let candidateClaims: RawProfileClaim[] = [];
       for (let promptPayload of promptPayloads) {
-        let payload = await this.callJson(config, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayload));
+        let payload = await this.callJson(config, 'profile.generate.' + domain, PROFILE_SYSTEM_PROMPT, this.profilePromptText(promptPayload));
         let parsed = this.normalizeProfilePayload(payload);
         candidateClaims = candidateClaims.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8));
       }
@@ -555,7 +605,7 @@ export class DataPipelineModelClient {
       title: title,
       events: promptEvents
     };
-    let payload = await this.callJson(config, COLLECTION_GROUPING_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    let payload = await this.callJson(config, 'collection.group.' + tabId, COLLECTION_GROUPING_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
     return this.normalizeCollectionPlannerGroups(payload, tabId, idPrefix);
   }
 
@@ -570,6 +620,35 @@ export class DataPipelineModelClient {
       });
     }
     return ordered;
+  }
+
+  async planHomeRecommendations(events: HomeRecommendationPlannerEvent[], currentDate: string, config: DataManagerModelConfig): Promise<HomeRecommendationState[]> {
+    if (!this.isEnabled(config) || events.length === 0) {
+      return [];
+    }
+    let promptEvents: HomeRecommendationEventPromptPayload[] = events.map((event: HomeRecommendationPlannerEvent): HomeRecommendationEventPromptPayload => {
+      let item: HomeRecommendationEventPromptPayload = {
+        event_id: event.event_id,
+        date: event.date,
+        todo_type: event.todo_type,
+        todo_deadline: event.todo_deadline,
+        todo_text: summarizeText(event.todo_text, 120),
+        summary: summarizeText(event.summary, 100),
+        normalized_fact: summarizeText(event.normalized_fact, 180),
+        sources: event.sources.slice(0, 4),
+        domains: event.domains.slice(0, 4),
+        keywords: event.keywords.slice(0, 8),
+        image_paths: event.image_paths.slice(0, 3)
+      };
+      return item;
+    });
+    let promptPayload: HomeRecommendationPromptPayload = {
+      current_date: currentDate,
+      events: promptEvents
+    };
+    dataManagerInfo(`Home recommendation planner request: events=${events.length}, currentDate=${currentDate}`);
+    let payload = await this.callJson(config, 'home.recommendation', HOME_RECOMMENDATION_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    return this.normalizeHomeRecommendations(payload);
   }
 
   private async mergeCollectionGroups(tabId: string, title: string, groups: CollectionGroupState[], config: DataManagerModelConfig): Promise<CollectionGroupState[]> {
@@ -591,7 +670,7 @@ export class DataPipelineModelClient {
       title: title,
       groups: promptGroups
     };
-    let payload = await this.callJson(config, COLLECTION_GROUP_MERGE_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    let payload = await this.callJson(config, 'collection.merge.' + tabId, COLLECTION_GROUP_MERGE_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
     let rawGroups = Array.isArray(payload['groups']) ? payload['groups'] as JsonMap[] : [];
     let merged: CollectionGroupState[] = [];
     rawGroups.forEach((rawGroup: JsonMap, index: number) => {
@@ -629,6 +708,41 @@ export class DataPipelineModelClient {
       merged.push(group);
     });
     return merged.length > 0 ? merged : groups;
+  }
+
+  private normalizeHomeRecommendations(payload: JsonMap): HomeRecommendationState[] {
+    let rawItems = Array.isArray(payload['recommendations']) ? payload['recommendations'] as JsonMap[] : [];
+    let result: HomeRecommendationState[] = [];
+    rawItems.forEach((raw: JsonMap, index: number) => {
+      let title = normalizeFreeText(raw['title']);
+      let sourceEventIds = this.normalizeStringArray(raw['source_event_ids']);
+      if (title.length === 0 || sourceEventIds.length === 0) {
+        return;
+      }
+      let domains = normalizeDomains([normalizeFreeText(raw['domain'])]);
+      let item: HomeRecommendationState = {
+        id: normalizeFreeText(raw['id']) || 'todo-' + String(index + 1),
+        tag: this.normalizeRecommendationTag(raw['tag']),
+        title: title,
+        desc: normalizeFreeText(raw['desc']),
+        meta: '',
+        domain: domains.length > 0 ? domains[0] : 'other',
+        source_event_ids: sourceEventIds
+      };
+      result.push(item);
+    });
+    return result;
+  }
+
+  private normalizeRecommendationTag(value: Object | string | number | boolean | null | undefined): string {
+    let tag = normalizeFreeText(value);
+    if (tag.length < 2) {
+      return '';
+    }
+    if (tag.length > 6) {
+      return '';
+    }
+    return tag;
   }
 
   private normalizeCollectionPlannerGroups(payload: JsonMap, tabId: string, idPrefix: string): CollectionGroupState[] {
@@ -695,6 +809,7 @@ export class DataPipelineModelClient {
     enriched.entity_mentions = ruleEntities;
     enriched.entities = ruleEntities.map((entity: EntityMention) => `${entity.type}:${entity.name}`);
     enriched.profile_domains = normalizeDomains(enriched.domains);
+    enriched.todo = this.emptyTodo();
     enriched.enrichment_method = method;
     return enriched;
   }
@@ -713,8 +828,130 @@ export class DataPipelineModelClient {
     enriched.entity_mentions = entityMentions;
     enriched.entities = entityMentions.map((entity: EntityMention) => `${entity.type}:${entity.name}`);
     enriched.profile_domains = normalizeDomains(enriched.domains);
+    enriched.todo = this.normalizeTodo(payload['todo']);
     enriched.enrichment_method = method;
     return enriched;
+  }
+
+  private emptyTodo(): IndexedEventTodo {
+    return {
+      type: '',
+      deadline: '',
+      text: ''
+    };
+  }
+
+  private normalizeTodo(value: Object | string | number | boolean | null | undefined): IndexedEventTodo {
+    if (!value || typeof value !== 'object') {
+      return this.emptyTodo();
+    }
+    let raw = value as JsonMap;
+    let type = this.normalizeTodoType(raw['type']);
+    let deadline = normalizeFreeText(raw['deadline']);
+    deadline = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? deadline : '';
+    let text = normalizeFreeText(raw['text']);
+    if (type.length === 0 && deadline.length === 0) {
+      return this.emptyTodo();
+    }
+    let todo: IndexedEventTodo = {
+      type: type,
+      deadline: deadline,
+      text: text
+    };
+    return todo;
+  }
+
+  private normalizeTodoType(value: Object | string | number | boolean | null | undefined): string {
+    let type = normalizeFreeText(value);
+    let allowed = [
+      'buy', 'compare', 'pay', 'refund', 'pickup', 'after_sale',
+      'order', 'reorder', 'complain',
+      'watch', 'renew', 'book', 'join',
+      'repair', 'appointment', 'prepare', 'follow_up',
+      'contact', 'gift', 'plan', 'attend',
+      'depart', 'check_in', 'reimburse',
+      'other'
+    ];
+    return allowed.indexOf(type) >= 0 ? type : '';
+  }
+
+  private workflowSceneLabels(sceneIds: number[]): string[] {
+    let labels: string[] = [];
+    sceneIds.forEach((sceneId: number) => {
+      if (!isNaN(sceneId) && sceneId >= 0) {
+        labels.push(workflowSceneLabel(sceneId));
+      }
+    });
+    return stableUnique(labels);
+  }
+
+  private enrichSystemPrompt(events: IndexedEvent[], batch: boolean): string {
+    return (batch ? BATCH_ENRICH_SYSTEM_PROMPT : ENRICH_SYSTEM_PROMPT) + this.todoGuideForEvents(events);
+  }
+
+  private todoGuideForEvents(events: IndexedEvent[]): string {
+    let labels: string[] = [];
+    events.forEach((event: IndexedEvent) => {
+      labels = labels.concat(this.workflowSceneLabels(event.workflow_scene_ids || []));
+    });
+    labels = stableUnique(labels);
+    let guides: string[] = ['\n按 workflow_scene_labels 使用以下待办提取规则：'];
+    if (labels.length === 0) {
+      guides.push('未知场景：只在行动责任明确时使用 other；不要因为普通信息记录生成 todo。');
+      return guides.join('');
+    }
+    if (labels.indexOf('聊天') >= 0) {
+      guides.push('聊天：只提取有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间；todo.type 必须写空字符串，只填写 deadline 和 text。没有可换算日期时写空 todo。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 只描述该计划本身，例如“周末去江川路佬肥猫聚餐”，不要写同条事件里的文件或技术讨论。');
+    }
+    if (labels.indexOf('购物') >= 0) {
+      guides.push('购物：允许 type=buy|compare|pay|refund|pickup|after_sale|other，分别表示购买、比价决策、付款、退款、取货/收货、售后、其他购物后续。');
+    }
+    if (labels.indexOf('外卖') >= 0) {
+      guides.push('外卖：允许 type=order|reorder|pay|refund|pickup|complain|other，分别表示下单、复购、付款、退款、取餐/配送、投诉反馈、其他外卖后续。');
+    }
+    if (labels.indexOf('娱乐') >= 0) {
+      guides.push('娱乐：允许 type=watch|renew|book|buy|join|follow_up|other，分别表示观看/追更、续费、预约/订票、购买内容或会员、参与活动、后续关注、其他娱乐事项。');
+    }
+    if (labels.indexOf('生活') >= 0) {
+      guides.push('生活：允许 type=pay|repair|appointment|renew|prepare|follow_up|other，分别表示缴费、维修、预约、续期、准备材料/物品、后续跟进、其他生活事项。');
+    }
+    if (labels.indexOf('社交') >= 0) {
+      guides.push('社交：允许 type=attend|contact|gift|plan|book|follow_up|other，分别表示赴约/参加、联系某人、礼物/心意、安排计划、预订、后续跟进、其他社交事项。');
+    }
+    if (labels.indexOf('差旅') >= 0) {
+      guides.push('差旅：允许 type=book|depart|check_in|prepare|pay|reimburse|follow_up|other，分别表示预订、出发、入住/值机、准备证件物品、付款、报销、后续跟进、其他差旅事项。');
+    }
+    guides.push('如果事件同时属于多个场景，优先使用最具体的非聊天场景规则；聊天规则只用于纯聊天场景。不要输出规则外的 type。');
+    return guides.join('');
+  }
+
+  private todoGuideKey(event: IndexedEvent): string {
+    let labels = this.workflowSceneLabels(event.workflow_scene_ids || []);
+    if (labels.indexOf('聊天') >= 0 && labels.length === 1) {
+      return 'chat';
+    }
+    if (labels.length > 0) {
+      return labels[0];
+    }
+    return 'default';
+  }
+
+  private chunkEventsByTodoGuide(events: IndexedEvent[], size: number): IndexedEvent[][] {
+    let grouped: Record<string, IndexedEvent[]> = new Object() as Record<string, IndexedEvent[]>;
+    let keys: string[] = [];
+    events.forEach((event: IndexedEvent) => {
+      let key = this.todoGuideKey(event);
+      if (!grouped[key]) {
+        grouped[key] = [];
+        keys.push(key);
+      }
+      grouped[key].push(event);
+    });
+    let chunks: IndexedEvent[][] = [];
+    keys.forEach((key: string) => {
+      chunks = chunks.concat(this.chunkEvents(grouped[key], size));
+    });
+    return chunks;
   }
 
   private chunkSourceEntries(entries: SourceEntry[], size: number): SourceEntry[][] {
@@ -894,7 +1131,7 @@ export class DataPipelineModelClient {
       let merged: RawProfileClaim[] = [];
       let shortSummary = '';
       for (let payload of payloads) {
-        let raw = await this.callJson(config, PROFILE_MERGE_SYSTEM_PROMPT, this.profilePromptText(payload));
+        let raw = await this.callJson(config, 'profile.merge.' + domain, PROFILE_MERGE_SYSTEM_PROMPT, this.profilePromptText(payload));
         let parsed = this.normalizeProfilePayload(raw);
         if (shortSummary.length === 0) {
           shortSummary = parsed.short_summary;
@@ -1143,6 +1380,11 @@ export class DataPipelineModelClient {
       sources: event.sources.slice(),
       workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
       image_paths: event.image_paths.slice(),
+      todo: {
+        type: event.todo.type,
+        deadline: event.todo.deadline,
+        text: event.todo.text
+      },
       keywords: event.keywords.slice(),
       domains: event.domains.slice(),
       entity_mentions: event.entity_mentions.slice(),
@@ -1192,13 +1434,15 @@ export class DataPipelineModelClient {
     return result;
   }
 
-  private async callJson(config: DataManagerModelConfig, systemPrompt: string, userPrompt: string): Promise<JsonMap> {
+  private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string): Promise<JsonMap> {
     let messages: CloudChatMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ];
     let startedAt = Date.now();
-    dataManagerInfo(`Model request start: baseUrl=${config.baseUrl}, promptChars=${userPrompt.length}`);
+    this.requestSequence += 1;
+    let requestId = this.requestSequence;
+    dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}`);
     try {
       let content = await this.cloudClient.chatCompletionText({
         baseUrl: config.baseUrl,
@@ -1209,11 +1453,11 @@ export class DataPipelineModelClient {
           enable_thinking: false
         }
       });
-      dataManagerInfo(`Model request response: ms=${Date.now() - startedAt}`);
+      dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
       return this.parseJsonObject(content);
     } catch (e) {
       let err = e as Error;
-      dataManagerError(`Model request failed: baseUrl=${config.baseUrl}, ms=${Date.now() - startedAt}, error=${err.message}`);
+      dataManagerError(`Model request failed: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, ms=${Date.now() - startedAt}, error=${err.message}`);
       throw err;
     }
   }

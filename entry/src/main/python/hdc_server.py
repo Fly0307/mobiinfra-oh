@@ -135,7 +135,8 @@ class HDCServerHandler(BaseHTTPRequestHandler):
             request = json.loads(post_data or b'{}')
             target = str(request.get('target', '')).strip()
             kill_others = bool(request.get('kill_others', True))
-            result = connect_hdc_target(target, kill_others=kill_others)
+            prefer_wired = bool(request.get('prefer_wired', True))
+            result = connect_hdc_target(target, kill_others=kill_others, prefer_wired=prefer_wired)
             status_code = 200 if result.get('status') == 'ok' else 500
             self.write_json(status_code, result)
         except Exception as e:
@@ -162,6 +163,7 @@ class HDCServerHandler(BaseHTTPRequestHandler):
 
 agent_thread = None
 agent_stop_event = threading.Event()
+hdc_control_lock = threading.RLock()
 
 def run_process(args, check=False):
     try:
@@ -179,6 +181,9 @@ def hdc_args(target=""):
     if target:
         args.extend(["-t", target])
     return args
+
+def is_wireless_hdc_target(target):
+    return ":" in target
 
 def parse_hdc_targets(output):
     targets = []
@@ -200,7 +205,7 @@ def list_hdc_targets():
         return [], result.stderr.strip() or result.stdout.strip()
     return parse_hdc_targets(result.stdout), ""
 
-def choose_hdc_target(targets):
+def choose_hdc_target(targets, preferred_target=""):
     if not targets:
         return ""
     if HDC_TARGET_OVERRIDE:
@@ -208,7 +213,12 @@ def choose_hdc_target(targets):
             return HDC_TARGET_OVERRIDE
         print(f">> [HDC] HDC_TARGET is set but not connected: {HDC_TARGET_OVERRIDE}")
         return ""
-    wireless_targets = [target for target in targets if ":" in target]
+    wired_targets = [target for target in targets if not is_wireless_hdc_target(target)]
+    if wired_targets:
+        return wired_targets[0]
+    if preferred_target and preferred_target in targets:
+        return preferred_target
+    wireless_targets = [target for target in targets if is_wireless_hdc_target(target)]
     if wireless_targets:
         return wireless_targets[0]
     return targets[0]
@@ -217,7 +227,16 @@ def set_harmony_agent_target(target):
     global _hdc_health_target
     _hdc_health_target = target
     if harmony_agent is not None:
-        harmony_agent.HDC_TARGET = target
+        if hasattr(harmony_agent, "set_hdc_target"):
+            harmony_agent.set_hdc_target(target)
+        else:
+            harmony_agent.HDC_TARGET = target
+
+def run_with_hdc_control(operation_name, operation):
+    if harmony_agent is not None and hasattr(harmony_agent, 'run_with_device_control'):
+        return harmony_agent.run_with_device_control(operation_name, operation)
+    with hdc_control_lock:
+        return operation()
 
 def get_active_hdc_target(force=False):
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
@@ -230,16 +249,16 @@ def get_active_hdc_target(force=False):
     if not targets:
         _hdc_health_checked_at = now
         _hdc_health_connected = False
-        _hdc_health_target = ""
+        set_harmony_agent_target("")
         if error:
             print(f">> [HDC] list targets failed: {error}")
         return ""
 
-    target = choose_hdc_target(targets)
+    target = choose_hdc_target(targets, _hdc_health_target)
     if not target:
         _hdc_health_checked_at = now
         _hdc_health_connected = False
-        _hdc_health_target = ""
+        set_harmony_agent_target("")
         return ""
     set_harmony_agent_target(target)
     _hdc_health_checked_at = now
@@ -263,26 +282,12 @@ def hdc_port_error_is_existing_mapping(message):
     return "exist" in lower or "already" in lower or "duplicate" in lower or "存在" in message
 
 def ensure_hdc_tunnels(force=False, reset_reverse=False):
-    global _hdc_tunnel_checked_at, _hdc_tunnel_status
-    now = time.monotonic()
-    if (not force and _hdc_tunnel_checked_at > 0 and
-            now - _hdc_tunnel_checked_at < HDC_HEALTH_CACHE_TTL):
-        return dict(_hdc_tunnel_status)
+    return run_with_hdc_control(
+        "ensure_hdc_tunnels",
+        lambda: _ensure_hdc_tunnels_impl(force=force, reset_reverse=reset_reverse)
+    )
 
-    target = get_active_hdc_target(force=force)
-    if not target:
-        _hdc_tunnel_checked_at = now
-        _hdc_tunnel_status = {
-            "status": "error",
-            "message": "HDC target is not connected",
-            "target": "",
-            "tunnel_ready": False,
-            "fport_ready": False,
-            "rport_ready": False,
-        }
-        return dict(_hdc_tunnel_status)
-
-    errors = []
+def run_hdc_tunnel_commands(target, reset_reverse=False):
     fport_errors = []
     rport_errors = []
     commands = [
@@ -303,12 +308,11 @@ def ensure_hdc_tunnels(force=False, reset_reverse=False):
             else:
                 fport_errors.append(message)
 
-    _hdc_tunnel_checked_at = now
     errors = fport_errors + rport_errors
     fport_ready = len(fport_errors) == 0
     rport_ready = len(rport_errors) == 0
     if errors:
-        _hdc_tunnel_status = {
+        return {
             "status": "error",
             "message": "; ".join(errors),
             "target": target,
@@ -316,31 +320,79 @@ def ensure_hdc_tunnels(force=False, reset_reverse=False):
             "fport_ready": fport_ready,
             "rport_ready": rport_ready,
         }
-    else:
-        _hdc_tunnel_status = {
-            "status": "ok",
-            "message": (
-                f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
-                f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
-            ),
-            "target": target,
-            "tunnel_ready": True,
-            "fport_ready": True,
-            "rport_ready": True,
-        }
+    return {
+        "status": "ok",
+        "message": (
+            f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
+            f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
+        ),
+        "target": target,
+        "tunnel_ready": True,
+        "fport_ready": True,
+        "rport_ready": True,
+    }
+
+def choose_fallback_hdc_target(failed_target):
+    targets, _ = list_hdc_targets()
+    candidates = [target for target in targets if target != failed_target]
+    return choose_hdc_target(candidates)
+
+def store_hdc_tunnel_status(status):
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    _hdc_tunnel_checked_at = time.monotonic()
+    _hdc_tunnel_status = status
     return dict(_hdc_tunnel_status)
 
-def hdc_health_payload(force=False):
+def refresh_hdc_tunnels_for_target(target, reset_reverse=False, allow_fallback=True):
+    return run_with_hdc_control(
+        "refresh_hdc_tunnels_for_target",
+        lambda: _refresh_hdc_tunnels_for_target_impl(target, reset_reverse, allow_fallback)
+    )
+
+def _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=False, allow_fallback=True):
+    if not target:
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
+
+    set_harmony_agent_target(target)
+    status = run_hdc_tunnel_commands(target, reset_reverse=reset_reverse)
+    if allow_fallback and not status.get("fport_ready"):
+        fallback = choose_fallback_hdc_target(target)
+        if fallback:
+            print(f">> [HDC] target {target} fport failed; retry with {fallback}")
+            set_harmony_agent_target(fallback)
+            status = run_hdc_tunnel_commands(fallback, reset_reverse=True)
+    return store_hdc_tunnel_status(status)
+
+def _ensure_hdc_tunnels_impl(force=False, reset_reverse=False):
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    now = time.monotonic()
+    if (not force and _hdc_tunnel_checked_at > 0 and
+            now - _hdc_tunnel_checked_at < HDC_HEALTH_CACHE_TTL):
+        return dict(_hdc_tunnel_status)
+
     target = get_active_hdc_target(force=force)
-    tunnel = ensure_hdc_tunnels(force=force) if target else {
-        "status": "error",
-        "message": "HDC target is not connected",
-        "target": "",
-        "tunnel_ready": False,
-        "fport_ready": False,
-        "rport_ready": False,
-    }
-    hdc_connected = bool(target)
+    if not target:
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
+
+    return _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=reset_reverse, allow_fallback=True)
+
+def build_hdc_health_payload(target, tunnel):
+    active_target = str(tunnel.get("target", "")) or target
+    hdc_connected = bool(active_target)
     tunnel_ready = bool(tunnel.get("tunnel_ready"))
     fport_ready = bool(tunnel.get("fport_ready"))
     rport_ready = bool(tunnel.get("rport_ready"))
@@ -348,7 +400,7 @@ def hdc_health_payload(force=False):
         "status": "ok" if hdc_connected and tunnel_ready else "error",
         "message": tunnel.get("message", ""),
         "hdc_connected": hdc_connected,
-        "target": target,
+        "target": active_target,
         "tunnel_ready": tunnel_ready,
         "fport_ready": fport_ready,
         "rport_ready": rport_ready,
@@ -360,7 +412,47 @@ def hdc_health_payload(force=False):
         "loop_alive": agent_thread is not None and agent_thread.is_alive(),
     }
 
-def connect_hdc_target(target, kill_others=True):
+def hdc_health_payload(force=False):
+    target = get_active_hdc_target(force=force)
+    tunnel = ensure_hdc_tunnels(force=force) if target else {
+        "status": "error",
+        "message": "HDC target is not connected",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
+    return build_hdc_health_payload(target, tunnel)
+
+def health_payload_after_target_selected(selected_target, message_prefix="", requested_target=""):
+    tunnel = refresh_hdc_tunnels_for_target(selected_target, reset_reverse=True, allow_fallback=True)
+    if LEGACY_LOOP_ENABLED and tunnel.get("fport_ready"):
+        start_harmony_agent()
+    payload = build_hdc_health_payload(str(tunnel.get("target", "")) or selected_target, tunnel)
+    if payload.get("hdc_connected") and payload.get("fport_ready"):
+        payload["status"] = "ok"
+        if not payload.get("tunnel_ready"):
+            payload["message"] = (
+                "HDC target connected and fport ready; reverse rport is unavailable, "
+                "so keep using the manual PC HDC Server URL."
+            )
+    if message_prefix:
+        payload["message"] = message_prefix + " " + str(payload.get("message", "")).strip()
+    if requested_target:
+        payload["requested_target"] = requested_target
+    return payload
+
+def first_wired_target(targets):
+    wired_targets = [target for target in targets if not is_wireless_hdc_target(target)]
+    return wired_targets[0] if wired_targets else ""
+
+def cleanup_other_wireless_targets(active_target):
+    targets, _ = list_hdc_targets()
+    for old_target in targets:
+        if old_target != active_target and is_wireless_hdc_target(old_target):
+            run_process(["hdc", "kill", old_target])
+
+def connect_hdc_target(target, kill_others=True, prefer_wired=True):
     if not target:
         return {
             "status": "error",
@@ -370,16 +462,33 @@ def connect_hdc_target(target, kill_others=True):
             "app_server_url": APP_REVERSE_HDC_URL,
         }
 
-    if kill_others:
-        targets, _ = list_hdc_targets()
-        for old_target in targets:
-            if old_target != target:
-                run_process(["hdc", "kill", old_target])
+    targets, _ = list_hdc_targets()
+    wired_target = first_wired_target(targets)
+    if prefer_wired and wired_target and not HDC_TARGET_OVERRIDE:
+        invalidate_hdc_health_cache()
+        set_harmony_agent_target(wired_target)
+        reset_hdc_tunnel_cache()
+        return health_payload_after_target_selected(
+            wired_target,
+            "Using wired HDC target; wireless tconn skipped.",
+            requested_target=target
+        )
 
-    result = run_process(["hdc", "tconn", target])
+    if target in targets:
+        result = subprocess.CompletedProcess(["hdc", "tconn", target], 0, "", "")
+    else:
+        result = run_process(["hdc", "tconn", target])
     invalidate_hdc_health_cache()
     reset_hdc_tunnel_cache()
     if result.returncode != 0:
+        fallback = choose_hdc_target(targets)
+        if fallback and fallback != target:
+            set_harmony_agent_target(fallback)
+            return health_payload_after_target_selected(
+                fallback,
+                "Wireless tconn failed; using existing HDC target.",
+                requested_target=target
+            )
         return {
             "status": "error",
             "message": result.stderr.strip() or result.stdout.strip() or f"hdc tconn failed: {target}",
@@ -390,18 +499,9 @@ def connect_hdc_target(target, kill_others=True):
         }
 
     set_harmony_agent_target(target)
-    tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
-    if LEGACY_LOOP_ENABLED and tunnel.get("fport_ready"):
-        start_harmony_agent()
-    payload = hdc_health_payload(force=True)
-    if payload.get("hdc_connected") and payload.get("fport_ready"):
-        payload["status"] = "ok"
-        if not payload.get("tunnel_ready"):
-            payload["message"] = (
-                "HDC target connected and fport ready; reverse rport is unavailable, "
-                "so keep using the manual PC HDC Server URL."
-            )
-    return payload
+    if kill_others:
+        cleanup_other_wireless_targets(target)
+    return health_payload_after_target_selected(target, requested_target=target)
 
 def ensure_workflow_agent_ready():
     if harmony_agent is None:
@@ -413,7 +513,6 @@ def run_remote_command(cmd):
     def execute():
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if harmony_agent is not None and 'hdc' in cmd.lower():
-            harmony_agent.HDC_TARGET = ''
             invalidate_hdc_health_cache()
         return result
 
@@ -610,7 +709,7 @@ def invalidate_hdc_health_cache():
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
     _hdc_health_checked_at = 0.0
     _hdc_health_connected = False
-    _hdc_health_target = ""
+    set_harmony_agent_target("")
     reset_hdc_tunnel_cache()
 
 def is_hdc_connected(force=False):

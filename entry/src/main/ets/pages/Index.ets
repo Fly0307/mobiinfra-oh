@@ -43,6 +43,7 @@ interface ServerFile {
 interface HdcConnectRequest {
   target: string;
   kill_others: boolean;
+  prefer_wired: boolean;
 }
 
 interface HdcHealthResponse {
@@ -1124,7 +1125,8 @@ struct Index {
     try {
       let connectPayload: HdcConnectRequest = {
         target: target,
-        kill_others: true
+        kill_others: true,
+        prefer_wired: true
       };
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,

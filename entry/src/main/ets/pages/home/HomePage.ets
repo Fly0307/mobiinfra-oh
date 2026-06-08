@@ -11,8 +11,11 @@ import { promptAction } from '@kit.ArkUI';
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
   @State recommendationBatchIndex: number = 0;
   @State selectedRecommendationId: string = '';
+  @State agentTaskDraft: string = '';
+  @State agentTaskSubmitting: boolean = false;
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -149,6 +152,7 @@ export struct HomePage {
     .shadow({ radius: 18, color: '#16000000', offsetX: 0, offsetY: 8 })
     .onClick(() => {
       this.selectedRecommendationId = item.id;
+      this.agentTaskDraft = item.agentTask;
     })
   }
 
@@ -187,6 +191,27 @@ export struct HomePage {
       return [];
     }
     return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.id === this.selectedRecommendationId).slice(0, 1);
+  }
+
+  private async executeAgentTask(): Promise<void> {
+    let task = this.agentTaskDraft.trim();
+    if (task.length === 0) {
+      promptAction.showToast({ message: '请输入要执行的任务', duration: 1200 });
+      return;
+    }
+    if (this.agentTaskSubmitting) {
+      return;
+    }
+    this.agentTaskSubmitting = true;
+    try {
+      await this.onExecuteAgentTask(task);
+      this.selectedRecommendationId = '';
+    } catch (e) {
+      let err = e as Error;
+      promptAction.showToast({ message: '任务下发失败：' + err.message, duration: 1800 });
+    } finally {
+      this.agentTaskSubmitting = false;
+    }
   }
 
   @Builder RecommendationDetailImage(item: HomeRecommendationViewModel) {
@@ -260,6 +285,43 @@ export struct HomePage {
           .fontColor('#4E5668')
           .width('100%')
           .margin({ top: 14 })
+        if (item.agentTask.length > 0) {
+          Column() {
+            Text('执行任务')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+              .width('100%')
+            TextArea({ placeholder: '调整要交给 GUI Agent 的任务', text: this.agentTaskDraft })
+              .width('100%')
+              .height(92)
+              .fontSize(14)
+              .fontColor('#222B3A')
+              .backgroundColor('#F5F7FB')
+              .borderRadius(12)
+              .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+              .margin({ top: 10 })
+              .onChange((value: string) => {
+                this.agentTaskDraft = value;
+              })
+            Button(this.agentTaskSubmitting ? '下发中' : '执行')
+              .width('100%')
+              .height(44)
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor(this.agentTaskSubmitting ? '#A9B7E9' : item.color)
+              .borderRadius(14)
+              .margin({ top: 12 })
+              .enabled(!this.agentTaskSubmitting)
+              .onClick(() => {
+                this.executeAgentTask();
+              })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .margin({ top: 18 })
+        }
       }
       .alignItems(HorizontalAlign.Start)
       .width('88%')

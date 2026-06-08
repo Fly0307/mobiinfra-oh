@@ -845,7 +845,8 @@ export class DataManagerFacade {
         color: colors[domain] || '#8066FF',
         thumbnailUri: this.recommendationThumbnail(item, eventMap),
         sourceEventIds: (item.source_event_ids || []).slice(),
-        detail: this.recommendationDetail(item, eventMap)
+        detail: this.recommendationDetail(item, eventMap),
+        agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap)
       };
       if (recommendation.id.length > 0 && recommendation.title.length > 0) {
         result.push(recommendation);
@@ -868,6 +869,17 @@ export class DataManagerFacade {
       let type = event ? normalizeFreeText(event.todo.type) : '';
       if (type.length > 0) {
         return type;
+      }
+    }
+    return '';
+  }
+
+  private firstAgentTask(eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
+    for (let id of eventIds) {
+      let event = eventMap[id];
+      let task = event ? normalizeFreeText(event.todo.agent_task) : '';
+      if (task.length > 0) {
+        return task;
       }
     }
     return '';

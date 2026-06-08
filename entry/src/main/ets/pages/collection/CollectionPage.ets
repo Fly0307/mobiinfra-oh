@@ -8,6 +8,8 @@ import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFa
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 
+const COLLECTION_GROUPS_PER_PAGE: number = 5;
+
 // 数据采集页：按 workflow 场景切换展示对应任务采集到的已整理数据。
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
@@ -15,6 +17,7 @@ export struct CollectionPage {
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
+  @State private groupPageIndex: number = 0;
   onRefresh: () => void = () => {};
 
   private currentView(): CollectionViewModel {
@@ -36,6 +39,40 @@ export struct CollectionPage {
     return this.currentView().lastUpdatedLabel;
   }
 
+  private groupCount(): number {
+    return this.currentView().groups.length;
+  }
+
+  private groupPageCount(): number {
+    return Math.max(1, Math.ceil(this.groupCount() / COLLECTION_GROUPS_PER_PAGE));
+  }
+
+  private currentGroupPageIndex(): number {
+    let maxPageIndex = this.groupPageCount() - 1;
+    if (this.groupPageIndex < 0) {
+      return 0;
+    }
+    if (this.groupPageIndex > maxPageIndex) {
+      return maxPageIndex;
+    }
+    return this.groupPageIndex;
+  }
+
+  private currentPageGroups(): CollectionGroupViewModel[] {
+    let start = this.currentGroupPageIndex() * COLLECTION_GROUPS_PER_PAGE;
+    return this.currentView().groups.slice(start, start + COLLECTION_GROUPS_PER_PAGE);
+  }
+
+  private setGroupPage(index: number): void {
+    let maxPageIndex = this.groupPageCount() - 1;
+    let nextIndex = Math.max(0, Math.min(index, maxPageIndex));
+    this.groupPageIndex = nextIndex;
+  }
+
+  private shouldShowGroupPagination(): boolean {
+    return this.groupCount() > COLLECTION_GROUPS_PER_PAGE;
+  }
+
   @Builder CollectTab(scene: WorkflowSceneConfig) {
     // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
     Text(scene.label)
@@ -50,6 +87,7 @@ export struct CollectionPage {
       .margin({ right: 10 })
       .onClick(() => {
         this.collectionModule = scene.sceneId;
+        this.groupPageIndex = 0;
       })
   }
 
@@ -100,17 +138,70 @@ export struct CollectionPage {
   }
 
   @Builder CollectionRows() {
-    if (this.currentView().groups.length === 0) {
+    if (this.groupCount() === 0) {
       Column() {
         Text('暂无已整理记录').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#151A28')
-        Text('生成日之后点击同步即可开始整理').fontSize(12).fontColor('#7C8494').margin({ top: 6 })
+        Text('生成日志后，点击同步即可开始整理').fontSize(12).fontColor('#7C8494').margin({ top: 6 })
       }.width('100%').height(92).justifyContent(FlexAlign.Center)
     } else {
-      ForEach(this.currentView().groups, (group: CollectionGroupViewModel) => {
-        this.GroupRow(group)
-        Divider().color('#EEF0F5')
-      }, (group: CollectionGroupViewModel) => group.id)
+      List({ space: 0 }) {
+        ForEach(this.currentPageGroups(), (group: CollectionGroupViewModel) => {
+          ListItem() {
+            Column() {
+              this.GroupRow(group)
+              Divider().color('#EEF0F5')
+            }
+            .width('100%')
+          }
+          .width('100%')
+        }, (group: CollectionGroupViewModel) => group.id)
+      }
+      .width('100%')
+      .alignListItem(ListItemAlign.Start)
+      .scrollBar(BarState.Off)
     }
+  }
+
+  @Builder GroupPagination() {
+    if (this.shouldShowGroupPagination()) {
+      Row() {
+        Button('上一页')
+          .fontSize(12)
+          .fontColor(this.currentGroupPageIndex() > 0 ? '#8066FF' : '#A7ADBA')
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .backgroundColor(this.currentGroupPageIndex() > 0 ? '#F0ECFF' : '#EEF0F5')
+          .enabled(this.currentGroupPageIndex() > 0)
+          .onClick(() => {
+            this.setGroupPage(this.currentGroupPageIndex() - 1);
+          })
+        Text(`${this.currentGroupPageIndex() + 1}/${this.groupPageCount()}`)
+          .fontSize(13)
+          .fontColor('#6D7481')
+          .textAlign(TextAlign.Center)
+          .layoutWeight(1)
+          .maxLines(1)
+        Button('下一页')
+          .fontSize(12)
+          .fontColor(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#8066FF' : '#A7ADBA')
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .backgroundColor(this.currentGroupPageIndex() < this.groupPageCount() - 1 ? '#F0ECFF' : '#EEF0F5')
+          .enabled(this.currentGroupPageIndex() < this.groupPageCount() - 1)
+          .onClick(() => {
+            this.setGroupPage(this.currentGroupPageIndex() + 1);
+          })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+    }
+  }
+
+  @Builder GroupRangeLabel() {
+    Text(`共${this.groupCount()}组`)
+      .fontSize(13)
+      .fontColor('#7F8592')
+      .maxLines(1)
   }
 
   @Builder PreferenceLine(color: string, name: string, value: string, widthValue: string) {
@@ -180,9 +271,10 @@ export struct CollectionPage {
         Column() {
           Row() {
             Text(this.getCollectionTitle()).fontSize(20).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(`${this.currentView().groups.length} 组`).fontSize(13).fontColor('#7F8592')
+            this.GroupRangeLabel()
           }.width('100%').margin({ bottom: 8 })
           this.CollectionRows()
+          this.GroupPagination()
         }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: 22 })
 
         Column() {

@@ -201,6 +201,7 @@ export interface IndexedEventTodo {
   type: string;
   deadline: string;
   text: string;
+  agent_task: string;
 }
 
 export interface IndexedEvent {
@@ -323,6 +324,7 @@ export interface HomeRecommendationViewModel {
   thumbnailUri: string;
   sourceEventIds: string[];
   detail: string;
+  agentTask: string;
 }
 
 export interface HomeRecommendationState {
@@ -333,6 +335,7 @@ export interface HomeRecommendationState {
   meta: string;
   domain: string;
   source_event_ids: string[];
+  source_input_hash: string;
 }
 
 export interface HomeRecommendationsDocument {

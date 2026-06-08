@@ -202,6 +202,10 @@ interface HomeRecommendationPromptPayload {
   events: HomeRecommendationEventPromptPayload[];
 }
 
+export function shouldKeepTodoAgentTask(type: string, workflowSceneLabels: string[]): boolean {
+  return normalizeFreeText(type) === 'buy' && workflowSceneLabels.length === 1 && workflowSceneLabels[0] === '聊天';
+}
+
 const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。' +
   '输入包含 entries，每条都有 source_ref/source_date/file_name/entry_index/workflow_metadata/entry_text。返回严格 JSON：' +
@@ -215,15 +219,15 @@ const DEDUP_SYSTEM_PROMPT: string =
 
 const ENRICH_SYSTEM_PROMPT: string =
   '你是本地个人数据索引助手。请为事件提取关键词、领域、实体和可能的待办信号。输入包含 event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。返回严格 JSON：' +
-  '{"keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串"}}。' +
-  'todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的三个字段都写空。' +
-  '有明确相对日期时，必须以 event_date 为基准把“今天/明天/后天/周末/下周”等换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '{"keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}。' +
+  'todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
+  '有明确相对日期时，必须以 event_date 为基准把“今天/明天/后天/周末/下周”等换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
 
 const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '你是本地个人数据索引助手。请批量为事件提取关键词、领域、实体和可能的待办信号。输入包含 events，每条都有 event_id/event_date/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。' +
-  '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串"}}]}。' +
-  '必须为每个输入 event_id 返回一个结果。todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的三个字段都写空。' +
-  '有明确相对日期时，必须以该事件 event_date 为基准换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}]}。' +
+  '必须为每个输入 event_id 返回一个结果。todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
+  '有明确相对日期时，必须以该事件 event_date 为基准换算为绝对 deadline；没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
 
 const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。' +
@@ -263,27 +267,26 @@ const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
 
 const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
-  '你是 App 采集页的 Planner。请把检索回来的事件组织成适合手机列表展示的少量分组。分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或主题，而不是来自固定模板。' +
+  '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或主题，而不是来自固定模板。' +
   '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。' +
   '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。' +
   '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。' +
   '避免低信息标题：平台名、纯数字、日期时间、单个技术词、单个截图/图片/贴图/表情包等界面元素、或“微信聊天记录”“工作相关聊天记录”“聊天记录”“通知记录”“视频记录”“订单记录”这类泛称。不要输出 markdown。';
 
 const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
-  '你是 App 采集页的 Planner。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。' +
+  '你是一个事件语义分组合并助手。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。' +
   '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。' +
   '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；分组数量最多 12 个。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
-  '你是首页待办推荐 Planner。输入中的事件已经过索引过滤：每条都有待办信号；todo_text 是上游提取出的具体待办行动内容；todo_deadline 为空表示没有明确截止日期，非空时一定晚于 current_date。聊天计划可能只有 todo_deadline，todo_type 为空。' +
-  'todo_type 是上游按 workflow 场景提取的行动信号，含义包括：buy购买、compare比价、pay付款、refund退款、pickup取货/收货、after_sale售后、order下单、reorder复购、complain反馈投诉、watch观看/追更、renew续费/权益恢复、book预订、join参与、repair维修、appointment预约、prepare准备、contact联系、gift送礼、plan安排计划、attend参加、depart出发、check_in入住/值机、reimburse报销、follow_up跟进。' +
-  '不要重新判断输入事件是不是 todo，也不要根据重要性、价值、来源、是否有 deadline 来丢弃任何输入事件；上游已经完成候选筛选。你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并成卡片，并生成适合首页展示的文案。' +
-  '每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中。聊天候选的 todo_type 可能为空；同一事件里的文件分享、技术讨论、页面状态等背景信息不要盖过 todo_text 指向的未来行动。' +
+  '你是用户待办事项推荐助手。输入中的事件每条都有上游提取出的待办事项信号；todo_text 是具体待办行动内容；todo_deadline 为截止日期（可能为空）；' +
+  'todo_type 是待办类型（可能为空），含义包括：buy购买、compare比价、pay付款、refund退款、pickup取货/收货、after_sale售后、order下单、reorder复购、complain反馈投诉、watch观看/追更、renew续费/权益恢复、book预订、join参与、repair维修、appointment预约、prepare准备、contact联系、gift送礼、plan安排计划、attend参加、depart出发、check_in入住/值机、reimburse报销、follow_up跟进。' +
+  '不要重新判断输入事件是不是 todo，也不要丢弃任何输入事件，你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并，并生成适合在应用首页展示给用户的推荐卡片文案。' +
   '返回严格 JSON：' +
   '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。' +
-  'source_event_ids 必须来自输入事件，至少 1 个；每个推荐要能让用户知道接下来具体要做什么。不要编造输入里没有的人名、地点、商品、金额或行动。' +
+  'source_event_ids 必须来自输入事件，至少 1 个，每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中；每个推荐要能让用户知道接下来具体要做什么。不要编造输入里没有的人名、地点、商品、金额或行动。' +
   'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待准备”“待出发”“待购买”“待跟进”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。' +
-  '不要输出日期状态、meta、today/tomorrow 等相对时间文案，截止日期由应用根据 todo_deadline 生成；title 和 desc 不要使用省略号或“...”截断内容。' +
+  'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。' +
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
 export class DataPipelineModelClient {
@@ -727,7 +730,8 @@ export class DataPipelineModelClient {
         desc: normalizeFreeText(raw['desc']),
         meta: '',
         domain: domains.length > 0 ? domains[0] : 'other',
-        source_event_ids: sourceEventIds
+        source_event_ids: sourceEventIds,
+        source_input_hash: ''
       };
       result.push(item);
     });
@@ -828,7 +832,7 @@ export class DataPipelineModelClient {
     enriched.entity_mentions = entityMentions;
     enriched.entities = entityMentions.map((entity: EntityMention) => `${entity.type}:${entity.name}`);
     enriched.profile_domains = normalizeDomains(enriched.domains);
-    enriched.todo = this.normalizeTodo(payload['todo']);
+    enriched.todo = this.normalizeTodo(payload['todo'], event);
     enriched.enrichment_method = method;
     return enriched;
   }
@@ -837,11 +841,12 @@ export class DataPipelineModelClient {
     return {
       type: '',
       deadline: '',
-      text: ''
+      text: '',
+      agent_task: ''
     };
   }
 
-  private normalizeTodo(value: Object | string | number | boolean | null | undefined): IndexedEventTodo {
+  private normalizeTodo(value: Object | string | number | boolean | null | undefined, event: IndexedEvent): IndexedEventTodo {
     if (!value || typeof value !== 'object') {
       return this.emptyTodo();
     }
@@ -850,15 +855,24 @@ export class DataPipelineModelClient {
     let deadline = normalizeFreeText(raw['deadline']);
     deadline = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? deadline : '';
     let text = normalizeFreeText(raw['text']);
+    let agentTask = this.normalizeAgentTask(raw['agent_task'], type, event);
     if (type.length === 0 && deadline.length === 0) {
       return this.emptyTodo();
     }
     let todo: IndexedEventTodo = {
       type: type,
       deadline: deadline,
-      text: text
+      text: text,
+      agent_task: agentTask
     };
     return todo;
+  }
+
+  private normalizeAgentTask(value: Object | string | number | boolean | null | undefined, type: string, event: IndexedEvent): string {
+    if (!shouldKeepTodoAgentTask(type, this.workflowSceneLabels(event.workflow_scene_ids || []))) {
+      return '';
+    }
+    return normalizeFreeText(value);
   }
 
   private normalizeTodoType(value: Object | string | number | boolean | null | undefined): string {
@@ -901,7 +915,7 @@ export class DataPipelineModelClient {
       return guides.join('');
     }
     if (labels.indexOf('聊天') >= 0) {
-      guides.push('聊天：只提取有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间；todo.type 必须写空字符串，只填写 deadline 和 text。没有可换算日期时写空 todo。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 只描述该计划本身，例如“周末去江川路佬肥猫聚餐”，不要写同条事件里的文件或技术讨论。');
+      guides.push('聊天：提取两类待办。第一类是有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间，此时 todo.type 写空字符串，只填写 deadline 和 text，没有可换算日期时写空 todo。第二类是用户明确表达要购买某商品或让对方帮忙购买某商品，此时允许 type=buy，deadline 可以为空，text 写购买行动，agent_task 写可直接执行的 GUI Agent 任务，例如“在淘宝中购买xxx商品”；如果聊天明确指定京东、淘宝、美团等平台则使用该平台，否则默认淘宝。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 和 agent_task 只描述该待办本身，不要写同条事件里的文件或技术讨论。');
     }
     if (labels.indexOf('购物') >= 0) {
       guides.push('购物：允许 type=buy|compare|pay|refund|pickup|after_sale|other，分别表示购买、比价决策、付款、退款、取货/收货、售后、其他购物后续。');
@@ -1383,7 +1397,8 @@ export class DataPipelineModelClient {
       todo: {
         type: event.todo.type,
         deadline: event.todo.deadline,
-        text: event.todo.text
+        text: event.todo.text,
+        agent_task: event.todo.agent_task
       },
       keywords: event.keywords.slice(),
       domains: event.domains.slice(),
@@ -1518,4 +1533,3 @@ export class DataPipelineModelClient {
     return normalizeEntityMentions(result);
   }
 }
-

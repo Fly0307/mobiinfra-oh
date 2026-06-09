@@ -31,9 +31,9 @@ import {
 } from '../../utils/gallery/GalleryTypes';
 import { GallerySearchHit, GallerySearchService } from '../../utils/gallery/GallerySearchService';
 
-const DEFAULT_GALLERY_API_BASE_URL = 'https://api.modelbest.cn/v1';
-const DEFAULT_GALLERY_API_KEY = 'sk-pQ8L2zF3XmR5kY9wV4jB7hN1tC6vM0xG3aD5sH2bJ9lK4cZ8';
-const DEFAULT_GALLERY_MODEL = 'MiniCPM-V-4.6-Instruct';
+const DEFAULT_GALLERY_API_BASE_URL = 'http://123.60.91.241:9003/';
+const DEFAULT_GALLERY_API_KEY = '';
+const DEFAULT_GALLERY_MODEL = 'Qwen3.5-35B-A3B';
 const DEFAULT_GALLERY_SKIP_OCR = 'false';
 const DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER = 'true';
 const DEFAULT_GALLERY_OCR_CONCURRENCY = '3';
@@ -41,7 +41,7 @@ const DEFAULT_GALLERY_MODEL_CONCURRENCY = '2';
 const DEFAULT_GALLERY_EMBEDDING_CONCURRENCY = '2';
 const DEFAULT_GALLERY_EMBEDDING_MODE = 'huawei_local';
 const DEFAULT_GALLERY_EMBEDDING_BASE_URL = 'https://api.siliconflow.cn/v1';
-const DEFAULT_GALLERY_EMBEDDING_API_KEY = 'sk-ftatcmqivwegrrazieeiiwswmotmryswxwhjuakxwsmsudrs';
+const DEFAULT_GALLERY_EMBEDDING_API_KEY = '';
 const DEFAULT_GALLERY_EMBEDDING_MODEL = 'BAAI/bge-m3';
 const DEFAULT_GALLERY_IMAGE_SCALE = '0.9';
 const DEFAULT_GALLERY_AMAP_WEB_KEY = '';
@@ -1496,7 +1496,7 @@ struct GalleryPage {
                   this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, 'https://api.example.com/v1', 0)
                   this.SettingInput('API Key', this.galleryApiKey, 'Bearer token 或服务密钥', 1)
                   this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
-                  this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
+                  this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
                   this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码', 10)
                   this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)

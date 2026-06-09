@@ -391,7 +391,7 @@ export class GalleryAnalyzer {
       let embeddingStatus = 'skipped';
       let embeddingDimension = 0;
       let embeddingRef = '';
-      if (resultText.length > 0) {
+      if (resultText.length > 0 && config.embeddingApiKey.trim().length > 0) {
         await gates.embedding.acquire();
         try {
           let embeddingStartedAt = new Date().getTime();
@@ -428,7 +428,8 @@ export class GalleryAnalyzer {
           gates.embedding.release();
         }
       } else {
-        this.logInfo('embedding skipped id=' + id + ' emptyText=true');
+        this.logInfo('embedding skipped id=' + id + ' emptyText=' + (resultText.length === 0).toString() +
+          ' emptyApiKey=' + (config.embeddingApiKey.trim().length === 0).toString());
         progress.current = '跳过 Embedding ' + id;
         onProgress(progress);
       }

@@ -119,7 +119,6 @@ export class GalleryAnalyzer {
     };
     onProgress(progress);
     let results: GalleryAnalysisResult[] = [];
-    let dirtyDates: string[] = [];
     let gates: GalleryStageGates = {
       ocr: new GallerySemaphore(config.ocrConcurrency),
       model: new GallerySemaphore(config.modelConcurrency),
@@ -155,7 +154,6 @@ export class GalleryAnalyzer {
       this.logInfo('cache result start id=' + result.id);
       let cacheStartedAt = new Date().getTime();
       let normalized = GalleryStorage.writeResult(this.filesDir, result);
-      this.pushUnique(dirtyDates, normalized.date);
       this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
       progress.processed += 1;
       progress.pending = Math.max(0, progress.selected - progress.processed);
@@ -171,9 +169,6 @@ export class GalleryAnalyzer {
       }
       return true;
     });
-    let dailyStartedAt = new Date().getTime();
-    GalleryStorage.rebuildDailyForDates(this.filesDir, dirtyDates);
-    this.logInfo('daily rebuild done dates=' + dirtyDates.length + ' elapsedMs=' + this.elapsed(dailyStartedAt));
     await this.ocrService.release();
     this.logInfo('batch done selected=' + inputs.length +
       ' results=' + results.length +

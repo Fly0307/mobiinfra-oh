@@ -116,7 +116,6 @@ export class GalleryStorage {
 
   static ensureWorkspace(filesDir: string): void {
     GalleryStorage.ensureDirectory(GalleryStorage.rootDir(filesDir));
-    GalleryStorage.ensureDirectory(GalleryStorage.dailyRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.itemRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.embeddingRoot(filesDir));
   }

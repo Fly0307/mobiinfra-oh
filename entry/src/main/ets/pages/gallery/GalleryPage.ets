@@ -2705,7 +2705,6 @@ struct GalleryPage {
   private persistLocationToResult(item: GalleryAnalysisResult, record: GalleryLocationCacheRecord): void {
     item.location = record;
     let normalized = GalleryStorage.writeResult(this.filesDir, item);
-    GalleryStorage.rebuildDaily(this.filesDir, normalized.date);
     this.mergeResult(normalized);
     this.locationResolveRevision += 1;
   }

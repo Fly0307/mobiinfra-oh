@@ -134,12 +134,12 @@ interface CloudEmbeddingResponse {
 export class CloudModelClient {
   private activeRequests: http.HttpRequest[] = [];
   private readonly galleryChatOptions: CloudChatOptions = {
-    temperature: 0.7,
-    top_p: 0.8,
-    top_k: 20,
+    temperature: 0,
+    top_p: 1,
+    top_k: 1,
     min_p: 0.0,
-    presence_penalty: 1.5,
-    repetition_penalty: 1.0,
+    presence_penalty: 0,
+    repetition_penalty: 1.05,
     chat_template_kwargs: {
       enable_thinking: false
     }

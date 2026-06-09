@@ -8,6 +8,7 @@ import mnnllm from 'libentry.so';
 import { AppHeader } from '../components/AppHeader';
 import { CollectionPage } from './collection/CollectionPage';
 import { HomePage } from './home/HomePage';
+import { LocalAssistantPage } from './assistant/LocalAssistantPage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -29,6 +30,7 @@ import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
@@ -37,6 +39,11 @@ const AUTO_HDC_SERVER_URL: string = 'http://127.0.0.1:19124';
 
 interface ServerFile {
   name: string;
+  size: number;
+}
+
+interface ModelScopeFileTask {
+  path: string;
   size: number;
 }
 
@@ -75,6 +82,7 @@ type JsonMap = Record<string, JsonValue>;
 
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
+PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -110,6 +118,7 @@ struct Index {
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
+  @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
@@ -407,6 +416,13 @@ struct Index {
     if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}KB`;
     if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)}MB`;
     return `${(bytes / 1073741824).toFixed(2)}GB`;
+  }
+
+  private errorMessage(err: Object): string {
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return String(err);
   }
 
   clearScreenshots() {
@@ -954,6 +970,274 @@ struct Index {
     this.downloading = false;
   }
 
+  private modelScopeRepoParts(): string[] {
+    let repo = this.modelScopeMnnRepo.trim().replace(/^ModelScope\//, '');
+    let parts = repo.split('/');
+    if (parts.length !== 2 || parts[0].trim().length === 0 || parts[1].trim().length === 0) {
+      return [];
+    }
+    return [parts[0].trim(), parts[1].trim()];
+  }
+
+  private async fetchModelScopeFileList(owner: string, repo: string): Promise<ModelScopeFileTask[]> {
+    let url = 'https://modelscope.cn/api/v1/models/' + owner + '/' + repo + '/repo/files?Recursive=1';
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        connectTimeout: 30000,
+        readTimeout: 60000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(url, options);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new Error('ModelScope 文件清单请求失败 HTTP ' + resp.responseCode);
+      }
+      let root = ArkJSON.parse(resp.result as string) as JsonMap;
+      let data = root['Data'] as JsonMap;
+      if (!data) {
+        throw new Error('ModelScope 文件清单格式异常');
+      }
+      let files = data['Files'] as Object[];
+      if (!files) {
+        throw new Error('ModelScope 文件清单格式异常');
+      }
+      let tasks: ModelScopeFileTask[] = [];
+      for (let i = 0; i < files.length; i++) {
+        let item = files[i] as JsonMap;
+        let type = String(item['Type']);
+        if (type === 'tree') {
+          continue;
+        }
+        let path = String(item['Path']);
+        let size = Number(item['Size']);
+        if (path.length === 0 || isNaN(size) || size < 0) {
+          continue;
+        }
+        tasks.push({ path: path, size: size });
+      }
+      return tasks;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  private ensureDirectoryRecursive(path: string): void {
+    let parts = path.split('/');
+    let current = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) {
+        current = '/';
+        continue;
+      }
+      current = current === '/' ? '/' + parts[i] : current + '/' + parts[i];
+      try {
+        if (!fs.accessSync(current)) {
+          fs.mkdirSync(current);
+        }
+      } catch (e) {
+        try {
+          fs.mkdirSync(current);
+        } catch (err) {
+        }
+      }
+    }
+  }
+
+  private safeModelScopeTargetPath(relativePath: string): string {
+    let normalized = relativePath.replace(/\\/g, '/');
+    if (normalized.indexOf('..') >= 0 || normalized.startsWith('/')) {
+      throw new Error('非法 ModelScope 文件路径: ' + relativePath);
+    }
+    return this.modelDir + '/' + normalized;
+  }
+
+  private parentDir(path: string): string {
+    let index = path.lastIndexOf('/');
+    return index > 0 ? path.substring(0, index) : this.modelDir;
+  }
+
+  private downloadModelScopeFile(owner: string, repo: string, task: ModelScopeFileTask, index: number,
+    fileCount: number, completedBytes: number, totalBytes: number): Promise<number> {
+    let target = this.safeModelScopeTargetPath(task.path);
+    try {
+      let st = fs.statSync(target);
+      if (st.size === task.size) {
+        this.output = '[ModelScope ' + (index + 1).toString() + '/' + fileCount.toString() + '] ' + task.path + '\n' +
+          '已存在，跳过\n总进度: ' + this.formatSize(completedBytes + task.size) + ' / ' + this.formatSize(totalBytes);
+        return Promise.resolve(task.size);
+      }
+    } catch (e) {
+    }
+
+    this.ensureDirectoryRecursive(this.parentDir(target));
+    let url = 'https://modelscope.cn/api/v1/models/' + owner + '/' + repo + '/repo?FilePath=' + encodeURIComponent(task.path);
+    let self = this;
+    let idx = index;
+    let completed = completedBytes;
+    return new Promise<number>((resolve) => {
+      let httpReq = http.createHttp();
+      let fileHandle: fs.File;
+      let failed = false;
+      let resolved = false;
+      try {
+        fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      } catch (e) {
+        self.output = '创建文件失败: ' + target;
+        httpReq.destroy();
+        resolve(-1);
+        return;
+      }
+      let finish = (size: number): void => {
+        if (resolved) return;
+        resolved = true;
+        httpReq.off('dataReceive');
+        httpReq.off('dataReceiveProgress');
+        httpReq.off('dataEnd');
+        try { fs.closeSync(fileHandle); } catch (e) {}
+        httpReq.destroy();
+        resolve(size);
+      };
+      httpReq.on('dataReceive', (data: ArrayBuffer) => {
+        if (!failed) {
+          try {
+            fs.writeSync(fileHandle.fd, data);
+          } catch (e) {
+            failed = true;
+          }
+        }
+      });
+      httpReq.on('dataReceiveProgress', (data: http.DataReceiveProgressInfo) => {
+        if (failed) return;
+        let currentBytes = completed + data.receiveSize;
+        let overallPct = totalBytes > 0 ? Math.floor(currentBytes * 100 / totalBytes) : 0;
+        self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] ' + task.path + '\n' +
+          '文件: ' + self.formatSize(data.receiveSize) + ' / ' + self.formatSize(data.totalSize) + '\n' +
+          '总量: ' + self.formatSize(currentBytes) + ' / ' + self.formatSize(totalBytes) + ' ' + overallPct.toString() + '%';
+      });
+      httpReq.on('dataEnd', () => {
+        if (failed) {
+          self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 写入失败: ' + task.path;
+          finish(-1);
+          return;
+        }
+        let fileSize = 0;
+        try {
+          fs.closeSync(fileHandle);
+          fileSize = fs.statSync(target).size;
+        } catch (e) {
+        }
+        if (task.size > 0 && fileSize !== task.size) {
+          self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 文件大小不匹配: ' + task.path;
+          finish(-1);
+          return;
+        }
+        if (resolved) return;
+        resolved = true;
+        httpReq.off('dataReceive');
+        httpReq.off('dataReceiveProgress');
+        httpReq.off('dataEnd');
+        httpReq.destroy();
+        resolve(fileSize);
+      });
+      let streamOptions: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        connectTimeout: 30000,
+        readTimeout: 7200000
+      };
+      httpReq.requestInStream(url, streamOptions).then((code: number) => {
+        if (code < 200 || code >= 300) {
+          failed = true;
+          self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] HTTP ' + code.toString() + ': ' + task.path;
+          finish(-1);
+        }
+      }).catch((err: BusinessError) => {
+        failed = true;
+        self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 错误: code=' + err.code + ' ' + err.message;
+        finish(-1);
+      });
+    });
+  }
+
+  private disableModelThinkingByDefault(): void {
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(cfgPath)) {
+        return;
+      }
+      let file = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(cfgPath);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      fs.closeSync(file);
+      let content = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      let root = ArkJSON.parse(content) as JsonMap;
+      let jinja = root['jinja'] as JsonMap;
+      if (!jinja) {
+        jinja = {};
+        root['jinja'] = jinja;
+      }
+      let context = jinja['context'] as JsonMap;
+      if (!context) {
+        context = {};
+        jinja['context'] = context;
+      }
+      context['enable_thinking'] = false;
+      let newStr = ArkJSON.stringify(root, null, 4);
+      let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
+      let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      fs.writeSync(fileWrite.fd, byteStr.buffer);
+      fs.closeSync(fileWrite);
+    } catch (e) {
+    }
+  }
+
+  async downloadModelScopeModel() {
+    let parts = this.modelScopeRepoParts();
+    if (parts.length !== 2) {
+      this.output = 'ModelScope 仓库格式不正确，应为 owner/repo，例如 YYDH21/xxx-MNN';
+      return;
+    }
+    this.downloading = true;
+    this.connected = false;
+    this.modelLoaded = false;
+    try {
+      this.ensureDirectoryRecursive(this.modelDir);
+      this.output = '正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1];
+      let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
+      if (files.length === 0) {
+        this.output = 'ModelScope 文件清单为空: ' + this.modelScopeMnnRepo;
+        return;
+      }
+      let totalBytes = 0;
+      for (let i = 0; i < files.length; i++) {
+        totalBytes += files[i].size;
+      }
+      let completedBytes = 0;
+      let failed: string[] = [];
+      for (let j = 0; j < files.length; j++) {
+        let size = await this.downloadModelScopeFile(parts[0], parts[1], files[j], j, files.length, completedBytes, totalBytes);
+        if (size < 0) {
+          failed.push(files[j].path);
+        } else {
+          completedBytes += files[j].size;
+        }
+      }
+      this.disableModelThinkingByDefault();
+      if (failed.length === 0) {
+        this.output = 'ModelScope 下载完成\n仓库: ' + this.modelScopeMnnRepo + '\n保存目录: ' + this.modelDir +
+          '\n模型总大小: ' + this.formatSize(completedBytes) + '\n\n点击“加载大模型”开始使用';
+      } else {
+        this.output = 'ModelScope 下载有 ' + failed.length.toString() + ' 个失败: ' + failed.join(', ') +
+          '\n已下载: ' + this.formatSize(completedBytes);
+      }
+    } catch (e) {
+      this.output = 'ModelScope 下载失败: ' + this.errorMessage(e);
+    } finally {
+      this.downloading = false;
+    }
+  }
+
   private getCloudConfig(): CloudModelConfig {
     let config: CloudModelConfig = {
       plannerBaseUrl: this.cloudPlannerBaseUrl,
@@ -1416,6 +1700,19 @@ struct Index {
     return await this.ensurePcAgentLoopReady(false);
   }
 
+  private async startLocalAgentTask(task: string): Promise<void> {
+    if (task.length === 0) {
+      this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (!await this.ensureLocalAgentReady()) {
+      return;
+    }
+    this.agentRouter.submitLocalTask(task);
+    AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
+    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${task}\nPC 脚本检测到任务后将自动开始。`;
+  }
+
   private async ensureCloudAgentBackend(): Promise<boolean> {
     // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
@@ -1490,410 +1787,6 @@ struct Index {
       this.appendCloudLog('Workflow 执行异常：' + e.message);
       AgentExecutionController.finishExecution('Workflow failed');
     }
-  }
-
-  @Builder AssistantPage() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '本地推理', subtitle: this.assistantSettingsOpen ? '模型与网络设置' : '端侧模型控制台' })
-        if (this.assistantSettingsOpen) {
-          this.NetworkSettingsPage()
-        } else {
-        Scroll() {
-          Text(this.output).fontSize(13).fontFamily('monospace').fontColor('#333333').width('100%').padding(16)
-        }.constraintSize({ minHeight: 110, maxHeight: 190 }).width('92%').backgroundColor('#EEF4FF').borderRadius(18).margin({ top: 16 }).border({ width: 1, color: '#D9E5FF' })
-
-        if (this.debugImagePath !== '') {
-          Row() {
-            Text('Debug 截图预览').fontSize(14).fontColor('#555555').layoutWeight(1)
-            Image(this.debugImagePath).width(100).height(150).objectFit(ImageFit.Contain).backgroundColor(Color.Black).borderRadius(12).onClick(() => { this.debugImagePath = ''; })
-          }.width('92%').padding(14).backgroundColor(Color.White).borderRadius(18).margin({ top: 14 })
-        }
-
-        Scroll() {
-          Text(this.chatHistory.length > 0 ? this.chatHistory : '模型对话内容会显示在这里。')
-            .fontSize(15)
-            .fontColor(this.chatHistory.length > 0 ? '#232936' : '#9AA0AA')
-            .width('100%')
-            .padding(18)
-            .lineHeight(22)
-        }.constraintSize({ minHeight: 190, maxHeight: 320 }).width('92%').backgroundColor(Color.White).borderRadius(20).margin({ top: 16 }).shadow({ radius: 16, color: '#12000000', offsetX: 0, offsetY: 8 })
-
-        Row() {
-          TextInput({ placeholder: '输入消息或 Agent 任务...', text: this.userInput })
-            .onChange((val: string) => { this.userInput = val; })
-            .layoutWeight(1)
-            .height(48)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(24)
-            .padding({ left: 18, right: 18 })
-          Button('发送')
-            .height(48)
-            .width(86)
-            .backgroundColor(this.isThinking ? '#A9B7E9' : '#5B68FF')
-            .borderRadius(24)
-            .margin({ left: 10 })
-            .onClick(async () => {
-              if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) return;
-              let msg = this.userInput;
-              this.userInput = '';
-              this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
-              this.isThinking = true;
-              try {
-                let reply = await mnnllm.chat(msg);
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
-              } catch(err) {
-                let e = err as Error;
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${e.message}\n`);
-              } finally {
-                this.isThinking = false;
-              }
-            })
-        }.width('92%').margin({ top: 16 })
-
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          Button('加载大模型')
-            .onClick(async () => {
-              this.output = '加载中，请稍候...';
-              await this.ensureLocalModelLoaded();
-            })
-            .enabled(!this.downloading)
-            .height(42)
-            .width('30%')
-            .backgroundColor(this.modelLoaded ? '#E2E6EF' : '#38BE8B')
-            .fontColor(this.modelLoaded ? '#8B93A2' : '#FFFFFF')
-            .borderRadius(12)
-          Button('单轮推理')
-            .onClick(async () => {
-              if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
-              this.output = '推理中...';
-              try { this.output = await mnnllm.generate('你好'); } catch(err) { let e = err as Error; this.output = '推理错误: ' + e.message; }
-            })
-            .height(42)
-            .width('30%')
-            .backgroundColor('#4B8BFF')
-            .borderRadius(12)
-          Button('重置会话')
-            .onClick(() => { this.output = mnnllm.reset(); this.chatHistory = ''; })
-            .height(42)
-            .width('30%')
-            .backgroundColor('#FF7043')
-            .borderRadius(12)
-        }.width('92%').margin({ top: 16 })
-
-        Button('开始智能体执行（输入框为任务）')
-          .width('92%')
-          .height(52)
-          .backgroundColor('#765BFF')
-          .borderRadius(16)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .margin({ top: 16 })
-          .onClick(async () => {
-            if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
-            if (!await this.ensureLocalAgentReady()) { return; }
-            this.agentRouter.submitLocalTask(this.userInput);
-            AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
-            this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
-          })
-
-        Row() {
-          Button('启动 PC 控制后端 (HDC)')
-            .height(48)
-            .backgroundColor('#607D8B')
-            .borderRadius(14)
-            .layoutWeight(1)
-            .onClick(async () => {
-              if (!await this.ensureLocalModelLoaded()) { return; }
-              await this.startLocalBackend();
-            })
-          Row() {
-            Checkbox({ name: 'autoConfirm', group: 'settings' })
-              .select(this.autoConfirm)
-              .selectedColor('#5B68FF')
-              .onChange((value: boolean) => { this.autoConfirm = value; })
-            Text('自动同意').fontSize(14).fontColor('#333333')
-          }.height(48).padding({ left: 12, right: 12 }).backgroundColor(Color.White).borderRadius(14).margin({ left: 10 })
-        }.width('92%').margin({ top: 14 })
-
-        Button('网络设置')
-          .width('92%')
-          .height(46)
-          .backgroundColor(Color.White)
-          .fontColor('#4F68FF')
-          .borderRadius(14)
-          .margin({ top: 14 })
-          .border({ width: 1, color: '#DDE5FF' })
-          .onClick(() => { this.assistantSettingsOpen = true; })
-        Blank().height(110)
-        }
-      }.width('100%')
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
-  }
-
-  @Builder NetworkSettingsPage() {
-    Column() {
-      Row() {
-        Text('<')
-          .fontSize(18)
-          .fontColor('#4F68FF')
-          .width(34)
-          .height(34)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#EEF3FF')
-          .borderRadius(17)
-        Column() {
-          Text('网络与设置')
-            .fontSize(22)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-          Text('配置模型下载、运行参数和调试入口')
-            .fontSize(13)
-            .fontColor('#7B8290')
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .margin({ left: 10 })
-        .layoutWeight(1)
-      }
-      .width('92%')
-      .margin({ top: 16 })
-      .onClick(() => { this.assistantSettingsOpen = false; })
-
-      Scroll() {
-        Text(this.output)
-          .fontSize(13)
-          .fontFamily('monospace')
-          .fontColor('#333333')
-          .width('100%')
-          .padding(16)
-      }
-      .constraintSize({ minHeight: 100, maxHeight: 170 })
-      .width('92%')
-      .backgroundColor('#EEF4FF')
-      .borderRadius(18)
-      .margin({ top: 14 })
-      .border({ width: 1, color: '#D9E5FF' })
-
-      Column() {
-        Text('服务地址')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Text('模型下载服务')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl, text: this.serverIp })
-          .height(42)
-          .width('100%')
-          .fontSize(13)
-          .backgroundColor('#F2F5FC')
-          .borderRadius(12)
-          .padding({ left: 12, right: 12 })
-          .margin({ top: 6, bottom: 12 })
-          .onChange((val: string) => {
-            this.serverIp = val;
-            this.connected = false;
-          })
-        Text('HDC Server')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
-          .height(42)
-          .width('100%')
-          .fontSize(13)
-          .fontColor(this.hdcInputTextColor())
-          .backgroundColor(this.hdcInputBackgroundColor())
-          .borderRadius(12)
-          .padding({ left: 12, right: 12 })
-          .margin({ top: 6, bottom: 8 })
-          .enabled(this.hdcInputEditable())
-          .onChange((val: string) => {
-            this.hdcServerIp = val;
-            this.manualHdcServerIp = val;
-            this.markHdcManualEditing();
-          })
-        Text(this.hdcAutoStatus)
-          .fontSize(12)
-          .fontColor(this.hdcStatusColor())
-          .width('100%')
-          .maxLines(2)
-          .margin({ bottom: 8 })
-        Row() {
-          Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
-            .height(38)
-            .layoutWeight(1)
-            .fontSize(12)
-            .backgroundColor('#4F68FF')
-            .borderRadius(12)
-            .enabled(!this.hdcAutoConnecting)
-            .onClick(async () => {
-              this.hdcManualPairing = false;
-              await this.discoverHdcServer(false, true);
-            })
-          Button('手动配对')
-            .height(38)
-            .layoutWeight(1)
-            .fontSize(12)
-            .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .onClick(() => { this.setHdcManualPairing(); })
-        }
-        .width('100%')
-        .margin({ bottom: 12 })
-        Text('无线 HDC 目标')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        Row() {
-          TextInput({ placeholder: '手机无线调试地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
-            .height(42)
-            .layoutWeight(1)
-            .fontSize(13)
-            .fontColor(this.hdcInputTextColor())
-            .backgroundColor(this.hdcInputBackgroundColor())
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .enabled(this.hdcInputEditable())
-            .onChange((val: string) => {
-              this.wirelessIp = val;
-              this.markHdcManualEditing();
-            })
-          Button('连接测试')
-            .height(42)
-            .width(92)
-            .fontSize(13)
-            .backgroundColor('#765BFF')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .enabled(this.hdcInputEditable())
-            .onClick(() => { this.testAndConnectHdc(); })
-        }
-        .width('100%')
-        .margin({ top: 6 })
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 16 })
-
-      Column() {
-        Text('模型文件')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Row() {
-          Button('检查连接')
-            .onClick(() => { this.checkServer(); })
-            .enabled(!this.downloading)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#38BE8B')
-            .borderRadius(12)
-          Button('下载全部')
-            .onClick(() => { this.downloadAll(); })
-            .enabled(!this.downloading && this.connected)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#FF7043')
-            .borderRadius(12)
-            .margin({ left: 10 })
-          Button('删除模型')
-            .onClick(() => { this.deleteModelFiles(); })
-            .enabled(!this.downloading)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#F44336')
-            .borderRadius(12)
-            .margin({ left: 10 })
-        }.width('100%')
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 16 })
-
-      Column() {
-        Text('运行参数')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Row() {
-          Text('线程数')
-            .fontSize(14)
-            .fontColor('#666666')
-            .width(58)
-          TextInput({ text: this.threadNumInput })
-            .type(InputType.Number)
-            .width(76)
-            .height(40)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .onChange((val: string) => { this.threadNumInput = val; })
-          Button('修改 Config')
-            .onClick(() => { this.updateConfigThreadNum(); })
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#4B8BFF')
-            .borderRadius(12)
-            .margin({ left: 10 })
-          Button('查看 Config')
-            .onClick(() => { this.showConfigJson(); })
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#607D8B')
-            .borderRadius(12)
-            .margin({ left: 10 })
-        }.width('100%')
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 14 })
-
-      Row() {
-        Button('Op Precision Test')
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor('#FF9800')
-          .borderRadius(12)
-          .onClick(() => { router.pushUrl({ url: 'pages/OpTest' }) })
-        Button('Runtime Logs')
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 14 })
-
-      Button('返回助手')
-        .width('92%')
-        .height(46)
-        .fontColor('#4F68FF')
-        .backgroundColor('#EEF3FF')
-        .borderRadius(14)
-        .margin({ top: 14 })
-        .onClick(() => { this.assistantSettingsOpen = false; })
-      Blank().height(110)
-    }.width('100%')
   }
 
   @Builder CloudAssistantPage() {
@@ -2254,7 +2147,48 @@ struct Index {
             onRefresh: () => { this.refreshDataManager(); }
           })
         }.tabBar(this.TabItem('C', '采集', 1))
-        TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
+        TabContent() {
+          LocalAssistantPage({
+            output: $output,
+            assistantSettingsOpen: $assistantSettingsOpen,
+            debugImagePath: $debugImagePath,
+            chatHistory: $chatHistory,
+            userInput: $userInput,
+            isThinking: $isThinking,
+            modelLoaded: $modelLoaded,
+            downloading: $downloading,
+            autoConfirm: $autoConfirm,
+            serverIp: $serverIp,
+            modelScopeMnnRepo: $modelScopeMnnRepo,
+            connected: $connected,
+            hdcServerIp: $hdcServerIp,
+            manualHdcServerIp: $manualHdcServerIp,
+            wirelessIp: $wirelessIp,
+            hdcAutoStatus: $hdcAutoStatus,
+            hdcAutoConnecting: $hdcAutoConnecting,
+            hdcManualPairing: $hdcManualPairing,
+            threadNumInput: $threadNumInput,
+            onEnsureLocalModelLoaded: async () => { return await this.ensureLocalModelLoaded(); },
+            onStartLocalBackend: async () => { await this.startLocalBackend(); },
+            onStartLocalAgentTask: async (task: string) => { await this.startLocalAgentTask(task); },
+            onCheckServer: () => { this.checkServer(); },
+            onDownloadAll: () => { this.downloadAll(); },
+            onDeleteModelFiles: () => { this.deleteModelFiles(); },
+            onDownloadModelScopeModel: () => { this.downloadModelScopeModel(); },
+            onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
+            onShowConfigJson: () => { this.showConfigJson(); },
+            onDiscoverHdcServer: async (preferManual: boolean, showToast: boolean) => {
+              await this.discoverHdcServer(preferManual, showToast);
+            },
+            onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
+            onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
+            onTestAndConnectHdc: () => { this.testAndConnectHdc(); },
+            hdcInputTextColor: () => { return this.hdcInputTextColor(); },
+            hdcInputBackgroundColor: () => { return this.hdcInputBackgroundColor(); },
+            hdcInputEditable: () => { return this.hdcInputEditable(); },
+            hdcStatusColor: () => { return this.hdcStatusColor(); }
+          })
+        }.tabBar(this.TabItem('A', '助手', 2))
         TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
         TabContent() {
           TaskPage({

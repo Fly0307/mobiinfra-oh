@@ -1438,6 +1438,16 @@ struct Index {
     this.currentTab = 3;
   }
 
+  private setHomeRecommendationCompleted(id: string, completed: boolean): void {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('setHomeRecommendationCompleted skipped: facade is null');
+      return;
+    }
+    if (this.dataManagerFacade.setHomeRecommendationCompleted(id, completed)) {
+      this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    }
+  }
+
   private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
     let task = taskText.trim();
     if (task.length === 0) {
@@ -2241,6 +2251,9 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            onSetRecommendationCompleted: (id: string, completed: boolean) => {
+              this.setHomeRecommendationCompleted(id, completed);
+            },
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);
             }

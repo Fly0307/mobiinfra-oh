@@ -34,7 +34,7 @@ interface HomeRecommendationPlanningContext {
   today: string;
 }
 
-const HOME_TODO_NO_DEADLINE_LIMIT: number = 80;
+const HOME_TODO_NO_DEADLINE_RECENT_DAYS: number = 7;
 
 export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
   let parts: string[] = ['home_recommendation_source_v1'];
@@ -73,8 +73,8 @@ export function isHomeRecommendationSourceReusable(storedHash: string, currentHa
   return true;
 }
 
-export function isFutureTodoDeadline(deadline: string, today: string): boolean {
-  return isIsoDate(deadline) && isIsoDate(today) && deadline > today;
+export function isCurrentOrFutureTodoDeadline(deadline: string, today: string): boolean {
+  return isIsoDate(deadline) && isIsoDate(today) && deadline >= today;
 }
 
 export function recommendationTodoDeadlineMeta(deadline: string): string {
@@ -151,15 +151,15 @@ export class HomeRecommendationService {
 
   private planningContext(): HomeRecommendationPlanningContext {
     let today = this.currentDateKey();
-    let todoEvents = this.indexService.loadHomeTodoCandidateEvents(today, HOME_TODO_NO_DEADLINE_LIMIT);
+    let todoEvents = this.indexService.loadHomeTodoCandidateEvents(today, HOME_TODO_NO_DEADLINE_RECENT_DAYS);
     let candidates: IndexedEvent[] = [];
     Object.keys(todoEvents).forEach((eventId: string) => {
       let event = todoEvents[eventId];
       let todoType = normalizeFreeText(event.todo.type);
       let deadline = normalizeFreeText(event.todo.deadline);
-      let hasFutureDeadline = isFutureTodoDeadline(deadline, today);
+      let hasCurrentOrFutureDeadline = isCurrentOrFutureTodoDeadline(deadline, today);
       let hasNoDeadlineAction = deadline.length === 0 && todoType.length > 0;
-      if (hasFutureDeadline || hasNoDeadlineAction) {
+      if (hasCurrentOrFutureDeadline || hasNoDeadlineAction) {
         candidates.push(event);
       }
     });
@@ -282,7 +282,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: currentHash
+        source_input_hash: currentHash,
+        completed: item.completed === true
       };
       result.push(recommendation);
       usedIds[id] = true;
@@ -330,7 +331,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: this.recommendationSourceInputHash(eventIds, context)
+        source_input_hash: this.recommendationSourceInputHash(eventIds, context),
+        completed: false
       };
       result.push(recommendation);
       eventIds.forEach((eventId: string) => covered[eventId] = true);

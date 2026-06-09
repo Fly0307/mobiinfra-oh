@@ -321,10 +321,12 @@ export interface HomeRecommendationViewModel {
   desc: string;
   meta: string;
   color: string;
+  imageRefs: CollectionImageViewModel[];
   thumbnailUri: string;
   sourceEventIds: string[];
   detail: string;
   agentTask: string;
+  completed: boolean;
 }
 
 export interface HomeRecommendationState {
@@ -336,6 +338,7 @@ export interface HomeRecommendationState {
   domain: string;
   source_event_ids: string[];
   source_input_hash: string;
+  completed: boolean;
 }
 
 export interface HomeRecommendationsDocument {
@@ -431,4 +434,3 @@ export interface CollectionViewModel {
   insightSummary: string;
   empty: boolean;
 }
-

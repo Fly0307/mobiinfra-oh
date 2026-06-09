@@ -31,7 +31,10 @@ import {
   isQueryResultTruncated,
   resolveQueryLimit
 } from '../main/ets/datamanager/IndexService';
-import { shouldKeepTodoAgentTask } from '../main/ets/datamanager/DataPipelineModelClient';
+import {
+  buildEnrichPromptPreview,
+  shouldKeepTodoAgentTask
+} from '../main/ets/datamanager/DataPipelineModelClient';
 import { setHomeRecommendationCompletedInDocument, shouldShowHomeRecommendationInView } from '../main/ets/datamanager/DataManagerFacade';
 import {
   AggregatedRecord,
@@ -452,6 +455,32 @@ export default function dataManagerUnitTest() {
       expect(shouldKeepTodoAgentTask('buy', ['聊天', '购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('buy', ['购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('plan', ['聊天'])).assertFalse();
+    });
+
+    it('enrichPromptPreviewExplainsFieldsAndOmitsSceneIds', 0, () => {
+      let chatEvent = demoIndexedEvent('e1', '微信里提到这周六要买咖啡豆', '微信', 'eat', '咖啡豆');
+      chatEvent.workflow_scene_ids = [3];
+      chatEvent.normalized_fact = '与朋友聊天时提到这周六要在淘宝购买咖啡豆';
+      let shoppingEvent = demoIndexedEvent('e2', '淘宝浏览运动鞋', '淘宝', 'wear', '运动鞋');
+      shoppingEvent.workflow_scene_ids = [0];
+      shoppingEvent.normalized_fact = '在淘宝查看一双运动鞋商品详情';
+      let events: IndexedEvent[] = [chatEvent, shoppingEvent];
+      let preview = buildEnrichPromptPreview(events);
+
+      expect(preview.userPrompt.indexOf('workflow_scene_labels') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('workflow_scene_ids') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('微信里提到这周六要买咖啡豆') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('与朋友聊天时提到这周六要在淘宝购买咖啡豆') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_labels：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('keywords 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('domains 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('eat|wear|live|travel|work|other') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('entities 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('person') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('place') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('merchant') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('聊天：提取两类待办') >= 0).assertTrue();
     });
 
     it('eventEnrichInputFingerprintIgnoresGeneratedTodo', 0, () => {

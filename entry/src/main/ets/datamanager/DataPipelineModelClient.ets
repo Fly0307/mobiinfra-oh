@@ -89,7 +89,6 @@ interface BatchEventPromptPayload {
   event_id: string;
   event_date: string;
   event_weekday: string;
-  workflow_scene_ids: number[];
   workflow_scene_labels: string[];
   summary: string;
   normalized_fact: string;
@@ -97,6 +96,11 @@ interface BatchEventPromptPayload {
 
 interface BatchEnrichPromptPayload {
   events: BatchEventPromptPayload[];
+}
+
+export interface EnrichPromptPreview {
+  systemPrompt: string;
+  userPrompt: string;
 }
 
 interface ProfileEventPromptPayload {
@@ -212,10 +216,97 @@ const DEDUP_SYSTEM_PROMPT: string =
   'matched_record_ids 最多返回一个最相关历史记录。不要把多笔账单或多段聊天合并成一个大记录。不要输出 markdown。';
 
 const BATCH_ENRICH_SYSTEM_PROMPT: string =
-  '你是本地个人数据索引助手。请批量为输入事件提取关键词、领域、实体和可能的待办事项信号。输入包含 events，每条都有 event_id/event_date/event_weekday/workflow_scene_ids/workflow_scene_labels/summary/normalized_fact。' +
-  '返回严格 JSON：{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}]}。' +
-  '必须为每个输入 event_id 返回一个结果。todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
-  '有明确相对日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算。没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。domains 可多选；实体只抽取现实联系人、地点、商户。不要输出 markdown。';
+  '你是本地个人数据索引助手。请批量为输入事件提取关键词、领域、实体和可能的待办事项信号。' +
+  '\n\n输入字段说明：' +
+  '\nevent_id：事件唯一标识，只需要在输出中原样返回。' +
+  '\nevent_date：事件发生日期，格式为 YYYY-MM-DD。' +
+  '\nevent_weekday：event_date 对应的星期，用于把“这周六”“下周一”“周末”等相对日期换算为绝对日期。' +
+  '\nworkflow_scene_labels：工作流采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
+  '\nsummary：事件短摘要，用于快速理解事件。' +
+  '\nnormalized_fact：整理后的完整事实描述，通常比 summary 包含更多商户、商品、人物、地点、金额、状态或行动细节；抽取关键词、领域、实体和待办时优先参考它。' +
+  '\n\n输出必须是严格 JSON，不要输出 markdown 或解释：' +
+  '{"events":[{"event_id":"原样返回","keywords":["关键词"],"domains":["eat|wear|live|travel|work|other"],"entities":[{"type":"person|place|merchant","name":"名称","aliases":["别名"]}],"todo":{"type":"场景允许的 action tag 或空字符串","deadline":"YYYY-MM-DD 或空字符串","text":"触发待办的具体行动内容或空字符串","agent_task":"可直接交给 GUI Agent 执行的任务描述或空字符串"}}]}。' +
+  '\n必须为每个输入 event_id 返回一个结果。' +
+  '\n\nkeywords 规则：提取具体、可检索的商品、服务、商户、地点、人物、应用、动作、状态、主题词或金额词；优先保留输入原词；避免“当前页面”“截图”“记录”“信息”“详情”等泛词。' +
+  '\n\ndomains 规则：只能从 eat|wear|live|travel|work|other 中多选。eat 表示餐饮、外卖、食品、饮料；wear 表示服装、鞋包、美妆；live 表示住房、家居、酒店；travel 表示交通、通勤、出行、旅行、票务、差旅；work 表示工作、会议、协作、办公事务；other 表示无法归入以上分类的事件。购物、聊天、外卖、娱乐、生活、社交、差旅是 workflow_scene_labels，不要直接当作 domains。请注意 eat/wear/live/travel/work 只能覆盖真实场景中 20% 的事件，如果你没有 90% 以上的把握明确归类，**必须仅输出 other**。如果已经输出 eat/wear/live/travel/work 中任一领域，不要再输出 other。' +
+  '\n\nentities 规则：只抽取现实对象。person 只用于真实联系人、聊天对象或明确人物姓名；place 只用于实际地点、地址、场馆、目的地；merchant 只用于商户、店铺、平台、品牌门店或服务商。不要把商品、服务类别、金额、日期、订单号、抽象话题、页面元素、按钮、状态词或泛化类别抽成实体。name 和 aliases 必须来自输入文本，aliases 只放同一现实对象在输入中出现过的其他写法。' +
+  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
+  '有明确相对日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算。没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。';
+
+function enrichWorkflowSceneLabels(sceneIds: number[]): string[] {
+  let labels: string[] = [];
+  sceneIds.forEach((sceneId: number) => {
+    if (!isNaN(sceneId) && sceneId >= 0) {
+      labels.push(workflowSceneLabel(sceneId));
+    }
+  });
+  return stableUnique(labels);
+}
+
+function buildBatchEnrichPromptPayload(events: IndexedEvent[]): BatchEnrichPromptPayload {
+  let promptEvents: BatchEventPromptPayload[] = events.map((event: IndexedEvent): BatchEventPromptPayload => {
+    let item: BatchEventPromptPayload = {
+      event_id: event.event_id,
+      event_date: event.event_date,
+      event_weekday: weekdayLabelFromDate(event.event_date),
+      workflow_scene_labels: enrichWorkflowSceneLabels(event.workflow_scene_ids || []),
+      summary: event.summary,
+      normalized_fact: event.normalized_fact
+    };
+    return item;
+  });
+  let promptPayload: BatchEnrichPromptPayload = {
+    events: promptEvents
+  };
+  return promptPayload;
+}
+
+function enrichTodoGuideForEvents(events: IndexedEvent[]): string {
+  let labels: string[] = [];
+  events.forEach((event: IndexedEvent) => {
+    labels = labels.concat(enrichWorkflowSceneLabels(event.workflow_scene_ids || []));
+  });
+  labels = stableUnique(labels);
+  let guides: string[] = ['\n按 workflow_scene_labels 使用以下待办提取规则：'];
+  if (labels.length === 0) {
+    guides.push('未知场景：只在行动责任明确时使用 other；不要因为普通信息记录生成 todo。');
+    return guides.join('');
+  }
+  if (labels.indexOf('聊天') >= 0) {
+    guides.push('聊天：提取两类待办。第一类是有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间，此时 todo.type 写空字符串，只填写 deadline 和 text，没有可换算日期时写空 todo。第二类是用户明确表达要购买某商品或让对方帮忙购买某商品，此时允许 type=buy，deadline 可以为空，text 写购买行动，agent_task 写可直接执行的 GUI Agent 任务，例如“在淘宝中购买xxx商品”；如果聊天明确指定京东、淘宝、美团等平台则使用该平台，否则默认淘宝。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 和 agent_task 只描述该待办本身，不要写同条事件里的文件或技术讨论。');
+  }
+  if (labels.indexOf('购物') >= 0) {
+    guides.push('购物：允许 type=buy|pay|pickup|other，分别表示购买、付款、取货/收货、其他。');
+  }
+  if (labels.indexOf('外卖') >= 0) {
+    guides.push('外卖：允许 type=order|pay|pickup|other，分别表示下单、付款、取餐、其他。');
+  }
+  if (labels.indexOf('娱乐') >= 0) {
+    guides.push('娱乐：允许 type=renew|book|other，分别表示续费、预约/订票、其他。');
+  }
+  if (labels.indexOf('生活') >= 0) {
+    guides.push('生活：允许 type=pay|repair|appointment|other，分别表示缴费、维修、预约、其他。');
+  }
+  if (labels.indexOf('社交') >= 0) {
+    guides.push('社交：允许 type=attend|plan|book|other，分别表示赴约/参加、安排计划、预订、其他。');
+  }
+  if (labels.indexOf('差旅') >= 0) {
+    guides.push('差旅：允许 type=book|depart|check_in|pay|reimburse|other，分别表示预订、出发、入住/值机、付款、其他。');
+  }
+  if (labels.length > 1) {
+    guides.push('如果事件同时属于多个场景，优先使用最具体的非聊天场景规则；聊天规则只用于纯聊天场景。');
+  }
+  guides.push('不要输出规则外的 type。');
+  return guides.join('');
+}
+
+export function buildEnrichPromptPreview(events: IndexedEvent[]): EnrichPromptPreview {
+  let preview: EnrichPromptPreview = {
+    systemPrompt: BATCH_ENRICH_SYSTEM_PROMPT + enrichTodoGuideForEvents(events),
+    userPrompt: ArkJSON.stringify(buildBatchEnrichPromptPayload(events), null, 2)
+  };
+  return preview;
+}
 
 const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。' +
@@ -238,8 +329,7 @@ const PROFILE_SYSTEM_PROMPT: string =
   '不要推断职业、收入、性格、身份等事件没有证明的信息。证据少或只出现一次时，使用“最近出现”“曾记录”等保守表述；只有多条独立事件支持时才使用“经常”“偏好”“常用”等强表述。' +
   '合并上一版画像时，只保留仍有当前事件证据支持的结论；相近结论应合并，不要重复输出。event_ids 必须来自输入事件，不要编造 id；每条结论至少包含 1 个 event_id。' +
   '每个领域最多输出 5 条高价值结论；没有足够证据时返回空 summary 和空 claims。不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”；这些细节只用于内部证据。' +
-  '不要把单次转账、单次订单、单次 PR、单次浏览记录写成画像；它们只能作为证据，不是画像本身。' +
-  'relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。不要硬编码任何品牌、应用、群聊、支付、金融或测试数据词；只依据输入事件内容归纳。不要输出 markdown。';
+  'relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。只依据输入事件内容归纳。不要输出 markdown。';
 
 const PROFILE_MERGE_SYSTEM_PROMPT: string =
   '你是用户画像归并助手。输入是同一领域内多个分块已经生成的候选画像结论，以及上一版该领域画像结论。' +
@@ -391,25 +481,13 @@ export class DataPipelineModelClient {
     let chunks = this.chunkEventsByTodoGuide(events, 32);
     for (let chunk of chunks) {
       let eventMap: Record<string, IndexedEvent> = {};
-      let promptEvents: BatchEventPromptPayload[] = chunk.map((event: IndexedEvent): BatchEventPromptPayload => {
+      chunk.forEach((event: IndexedEvent) => {
         eventMap[event.event_id] = event;
-        let item: BatchEventPromptPayload = {
-          event_id: event.event_id,
-          event_date: event.event_date,
-          event_weekday: weekdayLabelFromDate(event.event_date),
-          workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
-          workflow_scene_labels: this.workflowSceneLabels(event.workflow_scene_ids || []),
-          summary: event.summary,
-          normalized_fact: event.normalized_fact
-        };
-        return item;
       });
-      let promptPayload: BatchEnrichPromptPayload = {
-        events: promptEvents
-      };
+      let preview = buildEnrichPromptPreview(chunk);
       try {
         dataManagerInfo(`Batch enrich request: events=${chunk.length}`);
-        let payload = await this.callJson(config, 'enrich.batch', this.enrichSystemPrompt(chunk), ArkJSON.stringify(promptPayload, null, 2));
+        let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
         let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
         rawEvents.forEach((rawEvent: JsonMap) => {
           let eventId = normalizeFreeText(rawEvent['event_id']);
@@ -855,56 +933,7 @@ export class DataPipelineModelClient {
   }
 
   private workflowSceneLabels(sceneIds: number[]): string[] {
-    let labels: string[] = [];
-    sceneIds.forEach((sceneId: number) => {
-      if (!isNaN(sceneId) && sceneId >= 0) {
-        labels.push(workflowSceneLabel(sceneId));
-      }
-    });
-    return stableUnique(labels);
-  }
-
-  private enrichSystemPrompt(events: IndexedEvent[]): string {
-    return BATCH_ENRICH_SYSTEM_PROMPT + this.todoGuideForEvents(events);
-  }
-
-  private todoGuideForEvents(events: IndexedEvent[]): string {
-    let labels: string[] = [];
-    events.forEach((event: IndexedEvent) => {
-      labels = labels.concat(this.workflowSceneLabels(event.workflow_scene_ids || []));
-    });
-    labels = stableUnique(labels);
-    let guides: string[] = ['\n按 workflow_scene_labels 使用以下待办提取规则：'];
-    if (labels.length === 0) {
-      guides.push('未知场景：只在行动责任明确时使用 other；不要因为普通信息记录生成 todo。');
-      return guides.join('');
-    }
-    if (labels.indexOf('聊天') >= 0) {
-      guides.push('聊天：提取两类待办。第一类是有明确时间锚点的未来计划、约定、聚餐、出行、会议、到期或必须回复时间，此时 todo.type 写空字符串，只填写 deadline 和 text，没有可换算日期时写空 todo。第二类是用户明确表达要购买某商品或让对方帮忙购买某商品，此时允许 type=buy，deadline 可以为空，text 写购买行动，agent_task 写可直接执行的 GUI Agent 任务，例如“在淘宝中购买xxx商品”；如果聊天明确指定京东、淘宝、美团等平台则使用该平台，否则默认淘宝。遇到“周末”且未说明周几时，以 event_date 之后最近的周六作为 deadline。text 和 agent_task 只描述该待办本身，不要写同条事件里的文件或技术讨论。');
-    }
-    if (labels.indexOf('购物') >= 0) {
-      guides.push('购物：允许 type=buy|pay|pickup|other，分别表示购买、付款、取货/收货、其他。');
-    }
-    if (labels.indexOf('外卖') >= 0) {
-      guides.push('外卖：允许 type=order|pay|pickup|other，分别表示下单、付款、取餐、其他。');
-    }
-    if (labels.indexOf('娱乐') >= 0) {
-      guides.push('娱乐：允许 type=renew|book|other，分别表示续费、预约/订票、其他。');
-    }
-    if (labels.indexOf('生活') >= 0) {
-      guides.push('生活：允许 type=pay|repair|appointment|other，分别表示缴费、维修、预约、其他。');
-    }
-    if (labels.indexOf('社交') >= 0) {
-      guides.push('社交：允许 type=attend|plan|book|other，分别表示赴约/参加、安排计划、预订、其他。');
-    }
-    if (labels.indexOf('差旅') >= 0) {
-      guides.push('差旅：允许 type=book|depart|check_in|pay|reimburse|other，分别表示预订、出发、入住/值机、付款、其他。');
-    }
-    if (labels.length > 1) {
-      guides.push('如果事件同时属于多个场景，优先使用最具体的非聊天场景规则；聊天规则只用于纯聊天场景。');
-    }
-    guides.push('不要输出规则外的 type。');
-    return guides.join('');
+    return enrichWorkflowSceneLabels(sceneIds);
   }
 
   private todoGuideKey(event: IndexedEvent): string {

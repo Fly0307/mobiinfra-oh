@@ -9,7 +9,6 @@ import {
   ConsolidatedState,
   DataManagerModelConfig,
   DataManagerProgressCallback,
-  DOMAIN_DESCRIPTIONS,
   DOMAIN_DISPLAY_NAMES,
   DOMAIN_KEYS,
   EntityMention,
@@ -122,7 +121,6 @@ interface SourceDocument {
 }
 
 interface DomainDocument {
-  domains: StringMap;
   postings: StringArrayMap;
 }
 
@@ -1359,7 +1357,6 @@ export class IndexService {
     });
     Object.keys(postings).forEach((domain: string) => postings[domain] = stableUnique(postings[domain]).sort());
     let document: DomainDocument = {
-      domains: DOMAIN_DESCRIPTIONS,
       postings: postings
     };
     return document;
@@ -2203,7 +2200,6 @@ export class IndexService {
     let postings: StringArrayMap = {};
     DOMAIN_KEYS.forEach((domain: string) => postings[domain] = []);
     let document: DomainDocument = {
-      domains: DOMAIN_DESCRIPTIONS,
       postings: postings
     };
     return document;

@@ -614,7 +614,7 @@ export struct HomePage {
                 GridItem() {
                   this.RecommendCard(item)
                 }
-              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + String(item.completed))
+              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
             }
             .columnsTemplate('1fr 1fr')
             .columnsGap(12)

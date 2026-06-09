@@ -45,7 +45,9 @@ import {
   sourceAppDisplayName,
   sourceDisplayName,
   sourceRef,
-  stableUnique
+  stableUnique,
+  addDays,
+  isIsoDate
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -90,6 +92,35 @@ function defaultHomeDomains(): HomeDomainViewModel[] {
 
 function defaultRecommendations(): HomeRecommendationViewModel[] {
   return [];
+}
+
+export function shouldShowHomeRecommendationInView(sourceEventIds: string[], eventMap: Record<string, IndexedEvent>, today: string): boolean {
+  if (!isIsoDate(today)) {
+    return false;
+  }
+  let eventIds = stableUnique((sourceEventIds || []).map((id: string): string => normalizeFreeText(id))).filter((id: string): boolean => id.length > 0);
+  if (eventIds.length === 0) {
+    return false;
+  }
+  let recentLowerBoundExclusive = addDays(today, -7);
+  for (let eventId of eventIds) {
+    let event = eventMap[eventId];
+    if (!event) {
+      return false;
+    }
+    let deadline = normalizeFreeText(event.todo.deadline);
+    if (isIsoDate(deadline)) {
+      if (deadline < today) {
+        return false;
+      }
+      continue;
+    }
+    let eventDate = normalizeFreeText(event.event_date);
+    if (!isIsoDate(eventDate) || eventDate <= recentLowerBoundExclusive) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function setHomeRecommendationCompletedInDocument(document: HomeRecommendationsDocument, id: string, completed: boolean): boolean {
@@ -865,7 +896,7 @@ export class DataManagerFacade {
     colors['wear'] = '#7669FF';
     colors['live'] = '#FF963D';
     colors['travel'] = '#4B9BFF';
-    colors['work'] = '#8066FF';
+    colors['work'] = '#E35D6A';
     colors['other'] = '#8B93A4';
     let document = this.homeRecommendationService.loadDocument();
     let allEventIds: string[] = [];
@@ -873,9 +904,14 @@ export class DataManagerFacade {
       allEventIds = allEventIds.concat(item.source_event_ids || []);
     });
     let eventMap = this.indexService.loadEventsByIds(stableUnique(allEventIds));
+    let today = nowIsoLocal().substring(0, 10);
     let result: HomeRecommendationViewModel[] = [];
     (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      if (!shouldShowHomeRecommendationInView(item.source_event_ids || [], eventMap, today)) {
+        return;
+      }
       let domain = normalizeFreeText(item.domain) || 'other';
+      let imageRefs = this.recommendationImages(item, eventMap);
       let recommendation: HomeRecommendationViewModel = {
         id: normalizeFreeText(item.id),
         domain: domain,
@@ -884,7 +920,8 @@ export class DataManagerFacade {
         desc: normalizeFreeText(item.desc),
         meta: this.recommendationMeta(item.meta),
         color: colors[domain] || '#8066FF',
-        thumbnailUri: this.recommendationThumbnail(item, eventMap),
+        imageRefs: imageRefs,
+        thumbnailUri: this.recommendationThumbnail(imageRefs),
         sourceEventIds: (item.source_event_ids || []).slice(),
         detail: this.recommendationDetail(item, eventMap),
         agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap),
@@ -1061,7 +1098,9 @@ export class DataManagerFacade {
     return lines.join('\n');
   }
 
-  private recommendationThumbnail(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string {
+  private recommendationImages(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): CollectionImageViewModel[] {
+    let result: CollectionImageViewModel[] = [];
+    let seen: StringMap = createStringMap();
     for (let eventId of item.source_event_ids || []) {
       let event = eventMap[eventId];
       if (!event) {
@@ -1069,12 +1108,23 @@ export class DataManagerFacade {
       }
       let images: CollectionImageViewModel[] = this.imageResolver.resolveAll(event.image_paths || []);
       for (let image of images) {
-        if (image.available && image.uri.length > 0) {
-          return image.uri;
+        let key = normalizeFreeText(image.ref) + '|' + normalizeFreeText(image.uri);
+        if (seen[key] === '1') {
+          continue;
         }
+        seen[key] = '1';
+        result.push(image);
+      }
+    }
+    return result;
+  }
+
+  private recommendationThumbnail(images: CollectionImageViewModel[]): string {
+    for (let image of images) {
+      if (image.available && image.uri.length > 0) {
+        return image.uri;
       }
     }
     return '';
   }
 }
-

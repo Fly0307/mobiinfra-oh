@@ -18,18 +18,19 @@ import {
 import {
   homeRecommendationSourceInputFingerprint,
   isHomeRecommendationSourceReusable,
-  isFutureTodoDeadline,
+  isCurrentOrFutureTodoDeadline,
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
   eventEnrichInputFingerprint,
   isEventEnrichInputReusable,
   isHomeTodoIndexCandidate,
+  isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
   resolveQueryLimit
 } from '../main/ets/datamanager/IndexService';
 import { shouldKeepTodoAgentTask } from '../main/ets/datamanager/DataPipelineModelClient';
-import { setHomeRecommendationCompletedInDocument } from '../main/ets/datamanager/DataManagerFacade';
+import { setHomeRecommendationCompletedInDocument, shouldShowHomeRecommendationInView } from '../main/ets/datamanager/DataManagerFacade';
 import {
   AggregatedRecord,
   CandidateFact,
@@ -100,6 +101,26 @@ function demoRecommendationState(id: string, completed: boolean): HomeRecommenda
     source_input_hash: 'hash-' + id,
     completed: completed
   };
+}
+
+function demoHomeRecommendationEvent(id: string, eventDate: string, deadline: string): IndexedEvent {
+  let event = demoIndexedEvent(id, '微信里提到一个待办事项', '微信', 'work', '待办');
+  event.event_date = eventDate;
+  event.todo = {
+    type: deadline.length > 0 ? '' : 'buy',
+    deadline: deadline,
+    text: '处理待办事项',
+    agent_task: ''
+  };
+  return event;
+}
+
+function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
+  let map: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
+  events.forEach((event: IndexedEvent) => {
+    map[event.event_id] = event;
+  });
+  return map;
 }
 
 export default function dataManagerUnitTest() {
@@ -283,10 +304,10 @@ export default function dataManagerUnitTest() {
     });
 
     it('homeRecommendationTodoDeadlineFilter', 0, () => {
-      expect(isFutureTodoDeadline('2026-06-06', '2026-06-05')).assertTrue();
-      expect(isFutureTodoDeadline('2026-06-05', '2026-06-05')).assertFalse();
-      expect(isFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
-      expect(isFutureTodoDeadline('', '2026-06-05')).assertFalse();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-06', '2026-06-05')).assertTrue();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-05', '2026-06-05')).assertTrue();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
+      expect(isCurrentOrFutureTodoDeadline('', '2026-06-05')).assertFalse();
       expect(recommendationTodoDeadlineMeta('2026-06-06')).assertEqual('6月6日截止');
     });
 
@@ -324,6 +345,45 @@ export default function dataManagerUnitTest() {
       expect(document.recommendations[0].completed).assertFalse();
       expect(setHomeRecommendationCompletedInDocument(document, 'missing', true)).assertFalse();
       expect(document.recommendations[0].completed).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterKeepsFutureDeadlineEvenWhenEventOld', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-05-01', '2026-06-10');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertTrue();
+    });
+
+    it('homeRecommendationViewFilterKeepsTodayDeadlineAndRejectsPastDeadline', 0, () => {
+      let todayEvent = demoHomeRecommendationEvent('e1', '2026-06-09', '2026-06-09');
+      let pastEvent = demoHomeRecommendationEvent('e2', '2026-06-08', '2026-06-08');
+      expect(shouldShowHomeRecommendationInView(['e1'], demoEventMap([todayEvent]), '2026-06-09')).assertTrue();
+      expect(shouldShowHomeRecommendationInView(['e2'], demoEventMap([pastEvent]), '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterKeepsRecentNoDeadlineEvent', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-06-02', '');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertTrue();
+    });
+
+    it('homeRecommendationViewFilterRejectsOldNoDeadlineEvent', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-06-01', '');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterRejectsMissingOrPartiallyExpiredSources', 0, () => {
+      let recent = demoHomeRecommendationEvent('e1', '2026-06-08', '');
+      let old = demoHomeRecommendationEvent('e2', '2026-06-01', '');
+      expect(shouldShowHomeRecommendationInView(['missing'], demoEventMap([recent]), '2026-06-09')).assertFalse();
+      expect(shouldShowHomeRecommendationInView(['e1', 'e2'], demoEventMap([recent, old]), '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationGenerationFilterUsesRecentNoDeadlineWindow', 0, () => {
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-02', '2026-06-09', 7)).assertTrue();
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-01', '2026-06-09', 7)).assertFalse();
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-08', '2026-06-09', 7)).assertTrue();
+      expect(isRecentNoDeadlineHomeTodoEvent('', '2026-06-09', 7)).assertFalse();
     });
 
     it('homeTodoIndexAllowsChatBuyWithoutDeadline', 0, () => {
@@ -379,4 +439,3 @@ export default function dataManagerUnitTest() {
     });
   });
 }
-

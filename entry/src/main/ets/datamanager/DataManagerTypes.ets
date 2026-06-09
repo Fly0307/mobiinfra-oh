@@ -321,6 +321,7 @@ export interface HomeRecommendationViewModel {
   desc: string;
   meta: string;
   color: string;
+  imageRefs: CollectionImageViewModel[];
   thumbnailUri: string;
   sourceEventIds: string[];
   detail: string;
@@ -433,4 +434,3 @@ export interface CollectionViewModel {
   insightSummary: string;
   empty: boolean;
 }
-

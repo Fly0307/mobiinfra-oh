@@ -32,6 +32,7 @@ import {
   createStringMap
 } from './DataManagerTypes';
 import {
+  addDays,
   dateToTime,
   deriveProfileDomains,
   displayDomainName,
@@ -212,6 +213,15 @@ export function isHomeTodoIndexCandidate(todo: IndexedEventTodo, eventSceneIds: 
     return false;
   }
   return true;
+}
+
+export function isRecentNoDeadlineHomeTodoEvent(eventDate: string, today: string, recentDays: number): boolean {
+  if (!isIsoDate(eventDate) || !isIsoDate(today)) {
+    return false;
+  }
+  let days = Math.max(0, recentDays);
+  let recentLowerBoundExclusive = addDays(today, -days);
+  return eventDate > recentLowerBoundExclusive;
 }
 
 function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
@@ -505,18 +515,25 @@ export class IndexService {
     return result;
   }
 
-  loadHomeTodoCandidateEvents(today: string, noDeadlineLimit: number): EventMap {
+  loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
     let document = this.storage.readJson<HomeTodoDocument>(
       this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
-    let eventIds: string[] = [];
+    let deadlineEventIds: string[] = [];
     let deadlinePostings = document.deadline_postings || {};
     Object.keys(deadlinePostings).sort().forEach((deadline: string) => {
-      if (isIsoDate(deadline) && isIsoDate(today) && deadline > today) {
-        eventIds = eventIds.concat(deadlinePostings[deadline] || []);
+      if (isIsoDate(deadline) && isIsoDate(today) && deadline >= today) {
+        deadlineEventIds = deadlineEventIds.concat(deadlinePostings[deadline] || []);
       }
     });
-    eventIds = eventIds.concat((document.no_deadline_event_ids || []).slice(0, Math.max(0, noDeadlineLimit)));
-    return this.loadEventsByIds(stableUnique(eventIds));
+    let result = this.loadEventsByIds(stableUnique(deadlineEventIds));
+    let noDeadlineEvents = this.loadEventsByIds(stableUnique(document.no_deadline_event_ids || []));
+    Object.keys(noDeadlineEvents).forEach((eventId: string) => {
+      let event = noDeadlineEvents[eventId];
+      if (isRecentNoDeadlineHomeTodoEvent(event.event_date, today, noDeadlineRecentDays)) {
+        result[eventId] = event;
+      }
+    });
+    return result;
   }
 
   private queryCandidateIds(options: QueryOptions): string[] {

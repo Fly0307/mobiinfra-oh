@@ -992,13 +992,9 @@ export class GalleryAnalyzer {
     for (let i = 0; i < tags.length; i++) {
       this.pushUnique(result, tags[i]);
     }
-    let normalized = ocrText.replace(/[，。！？、；：,.!?;:\n\r\t]+/g, ' ');
-    let pieces = normalized.split(' ');
-    for (let j = 0; j < pieces.length && result.length < 12; j++) {
-      let value = pieces[j].trim();
-      if (value.length >= 2 && value.length <= 16) {
-        this.pushUnique(result, value);
-      }
+    let keywordMatch = GalleryKeywordFilter.matchUsefulKeywords(ocrText);
+    for (let k = 0; k < keywordMatch.keywords.length && result.length < 12; k++) {
+      this.pushUnique(result, keywordMatch.keywords[k]);
     }
     return result;
   }

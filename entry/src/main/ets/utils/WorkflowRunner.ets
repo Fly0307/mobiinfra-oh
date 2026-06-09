@@ -56,6 +56,7 @@ interface GuiActionOutput {
   step_dir: string;
   action: string;
   device: string;
+  image_path?: string;
   image_b64?: string;
   width?: number;
   height?: number;

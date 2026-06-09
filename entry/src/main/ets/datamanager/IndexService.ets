@@ -95,13 +95,8 @@ interface IndexManifest {
   index_dir: string;
   run_root: string;
   enrichment: EnrichmentManifest;
-  domains: string[];
   entity_types: string[];
   sources: SourceManifestMap;
-  event_count: number;
-  profile_generated_at: string;
-  profile_claim_count: number;
-  profile_domains: NumberMap;
 }
 
 type EventGroupMap = Record<string, IndexedEvent[]>;
@@ -110,13 +105,10 @@ type TemporalDocumentMap = Record<string, TemporalDocument>;
 type ProfileDomainMap = Record<string, ProfileDomainState>;
 
 interface InvertedDocument {
-  normalization: string;
   postings: StringArrayMap;
 }
 
 interface SourceDocument {
-  normalization: string;
-  sources: StringArrayMap;
   postings: StringArrayMap;
 }
 
@@ -125,12 +117,10 @@ interface DomainDocument {
 }
 
 interface WorkflowSceneDocument {
-  scenes: StringMap;
   postings: StringArrayMap;
 }
 
 interface HomeTodoDocument {
-  normalization: string;
   deadline_postings: StringArrayMap;
   no_deadline_event_ids: string[];
   type_postings: StringArrayMap;
@@ -146,9 +136,6 @@ interface EntityDefinition {
 type EntityDefinitionMap = Record<string, EntityDefinition>;
 
 interface EntityDocument {
-  types: string[];
-  type_descriptions: StringMap;
-  entity_types: string[];
   entities: EntityDefinitionMap;
   alias_postings: StringArrayMap;
 }
@@ -162,10 +149,6 @@ interface ImageReferenceCandidate {
 type ImageReferenceCandidateMap = Record<string, ImageReferenceCandidate[]>;
 
 const ENTITY_TYPE_KEYS: string[] = ['person', 'place', 'merchant'];
-const ENTITY_TYPE_DESCRIPTIONS: StringMap = createStringMap();
-ENTITY_TYPE_DESCRIPTIONS['person'] = '现实中的个人或联系人';
-ENTITY_TYPE_DESCRIPTIONS['place'] = '现实地点、地址、场馆或地理位置';
-ENTITY_TYPE_DESCRIPTIONS['merchant'] = '提供商品或服务的商户、门店或商业品牌';
 
 const PROFILE_MODEL_MAX_TOKENS: number = 3000;
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
@@ -354,7 +337,7 @@ export class IndexService {
     let currentIds = Object.keys(events).sort();
     let previousIds = Object.keys(previousEvents).sort();
     let entityDocument = reuseAllowed && enrichedEventsCount === 0 && this.sameStringArrays(currentIds, previousIds) &&
-      this.sameStringArrays(this.entityTypeList(previousEntity), ENTITY_TYPE_KEYS) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
+      this.hasEntityIndexData(previousEntity) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
     await this.writeTemporalDocuments(events, modelConfig, reuseAllowed);
     this.emitProgress(progress, '生成画像', '正在生成用户画像', 90, 100, 90);
@@ -369,13 +352,8 @@ export class IndexService {
       index_dir: 'workflows/profile-consolidation/indexes',
       run_root: 'workflows/runs',
       enrichment: enrichment,
-      domains: DOMAIN_KEYS,
       entity_types: ENTITY_TYPE_KEYS,
-      sources: sources,
-      event_count: Object.keys(events).length,
-      profile_generated_at: profile.generated_at,
-      profile_claim_count: profile.claim_count,
-      profile_domains: this.profileDomainCounts(profile)
+      sources: sources
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
     dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${reusedEvents}, enriched=${enrichedEventsCount}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
@@ -1253,7 +1231,6 @@ export class IndexService {
     });
     Object.keys(postings).forEach((term: string) => postings[term] = stableUnique(postings[term]).sort());
     let document: InvertedDocument = {
-      normalization: 'lowercase compact text with adjacent CJK/alphanumeric bigram postings; one-character queries scan searchable text',
       postings: postings
     };
     return document;
@@ -1261,15 +1238,8 @@ export class IndexService {
 
   private buildSourceDocument(events: EventMap): SourceDocument {
     let postings: StringArrayMap = {};
-    let sources: StringArrayMap = {};
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
-      event.sources.forEach((source: string) => {
-        if (!sources[source]) {
-          sources[source] = [];
-        }
-        sources[source].push(eventId);
-      });
       indexTerms(sourceSearchText(event)).forEach((term: string) => {
         if (!postings[term]) {
           postings[term] = [];
@@ -1278,10 +1248,7 @@ export class IndexService {
       });
     });
     Object.keys(postings).forEach((term: string) => postings[term] = stableUnique(postings[term]).sort());
-    Object.keys(sources).forEach((source: string) => sources[source] = stableUnique(sources[source]).sort());
     let document: SourceDocument = {
-      normalization: 'lowercase compact text with adjacent CJK/alphanumeric bigram postings; one-character queries scan searchable text',
-      sources: sources,
       postings: postings
     };
     return document;
@@ -1322,7 +1289,6 @@ export class IndexService {
       return right.event_id.localeCompare(left.event_id);
     });
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; deadline_postings include absolute YYYY-MM-DD deadlines; no_deadline_event_ids are newest first; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: noDeadlineEvents.map((event: IndexedEvent): string => event.event_id),
       type_postings: typePostings
@@ -1363,11 +1329,9 @@ export class IndexService {
   }
 
   private buildWorkflowSceneDocument(events: EventMap): WorkflowSceneDocument {
-    let scenes: StringMap = createStringMap();
     let postings: StringArrayMap = {};
     workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
-      scenes[key] = scene.label;
       postings[key] = [];
     });
     Object.keys(events).sort().forEach((eventId: string) => {
@@ -1382,7 +1346,6 @@ export class IndexService {
     });
     Object.keys(postings).forEach((sceneId: string) => postings[sceneId] = stableUnique(postings[sceneId]).sort());
     let document: WorkflowSceneDocument = {
-      scenes: scenes,
       postings: postings
     };
     return document;
@@ -1491,9 +1454,6 @@ export class IndexService {
     });
     Object.keys(aliasPostings).forEach((key: string) => aliasPostings[key] = stableUnique(aliasPostings[key]).sort());
     let document: EntityDocument = {
-      types: ENTITY_TYPE_KEYS,
-      type_descriptions: ENTITY_TYPE_DESCRIPTIONS,
-      entity_types: ENTITY_TYPE_KEYS,
       entities: this.nonEmptyEntityDefinitions(entities),
       alias_postings: aliasPostings
     };
@@ -2098,14 +2058,6 @@ export class IndexService {
     return count;
   }
 
-  private profileDomainCounts(profile: ProfileState): NumberMap {
-    let result: NumberMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => {
-      result[domain] = profile.domains[domain] ? profile.domains[domain].claims.length : 0;
-    });
-    return result;
-  }
-
   private emptyProfileState(): ProfileState {
     let domains: ProfileDomainMap = {};
     DOMAIN_KEYS.forEach((domain: string) => {
@@ -2145,21 +2097,14 @@ export class IndexService {
       mode: '',
       base_url: ''
     };
-    let profileDomains: NumberMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => profileDomains[domain] = 0);
     let manifest: IndexManifest = {
       generated_at: '',
       input_root: '',
       index_dir: '',
       run_root: '',
       enrichment: enrichment,
-      domains: [],
       entity_types: [],
-      sources: sources,
-      event_count: 0,
-      profile_generated_at: '',
-      profile_claim_count: 0,
-      profile_domains: profileDomains
+      sources: sources
     };
     return manifest;
   }
@@ -2167,7 +2112,6 @@ export class IndexService {
   private emptyInvertedDocument(): InvertedDocument {
     let postings: StringArrayMap = {};
     let document: InvertedDocument = {
-      normalization: '',
       postings: postings
     };
     return document;
@@ -2177,7 +2121,6 @@ export class IndexService {
     let deadlinePostings: StringArrayMap = {};
     let typePostings: StringArrayMap = {};
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: [],
       type_postings: typePostings
@@ -2186,11 +2129,8 @@ export class IndexService {
   }
 
   private emptySourceDocument(): SourceDocument {
-    let sources: StringArrayMap = {};
     let postings: StringArrayMap = {};
     let document: SourceDocument = {
-      normalization: '',
-      sources: sources,
       postings: postings
     };
     return document;
@@ -2206,15 +2146,12 @@ export class IndexService {
   }
 
   private emptyWorkflowSceneDocument(): WorkflowSceneDocument {
-    let scenes: StringMap = createStringMap();
     let postings: StringArrayMap = {};
     workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
-      scenes[key] = scene.label;
       postings[key] = [];
     });
     let document: WorkflowSceneDocument = {
-      scenes: scenes,
       postings: postings
     };
     return document;
@@ -2224,17 +2161,14 @@ export class IndexService {
     let entities: EntityDefinitionMap = {};
     let aliasPostings: StringArrayMap = {};
     let document: EntityDocument = {
-      types: ENTITY_TYPE_KEYS,
-      type_descriptions: ENTITY_TYPE_DESCRIPTIONS,
-      entity_types: ENTITY_TYPE_KEYS,
       entities: entities,
       alias_postings: aliasPostings
     };
     return document;
   }
 
-  private entityTypeList(document: EntityDocument): string[] {
-    return (document.types && document.types.length > 0) ? document.types : (document.entity_types || []);
+  private hasEntityIndexData(document: EntityDocument): boolean {
+    return document.entities !== undefined && document.alias_postings !== undefined;
   }
 
   private emptyTemporalDocument(): TemporalDocument {

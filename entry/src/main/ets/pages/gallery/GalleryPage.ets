@@ -1094,32 +1094,55 @@ struct GalleryPage {
       this.requestPauseAutoAnalyze();
       return;
     }
-    if (!this.analyzing) {
-      GalleryStorage.clear(this.filesDir);
-      GalleryStorage.clearScanSession(this.filesDir);
-      GalleryStorage.clearMonthlySummaries(this.filesDir);
-      GalleryStorage.clearLocationCache(this.filesDir);
-      this.replaceResults([]);
-      this.clearMonthlyAiState();
-      this.locationCacheRecords = {};
-      this.locationResolvingKey = '';
-      this.locationResolveErrorKey = '';
-      this.locationResolveErrorText = '';
-      this.locationResolveRevision += 1;
-      this.progress = 0;
-      this.selectedFilter = 0;
-      this.selectedTimeFilter = 0;
-      this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
-      this.scanTotal = 0;
-      this.scanProcessed = 0;
-      this.scanPending = 0;
-      this.scanSkipped = 0;
-      this.scanFailed = 0;
-      this.scanRevision += 1;
-      this.autoScanStatus = 'idle';
-      this.setLastRunLabel('尚未开始');
-      promptAction.showToast({ message: '图库缓存已清理', duration: 1200 });
+    if (actionId === 2) {
+      this.confirmClearAnalysis();
     }
+  }
+
+  private confirmClearAnalysis(): void {
+    if (this.analyzing) {
+      promptAction.showToast({ message: '图库分析正在进行，无法清空', duration: 1200 });
+      return;
+    }
+    promptAction.showDialog({
+      title: '清空分析',
+      message: '将清空已保存的图库分析结果、扫描进度、月度总结和位置缓存。此操作不可恢复。',
+      buttons: [
+        { text: '取消', color: '#666666' },
+        { text: '清空', color: '#FF4D4F' }
+      ]
+    }).then((data: promptAction.ShowDialogSuccessResponse) => {
+      if (data.index === 1) {
+        this.clearAnalysis();
+      }
+    }).catch(() => {});
+  }
+
+  private clearAnalysis(): void {
+    GalleryStorage.clear(this.filesDir);
+    GalleryStorage.clearScanSession(this.filesDir);
+    GalleryStorage.clearMonthlySummaries(this.filesDir);
+    GalleryStorage.clearLocationCache(this.filesDir);
+    this.replaceResults([]);
+    this.clearMonthlyAiState();
+    this.locationCacheRecords = {};
+    this.locationResolvingKey = '';
+    this.locationResolveErrorKey = '';
+    this.locationResolveErrorText = '';
+    this.locationResolveRevision += 1;
+    this.progress = 0;
+    this.selectedFilter = 0;
+    this.selectedTimeFilter = 0;
+    this.resultDisplayLimit = GALLERY_RESULT_PAGE_SIZE;
+    this.scanTotal = 0;
+    this.scanProcessed = 0;
+    this.scanPending = 0;
+    this.scanSkipped = 0;
+    this.scanFailed = 0;
+    this.scanRevision += 1;
+    this.autoScanStatus = 'idle';
+    this.setLastRunLabel('尚未开始');
+    promptAction.showToast({ message: '图库缓存已清理', duration: 1200 });
   }
 
   private hasPausedScan(): boolean {
@@ -1206,7 +1229,7 @@ struct GalleryPage {
             if (this.analyzing) {
               this.ToolbarAction(this.autoScanStatus === 'pausing' ? '暂停中' : '暂停', '#B55A00', '#FFF4E8', 3)
             } else {
-              this.ToolbarAction('清理缓存', '#B55A00', '#FFF4E8', 2)
+              this.ToolbarAction('清空分析', '#B55A00', '#FFF4E8', 2)
             }
           }
           .width('100%')

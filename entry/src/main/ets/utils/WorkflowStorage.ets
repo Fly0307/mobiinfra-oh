@@ -110,6 +110,14 @@ export class WorkflowStorage {
     }
   }
 
+  private static fileExists(path: string): boolean {
+    try {
+      return fs.accessSync(path);
+    } catch (e) {
+      return false;
+    }
+  }
+
   static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
     let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
     if (!parsed.steps) {
@@ -161,7 +169,7 @@ export class WorkflowStorage {
       }
       let parsed = ArkJSON.parse(WorkflowStorage.readText(path)) as WorkflowTaskIndex;
       let tasks = parsed.tasks || [];
-      let syncedTasks = WorkflowStorage.syncTaskWorkflowJsonFromConfigFiles(filesDir,
+      let syncedTasks = WorkflowStorage.syncTasksFromConfigFiles(filesDir,
         WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, tasks));
       if (!WorkflowStorage.areTaskListsEqual(tasks, syncedTasks)) {
         WorkflowStorage.saveTasks(filesDir, syncedTasks);
@@ -210,7 +218,7 @@ export class WorkflowStorage {
     return nextTasks;
   }
 
-  private static syncTaskWorkflowJsonFromConfigFiles(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
+  private static syncTasksFromConfigFiles(filesDir: string, tasks: WorkflowTask[]): WorkflowTask[] {
     let synced: WorkflowTask[] = [];
     for (let i = 0; i < tasks.length; i++) {
       synced.push(WorkflowStorage.taskWithLatestValidConfig(filesDir, tasks[i]));
@@ -224,8 +232,10 @@ export class WorkflowStorage {
     }
     try {
       let rawJson = WorkflowStorage.readText(WorkflowStorage.configPath(filesDir, task.configFileName));
-      WorkflowStorage.validateWorkflowJson(rawJson, false);
-      if (rawJson === task.workflowJson) {
+      let workflow = WorkflowStorage.validateWorkflowJson(rawJson, false);
+      let title = WorkflowStorage.titleForWorkflow(workflow);
+      let source = WorkflowStorage.sourceForWorkflow(workflow);
+      if (rawJson === task.workflowJson && title === task.title && source === task.source) {
         return task;
       }
       return {
@@ -233,8 +243,8 @@ export class WorkflowStorage {
         sceneId: task.sceneId,
         icon: task.icon,
         iconColor: task.iconColor,
-        title: task.title,
-        source: task.source,
+        title: title,
+        source: source,
         enabled: task.enabled,
         configFileName: task.configFileName,
         workflowJson: rawJson,
@@ -472,11 +482,128 @@ export class WorkflowStorage {
     WorkflowStorage.saveTasks(filesDir, tasks);
   }
 
+  private static titleForWorkflow(workflow: WorkflowDefinition): string {
+    let metadata = workflow.metadata;
+    return metadata && metadata.description ? metadata.description : '自定义 Workflow';
+  }
+
+  private static sourceForWorkflow(workflow: WorkflowDefinition): string {
+    let metadata = workflow.metadata;
+    return metadata && metadata.name ? metadata.name : 'workflow';
+  }
+
+  private static copyTitleBase(title: string): string {
+    let current = title;
+    while (true) {
+      let stripped = WorkflowStorage.stripCopySuffix(current);
+      if (stripped === current) {
+        break;
+      }
+      current = stripped;
+    }
+    return current.length > 0 ? current : '自定义 Workflow';
+  }
+
+  private static stripCopySuffix(title: string): string {
+    let marker = ' 复制';
+    let markerIndex = title.lastIndexOf(marker);
+    if (markerIndex < 0) {
+      return title;
+    }
+    let suffix = title.substring(markerIndex + marker.length);
+    if (suffix.length === 0) {
+      return title.substring(0, markerIndex);
+    }
+    if (!suffix.startsWith(' ')) {
+      return title;
+    }
+    let numberText = suffix.substring(1);
+    if (numberText.length === 0) {
+      return title;
+    }
+    for (let i = 0; i < numberText.length; i++) {
+      let code = numberText.charCodeAt(i);
+      if (code < 48 || code > 57) {
+        return title;
+      }
+    }
+    return title.substring(0, markerIndex);
+  }
+
+  private static uniqueCopyTitle(tasks: WorkflowTask[], title: string): string {
+    let existing: Record<string, boolean> = {};
+    for (let i = 0; i < tasks.length; i++) {
+      existing[tasks[i].title] = true;
+    }
+    let base = WorkflowStorage.copyTitleBase(title);
+    let candidate = base + ' 复制';
+    if (!existing[candidate]) {
+      return candidate;
+    }
+    let index = 2;
+    while (existing[base + ' 复制 ' + index]) {
+      index++;
+    }
+    return base + ' 复制 ' + index;
+  }
+
+  private static uniqueTaskId(filesDir: string, tasks: WorkflowTask[]): string {
+    let existing: Record<string, boolean> = {};
+    for (let i = 0; i < tasks.length; i++) {
+      existing[tasks[i].id] = true;
+    }
+    let base = 'task_' + new Date().getTime();
+    let candidate = base;
+    let index = 1;
+    while (existing[candidate] || WorkflowStorage.fileExists(WorkflowStorage.configPath(filesDir, candidate + '.json'))) {
+      candidate = base + '_' + index;
+      index++;
+    }
+    return candidate;
+  }
+
+  private static workflowJsonWithDescription(rawJson: string, title: string): string {
+    let workflow = WorkflowStorage.validateWorkflowJson(rawJson, false);
+    if (!workflow.metadata) {
+      workflow.metadata = {};
+    }
+    workflow.metadata.description = title;
+    return ArkJSON.stringify(workflow, null, 2);
+  }
+
+  static duplicateTask(filesDir: string, taskId: string): WorkflowTask {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let sourceTask: WorkflowTask | null = null;
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        sourceTask = tasks[i];
+        break;
+      }
+    }
+    if (!sourceTask) {
+      throw new Error('Workflow 已不存在');
+    }
+
+    let copyTitle = WorkflowStorage.uniqueCopyTitle(tasks, sourceTask.title);
+    let copyJson = WorkflowStorage.workflowJsonWithDescription(
+      WorkflowStorage.readTaskWorkflowJson(filesDir, sourceTask),
+      copyTitle
+    );
+    let copyId = WorkflowStorage.uniqueTaskId(filesDir, tasks);
+    let copyTask = WorkflowStorage.createTaskFromJson(filesDir, sourceTask.sceneId, copyJson, copyId);
+    copyTask.enabled = sourceTask.enabled;
+    copyTask.lastStatus = '未运行';
+    copyTask.lastRun = '尚未执行';
+    copyTask.lastMessage = '复制自“' + sourceTask.title + '”';
+    tasks.push(copyTask);
+    WorkflowStorage.saveTasks(filesDir, tasks);
+    return copyTask;
+  }
+
   static createTaskFromJson(filesDir: string, sceneId: number, rawJson: string, existingId?: string): WorkflowTask {
     let workflow = WorkflowStorage.validateWorkflowJson(rawJson, false);
-    let metadata = workflow.metadata;
-    let title = metadata && metadata.description ? metadata.description : '自定义 Workflow';
-    let source = metadata && metadata.name ? metadata.name : 'workflow';
+    let title = WorkflowStorage.titleForWorkflow(workflow);
+    let source = WorkflowStorage.sourceForWorkflow(workflow);
     let taskId = existingId && existingId.length > 0 ? existingId : 'task_' + new Date().getTime();
     let configName = taskId + '.json';
     return {

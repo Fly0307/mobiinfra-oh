@@ -211,6 +211,19 @@ export struct TaskPage {
     return filtered;
   }
 
+  private taskCardRenderKey(task: WorkflowTask): string {
+    let keyParts: string[] = [
+      task.id,
+      task.title,
+      task.source,
+      task.enabled ? '1' : '0',
+      task.lastStatus,
+      task.lastRun,
+      task.lastMessage
+    ];
+    return ArkJSON.stringify(keyParts);
+  }
+
   private openCreateEditor(mode: string = 'graph'): void {
     this.editingTaskId = '';
     this.editorSceneId = this.taskScene;
@@ -403,6 +416,17 @@ export struct TaskPage {
     } finally {
       this.runningTaskId = '';
       this.reloadTasks();
+    }
+  }
+
+  private copyWorkflowTask(task: WorkflowTask): void {
+    try {
+      let copied = WorkflowStorage.duplicateTask(this.filesDir, task.id);
+      this.reloadTasks();
+      promptAction.showToast({ message: '已复制：' + copied.title, duration: 1500 });
+    } catch (e) {
+      let err = e as Error;
+      promptAction.showToast({ message: '复制失败：' + err.message, duration: 2500 });
     }
   }
 
@@ -3222,6 +3246,15 @@ export struct TaskPage {
             .borderRadius(10)
             .margin({ right: 8 })
             .onClick(() => { this.openEditEditor(task.id, 'json'); })
+          Button('复制')
+            .width(82)
+            .height(36)
+            .fontSize(12)
+            .backgroundColor('#EEF4FF')
+            .fontColor('#276EF1')
+            .borderRadius(10)
+            .margin({ right: 8 })
+            .onClick(() => { this.copyWorkflowTask(task); })
           Button('删除')
             .width(82)
             .height(36)
@@ -3358,7 +3391,7 @@ export struct TaskPage {
         if (this.editorOpen && this.editingTaskId === task.id) {
           this.EditorPanel()
         }
-      }, (task: WorkflowTask) => task.id)
+      }, (task: WorkflowTask) => this.taskCardRenderKey(task))
     }
   }
 

@@ -9,6 +9,7 @@ import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 
 const COLLECTION_GROUPS_PER_PAGE: number = 5;
+const COLLECTION_SECTION_GAP: number = 18;
 
 // 数据采集页：按 workflow 场景切换展示对应任务采集到的已整理数据。
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
@@ -76,15 +77,15 @@ export struct CollectionPage {
   @Builder CollectTab(scene: WorkflowSceneConfig) {
     // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
     Text(scene.label)
-      .fontSize(14)
+      .fontSize(13)
       .fontWeight(this.collectionModule === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
       .fontColor(this.collectionModule === scene.sceneId ? Color.White : '#6D7481')
-      .height(42)
-      .padding({ left: 18, right: 18 })
+      .height(38)
+      .padding({ left: 16, right: 16 })
       .textAlign(TextAlign.Center)
       .backgroundColor(this.collectionModule === scene.sceneId ? scene.color : Color.White)
-      .borderRadius(21)
-      .margin({ right: 10 })
+      .borderRadius(10)
+      .margin({ left: scene.sceneId === 0 ? 0 : 10 })
       .onClick(() => {
         this.collectionModule = scene.sceneId;
         this.groupPageIndex = 0;
@@ -230,10 +231,10 @@ export struct CollectionPage {
           }.padding({ left: 24, right: 24 })
         }
         .width('100%')
-        .height(46)
+        .height(42)
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
-        .margin({ top: 22, bottom: 18 })
+        .margin({ top: COLLECTION_SECTION_GAP, bottom: 0 })
 
         Row() {
           Column() {
@@ -266,7 +267,7 @@ export struct CollectionPage {
         .padding({ left: 22, right: 16 })
         .backgroundColor('#F8FAFE')
         .borderRadius(16)
-        .margin({ top: 22 })
+        .margin({ top: COLLECTION_SECTION_GAP })
 
         Column() {
           Row() {
@@ -275,7 +276,7 @@ export struct CollectionPage {
           }.width('100%').margin({ bottom: 8 })
           this.CollectionRows()
           this.GroupPagination()
-        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: 22 })
+        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
 
         Column() {
           Row() {
@@ -302,7 +303,7 @@ export struct CollectionPage {
             Text('你在数码和食品品类的消费较多').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#6D62F5').layoutWeight(1).margin({ left: 10 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             Text('详情').fontSize(12).fontColor('#9AA0AA')
           }.width('100%').height(46).padding({ left: 16, right: 12 }).backgroundColor('#F2EEFF').borderRadius(12)
-        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: 22 })
+        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
 
         Column() {
           Text('+  新增采集源').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)
@@ -313,7 +314,7 @@ export struct CollectionPage {
         .height(72)
         .backgroundColor('#725CFF')
         .borderRadius(18)
-        .margin({ top: 22 })
+        .margin({ top: COLLECTION_SECTION_GAP })
         .onClick(() => { promptAction.showToast({ message: '新增采集源功能即将接入', duration: 1500 }); })
 
         Column() {
@@ -325,7 +326,7 @@ export struct CollectionPage {
         .height(72)
         .backgroundColor('#4B8BFF')
         .borderRadius(18)
-        .margin({ top: 12 })
+        .margin({ top: COLLECTION_SECTION_GAP })
         .onClick(() => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); })
         Blank().height(110)
       }.width('100%')

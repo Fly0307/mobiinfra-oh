@@ -400,41 +400,49 @@ export function buildEnrichPromptPreview(events: IndexedEvent[]): EnrichPromptPr
 }
 
 const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
-  '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。' +
-  '将明确指向同一现实对象的候选合并，以便跨来源查询；仅在证据充分时合并，不要因名称相近而猜测。' +
-  '返回严格 JSON：{"entities":[{"name":"规范显示名","aliases":["同一对象的其他候选名称"]}]}。' +
+  '你是个人事件实体归并助手。输入是同一种类别下、从不同事件提取出的实体候选。\n\n' +
+  '将明确指向同一现实对象的候选合并，以便跨来源查询；仅在证据充分时合并，不要因名称相近而猜测。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"entities":[{"name":"规范显示名","aliases":["同一对象的其他候选名称"]}]}。\n\n' +
   '输出名称和别名必须来自输入候选，不要补充输入中不存在的名称，不要输出 markdown 或解释。';
 
 const SUMMARY_SYSTEM_PROMPT: string =
-  '你是个人事件摘要助手。根据输入的一组事件或下级摘要，生成简短、可检索的中文概括。' +
-  '只返回严格 JSON：{"summary":"摘要文本"}。' +
-  '摘要应陈述事实，不猜测，不遗漏主要活动类型，不输出 markdown。' +
+  '你是个人事件摘要助手。根据输入的一组事件或下级摘要，生成简短、可检索的中文概括。\n\n' +
+  '只返回严格 JSON：\n' +
+  '{"summary":"摘要文本"}。\n\n' +
+  '摘要应陈述事实，不猜测，不遗漏主要活动类型，不输出 markdown。\n' +
   'summary 最多 160 个汉字，只概括主要活动类型和显著事件，不要逐条复述输入。';
 
 const PROFILE_SYSTEM_PROMPT: string =
-  '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。' +
-  '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：' +
-  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
-  'short_summary 必须严格为 4 个中文字符，像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”，不要标点、空格、数字或解释。summary 应像产品中的个人画像卡片，概括整体倾向，不要列举订单、聊天或浏览事实。' +
-  'claims 只保留 2 到 5 条高层 insight，可以描述偏好、习惯、近期关注话题、常用服务/商户、稳定联系人或地点，但每条必须由至少 2 条输入事件直接支持。' +
-  '不要推断职业、收入、性格、身份等事件没有证明的信息。证据少或只出现一次时，使用“最近出现”“曾记录”等保守表述；只有多条独立事件支持时才使用“经常”“偏好”“常用”等强表述。' +
-  '合并上一版画像时，只保留仍有当前事件证据支持的结论；相近结论应合并，不要重复输出。event_ids 必须来自输入事件，不要编造 id；每条结论至少包含 1 个 event_id。' +
-  '每个领域最多输出 5 条高价值结论；没有足够证据时返回空 summary 和空 claims。不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”；这些细节只用于内部证据。' +
+  '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。\n\n' +
+  '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：\n' +
+  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。\n\n' +
+  'short_summary 必须严格为 4 个中文字符，像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”，不要标点、空格、数字或解释。\n' +
+  'summary 应像产品中的个人画像卡片，概括整体倾向，不要列举订单、聊天或浏览事实。\n\n' +
+  'claims 只保留 2 到 5 条高层 insight，可以描述偏好、习惯、近期关注话题、常用服务/商户、稳定联系人或地点，但每条必须由至少 2 条输入事件直接支持。\n\n' +
+  '不要推断职业、收入、性格、身份等事件没有证明的信息。\n' +
+  '证据少或只出现一次时，使用“最近出现”“曾记录”等保守表述；只有多条独立事件支持时才使用“经常”“偏好”“常用”等强表述。\n\n' +
+  '合并上一版画像时，只保留仍有当前事件证据支持的结论；相近结论应合并，不要重复输出。\n' +
+  'event_ids 必须来自输入事件，不要编造 id；每条结论至少包含 1 个 event_id。\n\n' +
+  '每个领域最多输出 5 条高价值结论；没有足够证据时返回空 summary 和空 claims。\n' +
+  '不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”；这些细节只用于内部证据。\n\n' +
   'relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。只依据输入事件内容归纳。不要输出 markdown。';
 
 const PROFILE_MERGE_SYSTEM_PROMPT: string =
-  '你是用户画像归并助手。输入是同一领域内多个分块已经生成的候选画像结论，以及上一版该领域画像结论。' +
-  '请去重、合并相近含义，并输出适合 App 前端展示的最终用户画像，返回严格 JSON：' +
-  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。' +
-  '只能基于 candidate_claims 和 previous_claims 中已有信息归并，不要创造新的品牌、实体、话题或事件 id。' +
-  'claims 只保留 2 到 5 条高层 insight；相近结论必须合并，单次事件陈述不能作为画像。' +
-  '每条结论必须至少由 2 个 event_ids 支持；event_ids 必须来自输入候选结论。合并上一版画像时，只保留仍被候选结论支持的内容。' +
+  '你是用户画像归并助手。输入是同一领域内多个分块已经生成的候选画像结论，以及上一版该领域画像结论。\n\n' +
+  '请去重、合并相近含义，并输出适合 App 前端展示的最终用户画像，返回严格 JSON：\n' +
+  '{"short_summary":"严格4个中文字符的首页摘要","summary":"该领域 1-2 句话的高层画像总结","claims":[{"statement":"一条短 insight，不要逐条复述事实","kind":"preference|habit|topic|service|relation|place|observation","confidence":"high|medium|low","event_ids":["支持该结论的输入事件 id"],"example":"一个最能说明该结论的事件摘要"}]}。\n\n' +
+  '只能基于 candidate_claims 和 previous_claims 中已有信息归并，不要创造新的品牌、实体、话题或事件 id。\n\n' +
+  'claims 只保留 2 到 5 条高层 insight；相近结论必须合并，单次事件陈述不能作为画像。\n\n' +
+  '每条结论必须至少由 2 个 event_ids 支持；event_ids 必须来自输入候选结论。\n' +
+  '合并上一版画像时，只保留仍被候选结论支持的内容。\n\n' +
   'short_summary 必须严格为 4 个中文字符，不要标点、空格、数字或解释。不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”。relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。不要输出 markdown 或解释。';
 
 const PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT: string =
-  '你是用户画像短摘要修复助手。输入是一段已经由模型生成的领域画像 summary 和 claims。' +
-  '你的唯一任务是为首页生成严格 4 个中文字符的短摘要，返回严格 JSON：{"short_summary":"四个中文字符"}。' +
-  'short_summary 必须只基于输入画像内容，不要引入新事实；必须正好 4 个中文字符，不要标点、空格、数字、英文或解释。' +
+  '你是用户画像短摘要修复助手。输入是一段已经由模型生成的领域画像 summary 和 claims。\n\n' +
+  '你的唯一任务是为首页生成严格 4 个中文字符的短摘要，返回严格 JSON：\n' +
+  '{"short_summary":"四个中文字符"}。\n\n' +
+  'short_summary 必须只基于输入画像内容，不要引入新事实；必须正好 4 个中文字符，不要标点、空格、数字、英文或解释。\n' +
   '风格像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”。无法生成时返回 {"short_summary":""}。不要输出 markdown。';
 
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
@@ -442,26 +450,32 @@ const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
 
 const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
-  '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或内容主题。' +
-  '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。' +
-  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。' +
-  '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。' +
+  '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。\n' +
+  '分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或内容主题。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。\n\n' +
+  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。\n\n' +
+  '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。\n' +
+  '聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。\n\n' +
   '避免低信息标题：平台名、纯数字、日期时间、单个技术词、单个截图/图片/贴图/表情包等界面元素、或“微信聊天记录”“工作相关聊天记录”“聊天记录”“通知记录”“视频记录”“订单记录”这类泛称。不要输出 markdown。';
 
 const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
-  '你是一个事件语义分组合并助手。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。' +
-  '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。' +
+  '你是一个事件语义分组合并助手。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。\n\n' +
   '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；分组数量最多 12 个。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
-  '你是用户待办事项推荐助手。输入中的事件每条都有上游提取出的待办事项信号；todo_text 是具体待办行动内容；todo_deadline 为截止日期（可能为空）；' +
-  'todo_type 是待办类型（可能为空），只会来自精简集合：buy购买、pay付款、pickup取货/收货/取餐、order下单、renew续费/权益恢复、book预订/订票、repair维修、appointment预约、attend参加/赴约、plan安排计划、depart出发、check_in入住/值机、reimburse报销、other其他待处理事项。' +
-  '不要重新判断输入事件是不是 todo，也不要丢弃任何输入事件，你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并，并生成适合在应用首页展示给用户的推荐卡片文案。' +
-  '返回严格 JSON：' +
-  '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。' +
-  'source_event_ids 必须来自输入事件，至少 1 个，每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中；每个推荐要能让用户知道接下来具体要做什么。不要编造输入里没有的人名、地点、商品、金额或行动。' +
-  'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待出发”“待购买”“待预约”“待付款”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。' +
-  'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。' +
+  '你是用户待办事项推荐助手。\n' +
+  '输入中的事件每条都有上游提取出的待办事项信号；todo_text 是具体待办行动内容；todo_deadline 为截止日期（可能为空）；\n' +
+  'todo_type 是待办类型（可能为空），只会来自精简集合：buy购买、pay付款、pickup取货/收货/取餐、order下单、renew续费/权益恢复、book预订/订票、repair维修、appointment预约、attend参加/赴约、plan安排计划、depart出发、check_in入住/值机、reimburse报销、other其他待处理事项。\n\n' +
+  '不要重新判断输入事件是不是 todo，也不要丢弃任何输入事件，你的任务只是在不丢事件的前提下，把同一事项、同一约定、同一截止目标的事件合并，并生成适合在应用首页展示给用户的推荐卡片文案。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"recommendations":[{"tag":"4到6个中文字符的短标签","title":"8个字左右的精简标题","desc":"一句完整说明","domain":"eat|wear|live|travel|work|other","source_event_ids":["输入中的event_id"]}]}。\n\n' +
+  'source_event_ids 必须来自输入事件，至少 1 个，每个输入 event_id 必须且只能出现在一张推荐卡片的 source_event_ids 中；每个推荐要能让用户知道接下来具体要做什么。\n' +
+  '不要编造输入里没有的人名、地点、商品、金额或行动。\n\n' +
+  'tag 用于卡片左上角，只写状态或行动类型，例如“待续费”“待出发”“待购买”“待预约”“待付款”；title 精简在 8 个字左右，优先根据 todo_text 写行动对象和动作；desc 写一完整句，说明为什么需要跟进。\n\n' +
+  'title 和 desc 不要使用省略号或“...”截断内容；请关注 todo_text 指向的核心待办事项，不要受同一事件里的各种其他背景信息干扰。\n' +
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
 export class DataPipelineModelClient {

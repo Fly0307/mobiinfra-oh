@@ -1705,6 +1705,36 @@ struct GalleryPage {
       .margin({ top: 6 })
   }
 
+  @Builder DetailBulletSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.detailAt(item, index).length > 0) {
+      this.DetailBullet(this.detailAt(item, index))
+    }
+  }
+
+  @Builder DetailBulletSlots(item: GalleryAnalysisResult) {
+    this.DetailBulletSlot(item, 0)
+    this.DetailBulletSlot(item, 1)
+    this.DetailBulletSlot(item, 2)
+  }
+
+  @Builder DetailTagSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.tagAt(item, index).length > 0) {
+      this.DetailTag(this.tagAt(item, index))
+    }
+  }
+
+  @Builder DetailTagSlots(item: GalleryAnalysisResult) {
+    Row() {
+      this.DetailTagSlot(item, 0)
+      this.DetailTagSlot(item, 1)
+      this.DetailTagSlot(item, 2)
+      this.DetailTagSlot(item, 3)
+      this.DetailTagSlot(item, 4)
+    }
+    .width('100%')
+    .margin({ top: 1 })
+  }
+
   @Builder ResultDetailPanel() {
     if (this.selectedDetailId.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -1788,38 +1818,12 @@ struct GalleryPage {
 
                 if (this.resultDetails(item).length > 0) {
                   this.DetailSectionTitle('分析明细')
-                  if (this.detailAt(item, 0).length > 0) {
-                    this.DetailBullet(this.detailAt(item, 0))
-                  }
-                  if (this.detailAt(item, 1).length > 0) {
-                    this.DetailBullet(this.detailAt(item, 1))
-                  }
-                  if (this.detailAt(item, 2).length > 0) {
-                    this.DetailBullet(this.detailAt(item, 2))
-                  }
+                  this.DetailBulletSlots(item)
                 }
 
                 if (this.resultTags(item).length > 0) {
                   this.DetailSectionTitle('标签')
-                  Row() {
-                    if (this.tagAt(item, 0).length > 0) {
-                      this.DetailTag(this.tagAt(item, 0))
-                    }
-                    if (this.tagAt(item, 1).length > 0) {
-                      this.DetailTag(this.tagAt(item, 1))
-                    }
-                    if (this.tagAt(item, 2).length > 0) {
-                      this.DetailTag(this.tagAt(item, 2))
-                    }
-                    if (this.tagAt(item, 3).length > 0) {
-                      this.DetailTag(this.tagAt(item, 3))
-                    }
-                    if (this.tagAt(item, 4).length > 0) {
-                      this.DetailTag(this.tagAt(item, 4))
-                    }
-                  }
-                  .width('100%')
-                  .margin({ top: 1 })
+                  this.DetailTagSlots(item)
                 }
 
                 if (item.ocrText && item.ocrText.length > 0) {
@@ -2037,7 +2041,12 @@ struct GalleryPage {
   }
 
   private hasAnyDisplayTag(item: GalleryAnalysisResult): boolean {
-    return this.tagAt(item, 0).length > 0 || this.tagAt(item, 1).length > 0 || this.tagAt(item, 2).length > 0;
+    for (let i = 0; i < 3; i++) {
+      if (this.tagAt(item, i).length > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private detailAt(item: GalleryAnalysisResult, index: number): string {
@@ -2052,7 +2061,12 @@ struct GalleryPage {
   }
 
   private hasAnyDisplayDetail(item: GalleryAnalysisResult): boolean {
-    return this.detailAt(item, 0).length > 0 || this.detailAt(item, 1).length > 0 || this.detailAt(item, 2).length > 0;
+    for (let i = 0; i < 3; i++) {
+      if (this.detailAt(item, i).length > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private selectedDetailItems(): GalleryAnalysisResult[] {
@@ -2102,6 +2116,44 @@ struct GalleryPage {
       .margin({ right: 6, top: 6 })
   }
 
+  @Builder InsightDetailSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.detailAt(item, index).length > 0) {
+      Text('· ' + this.detailAt(item, index))
+        .fontSize(11)
+        .fontColor('#667085')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ top: index === 0 ? 0 : 2 })
+    }
+  }
+
+  @Builder InsightDetailSlots(item: GalleryAnalysisResult) {
+    Column() {
+      this.InsightDetailSlot(item, 0)
+      this.InsightDetailSlot(item, 1)
+      this.InsightDetailSlot(item, 2)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .margin({ top: 6 })
+  }
+
+  @Builder InsightTagSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.tagAt(item, index).length > 0) {
+      this.TagChip(this.tagAt(item, index))
+    }
+  }
+
+  @Builder InsightTagSlots(item: GalleryAnalysisResult) {
+    Row() {
+      this.InsightTagSlot(item, 0)
+      this.InsightTagSlot(item, 1)
+      this.InsightTagSlot(item, 2)
+    }
+    .width('100%')
+    .height(24)
+  }
+
   @Builder InsightCard(item: GalleryAnalysisResult) {
     Row() {
       Image(this.previewUri(item))
@@ -2132,35 +2184,10 @@ struct GalleryPage {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.hasAnyDisplayDetail(item)) {
-          Column() {
-            if (this.detailAt(item, 0).length > 0) {
-              Text('· ' + this.detailAt(item, 0)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-            if (this.detailAt(item, 1).length > 0) {
-              Text('· ' + this.detailAt(item, 1)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 2 })
-            }
-            if (this.detailAt(item, 2).length > 0) {
-              Text('· ' + this.detailAt(item, 2)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 2 })
-            }
-          }
-          .alignItems(HorizontalAlign.Start)
-          .width('100%')
-          .margin({ top: 6 })
+          this.InsightDetailSlots(item)
         }
         if (this.hasAnyDisplayTag(item)) {
-          Row() {
-            if (this.tagAt(item, 0).length > 0) {
-              this.TagChip(this.tagAt(item, 0))
-            }
-            if (this.tagAt(item, 1).length > 0) {
-              this.TagChip(this.tagAt(item, 1))
-            }
-            if (this.tagAt(item, 2).length > 0) {
-              this.TagChip(this.tagAt(item, 2))
-            }
-          }
-          .width('100%')
-          .height(24)
+          this.InsightTagSlots(item)
         }
         Row() {
           Text(this.resultTime(item))

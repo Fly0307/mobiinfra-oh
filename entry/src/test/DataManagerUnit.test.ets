@@ -29,24 +29,40 @@ import {
   isHomeTodoIndexCandidate,
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
-  resolveQueryLimit
+  resolveQueryLimit,
+  buildProfileDomainStateFromPayload,
+  isProfileDomainStateReusable
 } from '../main/ets/datamanager/IndexService';
 import {
+  buildFactSplitPromptPreview,
   buildEnrichPromptPreview,
+  DataPipelineModelClient,
   shouldKeepTodoAgentTask
 } from '../main/ets/datamanager/DataPipelineModelClient';
-import { setHomeRecommendationCompletedInDocument, shouldShowHomeRecommendationInView } from '../main/ets/datamanager/DataManagerFacade';
+import {
+  homeProfileCompleteness,
+  homeProfileDomainDescription,
+  homeProfileDomainFullDescription,
+  setHomeRecommendationCompletedInDocument,
+  shouldShowHomeRecommendationInView
+} from '../main/ets/datamanager/DataManagerFacade';
 import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupState,
   HomeRecommendationsDocument,
   HomeRecommendationState,
+  HomeDomainViewModel,
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
+  DataManagerModelConfig,
   SourceEntry,
-  createJsonMap
+  ProfileClaim,
+  ProfileDomainState,
+  ProfileModelPayload,
+  createJsonMap,
+  createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
@@ -108,6 +124,19 @@ function demoRecommendationState(id: string, completed: boolean): HomeRecommenda
   };
 }
 
+function demoHomeDomain(domain: string, desc: string): HomeDomainViewModel {
+  return {
+    domain: domain,
+    icon: domain,
+    title: domain,
+    desc: desc,
+    fullDesc: desc,
+    claims: [],
+    color: '#000000',
+    eventCount: desc === '暂无数据' ? 0 : 1
+  };
+}
+
 function demoHomeRecommendationEvent(id: string, eventDate: string, deadline: string): IndexedEvent {
   let event = demoIndexedEvent(id, '微信里提到一个待办事项', '微信', 'work', '待办');
   event.event_date = eventDate;
@@ -118,6 +147,45 @@ function demoHomeRecommendationEvent(id: string, eventDate: string, deadline: st
     agent_task: ''
   };
   return event;
+}
+
+function disabledModelConfig(): DataManagerModelConfig {
+  return {
+    baseUrl: '',
+    apiKey: '',
+    enabled: false
+  };
+}
+
+function demoProfileClaim(statement: string): ProfileClaim {
+  return {
+    statement: statement,
+    kind: 'preference',
+    confidence: 'medium',
+    event_ids: ['e1', 'e2'],
+    evidence_count: 2,
+    start_date: '2026-05-29',
+    end_date: '2026-05-30',
+    example: '用户记录了咖啡相关消费'
+  };
+}
+
+function demoProfileDomainState(generation: string): ProfileDomainState {
+  let range = createStringMap();
+  range.start_date = '2026-05-29';
+  range.end_date = '2026-05-30';
+  return {
+    domain: 'eat',
+    display_name: '吃',
+    input_hash: 'hash',
+    event_ids: ['e1', 'e2'],
+    event_count: 2,
+    date_range: range,
+    short_summary: '',
+    summary: '',
+    claims: [],
+    generation: generation
+  };
 }
 
 function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
@@ -191,6 +259,92 @@ export default function dataManagerUnitTest() {
       expect(normalizeProfileShortSummary('健康轻食餐')).assertEqual('');
       expect(profileShortSummaryFromText('eat', '近期咖啡、奶茶等话题反复出现。', '')).assertEqual('咖啡奶茶');
       expect(profileShortSummaryFromText('travel', '', '近期记录')).assertEqual('近期记录');
+    });
+
+    it('profileGenerationReturnsEmptyWhenModelUnavailable', 0, async () => {
+      let client = new DataPipelineModelClient();
+      let event = demoIndexedEvent('e1', '近期咖啡、奶茶等话题反复出现。', '微信', 'eat', '咖啡');
+      let payload = await client.generateProfile('eat', [event], [], disabledModelConfig());
+      expect(payload.summary).assertEqual('');
+      expect(payload.short_summary).assertEqual('');
+      expect(payload.claims.length).assertEqual(0);
+      expect(payload.generation).assertEqual('model_unavailable');
+    });
+
+    it('profileDomainStateDoesNotDeriveMissingSummary', 0, () => {
+      let range = createStringMap();
+      range.start_date = '2026-05-29';
+      range.end_date = '2026-05-30';
+      let payload: ProfileModelPayload = {
+        short_summary: '咖啡奶茶',
+        summary: '模型给出的摘要不应在无有效 claims 时落盘',
+        claims: [],
+        generation: 'model'
+      };
+      let emptyState = buildProfileDomainStateFromPayload('eat', 'hash', ['e1', 'e2'], 2, range, payload, []);
+      expect(emptyState.summary).assertEqual('');
+      expect(emptyState.short_summary).assertEqual('');
+      expect(emptyState.claims.length).assertEqual(0);
+      expect(emptyState.generation).assertEqual('model_empty');
+
+      let modelState = buildProfileDomainStateFromPayload('eat', 'hash', ['e1', 'e2'], 2, range, {
+        short_summary: '',
+        summary: '',
+        claims: [],
+        generation: 'model'
+      }, [demoProfileClaim('用户在多条记录中关注咖啡和奶茶。')]);
+      expect(modelState.summary).assertEqual('');
+      expect(modelState.short_summary).assertEqual('');
+      expect(modelState.claims.length).assertEqual(1);
+      expect(modelState.generation).assertEqual('model');
+    });
+
+    it('profileDomainReuseRejectsHeuristicAndFailureStates', 0, () => {
+      expect(isProfileDomainStateReusable(demoProfileDomainState('heuristic'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_error'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_unavailable'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model'), 2)).assertTrue();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_empty'), 2)).assertTrue();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('empty'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('empty'), 0)).assertTrue();
+    });
+
+    it('homeProfileDescriptionShowsExistingProfileWithoutShortSummary', 0, () => {
+      let state = demoProfileDomainState('model');
+      state.summary = '模型已经生成了完整的饮食画像。';
+      state.claims = [demoProfileClaim('用户在多条记录中关注咖啡和奶茶。')];
+      expect(homeProfileDomainDescription(state)).assertEqual('查看画像');
+      expect(homeProfileDomainFullDescription(state)).assertEqual('模型已经生成了完整的饮食画像。');
+
+      state.short_summary = '咖啡奶茶';
+      expect(homeProfileDomainDescription(state)).assertEqual('咖啡奶茶');
+    });
+
+    it('homeProfileCompletenessCountsVisibleProfileDomains', 0, () => {
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '暂无数据'),
+        demoHomeDomain('wear', '暂无数据'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(0);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '暂无数据'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(25);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '简约舒适'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(50);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '简约舒适'),
+        demoHomeDomain('live', '整洁有序'),
+        demoHomeDomain('travel', '地铁通勤')
+      ])).assertEqual(100);
     });
 
     it('atomicizeCandidateFacts', 0, () => {
@@ -455,6 +609,39 @@ export default function dataManagerUnitTest() {
       expect(shouldKeepTodoAgentTask('buy', ['聊天', '购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('buy', ['购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('plan', ['聊天'])).assertFalse();
+    });
+
+    it('factSplitPromptPreviewUsesSemanticBatchPayload', 0, () => {
+      let entry: SourceEntry = {
+        source_date: '2026-06-05',
+        file_name: 'chat.md',
+        entry_index: 7,
+        entry_text: '微信聊天里提到今天买 iPhone 16 Pro，淘宝页面显示价格 7999 元。',
+        workflow_metadata: createJsonMap(),
+        workflow_scene_id: 3,
+        source_ref: '2026-06-05/chat.md#7'
+      };
+      let preview = buildFactSplitPromptPreview([entry]);
+
+      expect(preview.userPrompt.indexOf('"source_ref"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"source_date"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"workflow_scene_label"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"entry_text"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"file_name"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"entry_index"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"workflow_metadata"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('聊天') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('iPhone 16 Pro') >= 0).assertTrue();
+
+      expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('source_ref：输入 entry 的唯一引用标识') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('source_date：daily-log 文件日期') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_label：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('entry_text：原始日志条目正文') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('"items"') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('"facts"') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('一条原始记录中如果包含多件不同事情') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('订单、账单、交易、消费记录') >= 0).assertTrue();
     });
 
     it('enrichPromptPreviewExplainsFieldsAndOmitsSceneIds', 0, () => {

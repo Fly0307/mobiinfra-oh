@@ -69,6 +69,7 @@ export interface ProfileModelPayload {
   short_summary: string;
   summary: string;
   claims: RawProfileClaim[];
+  generation: string;
 }
 
 export const DOMAIN_DISPLAY_NAMES: StringMap = createStringMap();

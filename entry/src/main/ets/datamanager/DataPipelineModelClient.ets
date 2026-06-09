@@ -2,7 +2,6 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudChatMessage, CloudModelClient } from '../utils/CloudModelClient';
 import {
   DOMAIN_DESCRIPTIONS,
-  DOMAIN_DISPLAY_NAMES,
   AggregatedRecord,
   CandidateFact,
   CollectionGroupState,
@@ -14,11 +13,9 @@ import {
   IndexedEvent,
   IndexedEventTodo,
   JsonMap,
-  NumberMap,
   ProfileClaim,
   ProfileModelPayload,
   RawProfileClaim,
-  StringArrayMap,
   SourceEntry
 } from './DataManagerTypes';
 import {
@@ -35,7 +32,6 @@ import {
   normalizeProfileShortSummary,
   normalizedSimilarityKey,
   normalizedTransactionSignature,
-  profileShortSummaryFromText,
   selectCandidateRecords,
   sourceDisplayName,
   stableUnique,
@@ -48,9 +44,7 @@ import { workflowSceneLabel } from '../utils/WorkflowSceneConfig';
 interface BatchSplitEntryPromptPayload {
   source_date: string;
   source_ref: string;
-  file_name: string;
-  entry_index: number;
-  workflow_metadata: JsonMap;
+  workflow_scene_label: string;
   entry_text: string;
 }
 
@@ -103,6 +97,11 @@ export interface EnrichPromptPreview {
   userPrompt: string;
 }
 
+export interface FactSplitPromptPreview {
+  systemPrompt: string;
+  userPrompt: string;
+}
+
 interface ProfileEventPromptPayload {
   event_id: string;
   date: string;
@@ -141,7 +140,21 @@ interface ProfileMergePromptPayload {
 
 interface ProfileMergeResult {
   short_summary: string;
+  summary: string;
   claims: RawProfileClaim[];
+}
+
+interface ProfileShortSummaryRepairClaimPayload {
+  statement: string;
+  kind: string;
+  confidence: string;
+}
+
+interface ProfileShortSummaryRepairPromptPayload {
+  domain: string;
+  domain_description: string;
+  summary: string;
+  claims: ProfileShortSummaryRepairClaimPayload[];
 }
 
 interface EntityResolutionPromptPayload {
@@ -205,15 +218,93 @@ export function shouldKeepTodoAgentTask(type: string, workflowSceneLabels: strin
 }
 
 const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
-  '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。' +
-  '输入包含 entries，每条都有 source_ref/source_date/file_name/entry_index/workflow_metadata/entry_text。返回严格 JSON：' +
-  '{"items":[{"source_ref":"原样返回","facts":[{"summary":"一句话摘要","normalized_fact":"适合长期画像沉淀的整理后表述","event_date":"YYYY-MM-DD 或空字符串","tags":["标签1"],"model_notes":"简短说明"}]}]}。' +
-  '必须为每个输入 source_ref 返回一个 item。订单、账单、交易、消费记录必须保留商家、商品/服务、金额、时间、状态等关键细节。不要输出 markdown。';
+  '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。\n\n' +
+  '输入字段说明：\n' +
+  'source_ref：输入 entry 的唯一引用标识，只需要在输出 item 中原样返回，用于把 facts 归还给对应 entry。\n' +
+  'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
+  'workflow_scene_label：工作流采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
+  'entry_text：原始日志条目正文，是拆分事实的主要依据。\n\n' +
+  '返回严格 JSON，格式为：\n' +
+  '{\n' +
+  '  "items": [\n' +
+  '    {\n' +
+  '      "source_ref": "原样返回输入 source_ref",\n' +
+  '      "facts": [\n' +
+  '        {\n' +
+  '          "summary": "一句话摘要",\n' +
+  '          "normalized_fact": "适合长期画像沉淀的整理后表述",\n' +
+  '          "event_date": "YYYY-MM-DD 或空字符串",\n' +
+  '          "tags": ["标签1", "标签2"],\n' +
+  '          "model_notes": "简短说明这条事实是如何从原文拆出来的"\n' +
+  '        }\n' +
+  '      ]\n' +
+  '    }\n' +
+  '  ]\n' +
+  '}\n\n' +
+  '必须为每个输入 source_ref 返回一个 item。没有可沉淀事实时，也返回该 source_ref 且 facts 为空数组。\n\n' +
+  '要求：\n' +
+  '1. 一条原始记录中如果包含多件不同事情，拆成多条 facts。\n' +
+  '2. 如果原文只是同一事件的重复表述，不要重复拆分。\n' +
+  '3. event_date 如果无法明确判断，就使用空字符串。\n' +
+  '4. 如果是订单、账单、交易、消费记录，normalized_fact 必须尽量保留关键细节，例如商家、商品/服务、金额、时间、状态；不要压缩成只有“实付25.8元”这种只剩金额的信息。\n' +
+  '5. 不要输出 markdown，不要解释，只输出 JSON。';
+
+function splitWorkflowSceneLabel(entry: SourceEntry): string {
+  if (isNaN(entry.workflow_scene_id) || entry.workflow_scene_id < 0) {
+    return '';
+  }
+  return workflowSceneLabel(entry.workflow_scene_id);
+}
+
+function buildBatchSplitPromptPayload(entries: SourceEntry[]): BatchSplitPromptPayload {
+  let promptEntries: BatchSplitEntryPromptPayload[] = entries.map((entry: SourceEntry): BatchSplitEntryPromptPayload => {
+    let item: BatchSplitEntryPromptPayload = {
+      source_date: entry.source_date,
+      source_ref: entry.source_ref,
+      workflow_scene_label: splitWorkflowSceneLabel(entry),
+      entry_text: entry.entry_text
+    };
+    return item;
+  });
+  let promptPayload: BatchSplitPromptPayload = {
+    entries: promptEntries
+  };
+  return promptPayload;
+}
+
+export function buildFactSplitPromptPreview(entries: SourceEntry[]): FactSplitPromptPreview {
+  let preview: FactSplitPromptPreview = {
+    systemPrompt: BATCH_FACT_SPLIT_SYSTEM_PROMPT,
+    userPrompt: ArkJSON.stringify(buildBatchSplitPromptPayload(entries), null, 2)
+  };
+  return preview;
+}
 
 const DEDUP_SYSTEM_PROMPT: string =
-  '你是一个日志去重助手。比较一条候选事实和若干历史记录，判断它是否应该新增、重复、合并或跳过。' +
-  '返回严格 JSON：{"decision":"new | duplicate | merge_with_existing | skip_ambiguous","matched_record_ids":[1],"reason":"简短理由","merged_summary":"","merged_fact":"","merged_tags":["标签1"]}。' +
-  'matched_record_ids 最多返回一个最相关历史记录。不要把多笔账单或多段聊天合并成一个大记录。不要输出 markdown。';
+  '你是一个日志去重助手。你会比较一条候选事实和若干条历史记录，判断它是否应该新增、视为重复、合并到现有记录，或因信息不足而跳过。\n' +
+  '\n' +
+  '返回严格 JSON，格式为：\n' +
+  '{\n' +
+  '  "decision": "new | duplicate | merge_with_existing | skip_ambiguous",\n' +
+  '  "matched_record_ids": [1],\n' +
+  '  "reason": "简短理由",\n' +
+  '  "merged_summary": "如果需要合并，可给出更好的摘要，否则为空字符串",\n' +
+  '  "merged_fact": "如果需要合并，可给出更好的整理后事实，否则为空字符串",\n' +
+  '  "merged_tags": ["标签1"]\n' +
+  '}\n' +
+  '\n' +
+  '判断标准：\n' +
+  '1. duplicate: 候选事实和历史记录表达的是同一件事，且没有新增信息。\n' +
+  '2. merge_with_existing: 候选事实和历史记录高度相关，但带来补充细节，适合并入已有记录；只能用于同一个原子条目，绝不能把多个账单条目或多段聊天合并成一个大记录。\n' +
+  '3. new: 是新的独立事实。\n' +
+  '4. skip_ambiguous: 无法稳定判断。\n' +
+  '\n' +
+  '额外要求：\n' +
+  '1. 一条账单记录只能对应一个账单条目，例如一笔收益、一笔消费、一笔买入。\n' +
+  '2. 不要把“0.37元、0.38元、0.39元”这种多条账单合并成一条记录，除非它们本来就是同一条账单事实的重复表述。\n' +
+  '3. matched_record_ids 最多返回一个最相关的历史记录。\n' +
+  '\n' +
+  '不要输出 markdown，不要解释，只输出 JSON。';
 
 const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '你是本地个人数据索引助手。请批量为输入事件提取关键词、领域、实体和可能的待办事项信号。' +
@@ -340,12 +431,18 @@ const PROFILE_MERGE_SYSTEM_PROMPT: string =
   '每条结论必须至少由 2 个 event_ids 支持；event_ids 必须来自输入候选结论。合并上一版画像时，只保留仍被候选结论支持的内容。' +
   'short_summary 必须严格为 4 个中文字符，不要标点、空格、数字或解释。不要在 summary 或 statement 中写金额、订单状态、具体日期、证据数量或“事件 id”。relation 类 insight 只适合 other 领域；吃、穿、住、行、办公领域不要输出联系人关系画像。不要输出 markdown 或解释。';
 
+const PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT: string =
+  '你是用户画像短摘要修复助手。输入是一段已经由模型生成的领域画像 summary 和 claims。' +
+  '你的唯一任务是为首页生成严格 4 个中文字符的短摘要，返回严格 JSON：{"short_summary":"四个中文字符"}。' +
+  'short_summary 必须只基于输入画像内容，不要引入新事实；必须正好 4 个中文字符，不要标点、空格、数字、英文或解释。' +
+  '风格像“清淡轻食”“简约舒适”“整洁有序”“地铁通勤”。无法生成时返回 {"short_summary":""}。不要输出 markdown。';
+
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
 const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
 
 const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
-  '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或主题，而不是来自固定模板。' +
+  '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或内容主题。' +
   '返回严格 JSON：{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。' +
   '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。' +
   '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。' +
@@ -387,21 +484,10 @@ export class DataPipelineModelClient {
     let chunks = this.chunkSourceEntries(entries, 24);
     for (let chunk of chunks) {
       let entryMap: Record<string, SourceEntry> = {};
-      let promptEntries: BatchSplitEntryPromptPayload[] = chunk.map((entry: SourceEntry): BatchSplitEntryPromptPayload => {
+      chunk.forEach((entry: SourceEntry) => {
         entryMap[entry.source_ref] = entry;
-        let item: BatchSplitEntryPromptPayload = {
-          source_date: entry.source_date,
-          source_ref: entry.source_ref,
-          file_name: entry.file_name,
-          entry_index: entry.entry_index,
-          workflow_metadata: entry.workflow_metadata,
-          entry_text: entry.entry_text
-        };
-        return item;
       });
-      let promptPayload: BatchSplitPromptPayload = {
-        entries: promptEntries
-      };
+      let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
       try {
         dataManagerInfo(`Batch split request: entries=${chunk.length}`);
         let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
@@ -557,8 +643,11 @@ export class DataPipelineModelClient {
   }
 
   async generateProfile(domain: string, events: IndexedEvent[], previousClaims: ProfileClaim[], config: DataManagerModelConfig): Promise<ProfileModelPayload> {
-    if (!this.isEnabled(config) || events.length === 0) {
-      return this.heuristicProfile(domain, events);
+    if (events.length === 0) {
+      return this.emptyProfilePayload('empty');
+    }
+    if (!this.isEnabled(config)) {
+      return this.emptyProfilePayload('model_unavailable');
     }
     try {
       let promptPayloads = this.profileModelPromptChunks(domain, events, previousClaims);
@@ -567,13 +656,14 @@ export class DataPipelineModelClient {
         let parsed = this.normalizeProfilePayload(payload);
         let claims = this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 8);
         if (claims.length === 0) {
-          return this.heuristicProfile(domain, events);
+          return this.emptyProfilePayload('model_empty');
         }
-        let summary = this.profileSummaryFromRawClaims(domain, claims);
+        let shortSummary = await this.ensureProfileShortSummary(domain, parsed.short_summary, parsed.summary, claims, config);
         return {
-          short_summary: this.profileShortSummary(domain, parsed.short_summary, summary, claims, events),
-          summary: summary,
-          claims: claims
+          short_summary: shortSummary,
+          summary: parsed.summary,
+          claims: claims,
+          generation: 'model'
         };
       }
       let candidateClaims: RawProfileClaim[] = [];
@@ -584,18 +674,19 @@ export class DataPipelineModelClient {
       }
       let merged = await this.mergeProfileClaimsWithModel(domain, candidateClaims, previousClaims, events, config);
       if (merged.claims.length === 0) {
-        return this.heuristicProfile(domain, events);
+        return this.emptyProfilePayload('model_empty');
       }
-      let summary = this.profileSummaryFromRawClaims(domain, merged.claims);
+      let shortSummary = await this.ensureProfileShortSummary(domain, merged.short_summary, merged.summary, merged.claims, config);
       return {
-        short_summary: this.profileShortSummary(domain, merged.short_summary, summary, merged.claims, events),
-        summary: summary,
-        claims: merged.claims
+        short_summary: shortSummary,
+        summary: merged.summary,
+        claims: merged.claims,
+        generation: 'model'
       };
     } catch (e) {
       let err = e as Error;
-      dataManagerError(`Profile fallback: domain=${domain}, error=${err.message}`);
-      return this.heuristicProfile(domain, events);
+      dataManagerError(`Profile model failed: domain=${domain}, error=${err.message}`);
+      return this.emptyProfilePayload('model_error');
     }
   }
 
@@ -1134,32 +1225,40 @@ export class DataPipelineModelClient {
     events: IndexedEvent[], config: DataManagerModelConfig): Promise<ProfileMergeResult> {
     let pending = this.normalizeGeneratedProfileClaims(candidateClaims, events, domain, 80);
     if (pending.length === 0) {
-      return { short_summary: '', claims: [] };
+      return { short_summary: '', summary: '', claims: [] };
     }
     let currentPrevious = previousClaims;
+    let latestShortSummary = '';
+    let latestSummary = '';
     for (let round = 1; round <= PROFILE_MODEL_MERGE_ROUND_LIMIT; round++) {
       let payloads = this.profileModelMergePayloads(domain, pending, currentPrevious, round);
       let merged: RawProfileClaim[] = [];
       let shortSummary = '';
+      let summary = '';
       for (let payload of payloads) {
         let raw = await this.callJson(config, 'profile.merge.' + domain, PROFILE_MERGE_SYSTEM_PROMPT, this.profilePromptText(payload));
         let parsed = this.normalizeProfilePayload(raw);
         if (shortSummary.length === 0) {
           shortSummary = parsed.short_summary;
         }
+        if (summary.length === 0) {
+          summary = parsed.summary;
+        }
         merged = merged.concat(this.normalizeGeneratedProfileClaims(parsed.claims, events, domain, 16));
       }
       merged = this.normalizeGeneratedProfileClaims(merged, events, domain, 80);
       if (merged.length === 0) {
-        return { short_summary: '', claims: pending.slice(0, 8) };
+        return { short_summary: '', summary: '', claims: [] };
       }
+      latestShortSummary = shortSummary;
+      latestSummary = summary;
       if (payloads.length === 1 || merged.length >= pending.length) {
-        return { short_summary: shortSummary, claims: merged.slice(0, 8) };
+        return { short_summary: shortSummary, summary: summary, claims: merged.slice(0, 8) };
       }
       pending = merged;
       currentPrevious = [];
     }
-    return { short_summary: '', claims: pending.slice(0, 8) };
+    return { short_summary: latestShortSummary, summary: latestSummary, claims: pending.slice(0, 8) };
   }
 
   private normalizeGeneratedProfileClaims(rawClaims: RawProfileClaim[], events: IndexedEvent[], domain: string, limit: number): RawProfileClaim[] {
@@ -1224,94 +1323,48 @@ export class DataPipelineModelClient {
     return false;
   }
 
-  private profileSummaryFromRawClaims(domain: string, claims: RawProfileClaim[]): string {
-    let statements = claims
-      .map((claim: RawProfileClaim) => normalizeFreeText(claim.statement).replace(/。$/g, ''))
-      .filter((statement: string) => statement.length > 0);
-    if (statements.length === 0) {
-      return '';
-    }
-    return summarizeText(`${DOMAIN_DISPLAY_NAMES[domain] || domain}领域呈现出这些倾向：${statements.slice(0, 3).join('；')}。`, 180);
-  }
-
-  private profileShortSummary(domain: string, modelShortSummary: string, summary: string, claims: RawProfileClaim[], events: IndexedEvent[]): string {
-    let normalized = normalizeProfileShortSummary(modelShortSummary);
-    if (normalized.length > 0) {
-      return normalized;
-    }
-    for (let claim of claims) {
-      let fromClaim = profileShortSummaryFromText(domain, claim.statement, '');
-      if (fromClaim.length === 4) {
-        return fromClaim;
-      }
-    }
-    let fromSummary = profileShortSummaryFromText(domain, summary, '');
-    if (fromSummary.length === 4) {
-      return fromSummary;
-    }
-    for (let event of events) {
-      let fromEvent = profileShortSummaryFromText(domain, event.summary || event.normalized_fact, '');
-      if (fromEvent.length === 4) {
-        return fromEvent;
-      }
-    }
-    return profileShortSummaryFromText(domain, '', '近期记录');
-  }
-
-  private heuristicProfile(domain: string, events: IndexedEvent[]): ProfileModelPayload {
-    if (events.length === 0) {
-      let empty: ProfileModelPayload = { short_summary: '', summary: '', claims: [] };
-      return empty;
-    }
-    let sourceCounter: NumberMap = {};
-    let keywordCounter: NumberMap = {};
-    let keywordEvents: StringArrayMap = {};
-    for (let event of events) {
-      event.sources.forEach((source: string) => {
-        sourceCounter[source] = (sourceCounter[source] || 0) + 1;
-      });
-      event.keywords.slice(0, 10).forEach((keyword: string) => {
-        keywordCounter[keyword] = (keywordCounter[keyword] || 0) + 1;
-        if (!keywordEvents[keyword]) {
-          keywordEvents[keyword] = [];
-        }
-        keywordEvents[keyword].push(event.event_id);
-      });
-    }
-    let topKeywords = Object.keys(keywordCounter).sort((a: string, b: string) => keywordCounter[b] - keywordCounter[a]).slice(0, 3);
-    let claims: RawProfileClaim[] = [];
-    if (topKeywords.length > 0) {
-      let ids: string[] = [];
-      topKeywords.forEach((keyword: string) => {
-        ids = ids.concat(keywordEvents[keyword] || []);
-      });
-      let claim: RawProfileClaim = {
-        statement: `近期${topKeywords.join('、')}等话题反复出现。`,
-        kind: 'observation',
-        confidence: events.length >= 5 ? 'medium' : 'low',
-        event_ids: stableUnique(ids).slice(0, 8),
-        example: events[events.length - 1].summary
-      };
-      claims.push(claim);
-    }
-    let topSource = Object.keys(sourceCounter).sort((a: string, b: string) => sourceCounter[b] - sourceCounter[a])[0] || '';
-    if (topSource.length > 0 && events.length >= 2) {
-      let claim: RawProfileClaim = {
-        statement: `该领域的数据主要来自${topSource}。`,
-        kind: 'source',
-        confidence: 'medium',
-        event_ids: events.slice(-6).map((event: IndexedEvent) => event.event_id),
-        example: events[events.length - 1].summary
-      };
-      claims.push(claim);
-    }
+  private emptyProfilePayload(generation: string): ProfileModelPayload {
     let payload: ProfileModelPayload = {
       short_summary: '',
-      summary: claims.length > 0 ? claims.map((claim: RawProfileClaim) => normalizeFreeText(claim.statement)).join('；') + '。' : '',
-      claims: claims
+      summary: '',
+      claims: [],
+      generation: generation
     };
-    payload.short_summary = this.profileShortSummary(domain, '', payload.summary, claims, events);
     return payload;
+  }
+
+  private async ensureProfileShortSummary(domain: string, shortSummary: string, summary: string, claims: RawProfileClaim[],
+    config: DataManagerModelConfig): Promise<string> {
+    let normalized = normalizeProfileShortSummary(shortSummary);
+    if (normalized.length > 0 || claims.length === 0) {
+      return normalized;
+    }
+    return this.repairProfileShortSummary(domain, summary, claims, config);
+  }
+
+  private async repairProfileShortSummary(domain: string, summary: string, claims: RawProfileClaim[],
+    config: DataManagerModelConfig): Promise<string> {
+    let payload: ProfileShortSummaryRepairPromptPayload = {
+      domain: domain,
+      domain_description: DOMAIN_DESCRIPTIONS[domain] || domain,
+      summary: normalizeFreeText(summary),
+      claims: claims.slice(0, 5).map((claim: RawProfileClaim): ProfileShortSummaryRepairClaimPayload => {
+        let item: ProfileShortSummaryRepairClaimPayload = {
+          statement: summarizeText(claim.statement, 100),
+          kind: claim.kind,
+          confidence: claim.confidence
+        };
+        return item;
+      })
+    };
+    try {
+      let raw = await this.callJson(config, 'profile.short_summary.' + domain, PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT, this.profilePromptText(payload));
+      return normalizeProfileShortSummary(raw['short_summary']);
+    } catch (e) {
+      let err = e as Error;
+      dataManagerError(`Profile short summary repair failed: domain=${domain}, error=${err.message}`);
+      return '';
+    }
   }
 
   private isEnabled(config: DataManagerModelConfig): boolean {
@@ -1441,7 +1494,8 @@ export class DataPipelineModelClient {
     let result: ProfileModelPayload = {
       short_summary: normalizeProfileShortSummary(payload['short_summary']),
       summary: normalizeFreeText(payload['summary']),
-      claims: claims
+      claims: claims,
+      generation: 'model'
     };
     return result;
   }

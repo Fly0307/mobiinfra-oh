@@ -50,7 +50,6 @@ import {
   normalizeProfileShortSummary,
   nowIsoLocal,
   parseNumberedEntries,
-  profileShortSummaryFromText,
   publicEvent,
   sourceSearchText,
   stableUnique,
@@ -232,6 +231,50 @@ export function eventEnrichInputFingerprint(event: IndexedEvent): string {
 
 export function isEventEnrichInputReusable(previousHash: string, currentHash: string, previousEventExists: boolean): boolean {
   return previousEventExists && normalizeFreeText(previousHash).length > 0 && previousHash === currentHash;
+}
+
+function profileGenerationFromModelPayload(payload: ProfileModelPayload, claims: ProfileClaim[]): string {
+  let generation = normalizeFreeText(payload.generation);
+  if (claims.length === 0) {
+    if (generation === 'model') {
+      return 'model_empty';
+    }
+    return generation.length > 0 ? generation : 'model_empty';
+  }
+  return 'model';
+}
+
+export function isProfileDomainStateReusable(domain: ProfileDomainState | undefined, eventCount: number): boolean {
+  if (!domain || !Array.isArray(domain.claims)) {
+    return false;
+  }
+  let generation = normalizeFreeText(domain.generation);
+  if (generation === 'model' || generation === 'model_empty') {
+    return true;
+  }
+  return generation === 'empty' && eventCount === 0;
+}
+
+export function buildProfileDomainStateFromPayload(domain: string, inputHash: string, eventIds: string[], eventCount: number,
+  dateRange: StringMap, payload: ProfileModelPayload, claims: ProfileClaim[]): ProfileDomainState {
+  let generation = profileGenerationFromModelPayload(payload, claims);
+  let hasModelClaims = generation === 'model' && claims.length > 0;
+  let range: StringMap = createStringMap();
+  range.start_date = dateRange ? dateRange.start_date || '' : '';
+  range.end_date = dateRange ? dateRange.end_date || '' : '';
+  let domainState: ProfileDomainState = {
+    domain: domain,
+    display_name: DOMAIN_DISPLAY_NAMES[domain] || domain,
+    input_hash: inputHash,
+    event_ids: eventIds.slice(),
+    event_count: eventCount,
+    date_range: range,
+    short_summary: hasModelClaims ? normalizeProfileShortSummary(payload.short_summary) : '',
+    summary: hasModelClaims ? normalizeFreeText(payload.summary) : '',
+    claims: hasModelClaims ? claims : [],
+    generation: generation
+  };
+  return domainState;
 }
 
 export class IndexService {
@@ -1671,14 +1714,11 @@ export class IndexService {
       let inputHash = this.profileDomainInputHash(domain, domainEvents, modelConfig);
       let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
       let domainState: ProfileDomainState;
-      if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && Array.isArray(previousDomain.claims)) {
+      if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
         domainState = this.copyProfileDomain(previousDomain);
         domainState.event_ids = eventIds;
         domainState.event_count = eventIds.length;
         domainState.date_range = this.eventDateRange(domainEvents);
-        if (domainState.short_summary.length === 0 && domainState.event_count > 0) {
-          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, domainState.claims || []);
-        }
         dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
       } else if (domainEvents.length === 0) {
         domainState = {
@@ -1696,24 +1736,7 @@ export class IndexService {
       } else {
         let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
         let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
-        domainState = {
-          domain: domain,
-          display_name: DOMAIN_DISPLAY_NAMES[domain] || domain,
-          input_hash: inputHash,
-          event_ids: eventIds,
-          event_count: domainEvents.length,
-          date_range: this.eventDateRange(domainEvents),
-          short_summary: normalizeProfileShortSummary(payload.short_summary),
-          summary: normalizeFreeText(payload.summary),
-          claims: claims,
-          generation: modelConfig.enabled ? 'model' : 'heuristic'
-        };
-        if (domainState.summary.length === 0 && claims.length > 0) {
-          domainState.summary = this.profileSummaryFromClaims(domain, claims);
-        }
-        if (domainState.short_summary.length === 0) {
-          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, claims);
-        }
+        domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
       }
       domainsState[domain] = domainState;
       domainIndex++;
@@ -1740,7 +1763,7 @@ export class IndexService {
     let parts: string[] = [
       domain,
       'short_summary_v1',
-      modelConfig.enabled ? 'model' : 'heuristic',
+      modelConfig.enabled ? 'model' : 'model_unavailable',
       modelConfig.enabled ? String(PROFILE_MODEL_MAX_TOKENS) : '0',
       modelConfig.enabled ? String(PROFILE_MODEL_PROMPT_CHAR_LIMIT) : '0',
       modelConfig.enabled ? String(PROFILE_MODEL_MERGE_CHAR_LIMIT) : '0'
@@ -1864,30 +1887,6 @@ export class IndexService {
       }
     }
     return false;
-  }
-
-  private profileSummaryFromClaims(domain: string, claims: ProfileClaim[]): string {
-    let statements = claims
-      .map((claim: ProfileClaim) => normalizeFreeText(claim.statement).replace(/。$/g, ''))
-      .filter((statement: string) => statement.length > 0);
-    if (statements.length === 0) {
-      return '';
-    }
-    return `${DOMAIN_DISPLAY_NAMES[domain] || domain}领域呈现出这些倾向：${statements.slice(0, 3).join('；')}。`;
-  }
-
-  private profileShortSummary(domain: string, summary: string, claims: ProfileClaim[]): string {
-    for (let claim of claims) {
-      let fromClaim = profileShortSummaryFromText(domain, claim.statement, '');
-      if (fromClaim.length === 4) {
-        return fromClaim;
-      }
-    }
-    let fromSummary = profileShortSummaryFromText(domain, summary, '');
-    if (fromSummary.length === 4) {
-      return fromSummary;
-    }
-    return profileShortSummaryFromText(domain, '', '近期记录');
   }
 
   private renderProfileMarkdown(profile: ProfileState): string {

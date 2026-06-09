@@ -41,7 +41,6 @@ import {
   nowIsoLocal,
   parseDailyLogDocument,
   parseNumberedEntries,
-  profileShortSummaryFromText,
   sourceAppDisplayName,
   sourceDisplayName,
   sourceRef,
@@ -137,6 +136,44 @@ export function setHomeRecommendationCompletedInDocument(document: HomeRecommend
     item.completed = completed;
   });
   return matched;
+}
+
+export function homeProfileDomainDescription(doc: ProfileDomainState | undefined): string {
+  if (!doc || doc.event_count === 0) {
+    return '暂无数据';
+  }
+  let shortSummary = normalizeFreeText(doc.short_summary);
+  if (shortSummary.length > 0) {
+    return shortSummary;
+  }
+  let summary = normalizeFreeText(doc.summary);
+  let claims = doc.claims || [];
+  if (summary.length > 0 || claims.length > 0) {
+    return '查看画像';
+  }
+  return '暂无数据';
+}
+
+export function homeProfileDomainFullDescription(doc: ProfileDomainState | undefined): string {
+  if (!doc || doc.event_count === 0) {
+    return '暂无数据';
+  }
+  let summary = normalizeFreeText(doc.summary);
+  if (summary.length > 0) {
+    return summary;
+  }
+  return '暂无数据';
+}
+
+export function homeProfileCompleteness(domains: HomeDomainViewModel[]): number {
+  let total = 4;
+  let count = 0;
+  domains.slice(0, total).forEach((domain: HomeDomainViewModel) => {
+    if (normalizeFreeText(domain.desc) !== '暂无数据') {
+      count++;
+    }
+  });
+  return Math.round(count * 100 / total);
 }
 
 function emptyCollectionViewModel(index: number): CollectionViewModel {
@@ -523,8 +560,8 @@ export class DataManagerFacade {
         domain: item.domain,
         icon: item.icon,
         title: item.title,
-        desc: this.domainDescription(doc),
-        fullDesc: this.domainFullDescription(doc),
+        desc: homeProfileDomainDescription(doc),
+        fullDesc: homeProfileDomainFullDescription(doc),
         claims: this.domainClaimStatements(doc),
         color: item.color,
         eventCount: doc ? doc.event_count : 0
@@ -534,7 +571,7 @@ export class DataManagerFacade {
     let recommendations = this.homeRecommendations();
     return {
       updatedLabel: this.lastSyncLabel([]),
-      completeness: this.profileCompleteness(profile),
+      completeness: homeProfileCompleteness(domains),
       totalEvents: profile.event_count,
       domains: domains,
       recommendations: recommendations,
@@ -795,43 +832,6 @@ export class DataManagerFacade {
     return `最近整理了 ${events.length} 条记录，最新来自 ${latest.sources.join('、') || '本地日志'}。`;
   }
 
-  private domainDescription(doc: ProfileDomainState | undefined): string {
-    if (!doc || doc.event_count === 0) {
-      return '暂无数据';
-    }
-    let shortSummary = normalizeFreeText(doc.short_summary);
-    let claims = doc.claims || [];
-    if (shortSummary.length > 0) {
-      return shortSummary;
-    }
-    if (claims.length > 0) {
-      let fromClaim = profileShortSummaryFromText(doc.domain, claims[0].statement, '');
-      if (fromClaim.length === 4) {
-        return fromClaim;
-      }
-    }
-    let fromSummary = profileShortSummaryFromText(doc.domain, doc.summary, '');
-    if (fromSummary.length === 4) {
-      return fromSummary;
-    }
-    return '暂无数据';
-  }
-
-  private domainFullDescription(doc: ProfileDomainState | undefined): string {
-    if (!doc || doc.event_count === 0) {
-      return '暂无数据';
-    }
-    let summary = normalizeFreeText(doc.summary);
-    if (summary.length > 0) {
-      return summary;
-    }
-    let claims = this.domainClaimStatements(doc);
-    if (claims.length > 0) {
-      return claims.join('；');
-    }
-    return '暂无数据';
-  }
-
   private domainClaimStatements(doc: ProfileDomainState | undefined): string[] {
     if (!doc || doc.event_count === 0) {
       return [];
@@ -872,22 +872,6 @@ export class DataManagerFacade {
       return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6] || '0'));
     }
     return new Date(value);
-  }
-
-  private profileCompleteness(profile: ProfileState): number {
-    let lifestyleDomains = ['eat', 'wear', 'live', 'travel'];
-    let score = 0;
-    lifestyleDomains.forEach((domain: string) => {
-      let doc = profile.domains[domain];
-      if (!doc || doc.event_count === 0) {
-        return;
-      }
-      score += 18;
-      if (normalizeFreeText(doc.summary).length > 0 || (doc.claims || []).length > 0) {
-        score += 7;
-      }
-    });
-    return Math.min(100, score);
   }
 
   private homeRecommendations(): HomeRecommendationViewModel[] {

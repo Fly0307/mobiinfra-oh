@@ -10,8 +10,11 @@ export default function workflowDateContextUnitTest() {
       expect(context.runTimestamp()).assertEqual('2026年06月08日 14:05:09');
       expect(context.datePrompt()).assertContain('今天的日期是: 2026年06月08日 星期一');
       expect(context.datePrompt()).assertContain('当前本地时间是: 2026年06月08日 14:05:09');
-      expect(context.datePrompt()).assertContain('相对时间必须以当前任务执行日期为基准');
-      expect(context.datePrompt()).assertContain('写入总结或日志时保留原始表达并用方括号[]补充绝对日期或时间');
+      expect(context.datePrompt()).assertContain('任务执行时间只作为默认参考');
+      expect(context.datePrompt()).assertContain('内容自身时间锚点');
+      expect(context.datePrompt()).assertContain('优先以最近的内容时间锚点解析相对时间');
+      expect(context.datePrompt()).assertContain('只有完全无法确定内容时间锚点时，才使用任务执行日期兜底');
+      expect(context.datePrompt()).assertContain('写入总结或日志时保留原始表达，并在相对时间短语后用方括号[]补充绝对日期或时间');
       expect(context.datePrompt()).assertContain('无法确定时不要编造');
     });
 
@@ -89,6 +92,61 @@ export default function workflowDateContextUnitTest() {
       expect(normalized).assertEqual(
         '今天[2026年06月08日]已经标注，后天下午2点[2026年06月10日14:00]也已经标注，近3天[2026年06月06日-2026年06月08日]已标注，周末[2026年06月13日-2026年06月14日]已标注。'
       );
+
+      expect(context.normalizeDailyLogText('今天[2026年06月08日]已经标注，明天提交')).assertEqual(
+        '今天[2026年06月08日]已经标注，明天[2026年06月09日]提交'
+      );
+    });
+
+    it('keepsDailyLogLinesWithContentTimeAnchorsUnchanged', 0, () => {
+      let context = new WorkflowDateContext(new Date(2026, 5, 9, 14, 5, 9));
+      let alreadyAnnotated = '- 2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug';
+      let anchoredWithoutAnnotation = '- 2026年06月08日 21:15：明天下午两点前修复新的 bug';
+      let relativeDayClockAnchor = '- 昨天 09:30：明天下午两点前修复新的 bug';
+      let currentDayClockAnchor = '今天 14:05 明天提交';
+      let currentDayClockOnlyAnchor = '今天 14:05';
+      let weekdayClockAnchor = '星期一 09:30：明天下午两点前修复新的 bug';
+      let shortWeekdayClockAnchor = '周一 09:30：明天下午两点前修复新的 bug';
+      let monthDayClockAnchor = '6月1日09:30：明天下午两点前修复新的 bug';
+      let spacedMonthDayClockAnchor = '6月1日 09:30：明天下午两点前修复新的 bug';
+      let slashMonthDayClockAnchor = '6/1 09:30：明天下午两点前修复新的 bug';
+      let paddedSlashMonthDayClockAnchor = '06/01 09:30：明天下午两点前修复新的 bug';
+
+      expect(context.normalizeDailyLogText(alreadyAnnotated)).assertEqual(alreadyAnnotated);
+      expect(context.normalizeDailyLogText(anchoredWithoutAnnotation)).assertEqual(anchoredWithoutAnnotation);
+      expect(context.normalizeDailyLogText(relativeDayClockAnchor)).assertEqual(relativeDayClockAnchor);
+      expect(context.normalizeDailyLogText(currentDayClockAnchor)).assertEqual(currentDayClockAnchor);
+      expect(context.normalizeDailyLogText(currentDayClockOnlyAnchor)).assertEqual(currentDayClockOnlyAnchor);
+      expect(context.normalizeDailyLogText(weekdayClockAnchor)).assertEqual(weekdayClockAnchor);
+      expect(context.normalizeDailyLogText(shortWeekdayClockAnchor)).assertEqual(shortWeekdayClockAnchor);
+      expect(context.normalizeDailyLogText(monthDayClockAnchor)).assertEqual(monthDayClockAnchor);
+      expect(context.normalizeDailyLogText(spacedMonthDayClockAnchor)).assertEqual(spacedMonthDayClockAnchor);
+      expect(context.normalizeDailyLogText(slashMonthDayClockAnchor)).assertEqual(slashMonthDayClockAnchor);
+      expect(context.normalizeDailyLogText(paddedSlashMonthDayClockAnchor)).assertEqual(paddedSlashMonthDayClockAnchor);
+    });
+
+    it('keepsImmediateMessageBodyAfterContentTimeAnchorUnchanged', 0, () => {
+      let context = new WorkflowDateContext(new Date(2026, 5, 9, 14, 5, 9));
+
+      expect(context.normalizeDailyLogText('今天 14:05\n明天提交')).assertEqual('今天 14:05\n明天提交');
+      expect(context.normalizeDailyLogText('今天 14:05\n\n明天提交')).assertEqual(
+        '今天 14:05\n\n明天[2026年06月10日]提交'
+      );
+      expect(context.normalizeDailyLogText('今天 14:05\n明天提交\n后天复盘')).assertEqual(
+        '今天 14:05\n明天提交\n后天[2026年06月11日]复盘'
+      );
+    });
+
+    it('normalizesDailyLogLinesWithoutContentTimeAnchorsAgainstExecutionDate', 0, () => {
+      let context = new WorkflowDateContext(new Date(2026, 5, 9, 14, 5, 9));
+
+      expect(context.normalizeDailyLogText('明天下午两点前修复新的 bug')).assertEqual(
+        '明天下午两点[2026年06月10日14:00]前修复新的 bug'
+      );
+      expect(context.normalizeDailyLogText('明天上午提醒我领取注册条')).assertEqual(
+        '明天上午[2026年06月10日]提醒我领取注册条'
+      );
+      expect(context.normalizeDailyLogText('后天下午八点')).assertEqual('后天下午八点[2026年06月11日20:00]');
     });
   });
 }

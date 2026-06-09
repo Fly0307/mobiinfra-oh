@@ -970,7 +970,14 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
-        question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容，并以任务执行日期作为“今天”的判断基准，判断当前截图中的聊天记录是否仍然属于今天；如果已经出现更早日期的聊天记录，则应判定为 false。',
+        question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容。' +
+          '如果能识别，summary 必须包含当前联系人/群聊名称；无法识别时使用“当前聊天对象”，不要编造。' +
+          '可见聊天消息尽量按“消息时间锚点 + 原文相对时间 + 解析后的绝对时间”输出。' +
+          '推荐格式示例：- 2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug 并提交 pr；' +
+          '- 2026年06月08日 21:21：要求“明天上午[2026年06月09日]提醒我领取注册条”。' +
+          '解析相对时间时，优先使用图片中的聊天日期分隔符、消息时间、截图/OCR 时间等内容自身时间锚点；' +
+          '只有完全没有内容锚点时才使用任务执行日期兜底。继续判断 contains_today_chat；判断“今天”也应优先依据内容时间锚点，' +
+          '如果已经出现更早日期的聊天记录，则应判定为 false。不要求输出额外复杂 JSON 时间事件字段。',
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };
@@ -1063,7 +1070,13 @@ export class WorkflowStorage {
       WorkflowStorage.loopStep(3, [
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
         WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_b64}',
-          '帮我用一段话简要总结当前界面聊天记录的内容（不要使用markdown格式，也不要分点），这是第${loop.index}次截图。'),
+          '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容。' +
+            '如果能识别，summary 必须包含当前联系人/群聊名称；无法识别时使用“当前聊天对象”，不要编造。' +
+            '可见聊天消息尽量按“消息时间锚点 + 原文相对时间 + 解析后的绝对时间”输出。' +
+            '推荐格式示例：- 2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug 并提交 pr；' +
+            '- 2026年06月08日 21:21：要求“明天上午[2026年06月09日]提醒我领取注册条”。' +
+            '解析相对时间时，优先使用图片中的聊天日期分隔符、消息时间、截图/OCR 时间等内容自身时间锚点；' +
+            '只有完全没有内容锚点时才使用任务执行日期兜底。不要求输出额外复杂 JSON 时间事件字段。'),
         WorkflowStorage.ifStep(3, WorkflowStorage.condition('${loop.last}', '==', false), [
           WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
           WorkflowStorage.sleepStep(2, 1.0)

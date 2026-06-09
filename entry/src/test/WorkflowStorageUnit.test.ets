@@ -1,6 +1,36 @@
 import { describe, it, expect } from '@ohos/hypium';
+import { JSON as ArkJSON } from '@kit.ArkTS';
 import { WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
-import { WorkflowManagedFile } from '../main/ets/utils/WorkflowTypes';
+import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep } from '../main/ets/utils/WorkflowTypes';
+
+function findWeixinChatSummaryQuestion(steps: WorkflowStep[]): string {
+  for (let i = 0; i < steps.length; i++) {
+    let step = steps[i];
+    if (step.type === 'tool' && step.tool_name === 'vlm_qa' && step.inputs && step.inputs.mode === 'summary' &&
+      step.inputs.question && step.inputs.question.indexOf('聊天') >= 0) {
+      return step.inputs.question;
+    }
+    if (step.steps) {
+      let nestedQuestion = findWeixinChatSummaryQuestion(step.steps);
+      if (nestedQuestion.length > 0) {
+        return nestedQuestion;
+      }
+    }
+    if (step.then_steps) {
+      let thenQuestion = findWeixinChatSummaryQuestion(step.then_steps);
+      if (thenQuestion.length > 0) {
+        return thenQuestion;
+      }
+    }
+    if (step.else_steps) {
+      let elseQuestion = findWeixinChatSummaryQuestion(step.else_steps);
+      if (elseQuestion.length > 0) {
+        return elseQuestion;
+      }
+    }
+  }
+  return '';
+}
 
 export default function workflowStorageUnitTest() {
   describe('workflowStorageUnitTest', () => {
@@ -59,6 +89,22 @@ export default function workflowStorageUnitTest() {
       };
 
       expect(WorkflowStorage.managedFileDeleteTarget(filesDir, 'config', file)).assertEqual(file.path);
+    });
+
+    it('defaultWeixinSummaryPromptRequiresChatTimeAnchors', 0, () => {
+      let workflow = ArkJSON.parse(WorkflowStorage.defaultWeixinWorkflow()) as WorkflowDefinition;
+      let question = findWeixinChatSummaryQuestion(workflow.steps);
+
+      expect(question.length > 0).assertTrue();
+      expect(question.indexOf('联系人/群聊名称') >= 0).assertTrue();
+      expect(question.indexOf('当前聊天对象') >= 0).assertTrue();
+      expect(question.indexOf('消息时间锚点') >= 0).assertTrue();
+      expect(question.indexOf('原文相对时间') >= 0).assertTrue();
+      expect(question.indexOf('解析后的绝对时间') >= 0).assertTrue();
+      expect(question.indexOf('内容自身时间锚点') >= 0).assertTrue();
+      expect(question.indexOf('只有完全没有内容锚点时才使用任务执行日期兜底') >= 0).assertTrue();
+      let forbiddenTimeEventsKey = 'time' + '_events';
+      expect(question.indexOf(forbiddenTimeEventsKey)).assertEqual(-1);
     });
   });
 }

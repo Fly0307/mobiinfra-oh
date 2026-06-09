@@ -55,7 +55,6 @@ interface GuiActionOutput {
   step_dir: string;
   action: string;
   device: string;
-  image_path?: string;
   image_b64?: string;
   width?: number;
   height?: number;
@@ -555,7 +554,6 @@ export class WorkflowRunner {
     };
     if (action === 'screenshot') {
       let shot = await this.hdcBridge.screenshot();
-      output.image_path = shot.image_b64 || '';
       output.image_b64 = shot.image_b64 || '';
       output.width = shot.width || 0;
       output.height = shot.height || 0;
@@ -929,12 +927,27 @@ export class WorkflowRunner {
     let current: WorkflowJsonValue = root;
     for (let i = start; i < parts.length; i++) {
       let map = current as WorkflowJsonMap;
-      current = map[parts[i]];
+      let key = parts[i];
+      current = map[key];
+      if ((current === undefined || current === null) && key === 'image_path') {
+        current = this.legacyImagePathAlias(map);
+      }
       if (current === undefined || current === null) {
         return null;
       }
     }
     return current;
+  }
+
+  private legacyImagePathAlias(map: WorkflowJsonMap): WorkflowJsonValue {
+    if (map['action'] !== 'screenshot') {
+      return null;
+    }
+    let imageBase64 = map['image_b64'];
+    if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
+      return imageBase64;
+    }
+    return null;
   }
 
   private stepResultToMap(result: WorkflowStepResult): WorkflowJsonMap {

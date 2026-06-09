@@ -843,7 +843,7 @@ export class WorkflowStorage {
       tool_name: 'vlm_qa',
       inputs: {
         mode: 'summary',
-        image: '${steps.1.output.image_path}',
+        image: '${steps.1.output.image_b64}',
         question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容，并判断当前截图中的聊天记录是否仍然属于今天；如果已经出现更早日期的聊天记录，则应判定为 false。',
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
@@ -855,7 +855,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('支付宝'),
       WorkflowStorage.guiTaskStep(2, '点击我的，进入账单页面，查看当前界面账单信息'),
       WorkflowStorage.screenshotStep(3, 'alipay_bill.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的支付宝账单信息（不要使用markdown格式，也不要分点，尽量按照账单出现顺序描述每一条记录的类型、对象、金额和时间）')
     ]);
   }
@@ -865,7 +865,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('携程旅行'),
       WorkflowStorage.guiTaskStep(2, '点击“我的”，进入待付款界面，切换到“全部”标签，查看当前界面的订单'),
       WorkflowStorage.screenshotStep(3, 'ctrip_order.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的携程全部订单内容（不要使用markdown格式，也不要分点，尽量按照订单出现顺序描述每一单的出行类型、目的地或酒店/车次/航班、时间、金额和订单状态）')
     ]);
   }
@@ -875,7 +875,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('哔哩哔哩'),
       WorkflowStorage.guiTaskStep(2, '进入个人中心，打开历史记录页面，查看浏览记录'),
       WorkflowStorage.screenshotStep(3, 'bilibili_history.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的哔哩哔哩浏览记录（不要使用markdown格式，也不要分点，尽量按照记录出现顺序描述每个视频的标题、分区或观看进度等信息）')
     ]);
   }
@@ -885,7 +885,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('大众点评'),
       WorkflowStorage.guiTaskStep(2, '点击“我的”图标，进入我的订单页面，查看订单记录'),
       WorkflowStorage.screenshotStep(3, 'dianping_order.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的大众点评订单记录（不要使用markdown格式，也不要分点，尽量按照订单出现顺序描述每一单的店铺、消费内容、金额和订单状态）')
     ]);
   }
@@ -895,7 +895,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('饿了么'),
       WorkflowStorage.guiTaskStep(2, '点击“我的”图标，点击我的订单，结束任务'),
       WorkflowStorage.screenshotStep(3, 'ele_order.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的外卖订单信息（不要使用markdown格式，按照第一单，第二单，第三单的顺序描述，包括点了什么，花了多少钱）')
     ]);
   }
@@ -905,7 +905,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('美团'),
       WorkflowStorage.guiTaskStep(2, '点击“我的”图标，进入全部订单页面，查看订单记录'),
       WorkflowStorage.screenshotStep(3, 'meituan_order.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的美团订单记录（不要使用markdown格式，也不要分点，尽量按照订单出现顺序描述每一单的商家、下单内容、金额和订单状态）')
     ]);
   }
@@ -915,7 +915,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('腾讯视频'),
       WorkflowStorage.guiTaskStep(2, '进入个人中心，点击观看历史，查看观看记录'),
       WorkflowStorage.screenshotStep(3, 'tencent_video_history.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的腾讯视频观看记录（不要使用markdown格式，也不要分点，尽量按照记录出现顺序描述每个视频的名称、观看进度或更新时间等关键信息）')
     ]);
   }
@@ -926,7 +926,7 @@ export class WorkflowStorage {
       WorkflowStorage.guiTaskStep(2, '点击底部的发现按钮，点击更多微博文字即可'),
       WorkflowStorage.guiTaskStep(3, '查看第一条微博热搜，注意不是置顶的那条微博热搜，而是左侧数字是1的那条微博热搜'),
       WorkflowStorage.screenshotStep(4, 'vlm_input.jpg'),
-      WorkflowStorage.summaryToolStep(5, '${steps.4.output.image_path}', '帮我总结当前界面上新闻的内容。')
+      WorkflowStorage.summaryToolStep(5, '${steps.4.output.image_b64}', '帮我总结当前界面上新闻的内容。')
     ]);
   }
 
@@ -936,7 +936,7 @@ export class WorkflowStorage {
       WorkflowStorage.guiTaskStep(2, '搜索${context.contact_name}，进入聊天界面'),
       WorkflowStorage.loopStep(3, [
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
-        WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_path}',
+        WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_b64}',
           '帮我用一段话简要总结当前界面聊天记录的内容（不要使用markdown格式，也不要分点），这是第${loop.index}次截图。'),
         WorkflowStorage.ifStep(3, WorkflowStorage.condition('${loop.last}', '==', false), [
           WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
@@ -967,7 +967,7 @@ export class WorkflowStorage {
       WorkflowStorage.openAppStep('小红书'),
       WorkflowStorage.guiTaskStep(2, '进入个人中心，打开浏览记录页面，查看浏览记录'),
       WorkflowStorage.screenshotStep(3, 'xiaohongshu_history.jpg'),
-      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_path}',
+      WorkflowStorage.summaryToolStep(4, '${steps.3.output.image_b64}',
         '帮我用一段话简要总结当前页面上的小红书浏览记录（不要使用markdown格式，也不要分点，尽量按照记录出现顺序描述每条内容的主题、标题或账号信息）')
     ]);
   }

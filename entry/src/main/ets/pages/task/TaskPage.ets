@@ -1029,13 +1029,17 @@ export struct TaskPage {
     for (let i = insertIndex - 1; i >= 0; i--) {
       let step = container[i];
       if (step.type === 'gui_action' && step.action === 'screenshot') {
-        return '${steps.' + String(step.id) + '.output.image_path}';
+        return '${steps.' + String(step.id) + '.output.image_b64}';
       }
     }
-    return '${steps.1.output.image_path}';
+    return '${steps.1.output.image_b64}';
   }
 
   private shotImageVariable(step: WorkflowStep): string {
+    return '${steps.' + String(step.id) + '.output.image_b64}';
+  }
+
+  private legacyShotImageVariable(step: WorkflowStep): string {
     return '${steps.' + String(step.id) + '.output.image_path}';
   }
 
@@ -1056,7 +1060,9 @@ export struct TaskPage {
     }
     let shot = steps[index];
     let summary = steps[index + 1];
-    return this.isScreenshotStep(shot) && this.isSummaryStepForImage(summary, this.shotImageVariable(shot));
+    return this.isScreenshotStep(shot) &&
+      (this.isSummaryStepForImage(summary, this.shotImageVariable(shot)) ||
+        this.isSummaryStepForImage(summary, this.legacyShotImageVariable(shot)));
   }
 
   private isSummaryPartOfPair(steps: WorkflowStep[], index: number): boolean {
@@ -1314,7 +1320,7 @@ export struct TaskPage {
       let shotId = this.nextStepId(container);
       let summaryId = shotId + 1;
       let shot = this.createTemplateStep('screenshot', shotId, '');
-      let summary = this.createTemplateStep('summary', summaryId, '${steps.' + shotId + '.output.image_path}');
+      let summary = this.createTemplateStep('summary', summaryId, '${steps.' + shotId + '.output.image_b64}');
       container.splice(insertIndex, 0, shot, summary);
       this.prepareStructureSelectionRestore(newPath);
       this.markWorkflowStructureChanged();
@@ -2937,7 +2943,7 @@ export struct TaskPage {
       }.width('100%')
       Column() {
         this.FieldLabel('图片变量')
-        TextInput({ placeholder: '${steps.3.output.image_path}', text: this.selectedToolInput('image') })
+        TextInput({ placeholder: '${steps.3.output.image_b64}', text: this.selectedToolInput('image') })
           .height(38)
           .fontSize(12)
           .fontFamily('monospace')

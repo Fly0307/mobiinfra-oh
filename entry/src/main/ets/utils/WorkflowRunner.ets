@@ -197,7 +197,7 @@ export class WorkflowRunner {
 
   private workflowJsonForRun(task: WorkflowTask): string {
     try {
-      return WorkflowStorage.readText(this.workflowFile);
+      return WorkflowStorage.readTaskWorkflowJson(this.filesDir, task);
     } catch (e) {
       let err = e as Error;
       this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));

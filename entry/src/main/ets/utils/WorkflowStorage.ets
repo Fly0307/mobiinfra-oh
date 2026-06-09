@@ -353,6 +353,9 @@ export class WorkflowStorage {
   }
 
   private static taskWithLatestValidConfig(filesDir: string, task: WorkflowTask): WorkflowTask {
+    if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id) && task.isUserModified !== true) {
+      return task;
+    }
     if (task.configFileName.length === 0) {
       return task;
     }
@@ -376,7 +379,8 @@ export class WorkflowStorage {
         workflowJson: rawJson,
         lastStatus: task.lastStatus,
         lastRun: task.lastRun,
-        lastMessage: task.lastMessage
+        lastMessage: task.lastMessage,
+        isUserModified: task.isUserModified
       };
     } catch (e) {
       return task;
@@ -384,6 +388,9 @@ export class WorkflowStorage {
   }
 
   static readTaskWorkflowJson(filesDir: string, task: WorkflowTask): string {
+    if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id) && task.isUserModified !== true) {
+      return task.workflowJson;
+    }
     if (task.configFileName.length > 0) {
       try {
         return WorkflowStorage.readText(WorkflowStorage.configPath(filesDir, task.configFileName));
@@ -493,6 +500,7 @@ export class WorkflowStorage {
 
   private static mergeStoredStateIntoDefaultTask(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
     let sceneId = storedTask.sceneId >= 0 ? storedTask.sceneId : defaultTask.sceneId;
+    let userModified = storedTask.isUserModified === true;
     return {
       id: defaultTask.id,
       sceneId: sceneId,
@@ -502,11 +510,17 @@ export class WorkflowStorage {
       source: WorkflowStorage.nonEmptyOrDefault(storedTask.source, defaultTask.source),
       enabled: storedTask.enabled === false ? false : storedTask.enabled === true ? true : defaultTask.enabled,
       configFileName: WorkflowStorage.nonEmptyOrDefault(storedTask.configFileName, defaultTask.configFileName),
-      workflowJson: WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson),
+      workflowJson: userModified ? WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson) :
+        defaultTask.workflowJson,
       lastStatus: WorkflowStorage.nonEmptyOrDefault(storedTask.lastStatus, defaultTask.lastStatus),
       lastRun: WorkflowStorage.nonEmptyOrDefault(storedTask.lastRun, defaultTask.lastRun),
-      lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage)
+      lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage),
+      isUserModified: userModified
     };
+  }
+
+  static mergeCodeDefinedDefaultTaskForTest(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
+    return WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, storedTask);
   }
 
   private static findDefaultTask(filesDir: string, taskId: string): WorkflowTask | null {
@@ -556,6 +570,9 @@ export class WorkflowStorage {
     let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
     if (defaultTask) {
       WorkflowStorage.unmarkDefaultTaskDeleted(filesDir, task.id);
+      if (task.isUserModified !== true && task.workflowJson !== defaultTask.workflowJson) {
+        task.isUserModified = true;
+      }
       task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
     }
     let found = false;

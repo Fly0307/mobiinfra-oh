@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
-import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep } from '../main/ets/utils/WorkflowTypes';
+import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 
 function findWeixinChatSummaryQuestion(steps: WorkflowStep[]): string {
   for (let i = 0; i < steps.length; i++) {
@@ -105,6 +105,62 @@ export default function workflowStorageUnitTest() {
       expect(question.indexOf('只有完全没有内容锚点时才使用任务执行日期兜底') >= 0).assertTrue();
       let forbiddenTimeEventsKey = 'time' + '_events';
       expect(question.indexOf(forbiddenTimeEventsKey)).assertEqual(-1);
+    });
+
+    it('codeDefinedDefaultTaskUsesLatestWorkflowUnlessUserModified', 0, () => {
+      let defaultTask: WorkflowTask = {
+        id: 'default_weixin_chat',
+        sceneId: 3,
+        icon: 'Chat',
+        iconColor: '#FF9347',
+        title: '收集指定微信用户近3页的聊天记录',
+        source: 'basic-gui-task',
+        enabled: true,
+        configFileName: 'default_weixin_chat.json',
+        workflowJson: '{"version":"new-code-default"}',
+        lastStatus: '未运行',
+        lastRun: '尚未执行',
+        lastMessage: '点击运行后开始执行 workflow'
+      };
+      let storedTask: WorkflowTask = {
+        id: 'default_weixin_chat',
+        sceneId: 3,
+        icon: 'Chat',
+        iconColor: '#FF9347',
+        title: '收集指定微信用户近3页的聊天记录',
+        source: 'basic-gui-task',
+        enabled: false,
+        configFileName: 'default_weixin_chat.json',
+        workflowJson: '{"version":"old-stored-default"}',
+        lastStatus: '已完成',
+        lastRun: '2026/6/9 04:42:00',
+        lastMessage: '最近运行完成'
+      };
+
+      let synced = WorkflowStorage.mergeCodeDefinedDefaultTaskForTest(defaultTask, storedTask);
+      expect(synced.workflowJson).assertEqual(defaultTask.workflowJson);
+      expect(synced.enabled).assertFalse();
+      expect(synced.lastStatus).assertEqual('已完成');
+      expect(synced.lastRun).assertEqual('2026/6/9 04:42:00');
+
+      let modifiedTask: WorkflowTask = {
+        id: storedTask.id,
+        sceneId: storedTask.sceneId,
+        icon: storedTask.icon,
+        iconColor: storedTask.iconColor,
+        title: storedTask.title,
+        source: storedTask.source,
+        enabled: storedTask.enabled,
+        configFileName: storedTask.configFileName,
+        workflowJson: storedTask.workflowJson,
+        lastStatus: storedTask.lastStatus,
+        lastRun: storedTask.lastRun,
+        lastMessage: storedTask.lastMessage,
+        isUserModified: true
+      };
+      let preserved = WorkflowStorage.mergeCodeDefinedDefaultTaskForTest(defaultTask, modifiedTask);
+      expect(preserved.workflowJson).assertEqual(storedTask.workflowJson);
+      expect(preserved.isUserModified).assertTrue();
     });
   });
 }

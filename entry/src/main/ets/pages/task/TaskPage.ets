@@ -386,7 +386,8 @@ export struct TaskPage {
       workflowJson: task.workflowJson,
       lastStatus: task.lastStatus,
       lastRun: task.lastRun,
-      lastMessage: task.lastMessage
+      lastMessage: task.lastMessage,
+      isUserModified: task.isUserModified
     };
     this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
     this.refreshStatsText();

@@ -31,9 +31,9 @@ import {
 } from '../../utils/gallery/GalleryTypes';
 import { GallerySearchHit, GallerySearchService } from '../../utils/gallery/GallerySearchService';
 
-const DEFAULT_GALLERY_API_BASE_URL = 'http://123.60.91.241:9003/';
-const DEFAULT_GALLERY_API_KEY = '';
-const DEFAULT_GALLERY_MODEL = 'Qwen3.5-35B-A3B';
+const DEFAULT_GALLERY_API_BASE_URL = 'https://api.modelbest.cn/v1';
+const DEFAULT_GALLERY_API_KEY = 'sk-pQ8L2zF3XmR5kY9wV4jB7hN1tC6vM0xG3aD5sH2bJ9lK4cZ8';
+const DEFAULT_GALLERY_MODEL = 'MiniCPM-V-4.6-Instruct';
 const DEFAULT_GALLERY_SKIP_OCR = 'false';
 const DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER = 'true';
 const DEFAULT_GALLERY_OCR_CONCURRENCY = '3';
@@ -1696,6 +1696,15 @@ struct GalleryPage {
       .margin({ right: 7, top: 7 })
   }
 
+  @Builder DetailBullet(detail: string) {
+    Text('· ' + detail)
+      .fontSize(12)
+      .fontColor('#4D5566')
+      .lineHeight(18)
+      .width('100%')
+      .margin({ top: 6 })
+  }
+
   @Builder ResultDetailPanel() {
     if (this.selectedDetailId.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -1779,22 +1788,35 @@ struct GalleryPage {
 
                 if (this.resultDetails(item).length > 0) {
                   this.DetailSectionTitle('分析明细')
-                  ForEach(this.resultDetails(item), (detail: string) => {
-                    Text('· ' + detail)
-                      .fontSize(12)
-                      .fontColor('#4D5566')
-                      .lineHeight(18)
-                      .width('100%')
-                      .margin({ top: 6 })
-                  }, (detail: string, index: number) => item.id + '_detail_' + index.toString())
+                  if (this.detailAt(item, 0).length > 0) {
+                    this.DetailBullet(this.detailAt(item, 0))
+                  }
+                  if (this.detailAt(item, 1).length > 0) {
+                    this.DetailBullet(this.detailAt(item, 1))
+                  }
+                  if (this.detailAt(item, 2).length > 0) {
+                    this.DetailBullet(this.detailAt(item, 2))
+                  }
                 }
 
                 if (this.resultTags(item).length > 0) {
                   this.DetailSectionTitle('标签')
                   Row() {
-                    ForEach(this.resultTags(item), (tag: string) => {
-                      this.DetailTag(tag)
-                    }, (tag: string, index: number) => item.id + '_tag_' + index.toString())
+                    if (this.tagAt(item, 0).length > 0) {
+                      this.DetailTag(this.tagAt(item, 0))
+                    }
+                    if (this.tagAt(item, 1).length > 0) {
+                      this.DetailTag(this.tagAt(item, 1))
+                    }
+                    if (this.tagAt(item, 2).length > 0) {
+                      this.DetailTag(this.tagAt(item, 2))
+                    }
+                    if (this.tagAt(item, 3).length > 0) {
+                      this.DetailTag(this.tagAt(item, 3))
+                    }
+                    if (this.tagAt(item, 4).length > 0) {
+                      this.DetailTag(this.tagAt(item, 4))
+                    }
                   }
                   .width('100%')
                   .margin({ top: 1 })

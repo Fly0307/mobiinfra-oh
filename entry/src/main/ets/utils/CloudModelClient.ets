@@ -572,22 +572,18 @@ export class CloudModelClient {
     };
     let textPart: CloudTextPart = {
       type: 'text',
-      text: '你是图库采集分析器。请结合图片和本地 OCR 文本，提取可入库的生活记忆。' +
-        '\n不要思考，不要输出思考过程、推理过程或分析步骤。' +
-        '\n只返回 JSON，不要 Markdown。字段：title, category, summary, details, tags, importance。' +
-        '\ntitle、summary、details、tags 的内容都必须使用中文，除非是英文专有名词' +
-        '\ncategory 必须从"聊天、文档、餐饮、购物、出行、健康、工作、其他"中选择' +
-        '\nsummary 用 1 句概括这张图的核心信息。' +
-        '\ndetails 输出 3 到 8 条具体细节数组，尽量记录可核查的信息，例如人物/商户/地点/商品/金额/时间/订单号/聊天事项/待办/文档标题；看不清不要编造。' +
-        '\n如果 EXIF 元数据提供了拍摄时间、设备或经纬度，可作为可核查细节使用；不要把经纬度臆测成具体地址。' +
-        '\ntags 输出 3 到 8 个中文两字标签，优先从候选标签中选择。候选tag：聊天、待办、会议、工作、项目、客户、通知、截图、账单、消费、外卖、餐饮、购物、快递、售后、健康、体检、用药、运动、睡眠、饮食、医疗、文档、合同、笔记、课程、作业、证件、资料、发票、家庭、朋友、聚会、亲子、宠物、节日、纪念、账号、安全、配置、报错、登录、密码' +
-        '\nimportance 是 0 到 1 的数字。' +
-        '\n图片 EXIF 元数据：\n' + (exifText.length > 0 ? exifText : '(无)') +
-        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '(空)') +
-        '\n请返回 JSON'
+      text: '你是图库采集分析器。结合图片、OCR，提取可入库的生活记忆。' +
+        '\n只输出一个紧凑 JSON 对象，不要 Markdown，不要解释，不要思考过程，不要代码块。' +
+        '\n必须严格使用这个结构：{"title":"","category":"其他","summary":"","details":["",""],"tags":[],"importance":0.5}' +
+        '\n字段要求：title不超过18字；summary不超过60字；details输出1到3条描述细节的句子；tags输出1到5个两字中文标签；importance是0到1的数字。' +
+        '\n所有字符串必须使用中文，不能包含换行或未转义双引号' +
+        '\ncategory 只能是以下之一：聊天、文档、餐饮、购物、出行、健康、工作、其他。' +
+        '\n可用标签：聊天、待办、会议、工作、项目、客户、通知、截图、账单、消费、外卖、餐饮、购物、快递、售后、健康、体检、用药、运动、睡眠、饮食、医疗、文档、合同、笔记、课程、作业、证件、资料、发票、家庭、朋友、聚会、亲子、节日、纪念、账号、安全、配置、报错、登录、密码。' +
+        '\n本地 OCR 文本：\n' + (ocrText.length > 0 ? ocrText : '空') +
+        '\n现在只返回 JSON 对象。'
     };
     return this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      config.apiKey, config.model, 2048, 90000, this.galleryChatOptions);
+      config.apiKey, config.model, 4096, 90000, this.galleryChatOptions);
   }
 
   async createEmbedding(input: string, config: EmbeddingCloudConfig): Promise<number[]> {

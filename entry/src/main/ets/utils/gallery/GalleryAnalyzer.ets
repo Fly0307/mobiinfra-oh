@@ -776,9 +776,15 @@ export class GalleryAnalyzer {
     let trimmed = text.trim();
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(trimmed));
     let withoutComma = this.removeTrailingJsonComma(trimmed);
+    let withoutJsonCommas = this.removeJsonTrailingCommas(trimmed);
+    let normalizedKeys = this.normalizeModelJsonKeys(trimmed);
     this.pushModelJsonCandidate(candidates, withoutComma + ']}');
     this.pushModelJsonCandidate(candidates, withoutComma + '"]}');
     this.pushModelJsonCandidate(candidates, withoutComma + '}');
+    this.pushModelJsonCandidate(candidates, withoutJsonCommas);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutJsonCommas));
+    this.pushModelJsonCandidate(candidates, normalizedKeys);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(normalizedKeys));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + ']}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '"]}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '}'));
@@ -898,6 +904,56 @@ export class GalleryAnalyzer {
       return text.substring(0, end) + text.substring(end + 1);
     }
     return text;
+  }
+
+  private removeJsonTrailingCommas(text: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      let ch = text.charAt(i);
+      if (inString) {
+        result += ch;
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        result += ch;
+        continue;
+      }
+      if (ch === ',') {
+        let next = i + 1;
+        while (next < text.length) {
+          let nextChar = text.charAt(next);
+          if (nextChar !== ' ' && nextChar !== '\n' && nextChar !== '\r' && nextChar !== '\t') {
+            break;
+          }
+          next++;
+        }
+        if (next < text.length && (text.charAt(next) === '}' || text.charAt(next) === ']')) {
+          continue;
+        }
+      }
+      result += ch;
+    }
+    return result;
+  }
+
+  private normalizeModelJsonKeys(text: string): string {
+    return text
+      .replace(/"importance\s*:\s*([0-9.]+)/g, '"importance":$1')
+      .replace(/"title\s*:/g, '"title":')
+      .replace(/"category\s*:/g, '"category":')
+      .replace(/"summary\s*:/g, '"summary":')
+      .replace(/"details\s*:/g, '"details":')
+      .replace(/"tags\s*:/g, '"tags":');
   }
 
   private debugTail(text: string): string {

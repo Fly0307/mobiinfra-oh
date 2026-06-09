@@ -104,8 +104,10 @@ struct Index {
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State downloading: boolean = false;
+  @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
   @State connected: boolean = false;
+  @State modelScopePauseRequested: boolean = false;
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
@@ -148,6 +150,7 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
+  private modelScopeActiveHttpReq: http.HttpRequest | null = null;
   
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -1059,13 +1062,22 @@ struct Index {
 
   private downloadModelScopeFile(owner: string, repo: string, task: ModelScopeFileTask, index: number,
     fileCount: number, completedBytes: number, totalBytes: number): Promise<number> {
+    if (this.modelScopePauseRequested) {
+      return Promise.resolve(-2);
+    }
     let target = this.safeModelScopeTargetPath(task.path);
+    let resumeOffset = 0;
     try {
       let st = fs.statSync(target);
       if (st.size === task.size) {
         this.output = '[ModelScope ' + (index + 1).toString() + '/' + fileCount.toString() + '] ' + task.path + '\n' +
           '已存在，跳过\n总进度: ' + this.formatSize(completedBytes + task.size) + ' / ' + this.formatSize(totalBytes);
         return Promise.resolve(task.size);
+      }
+      if (st.size > 0 && st.size < task.size) {
+        resumeOffset = st.size;
+      } else if (st.size > task.size) {
+        try { fs.unlinkSync(target); } catch (e) {}
       }
     } catch (e) {
     }
@@ -1075,13 +1087,19 @@ struct Index {
     let self = this;
     let idx = index;
     let completed = completedBytes;
+    let startOffset = resumeOffset;
     return new Promise<number>((resolve) => {
       let httpReq = http.createHttp();
+      self.modelScopeActiveHttpReq = httpReq;
       let fileHandle: fs.File;
       let failed = false;
       let resolved = false;
       try {
-        fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        if (startOffset > 0) {
+          fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
+        } else {
+          fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        }
       } catch (e) {
         self.output = '创建文件失败: ' + target;
         httpReq.destroy();
@@ -1095,10 +1113,18 @@ struct Index {
         httpReq.off('dataReceiveProgress');
         httpReq.off('dataEnd');
         try { fs.closeSync(fileHandle); } catch (e) {}
+        if (self.modelScopeActiveHttpReq === httpReq) {
+          self.modelScopeActiveHttpReq = null;
+        }
         httpReq.destroy();
         resolve(size);
       };
       httpReq.on('dataReceive', (data: ArrayBuffer) => {
+        if (self.modelScopePauseRequested) {
+          failed = true;
+          finish(-2);
+          return;
+        }
         if (!failed) {
           try {
             fs.writeSync(fileHandle.fd, data);
@@ -1108,14 +1134,19 @@ struct Index {
         }
       });
       httpReq.on('dataReceiveProgress', (data: http.DataReceiveProgressInfo) => {
+        if (self.modelScopePauseRequested) return;
         if (failed) return;
-        let currentBytes = completed + data.receiveSize;
+        let currentBytes = completed + startOffset + data.receiveSize;
         let overallPct = totalBytes > 0 ? Math.floor(currentBytes * 100 / totalBytes) : 0;
         self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] ' + task.path + '\n' +
-          '文件: ' + self.formatSize(data.receiveSize) + ' / ' + self.formatSize(data.totalSize) + '\n' +
+          '文件: ' + self.formatSize(startOffset + data.receiveSize) + ' / ' + self.formatSize(task.size) + '\n' +
           '总量: ' + self.formatSize(currentBytes) + ' / ' + self.formatSize(totalBytes) + ' ' + overallPct.toString() + '%';
       });
       httpReq.on('dataEnd', () => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
         if (failed) {
           self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 写入失败: ' + task.path;
           finish(-1);
@@ -1129,6 +1160,7 @@ struct Index {
         }
         if (task.size > 0 && fileSize !== task.size) {
           self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 文件大小不匹配: ' + task.path;
+          try { fs.unlinkSync(target); } catch (e) {}
           finish(-1);
           return;
         }
@@ -1143,15 +1175,31 @@ struct Index {
       let streamOptions: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
         connectTimeout: 30000,
-        readTimeout: 7200000
+        readTimeout: 7200000,
+        header: startOffset > 0 ? { 'Range': 'bytes=' + startOffset.toString() + '-' } : {}
       };
       httpReq.requestInStream(url, streamOptions).then((code: number) => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
+        if (startOffset > 0 && code === 200) {
+          failed = true;
+          self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 服务端未支持断点续传，准备重下: ' + task.path;
+          try { fs.unlinkSync(target); } catch (e) {}
+          finish(-1);
+          return;
+        }
         if (code < 200 || code >= 300) {
           failed = true;
           self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] HTTP ' + code.toString() + ': ' + task.path;
           finish(-1);
         }
       }).catch((err: BusinessError) => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
         failed = true;
         self.output = '[ModelScope ' + (idx + 1).toString() + '/' + fileCount.toString() + '] 错误: code=' + err.code + ' ' + err.message;
         finish(-1);
@@ -1192,6 +1240,21 @@ struct Index {
     }
   }
 
+  pauseModelScopeDownload(): void {
+    if (!this.modelScopeDownloading) {
+      return;
+    }
+    this.modelScopePauseRequested = true;
+    this.output = this.output + '\n正在暂停 ModelScope 下载...';
+    if (this.modelScopeActiveHttpReq !== null) {
+      try {
+        this.modelScopeActiveHttpReq.destroy();
+      } catch (e) {
+      }
+      this.modelScopeActiveHttpReq = null;
+    }
+  }
+
   async downloadModelScopeModel() {
     let parts = this.modelScopeRepoParts();
     if (parts.length !== 2) {
@@ -1199,6 +1262,8 @@ struct Index {
       return;
     }
     this.downloading = true;
+    this.modelScopeDownloading = true;
+    this.modelScopePauseRequested = false;
     this.connected = false;
     this.modelLoaded = false;
     try {
@@ -1216,8 +1281,25 @@ struct Index {
       let completedBytes = 0;
       let failed: string[] = [];
       for (let j = 0; j < files.length; j++) {
+        if (this.modelScopePauseRequested) {
+          break;
+        }
         let size = await this.downloadModelScopeFile(parts[0], parts[1], files[j], j, files.length, completedBytes, totalBytes);
-        if (size < 0) {
+        if (size === -2 || this.modelScopePauseRequested) {
+          let savedBytes = completedBytes;
+          try {
+            let pausedTarget = this.safeModelScopeTargetPath(files[j].path);
+            let pausedStat = fs.statSync(pausedTarget);
+            if (pausedStat.size > 0 && pausedStat.size < files[j].size) {
+              savedBytes += pausedStat.size;
+            }
+          } catch (e) {
+          }
+          this.output = 'ModelScope 下载已暂停\n仓库: ' + this.modelScopeMnnRepo +
+            '\n已保存: ' + this.formatSize(savedBytes) +
+            '\n再次点击“从 ModelScope 下载”会从半截文件继续。';
+          return;
+        } else if (size < 0) {
           failed.push(files[j].path);
         } else {
           completedBytes += files[j].size;
@@ -1234,6 +1316,8 @@ struct Index {
     } catch (e) {
       this.output = 'ModelScope 下载失败: ' + this.errorMessage(e);
     } finally {
+      this.modelScopeActiveHttpReq = null;
+      this.modelScopeDownloading = false;
       this.downloading = false;
     }
   }
@@ -1317,7 +1401,7 @@ struct Index {
   }
 
   private hdcInputEditable(): boolean {
-    return this.hdcManualPairing || !this.hdcAutoConnected;
+    return true;
   }
 
   private hdcInputBackgroundColor(): string {
@@ -2157,6 +2241,8 @@ struct Index {
             isThinking: $isThinking,
             modelLoaded: $modelLoaded,
             downloading: $downloading,
+            modelScopeDownloading: $modelScopeDownloading,
+            modelScopePauseRequested: $modelScopePauseRequested,
             autoConfirm: $autoConfirm,
             serverIp: $serverIp,
             modelScopeMnnRepo: $modelScopeMnnRepo,
@@ -2175,6 +2261,7 @@ struct Index {
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
             onDownloadModelScopeModel: () => { this.downloadModelScopeModel(); },
+            onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
             onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
             onShowConfigJson: () => { this.showConfigJson(); },
             onDiscoverHdcServer: async (preferManual: boolean, showToast: boolean) => {

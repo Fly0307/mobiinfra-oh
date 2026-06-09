@@ -14,6 +14,8 @@ export struct LocalAssistantPage {
   @Link isThinking: boolean;
   @Link modelLoaded: boolean;
   @Link downloading: boolean;
+  @Link modelScopeDownloading: boolean;
+  @Link modelScopePauseRequested: boolean;
   @Link autoConfirm: boolean;
   @Link serverIp: string;
   @Link modelScopeMnnRepo: string;
@@ -33,6 +35,7 @@ export struct LocalAssistantPage {
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
   onDownloadModelScopeModel: () => void = () => {};
+  onPauseModelScopeDownload: () => void = () => {};
   onUpdateConfigThreadNum: () => void = () => {};
   onShowConfigJson: () => void = () => {};
   onDiscoverHdcServer: (preferManual: boolean, showToast: boolean) => Promise<void> = async (
@@ -242,14 +245,25 @@ export struct LocalAssistantPage {
             .borderRadius(12)
             .margin({ left: 10 })
         }.width('100%')
-        Button('从 ModelScope 下载')
-          .onClick(() => { this.onDownloadModelScopeModel(); })
-          .enabled(!this.downloading)
-          .height(40)
-          .width('100%')
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .margin({ top: 10 })
+        Row() {
+          Button('从 ModelScope 下载')
+            .onClick(() => { this.onDownloadModelScopeModel(); })
+            .enabled(!this.downloading)
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor('#4B8BFF')
+            .borderRadius(12)
+          Button(this.modelScopePauseRequested ? '暂停中' : '暂停下载')
+            .onClick(() => { this.onPauseModelScopeDownload(); })
+            .enabled(this.modelScopeDownloading && !this.modelScopePauseRequested)
+            .height(40)
+            .layoutWeight(1)
+            .backgroundColor(this.modelScopePauseRequested ? '#A9B0BE' : '#607D8B')
+            .borderRadius(12)
+            .margin({ left: 10 })
+        }
+        .width('100%')
+        .margin({ top: 10 })
       }
       .width('92%')
       .padding(18)

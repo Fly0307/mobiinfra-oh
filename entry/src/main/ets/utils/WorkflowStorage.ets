@@ -118,6 +118,132 @@ export class WorkflowStorage {
     }
   }
 
+  static readBytes(path: string): ArrayBuffer {
+    let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+    try {
+      let stat = fs.statSync(path);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      return buf;
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  static writeBytes(path: string, data: ArrayBuffer): void {
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, data);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  static writeBase64Image(path: string, imageBase64: string): void {
+    let helper = new util.Base64Helper();
+    let imageBytes = helper.decodeSync(WorkflowStorage.stripImageDataUri(imageBase64));
+    WorkflowStorage.writeBytes(path, imageBytes.buffer as ArrayBuffer);
+  }
+
+  static readImageAsBase64(path: string): string {
+    let helper = new util.Base64Helper();
+    return helper.encodeToStringSync(new Uint8Array(WorkflowStorage.readBytes(path)));
+  }
+
+  static workflowRunRelativePath(filesDir: string, path: string): string {
+    let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
+    let normalized = path.replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('workflows/')) {
+      return normalized;
+    }
+    let workflowRoot = root + '/' + WORKFLOW_DIR + '/';
+    if (normalized.startsWith(workflowRoot)) {
+      return WORKFLOW_DIR + '/' + normalized.substring(workflowRoot.length);
+    }
+    let marker = '/' + WORKFLOW_DIR + '/';
+    let markerIndex = normalized.indexOf(marker);
+    if (markerIndex >= 0) {
+      return WORKFLOW_DIR + '/' + normalized.substring(markerIndex + marker.length);
+    }
+    return normalized;
+  }
+
+  static workflowImageInputKind(value: string): string {
+    let text = value.trim();
+    if (text.length === 0) {
+      return 'empty';
+    }
+    if (text.startsWith('data:image/') && text.indexOf('base64,') >= 0) {
+      return 'data_uri';
+    }
+    if (WorkflowStorage.looksLikeBase64Image(text)) {
+      return 'base64';
+    }
+    let normalized = text.replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('runs/') ||
+      /\.(jpg|jpeg|png|webp|gif)$/i.test(normalized)) {
+      return 'path';
+    }
+    return 'text';
+  }
+
+  static resolveWorkflowImageInputAsBase64(filesDir: string, value: string): string {
+    let kind = WorkflowStorage.workflowImageInputKind(value);
+    if (kind === 'empty') {
+      return '';
+    }
+    if (kind === 'data_uri') {
+      return WorkflowStorage.stripImageDataUri(value);
+    }
+    if (kind === 'base64') {
+      return value.replace(/\s+/g, '');
+    }
+    if (kind === 'path') {
+      return WorkflowStorage.readImageAsBase64(WorkflowStorage.workflowAbsolutePath(filesDir, value));
+    }
+    return value;
+  }
+
+  private static workflowAbsolutePath(filesDir: string, path: string): string {
+    let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
+    let normalized = path.trim().replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('/')) {
+      return normalized;
+    }
+    if (normalized.startsWith('workflows/')) {
+      return root + '/' + normalized;
+    }
+    if (normalized.startsWith('runs/')) {
+      return WorkflowStorage.rootDir(root) + '/' + normalized;
+    }
+    return root + '/' + normalized;
+  }
+
+  private static stripImageDataUri(value: string): string {
+    let text = value.trim();
+    let marker = 'base64,';
+    let markerIndex = text.indexOf(marker);
+    if (text.startsWith('data:image/') && markerIndex >= 0) {
+      return text.substring(markerIndex + marker.length).replace(/\s+/g, '');
+    }
+    return text.replace(/\s+/g, '');
+  }
+
+  private static looksLikeBase64Image(value: string): boolean {
+    let text = value.replace(/\s+/g, '');
+    return text.startsWith('/9j/') || text.startsWith('iVBORw0KGgo') ||
+      text.startsWith('R0lGOD') || text.startsWith('UklGR');
+  }
+
   static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
     let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
     if (!parsed.steps) {
@@ -984,7 +1110,8 @@ export class WorkflowStorage {
 
   static listRunFiles(filesDir: string): WorkflowManagedFile[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), ''));
+    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), '')
+      .filter((file: WorkflowManagedFile): boolean => WorkflowStorage.isRunSummaryFile(file)));
   }
 
   static sortManagedFilesForDisplay(files: WorkflowManagedFile[]): WorkflowManagedFile[] {
@@ -1028,6 +1155,10 @@ export class WorkflowStorage {
     return [];
   }
 
+  private static isRunSummaryFile(file: WorkflowManagedFile): boolean {
+    return file.name.endsWith('/run_summary.json') || file.name === 'run_summary.json';
+  }
+
   static countFiles(path: string): number {
     try {
       let children = fs.listFileSync(path);
@@ -1069,7 +1200,7 @@ export class WorkflowStorage {
     return {
       configCount: WorkflowStorage.countFiles(WorkflowStorage.configDir(filesDir)),
       dailyLogCount: WorkflowStorage.countFiles(WorkflowStorage.dailyLogDir(filesDir)),
-      runCount: WorkflowStorage.countFiles(WorkflowStorage.runsDir(filesDir)),
+      runCount: WorkflowStorage.listRunFiles(filesDir).length,
       totalBytes: WorkflowStorage.calcPathSize(WorkflowStorage.rootDir(filesDir))
     };
   }
@@ -1103,6 +1234,83 @@ export class WorkflowStorage {
       deleted += WorkflowStorage.deleteManagedFile(files[i]);
     }
     return deleted;
+  }
+
+  static managedFileDeleteTarget(filesDir: string, category: string, file: WorkflowManagedFile): string {
+    if (category === 'run') {
+      return WorkflowStorage.runManagedFileDeleteTarget(filesDir, file);
+    }
+    return file.path;
+  }
+
+  static deleteManagedFileForCategory(filesDir: string, category: string, file: WorkflowManagedFile): number {
+    if (category === 'config') {
+      return WorkflowStorage.deleteConfigManagedFile(filesDir, file);
+    }
+    let deleteTarget = WorkflowStorage.managedFileDeleteTarget(filesDir, category, file);
+    let deleted = WorkflowStorage.deletePathRecursively(deleteTarget);
+    if (category === 'daily') {
+      deleted += WorkflowStorage.deleteEmptyParentDirectory(WorkflowStorage.dailyLogDir(filesDir), file.path);
+    }
+    return deleted;
+  }
+
+  static deleteManagedFilesForCategory(filesDir: string, category: string, files: WorkflowManagedFile[]): number {
+    let deleted = 0;
+    for (let i = 0; i < files.length; i++) {
+      deleted += WorkflowStorage.deleteManagedFileForCategory(filesDir, category, files[i]);
+    }
+    return deleted;
+  }
+
+  private static runManagedFileDeleteTarget(filesDir: string, file: WorkflowManagedFile): string {
+    let runsRoot = WorkflowStorage.normalizePath(WorkflowStorage.runsDir(filesDir));
+    let filePath = WorkflowStorage.normalizePath(file.path);
+    let parent = WorkflowStorage.parentPath(filePath);
+    if (WorkflowStorage.isRunSummaryFile(file) && WorkflowStorage.isNestedPath(parent, runsRoot)) {
+      return parent;
+    }
+    return file.path;
+  }
+
+  private static deleteEmptyParentDirectory(categoryRoot: string, filePath: string): number {
+    let root = WorkflowStorage.normalizePath(categoryRoot);
+    let parent = WorkflowStorage.parentPath(WorkflowStorage.normalizePath(filePath));
+    if (!WorkflowStorage.isNestedPath(parent, root)) {
+      return 0;
+    }
+    try {
+      let children = fs.listFileSync(parent);
+      if (children.length === 0) {
+        fs.rmdirSync(parent);
+        return 1;
+      }
+    } catch (e) {
+    }
+    return 0;
+  }
+
+  private static normalizePath(path: string): string {
+    let normalized = path.replace(/\\/g, '/');
+    while (normalized.endsWith('/') && normalized.length > 1) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
+  }
+
+  private static parentPath(path: string): string {
+    let normalized = WorkflowStorage.normalizePath(path);
+    let index = normalized.lastIndexOf('/');
+    if (index <= 0) {
+      return '';
+    }
+    return normalized.substring(0, index);
+  }
+
+  private static isNestedPath(path: string, root: string): boolean {
+    let normalizedPath = WorkflowStorage.normalizePath(path);
+    let normalizedRoot = WorkflowStorage.normalizePath(root);
+    return normalizedPath.length > normalizedRoot.length && normalizedPath.startsWith(normalizedRoot + '/');
   }
 
   private static taskMatchesConfigFile(filesDir: string, task: WorkflowTask, file: WorkflowManagedFile): boolean {

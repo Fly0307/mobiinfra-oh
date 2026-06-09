@@ -224,7 +224,9 @@ export class WorkflowRunner {
 
     this.log('====== Workflow started ======');
     this.log('任务：' + task.title);
+    this.log('run 目录已创建：' + this.runDir);
     AgentExecutionController.beginExecution('Workflow 启动：' + task.title);
+    this.writeRunSummary('running');
 
     let status = 'success';
     let message = 'Workflow 执行完成';
@@ -584,10 +586,15 @@ export class WorkflowRunner {
     };
     if (action === 'screenshot') {
       let shot = await this.hdcBridge.screenshot();
-      output.image_b64 = shot.image_b64 || '';
+      let imageBase64 = shot.image_b64 || '';
+      let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
+      let imagePath = this.stepDir(actualId) + '/' + imageFileName;
+      WorkflowStorage.writeBase64Image(imagePath, imageBase64);
+      output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
+      output.image_b64 = imageBase64;
       output.width = shot.width || 0;
       output.height = shot.height || 0;
-      output.file_name = step.file_name || 'screenshot.jpg';
+      output.file_name = imageFileName;
       return output as Object as WorkflowJsonMap;
     }
 
@@ -650,6 +657,7 @@ export class WorkflowRunner {
     if (question.length === 0 || image.length === 0) {
       throw new Error('vlm_qa requires question and image');
     }
+    let imageBase64 = WorkflowStorage.resolveWorkflowImageInputAsBase64(this.filesDir, image);
     let requiresStructuredOutput = inputs.json_schema !== undefined && inputs.json_schema !== null;
     let promptBody = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
     let prompt = this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
@@ -659,7 +667,7 @@ export class WorkflowRunner {
     }
     if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
-      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, image));
+      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, imageBase64));
       let deferredOutput: ToolOutput = {
         step_dir: this.stepDir(actualId),
         tool_name: toolName,
@@ -671,7 +679,7 @@ export class WorkflowRunner {
       return deferredOutput as Object as WorkflowJsonMap;
     }
     this.log('VLM QA request started: ' + actualId);
-    let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
+    let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
     this.log('VLM QA response:\n' + response);
     let output: ToolOutput = {
       step_dir: this.stepDir(actualId),
@@ -692,18 +700,18 @@ export class WorkflowRunner {
     return output as Object as WorkflowJsonMap;
   }
 
-  private createSummaryJob(actualId: string, prompt: string, image: string): PendingSummaryJob {
+  private createSummaryJob(actualId: string, prompt: string, imageBase64: string): PendingSummaryJob {
     return {
       actual_id: actualId,
       prompt: prompt,
-      image: image,
-      promise: this.startSummaryJob(actualId, prompt, image)
+      image: imageBase64,
+      promise: this.startSummaryJob(actualId, prompt, imageBase64)
     };
   }
 
-  private async startSummaryJob(actualId: string, prompt: string, image: string): Promise<SummaryJobResult> {
+  private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
-      let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
+      let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
       return this.normalizeSummaryJobResult({
         ok: true,
         actual_id: actualId,
@@ -1274,6 +1282,16 @@ export class WorkflowRunner {
     let dir = this.runDir + '/steps/' + actualId;
     WorkflowStorage.ensureDirectory(dir);
     return dir;
+  }
+
+  private screenshotFileName(value: string): string {
+    let safeName = this.sanitizeFileName(value);
+    let lower = safeName.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') ||
+      lower.endsWith('.webp') || lower.endsWith('.gif')) {
+      return safeName;
+    }
+    return safeName + '.jpg';
   }
 
   private sanitizeFileName(value: string): string {

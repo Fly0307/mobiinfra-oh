@@ -249,6 +249,7 @@ export struct ChatPage {
             .backgroundColor(Color.White)
             .borderRadius(19)
             .border({ width: 1, color: '#E2E5EA' })
+            .onClick(async () => { await this.runPrimaryAction(); })
           Text('下发任务')
             .fontSize(13)
             .fontColor('#222222')

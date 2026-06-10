@@ -12,6 +12,7 @@ import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
   AvatarProviderConfig,
+  AvatarVersionViewModel,
   createEmptyAvatarHomeViewModel
 } from './avatar/AvatarTypes';
 import {
@@ -534,8 +535,17 @@ export class DataManagerFacade {
     return this.avatarService.buildGenerateRequest(profile, this.profileCompleteness(profile), mode, sourceImage, consentedAt);
   }
 
+  isAvatarProfileSnapshotUnchanged(): boolean {
+    let profile = this.indexService.loadProfileState();
+    return this.avatarService.isCurrentProfileSnapshotUnchanged(profile, this.profileCompleteness(profile));
+  }
+
   async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
     return this.avatarService.generate(config, request);
+  }
+
+  listAvatarVersions(): AvatarVersionViewModel[] {
+    return this.avatarService.listVersionViewModels();
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {

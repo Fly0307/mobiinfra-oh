@@ -5,13 +5,14 @@ import {
   HomeRecommendationViewModel
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
-import { AvatarGenerationMode } from '../../datamanager/avatar/AvatarTypes';
+import { AvatarDomainSnapshot, AvatarGenerationMode, AvatarVersionViewModel } from '../../datamanager/avatar/AvatarTypes';
 import { promptAction } from '@kit.ArkUI';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  @Prop avatarVersions: AvatarVersionViewModel[] = [];
   onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
   onGenerateAvatar: (mode: AvatarGenerationMode, sourceImage: string) => Promise<void> =
     async (mode: AvatarGenerationMode, sourceImage: string) => {};
@@ -21,6 +22,8 @@ export struct HomePage {
   @State agentTaskSubmitting: boolean = false;
   @State avatarGenerationOpen: boolean = false;
   @State avatarGenerating: boolean = false;
+  @State avatarHistoryOpen: boolean = false;
+  @State selectedAvatarVersionId: string = '';
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -122,6 +125,28 @@ export struct HomePage {
     }
   }
 
+  private selectedAvatarVersionItems(): AvatarVersionViewModel[] {
+    if (this.selectedAvatarVersionId.length === 0) {
+      return [];
+    }
+    return this.avatarVersions.filter((item: AvatarVersionViewModel): boolean => {
+      return item.versionId === this.selectedAvatarVersionId;
+    }).slice(0, 1);
+  }
+
+  private avatarModeLabel(mode: AvatarGenerationMode): string {
+    return mode === 'image_to_image' ? '照片参考生成' : '画像生成';
+  }
+
+  private avatarParamsLabel(item: AvatarVersionViewModel): string {
+    return item.generationParams.size + ' / ' + item.generationParams.response_format + ' / ' +
+      item.generationParams.output_format;
+  }
+
+  private avatarConsentLabel(item: AvatarVersionViewModel): string {
+    return item.consentSnapshot.photo_used ? '已使用授权照片' : '未使用照片';
+  }
+
   @Builder AvatarImage() {
     if (this.profile.avatarUri.length > 0) {
       Image(this.profile.avatarUri)
@@ -142,6 +167,253 @@ export struct HomePage {
           this.avatarGenerationOpen = true;
         })
     }
+  }
+
+  @Builder AvatarHistoryEntry(item: AvatarVersionViewModel) {
+    Row() {
+      if (item.imageUri.length > 0) {
+        Image(item.imageUri)
+          .width(64)
+          .height(82)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(12)
+      } else {
+        Column() {
+          Text('无图').fontSize(12).fontColor('#8B93A4')
+        }
+        .justifyContent(FlexAlign.Center)
+        .width(64)
+        .height(82)
+        .backgroundColor('#EEF2F7')
+        .borderRadius(12)
+      }
+      Column() {
+        Text(item.createdAt.length > 0 ? item.createdAt : '未知时间')
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.avatarModeLabel(item.mode) + ' · ' + item.provider)
+          .fontSize(12)
+          .fontColor('#6F7684')
+          .width('100%')
+          .margin({ top: 4 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(item.model)
+          .fontSize(12)
+          .fontColor('#8A92A3')
+          .width('100%')
+          .margin({ top: 4 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.avatarParamsLabel(item))
+          .fontSize(12)
+          .fontColor('#8A92A3')
+          .width('100%')
+          .margin({ top: 4 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+      Text('>').fontSize(18).fontColor('#A4ABBA')
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .backgroundColor('#F8FBFF')
+    .borderRadius(14)
+    .margin({ top: 10 })
+    .onClick(() => {
+      this.selectedAvatarVersionId = item.versionId;
+    })
+  }
+
+  @Builder AvatarEvidenceDomain(item: AvatarDomainSnapshot) {
+    Column() {
+      Row() {
+        Text(item.display_name)
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .layoutWeight(1)
+        Text(item.event_count + ' 条')
+          .fontSize(12)
+          .fontColor('#8A92A3')
+      }
+      .width('100%')
+      Text(item.short_summary.length > 0 ? item.short_summary : '暂无摘要')
+        .fontSize(13)
+        .fontColor('#4E5668')
+        .width('100%')
+        .margin({ top: 6 })
+      ForEach(item.claims.slice(0, 3), (claim: string) => {
+        Text('· ' + claim)
+          .fontSize(12)
+          .fontColor('#6F7684')
+          .width('100%')
+          .margin({ top: 4 })
+      }, (claim: string) => claim)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .backgroundColor('#F8FBFF')
+    .borderRadius(12)
+    .margin({ top: 8 })
+  }
+
+  @Builder AvatarVersionDetailOverlay(item: AvatarVersionViewModel) {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.selectedAvatarVersionId = '';
+        })
+      Column() {
+        Row() {
+          Text('生成依据')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+            .layoutWeight(1)
+          Text('返回')
+            .fontSize(13)
+            .fontColor('#7C8494')
+            .onClick(() => {
+              this.selectedAvatarVersionId = '';
+            })
+        }.width('100%')
+        Scroll() {
+          Column() {
+            if (item.imageUri.length > 0) {
+              Image(item.imageUri)
+                .width('100%')
+                .height(220)
+                .objectFit(ImageFit.Contain)
+                .borderRadius(14)
+                .backgroundColor('#F5F7FB')
+                .margin({ top: 14 })
+            }
+            Text(item.createdAt + ' · ' + this.avatarModeLabel(item.mode))
+              .fontSize(13)
+              .fontColor('#6F7684')
+              .width('100%')
+              .margin({ top: 14 })
+            Text(item.provider + ' / ' + item.model)
+              .fontSize(13)
+              .fontColor('#4E5668')
+              .width('100%')
+              .margin({ top: 6 })
+            Text(this.avatarParamsLabel(item) + ' · ' + this.avatarConsentLabel(item))
+              .fontSize(13)
+              .fontColor('#4E5668')
+              .width('100%')
+              .margin({ top: 6 })
+            Text('画像摘要')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+              .width('100%')
+              .margin({ top: 18 })
+            ForEach(item.profileSnapshot.domains, (domain: AvatarDomainSnapshot) => {
+              this.AvatarEvidenceDomain(domain)
+            }, (domain: AvatarDomainSnapshot) => domain.domain + '-' + domain.short_summary)
+            Text('Prompt')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+              .width('100%')
+              .margin({ top: 18 })
+            Text(item.promptSnapshot)
+              .fontSize(12)
+              .fontColor('#4E5668')
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+              .backgroundColor('#F8FBFF')
+              .borderRadius(12)
+              .margin({ top: 8 })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+        }
+        .width('100%')
+        .height(560)
+        .scrollBar(BarState.Off)
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width('90%')
+      .padding({ left: 18, right: 18, top: 20, bottom: 20 })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 22, color: '#26000000', offsetX: 0, offsetY: 12 })
+    }
+    .width('100%')
+    .height('100%')
+    .zIndex(102)
+  }
+
+  @Builder AvatarHistoryOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.avatarHistoryOpen = false;
+          this.selectedAvatarVersionId = '';
+        })
+      Column() {
+        Row() {
+          Text('历史记录')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(13)
+            .fontColor('#7C8494')
+            .onClick(() => {
+              this.avatarHistoryOpen = false;
+              this.selectedAvatarVersionId = '';
+            })
+        }.width('100%')
+        if (this.avatarVersions.length === 0) {
+          Text('暂无历史数字分身')
+            .fontSize(14)
+            .fontColor('#7C8494')
+            .width('100%')
+            .margin({ top: 20 })
+        } else {
+          Scroll() {
+            Column() {
+              ForEach(this.avatarVersions, (item: AvatarVersionViewModel) => {
+                this.AvatarHistoryEntry(item)
+              }, (item: AvatarVersionViewModel) => item.versionId)
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .height(430)
+          .scrollBar(BarState.Off)
+          .margin({ top: 8 })
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width('90%')
+      .padding({ left: 18, right: 18, top: 20, bottom: 20 })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 22, color: '#26000000', offsetX: 0, offsetY: 12 })
+    }
+    .width('100%')
+    .height('100%')
+    .zIndex(101)
   }
 
   @Builder AvatarGenerationOverlay() {
@@ -221,6 +493,33 @@ export struct HomePage {
         .backgroundColor('#F5F7FB')
         .borderRadius(14)
         .margin({ top: 10 })
+
+        Row() {
+          Column() {
+            Text('历史记录 / 生成依据')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+            Text(this.avatarVersions.length > 0 ? '查看缩略图、模型参数和画像证据' : '生成后可查看每次的画像证据')
+              .fontSize(12)
+              .fontColor('#6F7684')
+              .margin({ top: 4 })
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Text(this.avatarVersions.length + ' 条')
+            .fontSize(12)
+            .fontColor('#8066FF')
+            .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+            .backgroundColor('#F1EEFF')
+            .borderRadius(10)
+        }
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+        .backgroundColor('#F8FBFF')
+        .borderRadius(14)
+        .margin({ top: 10 })
+        .onClick(() => {
+          this.avatarHistoryOpen = true;
+        })
 
         Button(this.avatarGenerating ? '生成中...' : this.avatarActionLabel())
           .width('100%')
@@ -626,6 +925,12 @@ export struct HomePage {
       if (this.avatarGenerationOpen) {
         this.AvatarGenerationOverlay()
       }
+      if (this.avatarHistoryOpen) {
+        this.AvatarHistoryOverlay()
+      }
+      ForEach(this.selectedAvatarVersionItems(), (item: AvatarVersionViewModel) => {
+        this.AvatarVersionDetailOverlay(item)
+      }, (item: AvatarVersionViewModel) => item.versionId)
     }
     .width('100%')
     .height('100%')

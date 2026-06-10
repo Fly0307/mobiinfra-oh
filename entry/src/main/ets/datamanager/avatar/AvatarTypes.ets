@@ -58,6 +58,21 @@ export interface AvatarVersionState {
   consent_snapshot: AvatarConsentSnapshot;
 }
 
+export interface AvatarVersionViewModel {
+  versionId: string;
+  createdAt: string;
+  imageUri: string;
+  imagePath: string;
+  mode: AvatarGenerationMode;
+  provider: string;
+  model: string;
+  generationParams: AvatarGenerationParams;
+  promptSnapshot: string;
+  profileSnapshot: AvatarProfileSnapshot;
+  profileSnapshotHash: string;
+  consentSnapshot: AvatarConsentSnapshot;
+}
+
 export interface AvatarState {
   current_version_id: string;
   profile_snapshot_hash: string;

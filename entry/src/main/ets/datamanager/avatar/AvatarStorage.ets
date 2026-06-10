@@ -6,6 +6,7 @@ import {
   AvatarState,
   AvatarStatus,
   AvatarVersionState,
+  AvatarVersionViewModel,
   createEmptyAvatarHomeViewModel,
   createEmptyAvatarState
 } from './AvatarTypes';
@@ -89,6 +90,12 @@ export class AvatarStorage {
     return result.sort((a: AvatarVersionState, b: AvatarVersionState) => b.created_at.localeCompare(a.created_at));
   }
 
+  listVersionViewModels(): AvatarVersionViewModel[] {
+    return this.listVersions().map((version: AvatarVersionState): AvatarVersionViewModel => {
+      return this.versionViewModel(version);
+    });
+  }
+
   homeViewFromState(state: AvatarState, currentVersion: AvatarVersionState | null): AvatarHomeViewModel {
     let view = createEmptyAvatarHomeViewModel();
     view.avatarStatus = state.status;
@@ -114,6 +121,23 @@ export class AvatarStorage {
       return 'file://' + path;
     }
     return 'file://' + this.storage.join(this.paths.avatarRoot, path);
+  }
+
+  private versionViewModel(version: AvatarVersionState): AvatarVersionViewModel {
+    return {
+      versionId: version.version_id,
+      createdAt: version.created_at,
+      imageUri: this.displayUri(version.image_path),
+      imagePath: version.image_path,
+      mode: version.mode,
+      provider: version.provider,
+      model: version.model,
+      generationParams: version.generation_params,
+      promptSnapshot: version.prompt_snapshot,
+      profileSnapshot: version.profile_snapshot,
+      profileSnapshotHash: version.profile_snapshot_hash,
+      consentSnapshot: version.consent_snapshot
+    };
   }
 
   private actionLabel(status: AvatarStatus): string {

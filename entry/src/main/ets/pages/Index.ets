@@ -27,7 +27,8 @@ import {
   AvatarGenerateRequest,
   AvatarGenerationMode,
   AvatarHomeViewModel,
-  AvatarProviderConfig
+  AvatarProviderConfig,
+  AvatarVersionViewModel
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
@@ -162,6 +163,7 @@ struct Index {
   @State dataManagerProgressPercent: number = 0;
   @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
+  @State avatarVersions: AvatarVersionViewModel[] = [];
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -238,11 +240,35 @@ struct Index {
     };
   }
 
+  private async confirmUnchangedAvatarRegeneration(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '画像未变化',
+        message: '当前画像内容与上次生成数字分身时一致，继续生成可能会得到相似结果。是否仍要重新生成？',
+        buttons: [
+          { text: '取消', color: '#666666' },
+          { text: '继续生成', color: '#8066FF' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => {
+        resolve(false);
+      });
+    });
+  }
+
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
       promptAction.showToast({ message: '数据管理服务未就绪', duration: 1500 });
       throw new Error('数据管理服务未就绪');
+    }
+    if (this.dataManagerFacade.isAvatarProfileSnapshotUnchanged()) {
+      let confirmed = await this.confirmUnchangedAvatarRegeneration();
+      if (!confirmed) {
+        dataManagerInfo('generateHomeAvatar cancelled: profile snapshot unchanged');
+        throw new Error('已取消生成');
+      }
     }
     let config = this.getAvatarProviderConfig();
     if (config.apiKey.trim().length === 0) {
@@ -288,6 +314,7 @@ struct Index {
     }
     this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
+    this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
@@ -2401,6 +2428,7 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            avatarVersions: this.avatarVersions,
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);
             },

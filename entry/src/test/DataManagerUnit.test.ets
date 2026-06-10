@@ -546,6 +546,69 @@ export default function dataManagerUnitTest() {
       expect(persistedState.profile_snapshot_hash).assertEqual(firstHash);
     });
 
+    it('avatarServiceDetectsUnchangedProfileBeforeRegeneration', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let hash = service.previewProfileSnapshotHash(profile, 100);
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v1';
+      state.profile_snapshot_hash = hash;
+      avatarStorage.saveState(state);
+
+      expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertTrue();
+      profile.domains['eat'].short_summary = '热咖啡党';
+      expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertFalse();
+    });
+
+    it('avatarStorageListsVersionViewModelsWithEvidence', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let snapshot = new AvatarPromptBuilder(storage).buildSnapshot(profile, 100);
+      avatarStorage.saveVersion({
+        version_id: 'v-history',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v-history.jpg',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'avatar prompt',
+        profile_snapshot: snapshot,
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '2026-06-10T10:07:00.000Z',
+          photo_source: ''
+        }
+      });
+
+      let versions = avatarStorage.listVersionViewModels();
+      expect(versions.length).assertEqual(1);
+      expect(versions[0].versionId).assertEqual('v-history');
+      expect(versions[0].imageUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v-history.jpg');
+      expect(versions[0].model).assertEqual('doubao-seedream-4-5-251128');
+      expect(versions[0].promptSnapshot).assertEqual('avatar prompt');
+      expect(versions[0].profileSnapshot.domains.length).assertEqual(4);
+      expect(versions[0].profileSnapshot.domains[0].claims.length > 0).assertTrue();
+      expect(versions[0].generationParams.output_format).assertEqual('jpeg');
+      expect(versions[0].consentSnapshot.photo_used).assertFalse();
+    });
+
     it('avatarStorageBuildsVersionUriAndActionLabels', 0, () => {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);

@@ -14,7 +14,8 @@ import {
   AvatarProviderRequest,
   AvatarProviderResult,
   AvatarState,
-  AvatarVersionState
+  AvatarVersionState,
+  AvatarVersionViewModel
 } from './AvatarTypes';
 
 export class AvatarService {
@@ -49,6 +50,20 @@ export class AvatarService {
 
   previewProfileSnapshotHash(profile: ProfileState, completeness: number): string {
     return this.promptBuilder.snapshotHash(this.promptBuilder.buildSnapshot(profile, completeness));
+  }
+
+  isCurrentProfileSnapshotUnchanged(profile: ProfileState, completeness: number): boolean {
+    this.ensureReady();
+    let state = this.avatarStorage.loadState();
+    if (state.current_version_id.length === 0 || state.profile_snapshot_hash.length === 0) {
+      return false;
+    }
+    return this.previewProfileSnapshotHash(profile, completeness) === state.profile_snapshot_hash;
+  }
+
+  listVersionViewModels(): AvatarVersionViewModel[] {
+    this.ensureReady();
+    return this.avatarStorage.listVersionViewModels();
   }
 
   buildGenerateRequest(profile: ProfileState, completeness: number, mode: AvatarGenerationMode,

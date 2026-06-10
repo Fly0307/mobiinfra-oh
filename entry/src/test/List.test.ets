@@ -4,6 +4,7 @@ import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
+import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -12,4 +13,5 @@ export default function testsuite() {
   workflowDateContextUnitTest();
   mainTabConfigUnitTest();
   chatPageTypesUnitTest();
+  settingsCenterConfigUnitTest();
 }

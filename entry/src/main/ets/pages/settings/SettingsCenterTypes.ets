@@ -1,0 +1,59 @@
+export enum SettingsSectionId {
+  PersonalPrivacy = 0,
+  DataCollection = 1,
+  ModelAgents = 2,
+  TaskAutomation = 3,
+  StorageAbout = 4
+}
+
+export interface SettingsSectionItem {
+  id: SettingsSectionId;
+  title: string;
+  subtitle: string;
+}
+
+export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
+  {
+    id: SettingsSectionId.PersonalPrivacy,
+    title: '个人与隐私',
+    subtitle: '隐私守护、确认策略与数字分身'
+  },
+  {
+    id: SettingsSectionId.DataCollection,
+    title: '数据采集',
+    subtitle: '图库、OCR、Embedding 与地图服务'
+  },
+  {
+    id: SettingsSectionId.ModelAgents,
+    title: '模型与智能体',
+    subtitle: '云端 Planner/Decider、本地模型与 HDC'
+  },
+  {
+    id: SettingsSectionId.TaskAutomation,
+    title: '任务与自动化',
+    subtitle: 'Agent 执行、Workflow 与运行日志'
+  },
+  {
+    id: SettingsSectionId.StorageAbout,
+    title: '存储与关于',
+    subtitle: '模型文件、调试产物、版本与说明'
+  }
+];
+
+export function settingsSectionTitle(id: SettingsSectionId): string {
+  for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
+    if (SETTINGS_SECTION_ITEMS[i].id === id) {
+      return SETTINGS_SECTION_ITEMS[i].title;
+    }
+  }
+  return '';
+}
+
+export function settingsSectionSubtitle(id: SettingsSectionId): string {
+  for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
+    if (SETTINGS_SECTION_ITEMS[i].id === id) {
+      return SETTINGS_SECTION_ITEMS[i].subtitle;
+    }
+  }
+  return '';
+}

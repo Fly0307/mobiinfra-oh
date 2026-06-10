@@ -23,6 +23,8 @@ export interface AvatarProfileSnapshot {
   generated_at: string;
   event_count: number;
   completeness: number;
+  gender: string;
+  age: string;
   domains: AvatarDomainSnapshot[];
   prompt_profile_text: string;
 }

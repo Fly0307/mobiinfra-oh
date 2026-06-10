@@ -479,9 +479,12 @@ export default function dataManagerUnitTest() {
       let builder = new AvatarPromptBuilder(new DataManagerStorage());
       let snapshot = builder.buildSnapshot(demoProfileStateForAvatar(), 100);
       expect(snapshot.domains.length).assertEqual(4);
+      expect(snapshot.gender).assertEqual('男');
+      expect(snapshot.age).assertEqual('');
       expect(snapshot.prompt_profile_text.indexOf('咖啡轻食') >= 0).assertTrue();
       let prompt = builder.buildPrompt(snapshot);
       expect(prompt.indexOf('personal digital avatar') >= 0).assertTrue();
+      expect(prompt.indexOf('gender=male') >= 0).assertTrue();
       expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
       expect(prompt.indexOf('no text') >= 0).assertTrue();
       expect(prompt.indexOf('event_id')).assertEqual(-1);

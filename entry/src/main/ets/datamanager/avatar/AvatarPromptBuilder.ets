@@ -12,6 +12,9 @@ import {
   AvatarProfileSnapshot
 } from './AvatarTypes';
 
+const DEFAULT_AVATAR_GENDER: string = '男';
+const DEFAULT_AVATAR_AGE: string = '';
+
 export class AvatarPromptBuilder {
   private storage: DataManagerStorage;
 
@@ -29,6 +32,8 @@ export class AvatarPromptBuilder {
       generated_at: normalizeFreeText(profile.generated_at),
       event_count: profile.event_count,
       completeness: completeness,
+      gender: DEFAULT_AVATAR_GENDER,
+      age: DEFAULT_AVATAR_AGE,
       domains: domains,
       prompt_profile_text: this.promptProfileText(domains)
     };
@@ -44,6 +49,7 @@ export class AvatarPromptBuilder {
       'Create a warm, trustworthy personal digital avatar for a mobile life-assistant home page.',
       'The image should be a clean vertical half-body portrait, simple soft background, no text, no watermark, no logo, suitable for a top home-page avatar area.',
       'Use the following evidence-based lifestyle profile as subtle visual inspiration. Do not infer income, job, health, identity, sensitive demographics, or personality traits not supported by the profile.',
+      this.supplementalProfileText(snapshot),
       snapshot.prompt_profile_text,
       'Style: vivid but realistic, friendly, polished, modern, light futuristic assistant feeling, balanced colors, clear face and upper body, high quality.'
     ];
@@ -86,5 +92,22 @@ export class AvatarPromptBuilder {
       lines.push(`${domain.display_name}: ${parts.join('；') || '暂无稳定画像'}`);
     });
     return lines.join('\n');
+  }
+
+  private supplementalProfileText(snapshot: AvatarProfileSnapshot): string {
+    let parts: string[] = [];
+    let gender = normalizeFreeText(snapshot.gender);
+    if (gender === '男') {
+      parts.push('gender=male');
+    } else if (gender === '女') {
+      parts.push('gender=female');
+    } else if (gender.length > 0) {
+      parts.push('gender=' + gender);
+    }
+    let age = normalizeFreeText(snapshot.age);
+    if (age.length > 0) {
+      parts.push('age=' + age);
+    }
+    return 'Supplemental demographic profile: ' + (parts.length > 0 ? parts.join(', ') : 'not specified');
   }
 }

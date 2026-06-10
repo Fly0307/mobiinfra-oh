@@ -147,6 +147,14 @@ export struct HomePage {
     return item.consentSnapshot.photo_used ? '已使用授权照片' : '未使用照片';
   }
 
+  private avatarDemographicLabel(item: AvatarVersionViewModel): string {
+    let genderText = item.profileSnapshot.gender;
+    let ageText = item.profileSnapshot.age;
+    let gender = genderText !== undefined && genderText.length > 0 ? genderText : '未设置';
+    let age = ageText !== undefined && ageText.length > 0 ? ageText : '未设置';
+    return '性别：' + gender + ' · 年龄：' + age;
+  }
+
   @Builder AvatarImage() {
     if (this.profile.avatarUri.length > 0) {
       Image(this.profile.avatarUri)
@@ -311,6 +319,11 @@ export struct HomePage {
               .width('100%')
               .margin({ top: 6 })
             Text(this.avatarParamsLabel(item) + ' · ' + this.avatarConsentLabel(item))
+              .fontSize(13)
+              .fontColor('#4E5668')
+              .width('100%')
+              .margin({ top: 6 })
+            Text(this.avatarDemographicLabel(item))
               .fontSize(13)
               .fontColor('#4E5668')
               .width('100%')

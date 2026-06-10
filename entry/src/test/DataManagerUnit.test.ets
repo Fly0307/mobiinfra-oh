@@ -38,9 +38,18 @@ import {
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
+  ProfileDomainState,
+  ProfileState,
   SourceEntry,
-  createJsonMap
+  createJsonMap,
+  createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
+import {
+  createEmptyAvatarHomeViewModel
+} from '../main/ets/datamanager/avatar/AvatarTypes';
+import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
+import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
+import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
   return {
@@ -395,6 +404,42 @@ export default function dataManagerUnitTest() {
       expect(isEventEnrichInputReusable('hash-1', 'hash-2', true)).assertFalse();
       expect(isEventEnrichInputReusable('hash-1', 'hash-1', false)).assertFalse();
       expect(isEventEnrichInputReusable('', 'hash-1', true)).assertFalse();
+    });
+
+    it('avatarHomeViewModelDefaultsToStaticFallbackState', 0, () => {
+      let avatar = createEmptyAvatarHomeViewModel();
+      expect(avatar.avatarUri).assertEqual('');
+      expect(avatar.avatarStatus).assertEqual('empty');
+      expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
+      expect(avatar.avatarVersionId).assertEqual('');
+      expect(avatar.avatarUpdatedLabel).assertEqual('');
+    });
+
+    it('dataManagerPathsExposeAvatarStorageRoots', 0, () => {
+      let paths = new DataManagerPaths('/tmp/demo-files', new DataManagerStorage());
+      expect(paths.avatarRoot).assertEqual('/tmp/demo-files/workflows/avatar');
+      expect(paths.avatarVersionsRoot).assertEqual('/tmp/demo-files/workflows/avatar/versions');
+      expect(paths.avatarAssetsRoot).assertEqual('/tmp/demo-files/workflows/avatar/assets');
+    });
+
+    it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {
+      let facade = new DataManagerFacade('/tmp/demo-home-profile-avatar');
+      let profile: ProfileState = {
+        generated_at: '2026-06-10T10:00:00',
+        event_count: 1,
+        event_date_range: createStringMap(),
+        domains: new Object() as Record<string, ProfileDomainState>,
+        claim_count: 0
+      };
+      facade.storage.writeJsonAtomic(facade.storage.join(facade.paths.indexesRoot, 'profile', 'state.json'), profile as Object);
+
+      let home = facade.loadHomeViewModel();
+      expect(home.empty).assertFalse();
+      expect(home.avatarUri).assertEqual('');
+      expect(home.avatarStatus).assertEqual('empty');
+      expect(home.avatarActionLabel).assertEqual('生成数字分身');
+      expect(home.avatarVersionId).assertEqual('');
+      expect(home.avatarUpdatedLabel).assertEqual('');
     });
   });
 }

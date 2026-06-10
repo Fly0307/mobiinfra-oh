@@ -10,6 +10,10 @@ import {
 } from './DataManagerTypes';
 import { DataManagerStorage } from './DataManagerStorage';
 
+const AVATAR_DIR_NAME: string = 'avatar';
+const AVATAR_VERSIONS_DIR_NAME: string = 'versions';
+const AVATAR_ASSETS_DIR_NAME: string = 'assets';
+
 export class DataManagerPaths {
   readonly filesDir: string;
   readonly rootDir: string;
@@ -19,6 +23,9 @@ export class DataManagerPaths {
   readonly indexesRoot: string;
   readonly collectionGroupsRoot: string;
   readonly workflowRunsRoot: string;
+  readonly avatarRoot: string;
+  readonly avatarVersionsRoot: string;
+  readonly avatarAssetsRoot: string;
   private storage: DataManagerStorage;
 
   constructor(filesDir: string, storage: DataManagerStorage) {
@@ -31,6 +38,9 @@ export class DataManagerPaths {
     this.indexesRoot = this.storage.join(this.consolidationRoot, INDEXES_DIR_NAME);
     this.collectionGroupsRoot = this.storage.join(this.indexesRoot, COLLECTION_GROUPS_DIR_NAME);
     this.workflowRunsRoot = this.storage.join(this.rootDir, WORKFLOW_RUNS_DIR_NAME);
+    this.avatarRoot = this.storage.join(this.rootDir, AVATAR_DIR_NAME);
+    this.avatarVersionsRoot = this.storage.join(this.avatarRoot, AVATAR_VERSIONS_DIR_NAME);
+    this.avatarAssetsRoot = this.storage.join(this.avatarRoot, AVATAR_ASSETS_DIR_NAME);
   }
 
   ensureBaseDirs(): void {
@@ -41,6 +51,9 @@ export class DataManagerPaths {
       this.outputsRoot,
       this.indexesRoot,
       this.workflowRunsRoot,
+      this.avatarRoot,
+      this.avatarVersionsRoot,
+      this.avatarAssetsRoot,
       this.storage.join(this.indexesRoot, 'events'),
       this.storage.join(this.indexesRoot, 'inverted'),
       this.storage.join(this.indexesRoot, 'source'),
@@ -87,4 +100,3 @@ export class DataManagerPaths {
     return this.storage.join(this.rootDir, relativePath);
   }
 }
-

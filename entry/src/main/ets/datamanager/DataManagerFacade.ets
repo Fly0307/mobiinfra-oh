@@ -7,6 +7,7 @@ import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTab
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
+import { AvatarHomeViewModel, createEmptyAvatarHomeViewModel } from './avatar/AvatarTypes';
 import {
   CollectionEventViewModel,
   CollectionGroupState,
@@ -64,8 +65,25 @@ interface DailyLogSnapshot {
 
 const DAILY_LOG_SNAPSHOT_FILE_NAME: string = 'daily-log-snapshot.json';
 
-export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
+function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
+  let avatar = createEmptyAvatarHomeViewModel();
   return {
+    avatarUri: avatar.avatarUri,
+    avatarStatus: avatar.avatarStatus,
+    avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+    avatarActionLabel: avatar.avatarActionLabel,
+    avatarVersionId: avatar.avatarVersionId
+  };
+}
+
+export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
+  let avatar = createHomeProfileAvatarDefaults();
+  return {
+    avatarUri: avatar.avatarUri,
+    avatarStatus: avatar.avatarStatus,
+    avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+    avatarActionLabel: avatar.avatarActionLabel,
+    avatarVersionId: avatar.avatarVersionId,
     updatedLabel: '暂无画像',
     completeness: 0,
     totalEvents: 0,
@@ -484,7 +502,13 @@ export class DataManagerFacade {
       return domain;
     });
     let recommendations = this.homeRecommendations();
+    let avatar = createHomeProfileAvatarDefaults();
     return {
+      avatarUri: avatar.avatarUri,
+      avatarStatus: avatar.avatarStatus,
+      avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+      avatarActionLabel: avatar.avatarActionLabel,
+      avatarVersionId: avatar.avatarVersionId,
       updatedLabel: this.lastSyncLabel([]),
       completeness: this.profileCompleteness(profile),
       totalEvents: profile.event_count,

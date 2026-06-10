@@ -589,6 +589,17 @@ export default function dataManagerUnitTest() {
       expect(base64).assertEqual('aGVsbG8=');
     });
 
+    it('seedreamResponseNormalizersIgnoreMalformedDataShapes', 0, () => {
+      expect(normalizeSeedreamImageUrl('{"data":null}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":{}}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":[null]}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":[{"url":123}]}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":null}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":{}}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":[null]}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":[{"b64_json":123}]}')).assertEqual('');
+    });
+
     it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {
       let facade = new DataManagerFacade('/tmp/demo-home-profile-avatar');
       let profile: ProfileState = {

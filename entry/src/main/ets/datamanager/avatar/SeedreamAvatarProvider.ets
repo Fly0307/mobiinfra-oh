@@ -21,6 +21,27 @@ interface SeedreamResponse {
   data?: SeedreamDataItem[];
 }
 
+function seedreamFirstDataString(raw: string, key: string): string {
+  let parsed = ArkJSON.parse(raw) as Record<string, Object | string | number | boolean | null>;
+  let data = parsed['data'];
+  if (!Array.isArray(data)) {
+    return '';
+  }
+  if (data.length === 0) {
+    return '';
+  }
+  let first = data[0];
+  if (first === null || typeof first !== 'object') {
+    return '';
+  }
+  let item = first as Record<string, Object | string | number | boolean | null>;
+  let value = item[key];
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim();
+}
+
 export function createSeedreamRequestBody(model: string, prompt: string, image: string,
   params: AvatarGenerationParams): SeedreamRequestBody {
   let body = new Object() as SeedreamRequestBody;
@@ -39,19 +60,11 @@ export function createSeedreamRequestBody(model: string, prompt: string, image: 
 }
 
 export function normalizeSeedreamImageUrl(raw: string): string {
-  let parsed = ArkJSON.parse(raw) as SeedreamResponse;
-  if (parsed.data === undefined || parsed.data.length === 0 || parsed.data[0].url === undefined) {
-    return '';
-  }
-  return parsed.data[0].url.trim();
+  return seedreamFirstDataString(raw, 'url');
 }
 
 export function normalizeSeedreamImageBase64(raw: string): string {
-  let parsed = ArkJSON.parse(raw) as SeedreamResponse;
-  if (parsed.data === undefined || parsed.data.length === 0 || parsed.data[0].b64_json === undefined) {
-    return '';
-  }
-  return parsed.data[0].b64_json.trim();
+  return seedreamFirstDataString(raw, 'b64_json');
 }
 
 export class SeedreamAvatarProvider {

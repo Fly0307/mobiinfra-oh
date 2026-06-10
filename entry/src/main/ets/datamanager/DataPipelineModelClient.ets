@@ -321,8 +321,10 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\n\nkeywords 规则：提取具体、可检索的商品、服务、商户、地点、人物、应用、动作、状态、主题词或金额词；优先保留输入原词；避免“当前页面”“截图”“记录”“信息”“详情”等泛词。' +
   '\n\ndomains 规则：只能从 eat|wear|live|travel|work|other 中多选。eat 表示餐饮、外卖、食品、饮料；wear 表示服装、鞋包、美妆；live 表示住房、家居、酒店；travel 表示交通、通勤、出行、旅行、票务、差旅；work 表示工作、会议、协作、办公事务；other 表示无法归入以上分类的事件。购物、聊天、外卖、娱乐、生活、社交、差旅是 workflow_scene_labels，不要直接当作 domains。请注意 eat/wear/live/travel/work 只能覆盖真实场景中 20% 的事件，如果你没有 90% 以上的把握明确归类，**必须仅输出 other**。如果已经输出 eat/wear/live/travel/work 中任一领域，不要再输出 other。' +
   '\n\nentities 规则：只抽取现实对象。person 只用于真实联系人、聊天对象或明确人物姓名；place 只用于实际地点、地址、场馆、目的地；merchant 只用于商户、店铺、平台、品牌门店或服务商。不要把商品、服务类别、金额、日期、订单号、抽象话题、页面元素、按钮、状态词或泛化类别抽成实体。name 和 aliases 必须来自输入文本，aliases 只放同一现实对象在输入中出现过的其他写法。' +
-  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；普通记录、偏好、已完成消费、纯浏览、信息分享、截图描述、无行动内容时必须把 todo 的四个字段都写空。' +
-  '有明确相对日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算。没有明确日期但有明确待办动作时 deadline 写空字符串。text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。';
+  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；对于常规的、不关联任何未来待办事项的事件（如浏览记录、购买记录、账单信息、普通聊天等），必须把 todo 的四个字段都写空。' +
+  'deadline 表示待办事项截止日期，当事件提到明确绝对截止日期时，直接将其作为 deadline；提到相对截止日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算；没有明确截止日期日期但有明确待办动作时 deadline 写空字符串。' +
+  'text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。' +
+  'agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。';
 
 function enrichWorkflowSceneLabels(sceneIds: number[]): string[] {
   let labels: string[] = [];
@@ -358,7 +360,7 @@ function enrichTodoGuideForEvents(events: IndexedEvent[]): string {
     labels = labels.concat(enrichWorkflowSceneLabels(event.workflow_scene_ids || []));
   });
   labels = stableUnique(labels);
-  let guides: string[] = ['\n按 workflow_scene_labels 使用以下待办提取规则：'];
+  let guides: string[] = ['type 表示待办事项类型，按 workflow_scene_labels 使用以下提取规则：'];
   if (labels.length === 0) {
     guides.push('未知场景：只在行动责任明确时使用 other；不要因为普通信息记录生成 todo。');
     return guides.join('');

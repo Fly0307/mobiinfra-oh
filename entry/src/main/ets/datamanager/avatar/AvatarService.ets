@@ -13,8 +13,7 @@ import {
   AvatarProviderRequest,
   AvatarProviderResult,
   AvatarState,
-  AvatarVersionState,
-  createDefaultAvatarGenerationParams
+  AvatarVersionState
 } from './AvatarTypes';
 
 export class AvatarService {
@@ -83,7 +82,13 @@ export class AvatarService {
     this.avatarStorage.saveState(generatingState);
 
     try {
-      let params = createDefaultAvatarGenerationParams(config.size, config.responseFormat, config.watermark);
+      let params = {
+        size: config.size,
+        response_format: config.responseFormat,
+        sequential_image_generation: config.sequentialImageGeneration,
+        stream: config.stream,
+        watermark: config.watermark
+      };
       let model = request.mode === 'image_to_image' ? config.imageToImageModel : config.textToImageModel;
       let providerRequest: AvatarProviderRequest = {
         prompt: request.prompt,

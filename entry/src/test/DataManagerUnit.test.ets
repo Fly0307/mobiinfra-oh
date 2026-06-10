@@ -501,11 +501,48 @@ export default function dataManagerUnitTest() {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);
       let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
       let profile = demoProfileStateForAvatar();
-      let first = service.previewProfileSnapshotHash(profile, 100);
+      let firstHash = service.previewProfileSnapshotHash(profile, 100);
+      avatarStorage.saveVersion({
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(profile, 100),
+        profile_snapshot_hash: firstHash,
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      let currentState = avatarStorage.emptyState();
+      currentState.status = 'current';
+      currentState.current_version_id = 'v1';
+      currentState.profile_snapshot_hash = firstHash;
+      currentState.updated_at = '2026-06-10 10:07:00';
+      avatarStorage.saveState(currentState);
+
       profile.domains['eat'].short_summary = '热咖啡党';
-      let second = service.previewProfileSnapshotHash(profile, 100);
-      expect(first === second).assertFalse();
+      let view = service.homeView(profile, 100);
+      let persistedState = avatarStorage.loadState();
+      expect(view.avatarStatus).assertEqual('stale');
+      expect(persistedState.status).assertEqual('stale');
+      expect(persistedState.current_version_id).assertEqual('v1');
+      expect(persistedState.profile_snapshot_hash).assertEqual(firstHash);
     });
 
     it('avatarStorageBuildsVersionUriAndActionLabels', 0, () => {

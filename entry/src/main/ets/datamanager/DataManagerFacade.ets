@@ -7,6 +7,14 @@ import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTab
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
+import { AvatarService } from './avatar/AvatarService';
+import {
+  AvatarGenerateRequest,
+  AvatarHomeViewModel,
+  AvatarProviderConfig,
+  AvatarVersionViewModel,
+  createEmptyAvatarHomeViewModel
+} from './avatar/AvatarTypes';
 import {
   CollectionEventViewModel,
   CollectionGroupState,
@@ -64,8 +72,25 @@ interface DailyLogSnapshot {
 
 const DAILY_LOG_SNAPSHOT_FILE_NAME: string = 'daily-log-snapshot.json';
 
-export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
+function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
+  let avatar = createEmptyAvatarHomeViewModel();
   return {
+    avatarUri: avatar.avatarUri,
+    avatarStatus: avatar.avatarStatus,
+    avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+    avatarActionLabel: avatar.avatarActionLabel,
+    avatarVersionId: avatar.avatarVersionId
+  };
+}
+
+export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
+  let avatar = createHomeProfileAvatarDefaults();
+  return {
+    avatarUri: avatar.avatarUri,
+    avatarStatus: avatar.avatarStatus,
+    avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+    avatarActionLabel: avatar.avatarActionLabel,
+    avatarVersionId: avatar.avatarVersionId,
     updatedLabel: '暂无画像',
     completeness: 0,
     totalEvents: 0,
@@ -122,6 +147,7 @@ export class DataManagerFacade {
   private collectionGroupingService: CollectionGroupingService;
   private homeRecommendationService: HomeRecommendationService;
   private imageResolver: DataManagerImageResolver;
+  private avatarService: AvatarService;
 
   constructor(filesDir: string) {
     this.storage = new DataManagerStorage();
@@ -132,10 +158,12 @@ export class DataManagerFacade {
     this.collectionGroupingService = new CollectionGroupingService(this.paths, this.storage, this.modelClient, this.indexService);
     this.homeRecommendationService = new HomeRecommendationService(this.paths, this.storage, this.modelClient, this.indexService);
     this.imageResolver = new DataManagerImageResolver(this.paths, this.storage);
+    this.avatarService = new AvatarService(this.paths, this.storage);
   }
 
   ensureReady(): void {
     this.paths.ensureBaseDirs();
+    this.avatarService.ensureReady();
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
   }
 
@@ -484,14 +512,40 @@ export class DataManagerFacade {
       return domain;
     });
     let recommendations = this.homeRecommendations();
+    let completeness = this.profileCompleteness(profile);
+    let avatar = this.avatarService.homeView(profile, completeness);
     return {
+      avatarUri: avatar.avatarUri,
+      avatarStatus: avatar.avatarStatus,
+      avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+      avatarActionLabel: avatar.avatarActionLabel,
+      avatarVersionId: avatar.avatarVersionId,
       updatedLabel: this.lastSyncLabel([]),
-      completeness: this.profileCompleteness(profile),
+      completeness: completeness,
       totalEvents: profile.event_count,
       domains: domains,
       recommendations: recommendations,
       empty: false
     };
+  }
+
+  buildAvatarGenerateRequest(mode: 'text_to_image' | 'image_to_image', sourceImage: string,
+    consentedAt: string, photoSource?: string): AvatarGenerateRequest {
+    let profile = this.indexService.loadProfileState();
+    return this.avatarService.buildGenerateRequest(profile, this.profileCompleteness(profile), mode, sourceImage, consentedAt, photoSource);
+  }
+
+  isAvatarProfileSnapshotUnchanged(): boolean {
+    let profile = this.indexService.loadProfileState();
+    return this.avatarService.isCurrentProfileSnapshotUnchanged(profile, this.profileCompleteness(profile));
+  }
+
+  async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
+    return this.avatarService.generate(config, request);
+  }
+
+  listAvatarVersions(): AvatarVersionViewModel[] {
+    return this.avatarService.listVersionViewModels();
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {

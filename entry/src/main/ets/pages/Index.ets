@@ -3,6 +3,8 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { image } from '@kit.ImageKit';
+import { fileIo } from '@kit.CoreFileKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { AppHeader } from '../components/AppHeader';
@@ -24,6 +26,13 @@ import {
   HomeDomainViewModel,
   HomeProfileViewModel
 } from '../datamanager/DataManagerTypes';
+import {
+  AvatarGenerateRequest,
+  AvatarGenerationMode,
+  AvatarHomeViewModel,
+  AvatarProviderConfig,
+  AvatarVersionViewModel
+} from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
@@ -50,6 +59,7 @@ interface ModelScopeFileTask {
 interface HdcConnectRequest {
   target: string;
   kill_others: boolean;
+  prefer_wired: boolean;
 }
 
 interface HdcHealthResponse {
@@ -89,6 +99,17 @@ PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.clo
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+PersistentStorage.persistProp('avatarImageBaseUrl', DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl);
+PersistentStorage.persistProp('avatarImageApiKey', '');
+PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+PersistentStorage.persistProp('avatarImageToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+PersistentStorage.persistProp('avatarImageSize', DEFAULT_ENDPOINT_CONFIG.avatarImageSize);
+PersistentStorage.persistProp('avatarImageResponseFormat', DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat);
+PersistentStorage.persistProp('avatarImageOutputFormat', DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat);
+PersistentStorage.persistProp('avatarSequentialImageGeneration', 'disabled');
+PersistentStorage.persistProp('avatarImageStream', false);
+PersistentStorage.persistProp('avatarImageWatermark', DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark);
+PersistentStorage.persistProp('avatarImageTimeoutMs', 60000);
 PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
@@ -128,6 +149,17 @@ struct Index {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+  @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+  @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
+  @StorageLink('avatarImageResponseFormat') avatarImageResponseFormat: string = DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat;
+  @StorageLink('avatarImageOutputFormat') avatarImageOutputFormat: string = DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat;
+  @StorageLink('avatarSequentialImageGeneration') avatarSequentialImageGeneration: string = 'disabled';
+  @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
+  @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
+  @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -144,6 +176,7 @@ struct Index {
   @State dataManagerProgressPercent: number = 0;
   @State homeProfile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   @State collectionViews: CollectionViewModel[] = createEmptyCollectionViewModels();
+  @State avatarVersions: AvatarVersionViewModel[] = [];
 
   private filesDir: string = '';
   private modelDir: string = '';
@@ -182,6 +215,159 @@ struct Index {
     };
   }
 
+  private getAvatarProviderConfig(): AvatarProviderConfig {
+    let textModel = this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+    let imageModel = this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel : textModel;
+    return {
+      imageBaseUrl: this.avatarImageBaseUrl.trim().length > 0 ? this.avatarImageBaseUrl :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
+      apiKey: this.avatarImageApiKey,
+      textToImageModel: textModel,
+      imageToImageModel: imageModel,
+      size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
+      outputFormat: this.avatarImageOutputFormat.trim().length > 0 ? this.avatarImageOutputFormat :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat,
+      sequentialImageGeneration: this.avatarSequentialImageGeneration.trim().length > 0 ?
+        this.avatarSequentialImageGeneration : 'disabled',
+      stream: this.avatarImageStream,
+      watermark: this.avatarImageWatermark,
+      timeoutMs: this.avatarImageTimeoutMs > 0 ? this.avatarImageTimeoutMs : 60000
+    };
+  }
+
+  private mergeHomeAvatarView(avatar: AvatarHomeViewModel): void {
+    this.homeProfile = {
+      avatarUri: avatar.avatarUri,
+      avatarStatus: avatar.avatarStatus,
+      avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+      avatarActionLabel: avatar.avatarActionLabel,
+      avatarVersionId: avatar.avatarVersionId,
+      updatedLabel: this.homeProfile.updatedLabel,
+      completeness: this.homeProfile.completeness,
+      totalEvents: this.homeProfile.totalEvents,
+      domains: this.homeProfile.domains,
+      recommendations: this.homeProfile.recommendations,
+      empty: this.homeProfile.empty
+    };
+  }
+
+  private async confirmUnchangedAvatarRegeneration(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '画像未变化',
+        message: '当前画像内容与上次生成数字分身时一致，继续生成可能会得到相似结果。是否仍要重新生成？',
+        buttons: [
+          { text: '取消', color: '#666666' },
+          { text: '继续生成', color: '#8066FF' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => {
+        resolve(false);
+      });
+    });
+  }
+
+  private async avatarProviderSourceImage(mode: AvatarGenerationMode, sourceImage: string): Promise<string> {
+    if (mode !== 'image_to_image') {
+      return '';
+    }
+    let normalized = sourceImage.trim();
+    if (normalized.length === 0) {
+      throw new Error('请先选择参考照片');
+    }
+    if (normalized.startsWith('data:image/') || normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      return normalized;
+    }
+    return await this.imageUriToJpegDataUrl(normalized);
+  }
+
+  private async imageUriToJpegDataUrl(uri: string): Promise<string> {
+    let imageFile: fileIo.File | null = null;
+    let imageSource: image.ImageSource | null = null;
+    let pixelMap: image.PixelMap | null = null;
+    let packer: image.ImagePacker | null = null;
+    try {
+      imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      imageSource = image.createImageSource(imageFile.fd);
+      pixelMap = await imageSource.createPixelMap();
+      packer = image.createImagePacker();
+      let data = await packer.packToData(pixelMap, {
+        format: 'image/jpeg',
+        quality: 90
+      });
+      let helper = new util.Base64Helper();
+      return 'data:image/jpeg;base64,' + helper.encodeToStringSync(new Uint8Array(data));
+    } finally {
+      if (packer !== null) {
+        try {
+          await packer.release();
+        } catch (e) {
+        }
+      }
+      if (pixelMap !== null) {
+        try {
+          await pixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (imageSource !== null) {
+        try {
+          await imageSource.release();
+        } catch (e) {
+        }
+      }
+      if (imageFile !== null) {
+        try {
+          await fileIo.close(imageFile);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('generateHomeAvatar skipped: facade is null');
+      promptAction.showToast({ message: '数据管理服务未就绪', duration: 1500 });
+      throw new Error('数据管理服务未就绪');
+    }
+    if (this.dataManagerFacade.isAvatarProfileSnapshotUnchanged()) {
+      let confirmed = await this.confirmUnchangedAvatarRegeneration();
+      if (!confirmed) {
+        dataManagerInfo('generateHomeAvatar cancelled: profile snapshot unchanged');
+        throw new Error('已取消生成');
+      }
+    }
+    let config = this.getAvatarProviderConfig();
+    if (config.apiKey.trim().length === 0) {
+      dataManagerWarn('generateHomeAvatar skipped: missing avatar api key');
+      promptAction.showToast({ message: '请先配置数字分身图片 API Key', duration: 1800 });
+      throw new Error('缺少数字分身图片 API Key');
+    }
+    dataManagerInfo(`generateHomeAvatar start: mode=${mode}, baseUrl=${config.imageBaseUrl}, model=${config.textToImageModel}`);
+    try {
+      let providerSourceImage = await this.avatarProviderSourceImage(mode, sourceImage);
+      let request: AvatarGenerateRequest =
+        this.dataManagerFacade.buildAvatarGenerateRequest(mode, providerSourceImage, new Date().toISOString(), sourceImage);
+      let avatar = await this.dataManagerFacade.generateAvatar(config, request);
+      this.mergeHomeAvatarView(avatar);
+      this.reloadDataManagerViewModels();
+      promptAction.showToast({ message: '数字分身已生成', duration: 1500 });
+      dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
+    } catch (e) {
+      let err = e as Error;
+      this.reloadDataManagerViewModels();
+      dataManagerError('generateHomeAvatar failed: ' + err.message);
+      this.appendCloudLog('Avatar generation failed: ' + err.message);
+      promptAction.showToast({ message: '数字分身生成失败：' + err.message, duration: 2200 });
+      throw err;
+    }
+  }
+
   private initDataManager(): void {
     if (this.filesDir.length === 0) {
       dataManagerWarn('initDataManager skipped: filesDir is empty');
@@ -201,6 +387,7 @@ struct Index {
     }
     this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
+    this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
@@ -1497,7 +1684,8 @@ struct Index {
     try {
       let connectPayload: HdcConnectRequest = {
         target: target,
-        kill_others: true
+        kill_others: true,
+        prefer_wired: true
       };
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,
@@ -1977,6 +2165,66 @@ struct Index {
         .margin({ top: 16 })
 
         Column() {
+          Text('数字分身图片')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+            .margin({ bottom: 12 })
+          Text('图片服务')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+          TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, text: this.avatarImageBaseUrl })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => { this.avatarImageBaseUrl = val; })
+          TextInput({ placeholder: '图片 API Key', text: this.avatarImageApiKey })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.avatarImageApiKey = val; })
+          Text('图片模型')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+            .margin({ top: 10 })
+          TextInput({ placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel, text: this.avatarTextToImageModel })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => {
+              this.avatarTextToImageModel = val;
+              this.avatarImageToImageModel = val;
+            })
+          TextInput({ placeholder: '尺寸，默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize, text: this.avatarImageSize })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.avatarImageSize = val; })
+        }
+        .width('92%')
+        .padding(18)
+        .backgroundColor(Color.White)
+        .borderRadius(20)
+        .margin({ top: 16 })
+
+        Column() {
           Text('HDC 控制')
             .fontSize(17)
             .fontWeight(FontWeight.Bold)
@@ -2218,8 +2466,12 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            avatarVersions: this.avatarVersions,
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);
+            },
+            onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
+              await this.generateHomeAvatar(mode, sourceImage);
             }
           })
         }.tabBar(this.TabItem('H', '首页', 0))

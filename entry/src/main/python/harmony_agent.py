@@ -12,6 +12,7 @@ import logging
 import argparse
 import threading
 import uuid
+import inspect
 
 # PC 侧视觉自动化 Agent：
 # 1. 轮询 App 内 9126 TCP 服务获取任务；
@@ -33,6 +34,9 @@ HOST = '127.0.0.1'
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
 HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
+HDC_TARGET_OVERRIDE = HDC_TARGET
+HDC_TARGET_CHECKED_AT = 0.0
+HDC_TARGET_CACHE_TTL = 2.0
 LAST_TASK_COMPLETED = False
 DEVICE_CONTROL_LOCK = threading.RLock()
 AGENT_LOOP_STOP_EVENT = threading.Event()
@@ -70,28 +74,99 @@ def quiet_system(cmd):
     # 跨平台静默执行 HDC 辅助命令，避免无任务轮询时刷屏。
     return os.system(f"{cmd} >{NULL_DEVICE} 2>&1")
 
-def get_hdc_target():
-    # 优先使用环境变量指定的设备；未指定时自动选择第一个无线 HDC target。
-    global HDC_TARGET
-    if HDC_TARGET:
-        return HDC_TARGET
+def is_wireless_hdc_target(target):
+    return ":" in target
+
+def parse_hdc_targets(output):
+    targets = []
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "[Empty]" in text:
+            continue
+        lower = text.lower()
+        if "not found" in lower or "list targets" in lower:
+            continue
+        target = text.split()[0].strip()
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+def list_hdc_targets():
     try:
-        output = subprocess.check_output("hdc list targets", shell=True, text=True).strip()
-        targets = [line.strip() for line in output.splitlines()
-                   if line.strip() and "[Empty]" not in line]
-        if not targets:
-            return ""
-        wireless_targets = [target for target in targets if ":" in target]
-        HDC_TARGET = wireless_targets[0] if wireless_targets else targets[0]
-        print(f">> [HDC] 使用目标设备: {HDC_TARGET}")
-        return HDC_TARGET
+        result = subprocess.run(
+            ["hdc", "list", "targets"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode != 0:
+            return []
+        return parse_hdc_targets(result.stdout)
     except Exception as ex:
         print(f">> [HDC警告] 获取目标设备失败: {ex}")
-        return ""
+        return []
 
-def hdc_prefix():
+def choose_hdc_target(targets, preferred_target=""):
+    if not targets:
+        return ""
+    if HDC_TARGET_OVERRIDE:
+        if HDC_TARGET_OVERRIDE in targets:
+            return HDC_TARGET_OVERRIDE
+        print(f">> [HDC] HDC_TARGET is set but not connected: {HDC_TARGET_OVERRIDE}")
+        return ""
+    wired_targets = [target for target in targets if not is_wireless_hdc_target(target)]
+    if wired_targets:
+        return wired_targets[0]
+    if preferred_target and preferred_target in targets:
+        return preferred_target
+    wireless_targets = [target for target in targets if is_wireless_hdc_target(target)]
+    if wireless_targets:
+        return wireless_targets[0]
+    return targets[0]
+
+def set_hdc_target(target, checked_at=0.0):
+    global HDC_TARGET, HDC_TARGET_CHECKED_AT
+    HDC_TARGET = target.strip() if isinstance(target, str) else ""
+    HDC_TARGET_CHECKED_AT = checked_at
+    # hmdriver2 may read HDC_TARGET during import; keep runtime selection visible without
+    # treating it as the startup override used by choose_hdc_target().
+    if HDC_TARGET:
+        os.environ["HDC_TARGET"] = HDC_TARGET
+    elif not HDC_TARGET_OVERRIDE:
+        os.environ.pop("HDC_TARGET", None)
+
+def clear_hdc_target_cache():
+    if HDC_TARGET_OVERRIDE:
+        return
+    set_hdc_target("")
+
+def get_hdc_target(force=False):
+    global HDC_TARGET, HDC_TARGET_CHECKED_AT
+    now = time.monotonic()
+    if (not force and HDC_TARGET and HDC_TARGET_CHECKED_AT > 0 and
+            now - HDC_TARGET_CHECKED_AT < HDC_TARGET_CACHE_TTL):
+        return HDC_TARGET
+
+    targets = list_hdc_targets()
+    target = choose_hdc_target(targets, HDC_TARGET)
+    if not target:
+        if HDC_TARGET:
+            print(f">> [HDC] 目标设备已失效，清理缓存: {HDC_TARGET}")
+        set_hdc_target("", checked_at=now)
+        return ""
+    if target != HDC_TARGET:
+        print(f">> [HDC] 使用目标设备: {target}")
+    set_hdc_target(target, checked_at=now)
+    return HDC_TARGET
+
+def hdc_prefix(force=False):
     # 所有 hdc 命令统一走这里，保证多设备场景下始终带 -t target。
-    target = get_hdc_target()
+    target = get_hdc_target(force=force)
+    if target:
+        return f"hdc -t {target}"
+    return "hdc"
+
+def hdc_prefix_for_target(target):
     if target:
         return f"hdc -t {target}"
     return "hdc"
@@ -102,13 +177,27 @@ def refresh_hdc_forwarding(verbose=False):
         lambda: _refresh_hdc_forwarding_impl(verbose)
     )
 
-def _refresh_hdc_forwarding_impl(verbose=False):
-    # PC 通过 tcp:9126 转发到手机 App 内 TCP server；每次任务前刷新，避免旧映射残留。
-    prefix = hdc_prefix()
+def _refresh_hdc_forwarding_for_target(target, verbose=False):
+    prefix = hdc_prefix_for_target(target)
     quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
     if verbose:
         return os.system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
     return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
+
+def _refresh_hdc_forwarding_impl(verbose=False):
+    # PC 通过 tcp:9126 转发到手机 App 内 TCP server；每次任务前刷新，避免旧映射残留。
+    target = get_hdc_target(force=True)
+    result = _refresh_hdc_forwarding_for_target(target, verbose)
+    if result == 0 or HDC_TARGET_OVERRIDE:
+        return result
+
+    candidates = [candidate for candidate in list_hdc_targets() if candidate != target]
+    fallback = choose_hdc_target(candidates)
+    if not fallback:
+        return result
+    print(f">> [HDC] target {target} fport failed; retry with {fallback}")
+    set_hdc_target(fallback)
+    return _refresh_hdc_forwarding_for_target(fallback, verbose)
 
 def normalize_hmdriver_loggers():
     # hmdriver2 多次重载后可能重复挂 handler，导致日志重复；这里去重并关闭向上传播。
@@ -389,8 +478,37 @@ def _capture_screen_file(local_path, factor, label):
         if snapshot_created:
             _cleanup_device_file_async(prefix, device_path)
 
+def _capture_overlay_hide_best_effort():
+    try:
+        res = send_request({"type": "capture_overlay_hide"})
+        if isinstance(res, str):
+            parsed = json.loads(res)
+            if isinstance(parsed, dict):
+                return bool(parsed.get("hidden", False))
+        if isinstance(res, dict):
+            return bool(res.get("hidden", False))
+    except Exception as exc:
+        print(f">> [Capture Overlay] hide skipped: {exc}")
+    return False
+
+def _capture_overlay_restore_best_effort(hidden):
+    try:
+        send_request_best_effort(
+            {"type": "capture_overlay_restore", "hidden": bool(hidden)},
+            "Capture overlay restore"
+        )
+    except Exception as exc:
+        print(f">> [Capture Overlay] restore skipped: {exc}")
+
 def capture_screen(factor=0.25):
-    return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+    hidden = _capture_overlay_hide_best_effort()
+    try:
+        if hidden:
+            # 等待 HarmonyOS 浮窗销毁提交到合成层，避免截图仍捕获上一帧的控制面板。
+            time.sleep(0.12)
+        return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+    finally:
+        _capture_overlay_restore_best_effort(hidden)
 
 def _capture_screen_impl(factor=0.25):
     # 使用 hdc snapshot_display 截图并拉回 PC，再压缩为 base64 发送给 App/云端模型。
@@ -399,10 +517,17 @@ def _capture_screen_impl(factor=0.25):
     return _capture_screen_file(local_path, factor, "screenshot")
 
 def capture_screen_mobiagent_style(factor=0.5):
-    return run_with_device_control(
-        "capture_screen_mobiagent_style",
-        lambda: _capture_screen_mobiagent_style_impl(factor)
-    )
+    hidden = _capture_overlay_hide_best_effort()
+    try:
+        if hidden:
+            # 云端 Agent 截图同样经过系统截图命令，需要给浮窗隐藏留出一帧以上的缓冲。
+            time.sleep(0.12)
+        return run_with_device_control(
+            "capture_screen_mobiagent_style",
+            lambda: _capture_screen_mobiagent_style_impl(factor)
+        )
+    finally:
+        _capture_overlay_restore_best_effort(hidden)
 
 def _capture_screen_mobiagent_style_impl(factor=0.5):
     """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""
@@ -506,6 +631,17 @@ def is_connection_closed_error(err_msg):
         "远程主机强迫关闭" in err_msg
     )
 
+def create_driver_for_target(driver_cls, target):
+    if target:
+        try:
+            params = inspect.signature(driver_cls).parameters
+            for name in ("serial", "target", "device", "connect_key"):
+                if name in params:
+                    return driver_cls(**{name: target})
+        except Exception as ex:
+            print(f">> [DriverManager] Inspect Driver signature failed, fallback to default Driver(): {ex}")
+    return driver_cls()
+
 def reset_driver():
     """触发式重置：清理并重新初始化 Driver，丢弃无用的轮询阈值逻辑"""
     global d
@@ -513,13 +649,14 @@ def reset_driver():
         try:
             import sys
             normalize_hmdriver_loggers()
+            target = get_hdc_target(force=True)
             # 强制把 hmdriver2 相关的模块从缓存中剔除，打破单例
             modules_to_remove = [m for m in list(sys.modules.keys()) if m.startswith('hmdriver2')]
             for m in modules_to_remove:
                 del sys.modules[m]
             
             from hmdriver2.driver import Driver
-            d = Driver()
+            d = create_driver_for_target(Driver, target)
             normalize_hmdriver_loggers()
             print(">> [系统] 驱动对象 (Driver) 初始化/重置成功！")
         except Exception as ex:

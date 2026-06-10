@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
+import fs from '@ohos.file.fs';
 import {
   atomicizeCandidateFacts,
   findExactExistingMatch,
@@ -38,9 +39,28 @@ import {
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
+  ProfileClaim,
+  ProfileDomainState,
+  ProfileState,
   SourceEntry,
-  createJsonMap
+  createJsonMap,
+  createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
+import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
+import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
+import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
+import {
+  createDefaultAvatarGenerationParams,
+  createEmptyAvatarHomeViewModel
+} from '../main/ets/datamanager/avatar/AvatarTypes';
+import {
+  createSeedreamRequestBody,
+  normalizeSeedreamImageBase64,
+  normalizeSeedreamImageUrl
+} from '../main/ets/datamanager/avatar/SeedreamAvatarProvider';
+import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
+import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
+import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
   return {
@@ -84,6 +104,48 @@ function demoPlannerEvent(id: string, deadline: string, todoType: string = 'buy'
     domains: ['eat'],
     keywords: ['咖啡豆'],
     image_paths: []
+  };
+}
+
+function demoProfileDomainState(domain: string, displayName: string, shortSummary: string, summary: string, claims: string[]): ProfileDomainState {
+  let profileClaims: ProfileClaim[] = claims.map((statement: string): ProfileClaim => {
+    return {
+      statement: statement,
+      kind: 'preference',
+      confidence: 'high',
+      event_ids: ['e1', 'e2'],
+      evidence_count: 2,
+      start_date: '2026-06-01',
+      end_date: '2026-06-10',
+      example: statement
+    };
+  });
+  return {
+    domain: domain,
+    display_name: displayName,
+    input_hash: domain + '-hash',
+    event_ids: ['e1', 'e2'],
+    event_count: 2,
+    date_range: createStringMap(),
+    short_summary: shortSummary,
+    summary: summary,
+    claims: profileClaims,
+    generation: 'model'
+  };
+}
+
+function demoProfileStateForAvatar(): ProfileState {
+  let domains = new Object() as Record<string, ProfileDomainState>;
+  domains['eat'] = demoProfileDomainState('eat', '吃', '咖啡轻食', '近期记录显示用户关注咖啡、轻食和外卖效率。', ['经常围绕咖啡和轻食做选择']);
+  domains['wear'] = demoProfileDomainState('wear', '穿', '简洁舒适', '穿搭相关记录偏向简洁、舒适和实用。', []);
+  domains['live'] = demoProfileDomainState('live', '住', '桌面收纳', '居住相关记录关注桌面整理和空间收纳。', []);
+  domains['travel'] = demoProfileDomainState('travel', '行', '地铁通勤', '出行记录以地铁通勤和计划执行为主。', []);
+  return {
+    generated_at: '2026-06-10 10:07:00',
+    event_count: 12,
+    event_date_range: createStringMap(),
+    domains: domains,
+    claim_count: 1
   };
 }
 
@@ -395,6 +457,321 @@ export default function dataManagerUnitTest() {
       expect(isEventEnrichInputReusable('hash-1', 'hash-2', true)).assertFalse();
       expect(isEventEnrichInputReusable('hash-1', 'hash-1', false)).assertFalse();
       expect(isEventEnrichInputReusable('', 'hash-1', true)).assertFalse();
+    });
+
+    it('avatarHomeViewModelDefaultsToStaticFallbackState', 0, () => {
+      let avatar = createEmptyAvatarHomeViewModel();
+      expect(avatar.avatarUri).assertEqual('');
+      expect(avatar.avatarStatus).assertEqual('empty');
+      expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
+      expect(avatar.avatarVersionId).assertEqual('');
+      expect(avatar.avatarUpdatedLabel).assertEqual('');
+    });
+
+    it('dataManagerPathsExposeAvatarStorageRoots', 0, () => {
+      let paths = new DataManagerPaths('/tmp/demo-files', new DataManagerStorage());
+      expect(paths.avatarRoot).assertEqual('/tmp/demo-files/workflows/avatar');
+      expect(paths.avatarVersionsRoot).assertEqual('/tmp/demo-files/workflows/avatar/versions');
+      expect(paths.avatarAssetsRoot).assertEqual('/tmp/demo-files/workflows/avatar/assets');
+    });
+
+    it('avatarPromptBuilderCreatesStableSnapshotAndPrompt', 0, () => {
+      let builder = new AvatarPromptBuilder(new DataManagerStorage());
+      let snapshot = builder.buildSnapshot(demoProfileStateForAvatar(), 100);
+      expect(snapshot.domains.length).assertEqual(4);
+      expect(snapshot.gender).assertEqual('男');
+      expect(snapshot.age).assertEqual('');
+      expect(snapshot.prompt_profile_text.indexOf('咖啡轻食') >= 0).assertTrue();
+      let prompt = builder.buildPrompt(snapshot);
+      expect(prompt.indexOf('3D 卡通风格个人数字形象') >= 0).assertTrue();
+      expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
+      expect(prompt.indexOf('gender=male') >= 0).assertTrue();
+      expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
+      expect(prompt.indexOf('要求无文字') >= 0).assertTrue();
+      expect(prompt.indexOf('参考照片中的人物')).assertEqual(-1);
+      expect(prompt.indexOf('event_id')).assertEqual(-1);
+      expect(prompt.indexOf('API')).assertEqual(-1);
+    });
+
+    it('avatarPromptBuilderCentersReferencePhotoForImageToImage', 0, () => {
+      let builder = new AvatarPromptBuilder(new DataManagerStorage());
+      let snapshot = builder.buildSnapshot(demoProfileStateForAvatar(), 100);
+      let prompt = builder.buildPrompt(snapshot, 'image_to_image');
+      expect(prompt.indexOf('参考照片中的人物') >= 0).assertTrue();
+      expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
+      expect(prompt.indexOf('不是生成另一个陌生角色') >= 0).assertTrue();
+      expect(prompt.indexOf('不要让 profile 覆盖或替换参考照片中的人物身份特征') >= 0).assertTrue();
+      expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
+      expect(prompt.indexOf('gender=male') >= 0).assertTrue();
+    });
+
+    it('avatarPromptBuilderHashChangesWhenProfileChanges', 0, () => {
+      let builder = new AvatarPromptBuilder(new DataManagerStorage());
+      let profile = demoProfileStateForAvatar();
+      let first = builder.snapshotHash(builder.buildSnapshot(profile, 100));
+      profile.domains['eat'].short_summary = '热咖啡党';
+      let second = builder.snapshotHash(builder.buildSnapshot(profile, 100));
+      expect(first === second).assertFalse();
+    });
+
+    it('avatarServiceMarksStaleWhenProfileHashChanges', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let firstHash = service.previewProfileSnapshotHash(profile, 100);
+      avatarStorage.saveVersion({
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(profile, 100),
+        profile_snapshot_hash: firstHash,
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      let currentState = avatarStorage.emptyState();
+      currentState.status = 'current';
+      currentState.current_version_id = 'v1';
+      currentState.profile_snapshot_hash = firstHash;
+      currentState.updated_at = '2026-06-10 10:07:00';
+      avatarStorage.saveState(currentState);
+
+      profile.domains['eat'].short_summary = '热咖啡党';
+      let view = service.homeView(profile, 100);
+      let persistedState = avatarStorage.loadState();
+      expect(view.avatarStatus).assertEqual('stale');
+      expect(persistedState.status).assertEqual('stale');
+      expect(persistedState.current_version_id).assertEqual('v1');
+      expect(persistedState.profile_snapshot_hash).assertEqual(firstHash);
+    });
+
+    it('avatarServiceDetectsUnchangedProfileBeforeRegeneration', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let hash = service.previewProfileSnapshotHash(profile, 100);
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v1';
+      state.profile_snapshot_hash = hash;
+      avatarStorage.saveState(state);
+
+      expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertTrue();
+      profile.domains['eat'].short_summary = '热咖啡党';
+      expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertFalse();
+    });
+
+    it('avatarGenerateRequestKeepsOriginalPhotoSourceInConsent', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let request = service.buildGenerateRequest(demoProfileStateForAvatar(), 100, 'image_to_image',
+        'data:image/jpeg;base64,AQID', '2026-06-10T10:07:00.000Z', 'file://photo/reference.jpg');
+      expect(request.sourceImage).assertEqual('data:image/jpeg;base64,AQID');
+      expect(request.consent.photo_used).assertTrue();
+      expect(request.consent.photo_source).assertEqual('file://photo/reference.jpg');
+    });
+
+    it('avatarStorageListsVersionViewModelsWithEvidence', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let snapshot = new AvatarPromptBuilder(storage).buildSnapshot(profile, 100);
+      avatarStorage.saveVersion({
+        version_id: 'v-history',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v-history.jpg',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'avatar prompt',
+        profile_snapshot: snapshot,
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '2026-06-10T10:07:00.000Z',
+          photo_source: ''
+        }
+      });
+
+      let versions = avatarStorage.listVersionViewModels();
+      expect(versions.length).assertEqual(1);
+      expect(versions[0].versionId).assertEqual('v-history');
+      expect(versions[0].imageUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v-history.jpg');
+      expect(versions[0].model).assertEqual('doubao-seedream-4-5-251128');
+      expect(versions[0].promptSnapshot).assertEqual('avatar prompt');
+      expect(versions[0].profileSnapshot.domains.length).assertEqual(4);
+      expect(versions[0].profileSnapshot.domains[0].claims.length > 0).assertTrue();
+      expect(versions[0].generationParams.output_format).assertEqual('jpeg');
+      expect(versions[0].consentSnapshot.photo_used).assertFalse();
+    });
+
+    it('avatarStorageBuildsVersionUriAndActionLabels', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let emptyView = avatarStorage.homeViewFromState(avatarStorage.emptyState(), null);
+      expect(emptyView.avatarStatus).assertEqual('empty');
+      expect(emptyView.avatarActionLabel).assertEqual('生成数字分身');
+      let currentState = avatarStorage.emptyState();
+      currentState.status = 'current';
+      currentState.current_version_id = 'v1';
+      currentState.updated_at = '2026-06-10 10:07:00';
+      let view = avatarStorage.homeViewFromState(currentState, {
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      expect(view.avatarUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+      expect(view.avatarActionLabel).assertEqual('数字分身已更新');
+    });
+
+    it('avatarStorageSaveAssetBase64ReturnsDisplayableVersionUri', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let relativePath = avatarStorage.saveAssetBase64('v1', 'AQID');
+      expect(relativePath).assertEqual('assets/v1.png');
+      expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+    });
+
+    it('avatarStorageSaveAssetBase64UsesJpegExtensionForJpegOutputFormat', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let relativePath = avatarStorage.saveAssetBase64('v2', 'AQID', 'jpeg');
+      expect(relativePath).assertEqual('assets/v2.jpg');
+      expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v2.jpg');
+    });
+
+    it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {
+      let storage = new DataManagerStorage();
+      let path = '/tmp/demo-byte-writes/exact.bin';
+      let source = new Uint8Array([9, 1, 2, 3, 8]);
+      storage.writeBytesAtomic(path, source.subarray(1, 4));
+      let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let buffer = new ArrayBuffer(3);
+      try {
+        fs.readSync(file.fd, buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+      let bytes = new Uint8Array(buffer);
+      expect(bytes.length).assertEqual(3);
+      expect(bytes[0]).assertEqual(1);
+      expect(bytes[1]).assertEqual(2);
+      expect(bytes[2]).assertEqual(3);
+      expect(fs.statSync(path).size).assertEqual(3);
+    });
+
+    it('seedreamTextToImageRequestBodyMatchesArkShape', 0, () => {
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '', createDefaultAvatarGenerationParams('2K', 'url', true));
+      expect(String(body['model'])).assertEqual('doubao-seedream-4-5-251128');
+      expect(String(body['prompt'])).assertEqual('生成数字分身');
+      expect(String(body['sequential_image_generation'])).assertEqual('disabled');
+      expect(String(body['response_format'])).assertEqual('url');
+      expect(body['output_format'] === undefined).assertTrue();
+      expect(String(body['size'])).assertEqual('2K');
+      expect(Boolean(body['stream'])).assertFalse();
+      expect(Boolean(body['watermark'])).assertTrue();
+      expect(body['image'] === undefined).assertTrue();
+    });
+
+    it('seedreamImageToImageRequestBodyIncludesImage', 0, () => {
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '照片增强数字分身', 'https://example.com/photo.png', createDefaultAvatarGenerationParams('2K', 'url', true));
+      expect(String(body['image'])).assertEqual('https://example.com/photo.png');
+    });
+
+    it('seedreamResponseNormalizersReadFirstDataItem', 0, () => {
+      let url = normalizeSeedreamImageUrl('{"data":[{"url":"https://example.com/avatar.png"}]}');
+      expect(url).assertEqual('https://example.com/avatar.png');
+      let base64 = normalizeSeedreamImageBase64('{"data":[{"b64_json":"aGVsbG8="}]}');
+      expect(base64).assertEqual('aGVsbG8=');
+    });
+
+    it('seedreamResponseNormalizersIgnoreMalformedDataShapes', 0, () => {
+      expect(normalizeSeedreamImageUrl('{"data":null}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":{}}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":[null]}')).assertEqual('');
+      expect(normalizeSeedreamImageUrl('{"data":[{"url":123}]}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":null}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":{}}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":[null]}')).assertEqual('');
+      expect(normalizeSeedreamImageBase64('{"data":[{"b64_json":123}]}')).assertEqual('');
+    });
+
+    it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {
+      let facade = new DataManagerFacade('/tmp/demo-home-profile-avatar');
+      let profile: ProfileState = {
+        generated_at: '2026-06-10T10:00:00',
+        event_count: 1,
+        event_date_range: createStringMap(),
+        domains: new Object() as Record<string, ProfileDomainState>,
+        claim_count: 0
+      };
+      facade.storage.writeJsonAtomic(facade.storage.join(facade.paths.indexesRoot, 'profile', 'state.json'), profile as Object);
+
+      let home = facade.loadHomeViewModel();
+      expect(home.empty).assertFalse();
+      expect(home.avatarUri).assertEqual('');
+      expect(home.avatarStatus).assertEqual('empty');
+      expect(home.avatarActionLabel).assertEqual('生成数字分身');
+      expect(home.avatarVersionId).assertEqual('');
+      expect(home.avatarUpdatedLabel).assertEqual('');
     });
   });
 }

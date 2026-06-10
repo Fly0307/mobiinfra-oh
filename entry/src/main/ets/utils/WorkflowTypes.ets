@@ -86,6 +86,7 @@ export interface WorkflowTask {
   lastStatus: string;
   lastRun: string;
   lastMessage: string;
+  isUserModified?: boolean;
 }
 
 export interface WorkflowTaskIndex {

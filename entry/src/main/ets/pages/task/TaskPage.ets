@@ -211,6 +211,19 @@ export struct TaskPage {
     return filtered;
   }
 
+  private taskCardRenderKey(task: WorkflowTask): string {
+    let keyParts: string[] = [
+      task.id,
+      task.title,
+      task.source,
+      task.enabled ? '1' : '0',
+      task.lastStatus,
+      task.lastRun,
+      task.lastMessage
+    ];
+    return ArkJSON.stringify(keyParts);
+  }
+
   private openCreateEditor(mode: string = 'graph'): void {
     this.editingTaskId = '';
     this.editorSceneId = this.taskScene;
@@ -373,7 +386,8 @@ export struct TaskPage {
       workflowJson: task.workflowJson,
       lastStatus: task.lastStatus,
       lastRun: task.lastRun,
-      lastMessage: task.lastMessage
+      lastMessage: task.lastMessage,
+      isUserModified: task.isUserModified
     };
     this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
     this.refreshStatsText();
@@ -403,6 +417,17 @@ export struct TaskPage {
     } finally {
       this.runningTaskId = '';
       this.reloadTasks();
+    }
+  }
+
+  private copyWorkflowTask(task: WorkflowTask): void {
+    try {
+      let copied = WorkflowStorage.duplicateTask(this.filesDir, task.id);
+      this.reloadTasks();
+      promptAction.showToast({ message: '已复制：' + copied.title, duration: 1500 });
+    } catch (e) {
+      let err = e as Error;
+      promptAction.showToast({ message: '复制失败：' + err.message, duration: 2500 });
     }
   }
 
@@ -1005,13 +1030,17 @@ export struct TaskPage {
     for (let i = insertIndex - 1; i >= 0; i--) {
       let step = container[i];
       if (step.type === 'gui_action' && step.action === 'screenshot') {
-        return '${steps.' + String(step.id) + '.output.image_path}';
+        return '${steps.' + String(step.id) + '.output.image_b64}';
       }
     }
-    return '${steps.1.output.image_path}';
+    return '${steps.1.output.image_b64}';
   }
 
   private shotImageVariable(step: WorkflowStep): string {
+    return '${steps.' + String(step.id) + '.output.image_b64}';
+  }
+
+  private legacyShotImageVariable(step: WorkflowStep): string {
     return '${steps.' + String(step.id) + '.output.image_path}';
   }
 
@@ -1032,7 +1061,9 @@ export struct TaskPage {
     }
     let shot = steps[index];
     let summary = steps[index + 1];
-    return this.isScreenshotStep(shot) && this.isSummaryStepForImage(summary, this.shotImageVariable(shot));
+    return this.isScreenshotStep(shot) &&
+      (this.isSummaryStepForImage(summary, this.shotImageVariable(shot)) ||
+        this.isSummaryStepForImage(summary, this.legacyShotImageVariable(shot)));
   }
 
   private isSummaryPartOfPair(steps: WorkflowStep[], index: number): boolean {
@@ -1290,7 +1321,7 @@ export struct TaskPage {
       let shotId = this.nextStepId(container);
       let summaryId = shotId + 1;
       let shot = this.createTemplateStep('screenshot', shotId, '');
-      let summary = this.createTemplateStep('summary', summaryId, '${steps.' + shotId + '.output.image_path}');
+      let summary = this.createTemplateStep('summary', summaryId, '${steps.' + shotId + '.output.image_b64}');
       container.splice(insertIndex, 0, shot, summary);
       this.prepareStructureSelectionRestore(newPath);
       this.markWorkflowStructureChanged();
@@ -2913,7 +2944,7 @@ export struct TaskPage {
       }.width('100%')
       Column() {
         this.FieldLabel('图片变量')
-        TextInput({ placeholder: '${steps.3.output.image_path}', text: this.selectedToolInput('image') })
+        TextInput({ placeholder: '${steps.3.output.image_b64}', text: this.selectedToolInput('image') })
           .height(38)
           .fontSize(12)
           .fontFamily('monospace')
@@ -3222,6 +3253,15 @@ export struct TaskPage {
             .borderRadius(10)
             .margin({ right: 8 })
             .onClick(() => { this.openEditEditor(task.id, 'json'); })
+          Button('复制')
+            .width(82)
+            .height(36)
+            .fontSize(12)
+            .backgroundColor('#EEF4FF')
+            .fontColor('#276EF1')
+            .borderRadius(10)
+            .margin({ right: 8 })
+            .onClick(() => { this.copyWorkflowTask(task); })
           Button('删除')
             .width(82)
             .height(36)
@@ -3358,7 +3398,7 @@ export struct TaskPage {
         if (this.editorOpen && this.editingTaskId === task.id) {
           this.EditorPanel()
         }
-      }, (task: WorkflowTask) => task.id)
+      }, (task: WorkflowTask) => this.taskCardRenderKey(task))
     }
   }
 

@@ -6,6 +6,7 @@
 **/build
 /.hvigor
 /.hvigor-user-home
+/.hdc-auto-cache/
 .cxx
 /.clangd
 /.clang-format

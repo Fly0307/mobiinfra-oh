@@ -5,6 +5,10 @@ import os
 import argparse
 import time
 import threading
+import socket
+import sys
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import harmony_agent
@@ -14,6 +18,7 @@ except Exception as ex:
 
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
+AUTO_DISCOVERY_ENABLED = False
 HDC_HEALTH_CACHE_TTL = 2.0
 HDC_COMMAND_TIMEOUT = 20
 SERVER_PORT = 9124
@@ -21,6 +26,21 @@ APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
 APP_REVERSE_HDC_URL = f"http://127.0.0.1:{APP_REVERSE_HDC_PORT}"
 HDC_TARGET_OVERRIDE = os.environ.get("HDC_TARGET", "").strip()
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+AUTO_DISCOVERY_CACHE_FILE = os.environ.get(
+    "HDC_AUTO_CACHE",
+    os.path.join(REPO_ROOT, ".hdc-auto-cache", "targets.json")
+)
+AUTO_DISCOVERY_CONNECT_TIMEOUT = float(os.environ.get("HDC_AUTO_CONNECT_TIMEOUT", "0.25"))
+AUTO_DISCOVERY_TCONN_TIMEOUT = float(os.environ.get("HDC_AUTO_TCONN_TIMEOUT", "6"))
+AUTO_DISCOVERY_DISCOVER_TIMEOUT = float(os.environ.get("HDC_AUTO_DISCOVER_TIMEOUT", "5"))
+AUTO_DISCOVERY_SCAN_BUDGET = float(os.environ.get("HDC_AUTO_SCAN_BUDGET", "12"))
+AUTO_DISCOVERY_MAX_WORKERS = max(8, int(os.environ.get("HDC_AUTO_MAX_WORKERS", "128")))
+AUTO_DISCOVERY_COOLDOWN = float(os.environ.get("HDC_AUTO_COOLDOWN", "30"))
+AUTO_DISCOVERY_MAX_SUBNETS = max(1, int(os.environ.get("HDC_AUTO_MAX_SUBNETS", "8")))
+AUTO_DISCOVERY_EXTRA_PORTS = os.environ.get("HDC_AUTO_PORTS", "")
+AUTO_DISCOVERY_EXTRA_TARGETS = os.environ.get("HDC_AUTO_TARGETS", "")
+AUTO_DISCOVERY_DEFAULT_PORTS = (8710, 10178, 5555)
 
 _hdc_health_checked_at = 0.0
 _hdc_health_connected = False
@@ -34,6 +54,9 @@ _hdc_tunnel_status = {
     "fport_ready": False,
     "rport_ready": False,
 }
+_auto_discovery_last_attempt = 0.0
+_auto_discovery_running = False
+auto_discovery_lock = threading.RLock()
 
 # PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
 # workflow bridge 直接通过 /api/workflow 执行动作；9126 轮询 Agent 默认启动，
@@ -135,7 +158,8 @@ class HDCServerHandler(BaseHTTPRequestHandler):
             request = json.loads(post_data or b'{}')
             target = str(request.get('target', '')).strip()
             kill_others = bool(request.get('kill_others', True))
-            result = connect_hdc_target(target, kill_others=kill_others)
+            prefer_wired = bool(request.get('prefer_wired', True))
+            result = connect_hdc_target(target, kill_others=kill_others, prefer_wired=prefer_wired)
             status_code = 200 if result.get('status') == 'ok' else 500
             self.write_json(status_code, result)
         except Exception as e:
@@ -162,12 +186,13 @@ class HDCServerHandler(BaseHTTPRequestHandler):
 
 agent_thread = None
 agent_stop_event = threading.Event()
+hdc_control_lock = threading.RLock()
 
-def run_process(args, check=False):
+def run_process(args, check=False, timeout=HDC_COMMAND_TIMEOUT):
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=HDC_COMMAND_TIMEOUT)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as ex:
-        stderr = f"command timed out after {HDC_COMMAND_TIMEOUT}s: {' '.join(args)}"
+        stderr = f"command timed out after {timeout}s: {' '.join(args)}"
         result = subprocess.CompletedProcess(args, 124, ex.stdout or "", stderr)
     if check and result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(args)}"
@@ -179,6 +204,9 @@ def hdc_args(target=""):
     if target:
         args.extend(["-t", target])
     return args
+
+def is_wireless_hdc_target(target):
+    return ":" in target
 
 def parse_hdc_targets(output):
     targets = []
@@ -200,7 +228,7 @@ def list_hdc_targets():
         return [], result.stderr.strip() or result.stdout.strip()
     return parse_hdc_targets(result.stdout), ""
 
-def choose_hdc_target(targets):
+def choose_hdc_target(targets, preferred_target=""):
     if not targets:
         return ""
     if HDC_TARGET_OVERRIDE:
@@ -208,7 +236,12 @@ def choose_hdc_target(targets):
             return HDC_TARGET_OVERRIDE
         print(f">> [HDC] HDC_TARGET is set but not connected: {HDC_TARGET_OVERRIDE}")
         return ""
-    wireless_targets = [target for target in targets if ":" in target]
+    wired_targets = [target for target in targets if not is_wireless_hdc_target(target)]
+    if wired_targets:
+        return wired_targets[0]
+    if preferred_target and preferred_target in targets:
+        return preferred_target
+    wireless_targets = [target for target in targets if is_wireless_hdc_target(target)]
     if wireless_targets:
         return wireless_targets[0]
     return targets[0]
@@ -217,7 +250,661 @@ def set_harmony_agent_target(target):
     global _hdc_health_target
     _hdc_health_target = target
     if harmony_agent is not None:
-        harmony_agent.HDC_TARGET = target
+        if hasattr(harmony_agent, "set_hdc_target"):
+            harmony_agent.set_hdc_target(target)
+        else:
+            harmony_agent.HDC_TARGET = target
+
+def parse_wireless_target(target):
+    text = str(target or "").strip()
+    if not is_wireless_hdc_target(text):
+        return None
+    host, port_text = text.rsplit(":", 1)
+    host = host.strip()
+    port_text = port_text.strip()
+    if not port_text.isdigit():
+        return None
+    parts = host.split(".")
+    if len(parts) != 4:
+        return None
+    octets = []
+    for part in parts:
+        if not part.isdigit():
+            return None
+        value = int(part)
+        if value < 0 or value > 255:
+            return None
+        octets.append(value)
+    port = int(port_text)
+    if port <= 0 or port > 65535:
+        return None
+    return {
+        "target": f"{host}:{port}",
+        "host": host,
+        "port": port,
+        "octets": octets,
+        "prefix2": f"{octets[0]}.{octets[1]}",
+        "prefix3": f"{octets[0]}.{octets[1]}.{octets[2]}",
+        "third_octet": octets[2],
+        "host_octet": octets[3],
+    }
+
+def load_auto_discovery_cache():
+    try:
+        with open(AUTO_DISCOVERY_CACHE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict):
+            targets = data.get("targets")
+            if not isinstance(targets, list):
+                data["targets"] = []
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        print(f">> [HDC Auto] 读取缓存失败，将忽略缓存: {ex}")
+    return {"version": 1, "last_target": "", "targets": []}
+
+def save_auto_discovery_cache(cache):
+    try:
+        cache_dir = os.path.dirname(AUTO_DISCOVERY_CACHE_FILE)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        with open(AUTO_DISCOVERY_CACHE_FILE, "w", encoding="utf-8") as file:
+            json.dump(cache, file, ensure_ascii=False, indent=2)
+    except Exception as ex:
+        print(f">> [HDC Auto] 写入缓存失败: {ex}")
+
+def cache_wireless_hdc_target(target, source=""):
+    parsed = parse_wireless_target(target)
+    if not parsed:
+        return
+    cache = load_auto_discovery_cache()
+    now = time.time()
+    entry = {
+        "target": parsed["target"],
+        "host": parsed["host"],
+        "port": parsed["port"],
+        "prefix2": parsed["prefix2"],
+        "prefix3": parsed["prefix3"],
+        "third_octet": parsed["third_octet"],
+        "host_octet": parsed["host_octet"],
+        "last_success_at": now,
+        "source": source or "hdc",
+    }
+    targets = cache.get("targets", [])
+    if not isinstance(targets, list):
+        targets = []
+    deduped = [item for item in targets if isinstance(item, dict) and item.get("target") != parsed["target"]]
+    deduped.insert(0, entry)
+    cache["version"] = 1
+    cache["last_target"] = parsed["target"]
+    cache["targets"] = deduped[:20]
+    save_auto_discovery_cache(cache)
+
+def add_unique_value(values, value):
+    if value and value not in values:
+        values.append(value)
+
+def default_endpoint_config_path():
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "ets", "config", "DefaultEndpointConfig.ets"))
+
+def read_default_wireless_targets():
+    config_path = default_endpoint_config_path()
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            text = file.read()
+    except Exception:
+        return []
+    targets = []
+    blocks = []
+    single = re.search(r"wirelessHdcTarget\s*:\s*['\"]([^'\"]+)['\"]", text)
+    if single:
+        blocks.append(single.group(1))
+    array = re.search(r"wirelessHdcTargets\s*:\s*\[(.*?)\]", text, flags=re.DOTALL)
+    if array:
+        blocks.append(array.group(1))
+    for block in blocks:
+        for match in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}\b", block):
+            parsed = parse_wireless_target(match)
+            if parsed:
+                add_unique_value(targets, parsed["target"])
+    return targets
+
+def split_csv_values(raw):
+    values = []
+    for part in str(raw or "").replace(";", ",").split(","):
+        value = part.strip()
+        if value:
+            values.append(value)
+    return values
+
+def parse_extra_ports(raw):
+    ports = []
+    for item in split_csv_values(raw):
+        if item.isdigit():
+            port = int(item)
+            if 0 < port <= 65535 and port not in ports:
+                ports.append(port)
+    return ports
+
+def seed_entry_from_target(target, source):
+    parsed = parse_wireless_target(target)
+    if not parsed:
+        return None
+    return {
+        "target": parsed["target"],
+        "host": parsed["host"],
+        "port": parsed["port"],
+        "prefix2": parsed["prefix2"],
+        "prefix3": parsed["prefix3"],
+        "third_octet": parsed["third_octet"],
+        "host_octet": parsed["host_octet"],
+        "source": source,
+    }
+
+def build_auto_discovery_seeds():
+    seeds = []
+    seen_targets = set()
+
+    def add_seed(target, source):
+        entry = seed_entry_from_target(target, source)
+        if not entry or entry["target"] in seen_targets:
+            return
+        seen_targets.add(entry["target"])
+        seeds.append(entry)
+
+    cache = load_auto_discovery_cache()
+    last_target = cache.get("last_target", "")
+    add_seed(last_target, "cache-last")
+    targets = cache.get("targets", [])
+    if isinstance(targets, list):
+        sorted_targets = sorted(
+            [item for item in targets if isinstance(item, dict)],
+            key=lambda item: float(item.get("last_success_at", 0) or 0),
+            reverse=True
+        )
+        for item in sorted_targets:
+            add_seed(str(item.get("target", "")), "cache")
+
+    if HDC_TARGET_OVERRIDE:
+        add_seed(HDC_TARGET_OVERRIDE, "HDC_TARGET")
+
+    for target in split_csv_values(AUTO_DISCOVERY_EXTRA_TARGETS):
+        add_seed(target, "HDC_AUTO_TARGETS")
+
+    for target in read_default_wireless_targets():
+        add_seed(target, "default-config")
+    return seeds
+
+def get_local_ipv4_addresses():
+    addresses = []
+
+    def add_address(value):
+        parsed = parse_wireless_target(f"{value}:1")
+        if not parsed:
+            return
+        if value.startswith("127.") or value.startswith("169.254.") or value == "0.0.0.0":
+            return
+        add_unique_value(addresses, value)
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            add_address(info[4][0])
+    except Exception:
+        pass
+
+    for probe_host in ("8.8.8.8", "1.1.1.1", "223.5.5.5"):
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.2)
+            sock.connect((probe_host, 80))
+            add_address(sock.getsockname()[0])
+        except Exception:
+            pass
+        finally:
+            if sock:
+                sock.close()
+    private_addresses = [address for address in addresses if is_private_lan_ipv4(address)]
+    return private_addresses or addresses
+
+def is_private_lan_ipv4(address):
+    parsed = parse_wireless_target(f"{address}:1")
+    if not parsed:
+        return False
+    octets = parsed["octets"]
+    if octets[0] == 10:
+        return True
+    if octets[0] == 192 and octets[1] == 168:
+        return True
+    return octets[0] == 172 and 16 <= octets[1] <= 31
+
+def build_port_candidates(seeds):
+    ports = []
+    for seed in seeds:
+        port = int(seed.get("port", 0) or 0)
+        if 0 < port <= 65535 and port not in ports:
+            ports.append(port)
+    for port in parse_extra_ports(AUTO_DISCOVERY_EXTRA_PORTS):
+        if port not in ports:
+            ports.append(port)
+    for port in AUTO_DISCOVERY_DEFAULT_PORTS:
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+def build_prefix2_candidates(seeds, local_addresses=None):
+    prefixes = []
+    for address in local_addresses or []:
+        parsed = parse_wireless_target(f"{address}:1")
+        if parsed:
+            add_unique_value(prefixes, parsed["prefix2"])
+    for seed in seeds:
+        add_unique_value(prefixes, str(seed.get("prefix2", "")))
+    return prefixes
+
+def build_third_octet_order(prefix2, seeds, local_addresses):
+    order = []
+    for address in local_addresses:
+        parsed = parse_wireless_target(f"{address}:1")
+        if parsed and parsed["prefix2"] == prefix2:
+            add_unique_value(order, parsed["third_octet"])
+    for seed in seeds:
+        if seed.get("prefix2") == prefix2:
+            third = int(seed.get("third_octet", -1))
+            if 0 <= third <= 255:
+                add_unique_value(order, third)
+    for third in range(0, 256):
+        add_unique_value(order, third)
+    return order[:AUTO_DISCOVERY_MAX_SUBNETS]
+
+def build_host_octet_order(prefix2, third_octet, seeds):
+    order = []
+    for seed in seeds:
+        if seed.get("prefix2") == prefix2 and int(seed.get("third_octet", -1)) == third_octet:
+            host_octet = int(seed.get("host_octet", -1))
+            if 1 <= host_octet <= 254:
+                add_unique_value(order, host_octet)
+    for host_octet in range(1, 255):
+        add_unique_value(order, host_octet)
+    return order
+
+def tcp_port_open(host, port, timeout):
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
+    except Exception:
+        return False
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+def scan_subnet_for_hdc_port(prefix3, port, host_order, deadline):
+    if time.monotonic() >= deadline:
+        return []
+    found = []
+    if not host_order:
+        return found
+    max_workers = min(AUTO_DISCOVERY_MAX_WORKERS, len(host_order))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {}
+        for host_octet in host_order:
+            if time.monotonic() >= deadline:
+                break
+            host = f"{prefix3}.{host_octet}"
+            future = executor.submit(tcp_port_open, host, port, AUTO_DISCOVERY_CONNECT_TIMEOUT)
+            future_map[future] = host
+        for future in as_completed(future_map):
+            host = future_map[future]
+            try:
+                if future.result():
+                    found.append(f"{host}:{port}")
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                break
+    return found
+
+def probe_hdc_device_info(target):
+    info = {}
+    probes = [
+        ("manufacturer", ["shell", "param", "get", "const.product.manufacturer"]),
+        ("brand", ["shell", "param", "get", "const.product.brand"]),
+        ("model", ["shell", "param", "get", "const.product.model"]),
+        ("device_type", ["shell", "param", "get", "const.build.characteristics"]),
+    ]
+    for key, suffix in probes:
+        result = run_process(hdc_args(target) + suffix, timeout=4)
+        if result.returncode == 0:
+            value = (result.stdout or "").strip()
+            if value:
+                info[key] = value
+    return info
+
+def build_hdc_candidate(target, source, probe=True):
+    candidate = {
+        "target": target,
+        "source": source,
+    }
+    parsed = parse_wireless_target(target)
+    if parsed:
+        candidate.update({
+            "host": parsed["host"],
+            "port": parsed["port"],
+            "prefix2": parsed["prefix2"],
+        })
+    if probe:
+        try:
+            candidate.update(probe_hdc_device_info(target))
+        except Exception:
+            pass
+    return candidate
+
+def parse_wireless_targets_from_text(text, default_port=0):
+    targets = []
+    pattern = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3})(?::(\d{1,5}))?\b")
+    for match in pattern.finditer(str(text or "")):
+        host = match.group(1)
+        port_text = match.group(2)
+        if not port_text and default_port:
+            port_text = str(default_port)
+        if not port_text:
+            continue
+        parsed = parse_wireless_target(f"{host}:{port_text}")
+        if parsed:
+            add_unique_value(targets, parsed["target"])
+    return targets
+
+def discover_hdc_candidates_from_hdc():
+    result = run_process(["hdc", "discover"], timeout=AUTO_DISCOVERY_DISCOVER_TIMEOUT)
+    output = "\n".join([result.stdout or "", result.stderr or ""])
+    targets = parse_wireless_targets_from_text(output)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "hdc discover failed"
+        print(f">> [HDC Auto] hdc discover failed: {message}")
+    elif targets:
+        print(f">> [HDC Auto] hdc discover found: {', '.join(targets)}")
+    else:
+        brief = " ".join(line.strip() for line in output.splitlines() if line.strip())
+        if brief:
+            print(f">> [HDC Auto] hdc discover found no target: {brief}")
+    return [build_hdc_candidate(target, "hdc-discover", probe=False) for target in targets]
+
+def try_hdc_tconn_target(target, source, precheck=False):
+    parsed = parse_wireless_target(target)
+    if not parsed:
+        return None
+    if precheck and not tcp_port_open(parsed["host"], parsed["port"], AUTO_DISCOVERY_CONNECT_TIMEOUT):
+        print(f">> [HDC Auto] 跳过未开放端口的历史目标: {parsed['target']} ({source})")
+        return None
+    print(f">> [HDC Auto] 尝试连接候选设备: {parsed['target']} ({source})")
+    result = run_process(["hdc", "tconn", parsed["target"]], timeout=AUTO_DISCOVERY_TCONN_TIMEOUT)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "hdc tconn failed"
+        print(f">> [HDC Auto] tconn 失败: {parsed['target']} - {message}")
+        return None
+    targets, _ = list_hdc_targets()
+    if parsed["target"] not in targets:
+        print(f">> [HDC Auto] tconn 返回成功但目标未出现在 hdc list targets: {parsed['target']}")
+        return None
+    cache_wireless_hdc_target(parsed["target"], source=source)
+    return build_hdc_candidate(parsed["target"], source)
+
+def unique_candidates(candidates):
+    result = []
+    seen = set()
+    for candidate in candidates:
+        target = str(candidate.get("target", ""))
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        result.append(candidate)
+    return result
+
+def print_hdc_candidates(candidates, title):
+    print(title)
+    for idx, candidate in enumerate(candidates, start=1):
+        details = []
+        for key in ("manufacturer", "brand", "model", "device_type", "source"):
+            value = str(candidate.get(key, "")).strip()
+            if value:
+                details.append(f"{key}={value}")
+        suffix = " | " + ", ".join(details) if details else ""
+        print(f"  [{idx}] {candidate.get('target', '')}{suffix}")
+
+def select_hdc_candidate(candidates, prompt_user):
+    candidates = unique_candidates(candidates)
+    if not candidates:
+        return ""
+    if len(candidates) == 1:
+        return str(candidates[0].get("target", ""))
+
+    print_hdc_candidates(candidates, ">> [HDC Auto] 发现多个 HDC 目标，请选择要控制的手机:")
+    if not prompt_user or not sys.stdin or not sys.stdin.isatty():
+        print(">> [HDC Auto] 当前不是交互式终端，无法自动选择。请设置 HDC_TARGET 或只保留一个设备后重试。")
+        return ""
+
+    while True:
+        try:
+            raw = input("请选择设备序号（直接回车取消自动连接）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            return ""
+        if raw == "":
+            return ""
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(candidates):
+                return str(candidates[index - 1].get("target", ""))
+        for candidate in candidates:
+            target = str(candidate.get("target", ""))
+            if raw == target:
+                return target
+        print("输入无效，请输入列表中的序号或完整 target。")
+
+def mark_active_hdc_target(target, source=""):
+    global _hdc_health_checked_at, _hdc_health_connected
+    if not target:
+        return ""
+    set_harmony_agent_target(target)
+    _hdc_health_checked_at = time.monotonic()
+    _hdc_health_connected = True
+    if is_wireless_hdc_target(target):
+        cache_wireless_hdc_target(target, source=source)
+    return target
+
+def candidate_source_for_target(candidates, target):
+    for candidate in candidates:
+        if str(candidate.get("target", "")) == target:
+            return str(candidate.get("source", "")) or "auto-discovery"
+    return "auto-discovery"
+
+def discover_hdc_candidates():
+    seeds = build_auto_discovery_seeds()
+    candidates = []
+
+    if seeds:
+        print(
+            ">> [HDC Auto] 尝试历史/配置中的无线 HDC 目标: " +
+            ", ".join(seed["target"] for seed in seeds)
+        )
+    for seed in seeds:
+        parsed = parse_wireless_target(seed.get("target", ""))
+        if not parsed:
+            continue
+        source = str(seed.get("source", "")) or "cache"
+        trusted = source in ("cache-last", "cache", "HDC_TARGET", "HDC_AUTO_TARGETS")
+        candidate = try_hdc_tconn_target(parsed["target"], source, precheck=not trusted)
+        if candidate:
+            candidates.append(candidate)
+    candidates = unique_candidates(candidates)
+    if candidates:
+        return candidates
+
+    hdc_discovered = discover_hdc_candidates_from_hdc()
+    for candidate in hdc_discovered:
+        target = str(candidate.get("target", ""))
+        source = str(candidate.get("source", "")) or "hdc-discover"
+        connected_candidate = try_hdc_tconn_target(target, source, precheck=False)
+        if connected_candidate:
+            candidates.append(connected_candidate)
+    candidates = unique_candidates(candidates)
+    if candidates:
+        return candidates
+
+    local_addresses = get_local_ipv4_addresses()
+    ports = build_port_candidates(seeds)
+    prefixes = build_prefix2_candidates(seeds, local_addresses)
+    if not ports or not prefixes:
+        print(">> [HDC Auto] No LAN prefix or HDC port is available for auto scan.")
+        return []
+
+    deadline = time.monotonic() + AUTO_DISCOVERY_SCAN_BUDGET
+    print(
+        f">> [HDC Auto] LAN scan starts: prefixes={prefixes}, ports={ports}, "
+        f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
+    )
+    for prefix2 in prefixes:
+        third_order = build_third_octet_order(prefix2, seeds, local_addresses)
+        for port in ports:
+            for third in third_order:
+                if time.monotonic() >= deadline:
+                    print(">> [HDC Auto] LAN scan budget exhausted.")
+                    return unique_candidates(candidates)
+                prefix3 = f"{prefix2}.{third}"
+                host_order = build_host_octet_order(prefix2, third, seeds)
+                open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
+                if not open_targets:
+                    continue
+                print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
+                for target in open_targets:
+                    candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
+                    if candidate:
+                        candidates.append(candidate)
+                candidates = unique_candidates(candidates)
+                if candidates:
+                    return candidates
+    return unique_candidates(candidates)
+
+def ensure_auto_hdc_connected(force=False, prompt_user=False, reason=""):
+    global _auto_discovery_last_attempt, _auto_discovery_running
+    if not AUTO_DISCOVERY_ENABLED:
+        return {"status": "disabled", "message": "HDC auto discovery is disabled"}
+
+    with auto_discovery_lock:
+        now = time.monotonic()
+        if _auto_discovery_running:
+            return {"status": "running", "message": "HDC auto discovery is already running"}
+        if not force and _auto_discovery_last_attempt > 0 and now - _auto_discovery_last_attempt < AUTO_DISCOVERY_COOLDOWN:
+            return {"status": "skipped", "message": "HDC auto discovery cooldown is active"}
+        _auto_discovery_running = True
+        _auto_discovery_last_attempt = now
+
+    try:
+        if reason:
+            print(f">> [HDC Auto] {reason}")
+        targets, error = list_hdc_targets()
+        if error:
+            print(f">> [HDC Auto] hdc list targets failed before discovery: {error}")
+        if HDC_TARGET_OVERRIDE:
+            existing_candidates = [build_hdc_candidate(target, "already-connected", probe=False) for target in targets]
+            if HDC_TARGET_OVERRIDE in targets:
+                mark_active_hdc_target(HDC_TARGET_OVERRIDE, source="HDC_TARGET")
+                return {
+                    "status": "ok",
+                    "message": "Using HDC_TARGET override",
+                    "target": HDC_TARGET_OVERRIDE,
+                    "candidates": existing_candidates,
+                }
+
+            print(f">> [HDC Auto] HDC_TARGET is set but not connected: {HDC_TARGET_OVERRIDE}")
+            connected_candidate = try_hdc_tconn_target(HDC_TARGET_OVERRIDE, "HDC_TARGET", precheck=False)
+            if connected_candidate:
+                mark_active_hdc_target(HDC_TARGET_OVERRIDE, source="HDC_TARGET")
+                candidates = unique_candidates([connected_candidate] + existing_candidates)
+                return {
+                    "status": "ok",
+                    "message": "Connected HDC_TARGET override",
+                    "target": HDC_TARGET_OVERRIDE,
+                    "candidates": candidates,
+                }
+
+            return {
+                "status": "error",
+                "message": f"HDC_TARGET is set but target is not connected: {HDC_TARGET_OVERRIDE}",
+                "target": HDC_TARGET_OVERRIDE,
+                "candidates": existing_candidates,
+            }
+        if targets:
+            candidates = [build_hdc_candidate(target, "already-connected") for target in targets]
+            selected = select_hdc_candidate(candidates, prompt_user=prompt_user)
+            if selected:
+                mark_active_hdc_target(selected, source="already-connected")
+                if is_wireless_hdc_target(selected) and not HDC_TARGET_OVERRIDE:
+                    cleanup_other_wireless_targets(selected)
+                return {
+                    "status": "ok",
+                    "message": "Using existing HDC target",
+                    "target": selected,
+                    "candidates": candidates,
+                }
+            return {
+                "status": "multiple",
+                "message": "Multiple HDC targets are connected; selection is required",
+                "candidates": candidates,
+            }
+
+        candidates = discover_hdc_candidates()
+        selected = select_hdc_candidate(candidates, prompt_user=prompt_user)
+        if selected:
+            source = candidate_source_for_target(candidates, selected)
+            connected_targets, _ = list_hdc_targets()
+            if selected in connected_targets:
+                connected_candidate = build_hdc_candidate(selected, source)
+            else:
+                connected_candidate = try_hdc_tconn_target(selected, source, precheck=False)
+            if not connected_candidate:
+                return {
+                    "status": "error",
+                    "message": f"Selected HDC target could not be connected: {selected}",
+                    "target": selected,
+                    "candidates": candidates,
+                }
+            mark_active_hdc_target(selected, source=source)
+            if not HDC_TARGET_OVERRIDE:
+                cleanup_other_wireless_targets(selected)
+            return {
+                "status": "ok",
+                "message": "HDC target auto-discovered",
+                "target": selected,
+                "candidates": candidates,
+            }
+        if candidates:
+            return {
+                "status": "multiple",
+                "message": "Multiple HDC targets discovered; selection is required",
+                "candidates": candidates,
+            }
+        return {
+            "status": "error",
+            "message": "No HDC target discovered from HDC discover, cache, or bounded LAN scan",
+            "candidates": [],
+        }
+    finally:
+        with auto_discovery_lock:
+            _auto_discovery_running = False
+
+def run_with_hdc_control(operation_name, operation):
+    if harmony_agent is not None and hasattr(harmony_agent, 'run_with_device_control'):
+        return harmony_agent.run_with_device_control(operation_name, operation)
+    with hdc_control_lock:
+        return operation()
 
 def get_active_hdc_target(force=False):
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
@@ -228,23 +915,26 @@ def get_active_hdc_target(force=False):
 
     targets, error = list_hdc_targets()
     if not targets:
+        if AUTO_DISCOVERY_ENABLED:
+            auto_result = ensure_auto_hdc_connected(force=force, prompt_user=False,
+                                                    reason="No connected HDC target; trying cached LAN discovery.")
+            auto_target = str(auto_result.get("target", ""))
+            if auto_result.get("status") == "ok" and auto_target:
+                return auto_target
         _hdc_health_checked_at = now
         _hdc_health_connected = False
-        _hdc_health_target = ""
+        set_harmony_agent_target("")
         if error:
             print(f">> [HDC] list targets failed: {error}")
         return ""
 
-    target = choose_hdc_target(targets)
+    target = choose_hdc_target(targets, _hdc_health_target)
     if not target:
         _hdc_health_checked_at = now
         _hdc_health_connected = False
-        _hdc_health_target = ""
+        set_harmony_agent_target("")
         return ""
-    set_harmony_agent_target(target)
-    _hdc_health_checked_at = now
-    _hdc_health_connected = True
-    return target
+    return mark_active_hdc_target(target, source="hdc-list")
 
 def reset_hdc_tunnel_cache():
     global _hdc_tunnel_checked_at, _hdc_tunnel_status
@@ -263,26 +953,12 @@ def hdc_port_error_is_existing_mapping(message):
     return "exist" in lower or "already" in lower or "duplicate" in lower or "存在" in message
 
 def ensure_hdc_tunnels(force=False, reset_reverse=False):
-    global _hdc_tunnel_checked_at, _hdc_tunnel_status
-    now = time.monotonic()
-    if (not force and _hdc_tunnel_checked_at > 0 and
-            now - _hdc_tunnel_checked_at < HDC_HEALTH_CACHE_TTL):
-        return dict(_hdc_tunnel_status)
+    return run_with_hdc_control(
+        "ensure_hdc_tunnels",
+        lambda: _ensure_hdc_tunnels_impl(force=force, reset_reverse=reset_reverse)
+    )
 
-    target = get_active_hdc_target(force=force)
-    if not target:
-        _hdc_tunnel_checked_at = now
-        _hdc_tunnel_status = {
-            "status": "error",
-            "message": "HDC target is not connected",
-            "target": "",
-            "tunnel_ready": False,
-            "fport_ready": False,
-            "rport_ready": False,
-        }
-        return dict(_hdc_tunnel_status)
-
-    errors = []
+def run_hdc_tunnel_commands(target, reset_reverse=False):
     fport_errors = []
     rport_errors = []
     commands = [
@@ -303,12 +979,11 @@ def ensure_hdc_tunnels(force=False, reset_reverse=False):
             else:
                 fport_errors.append(message)
 
-    _hdc_tunnel_checked_at = now
     errors = fport_errors + rport_errors
     fport_ready = len(fport_errors) == 0
     rport_ready = len(rport_errors) == 0
     if errors:
-        _hdc_tunnel_status = {
+        return {
             "status": "error",
             "message": "; ".join(errors),
             "target": target,
@@ -316,31 +991,79 @@ def ensure_hdc_tunnels(force=False, reset_reverse=False):
             "fport_ready": fport_ready,
             "rport_ready": rport_ready,
         }
-    else:
-        _hdc_tunnel_status = {
-            "status": "ok",
-            "message": (
-                f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
-                f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
-            ),
-            "target": target,
-            "tunnel_ready": True,
-            "fport_ready": True,
-            "rport_ready": True,
-        }
+    return {
+        "status": "ok",
+        "message": (
+            f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
+            f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
+        ),
+        "target": target,
+        "tunnel_ready": True,
+        "fport_ready": True,
+        "rport_ready": True,
+    }
+
+def choose_fallback_hdc_target(failed_target):
+    targets, _ = list_hdc_targets()
+    candidates = [target for target in targets if target != failed_target]
+    return choose_hdc_target(candidates)
+
+def store_hdc_tunnel_status(status):
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    _hdc_tunnel_checked_at = time.monotonic()
+    _hdc_tunnel_status = status
     return dict(_hdc_tunnel_status)
 
-def hdc_health_payload(force=False):
+def refresh_hdc_tunnels_for_target(target, reset_reverse=False, allow_fallback=True):
+    return run_with_hdc_control(
+        "refresh_hdc_tunnels_for_target",
+        lambda: _refresh_hdc_tunnels_for_target_impl(target, reset_reverse, allow_fallback)
+    )
+
+def _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=False, allow_fallback=True):
+    if not target:
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
+
+    set_harmony_agent_target(target)
+    status = run_hdc_tunnel_commands(target, reset_reverse=reset_reverse)
+    if allow_fallback and not status.get("fport_ready"):
+        fallback = choose_fallback_hdc_target(target)
+        if fallback:
+            print(f">> [HDC] target {target} fport failed; retry with {fallback}")
+            set_harmony_agent_target(fallback)
+            status = run_hdc_tunnel_commands(fallback, reset_reverse=True)
+    return store_hdc_tunnel_status(status)
+
+def _ensure_hdc_tunnels_impl(force=False, reset_reverse=False):
+    global _hdc_tunnel_checked_at, _hdc_tunnel_status
+    now = time.monotonic()
+    if (not force and _hdc_tunnel_checked_at > 0 and
+            now - _hdc_tunnel_checked_at < HDC_HEALTH_CACHE_TTL):
+        return dict(_hdc_tunnel_status)
+
     target = get_active_hdc_target(force=force)
-    tunnel = ensure_hdc_tunnels(force=force) if target else {
-        "status": "error",
-        "message": "HDC target is not connected",
-        "target": "",
-        "tunnel_ready": False,
-        "fport_ready": False,
-        "rport_ready": False,
-    }
-    hdc_connected = bool(target)
+    if not target:
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
+
+    return _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=reset_reverse, allow_fallback=True)
+
+def build_hdc_health_payload(target, tunnel):
+    active_target = str(tunnel.get("target", "")) or target
+    hdc_connected = bool(active_target)
     tunnel_ready = bool(tunnel.get("tunnel_ready"))
     fport_ready = bool(tunnel.get("fport_ready"))
     rport_ready = bool(tunnel.get("rport_ready"))
@@ -348,7 +1071,7 @@ def hdc_health_payload(force=False):
         "status": "ok" if hdc_connected and tunnel_ready else "error",
         "message": tunnel.get("message", ""),
         "hdc_connected": hdc_connected,
-        "target": target,
+        "target": active_target,
         "tunnel_ready": tunnel_ready,
         "fport_ready": fport_ready,
         "rport_ready": rport_ready,
@@ -360,8 +1083,68 @@ def hdc_health_payload(force=False):
         "loop_alive": agent_thread is not None and agent_thread.is_alive(),
     }
 
-def connect_hdc_target(target, kill_others=True):
+def hdc_health_payload(force=False):
+    target = get_active_hdc_target(force=force)
+    tunnel = ensure_hdc_tunnels(force=force) if target else {
+        "status": "error",
+        "message": "HDC target is not connected",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
+    return build_hdc_health_payload(target, tunnel)
+
+def health_payload_after_target_selected(selected_target, message_prefix="", requested_target=""):
+    if is_wireless_hdc_target(selected_target):
+        cache_wireless_hdc_target(selected_target, source="selected")
+    tunnel = refresh_hdc_tunnels_for_target(selected_target, reset_reverse=True, allow_fallback=True)
+    tunnel_target = str(tunnel.get("target", ""))
+    if is_wireless_hdc_target(tunnel_target):
+        cache_wireless_hdc_target(tunnel_target, source="tunnel")
+    if LEGACY_LOOP_ENABLED and tunnel.get("fport_ready"):
+        start_harmony_agent()
+    payload = build_hdc_health_payload(str(tunnel.get("target", "")) or selected_target, tunnel)
+    if payload.get("hdc_connected") and payload.get("fport_ready"):
+        payload["status"] = "ok"
+        if not payload.get("tunnel_ready"):
+            payload["message"] = (
+                "HDC target connected and fport ready; reverse rport is unavailable, "
+                "so keep using the manual PC HDC Server URL."
+            )
+    if message_prefix:
+        payload["message"] = message_prefix + " " + str(payload.get("message", "")).strip()
+    if requested_target:
+        payload["requested_target"] = requested_target
+    return payload
+
+def first_wired_target(targets):
+    wired_targets = [target for target in targets if not is_wireless_hdc_target(target)]
+    return wired_targets[0] if wired_targets else ""
+
+def cleanup_other_wireless_targets(active_target):
+    targets, _ = list_hdc_targets()
+    for old_target in targets:
+        if old_target != active_target and is_wireless_hdc_target(old_target):
+            run_process(["hdc", "kill", old_target])
+
+def connect_hdc_target(target, kill_others=True, prefer_wired=True):
     if not target:
+        if AUTO_DISCOVERY_ENABLED:
+            auto_result = ensure_auto_hdc_connected(force=True, prompt_user=True,
+                                                    reason="/api/hdc/connect target is empty; trying auto discovery.")
+            selected = str(auto_result.get("target", ""))
+            if selected:
+                return health_payload_after_target_selected(selected, requested_target="auto")
+            return {
+                "status": "error",
+                "message": auto_result.get("message", "auto discovery failed"),
+                "hdc_connected": False,
+                "target": "",
+                "candidates": auto_result.get("candidates", []),
+                "tunnel_ready": False,
+                "app_server_url": APP_REVERSE_HDC_URL,
+            }
         return {
             "status": "error",
             "message": "target is required, for example 192.168.x.x:port",
@@ -370,16 +1153,33 @@ def connect_hdc_target(target, kill_others=True):
             "app_server_url": APP_REVERSE_HDC_URL,
         }
 
-    if kill_others:
-        targets, _ = list_hdc_targets()
-        for old_target in targets:
-            if old_target != target:
-                run_process(["hdc", "kill", old_target])
+    targets, _ = list_hdc_targets()
+    wired_target = first_wired_target(targets)
+    if prefer_wired and wired_target and not HDC_TARGET_OVERRIDE:
+        invalidate_hdc_health_cache()
+        set_harmony_agent_target(wired_target)
+        reset_hdc_tunnel_cache()
+        return health_payload_after_target_selected(
+            wired_target,
+            "Using wired HDC target; wireless tconn skipped.",
+            requested_target=target
+        )
 
-    result = run_process(["hdc", "tconn", target])
+    if target in targets:
+        result = subprocess.CompletedProcess(["hdc", "tconn", target], 0, "", "")
+    else:
+        result = run_process(["hdc", "tconn", target])
     invalidate_hdc_health_cache()
     reset_hdc_tunnel_cache()
     if result.returncode != 0:
+        fallback = choose_hdc_target(targets)
+        if fallback and fallback != target:
+            set_harmony_agent_target(fallback)
+            return health_payload_after_target_selected(
+                fallback,
+                "Wireless tconn failed; using existing HDC target.",
+                requested_target=target
+            )
         return {
             "status": "error",
             "message": result.stderr.strip() or result.stdout.strip() or f"hdc tconn failed: {target}",
@@ -390,18 +1190,10 @@ def connect_hdc_target(target, kill_others=True):
         }
 
     set_harmony_agent_target(target)
-    tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
-    if LEGACY_LOOP_ENABLED and tunnel.get("fport_ready"):
-        start_harmony_agent()
-    payload = hdc_health_payload(force=True)
-    if payload.get("hdc_connected") and payload.get("fport_ready"):
-        payload["status"] = "ok"
-        if not payload.get("tunnel_ready"):
-            payload["message"] = (
-                "HDC target connected and fport ready; reverse rport is unavailable, "
-                "so keep using the manual PC HDC Server URL."
-            )
-    return payload
+    cache_wireless_hdc_target(target, source="manual-connect")
+    if kill_others:
+        cleanup_other_wireless_targets(target)
+    return health_payload_after_target_selected(target, requested_target=target)
 
 def ensure_workflow_agent_ready():
     if harmony_agent is None:
@@ -413,7 +1205,6 @@ def run_remote_command(cmd):
     def execute():
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if harmony_agent is not None and 'hdc' in cmd.lower():
-            harmony_agent.HDC_TARGET = ''
             invalidate_hdc_health_cache()
         return result
 
@@ -610,7 +1401,7 @@ def invalidate_hdc_health_cache():
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
     _hdc_health_checked_at = 0.0
     _hdc_health_connected = False
-    _hdc_health_target = ""
+    set_harmony_agent_target("")
     reset_hdc_tunnel_cache()
 
 def is_hdc_connected(force=False):
@@ -706,6 +1497,8 @@ def cleanup():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--no_reason", action="store_true", help="Use prompts without reasoning")
+    parser.add_argument("--auto", action="store_true",
+                        help="Auto-discover a previously paired HarmonyOS wireless HDC target from LAN")
     parser.add_argument("--legacy_loop", action="store_true",
                         help="Compatibility flag; the 9126 polling harmony_agent loop is enabled by default")
     parser.add_argument("--workflow_only", action="store_true",
@@ -714,14 +1507,27 @@ if __name__ == '__main__':
     
     if args.no_reason:
         NO_REASON_MODE = True
+    AUTO_DISCOVERY_ENABLED = args.auto
     LEGACY_LOOP_ENABLED = not args.workflow_only
     if args.legacy_loop:
         LEGACY_LOOP_ENABLED = True
 
+    if AUTO_DISCOVERY_ENABLED:
+        print(
+            ">> HDC 自动发现已开启：将使用历史无线 HDC target 的端口和 IP 前缀扫描局域网。\n"
+            f">> 自动发现缓存: {AUTO_DISCOVERY_CACHE_FILE}"
+        )
+        auto_start_result = ensure_auto_hdc_connected(force=True, prompt_user=True,
+                                                      reason="Server startup auto discovery.")
+        if auto_start_result.get("status") == "ok":
+            print(f">> [HDC Auto] 已选择目标: {auto_start_result.get('target', '')}")
+        else:
+            print(f">> [HDC Auto] 启动自动发现未完成: {auto_start_result.get('message', '')}")
+
     # 9126 轮询同时服务 App 端“本地/云端智能体执行”按钮；workflow bridge 仍然按请求直接控制设备。
     if LEGACY_LOOP_ENABLED:
         start_harmony_agent()
-        if not is_hdc_connected(force=True):
+        if not is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
             print(">> 未检测到 HDC 设备连接；轮询 Agent loop 已启动，将在连接恢复后继续尝试。")
     else:
         print(">> 旧版 harmony_agent 轮询未启用；workflow bridge 将按请求直接控制设备。")
@@ -729,7 +1535,7 @@ if __name__ == '__main__':
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = SERVER_PORT
     server = HTTPServer(('0.0.0.0', PORT), HDCServerHandler)
-    if is_hdc_connected(force=True):
+    if is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
         tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
         print(f">> [HDC] {tunnel.get('message', '')}")
     print(f"HDC 远程控制服务端已启动，监听端口: {PORT}...")

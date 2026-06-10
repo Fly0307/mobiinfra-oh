@@ -219,8 +219,7 @@ struct WorkflowFileViewer {
 
   private deleteManagedFile(file: WorkflowManagedFile): void {
     let title = this.fileDisplayTitle(file);
-    let deleted = this.category === 'config' ?
-      WorkflowStorage.deleteConfigManagedFile(this.filesDir, file) : WorkflowStorage.deleteManagedFile(file);
+    let deleted = WorkflowStorage.deleteManagedFileForCategory(this.filesDir, this.category, file);
     this.setFileSelected(file, false);
     this.loadFiles();
     promptAction.showToast({
@@ -237,21 +236,30 @@ struct WorkflowFileViewer {
     }
     promptAction.showDialog({
       title: '删除选中文件',
-      message: '将删除当前分类中选中的 ' + selected.length + ' 个文件。',
+      message: this.deleteSelectedMessage(selected.length),
       buttons: [
         { text: '取消', color: '#666666' },
         { text: '删除', color: '#FF4D4F' }
       ]
     }).then((data: promptAction.ShowDialogSuccessResponse) => {
       if (data.index === 1) {
-        let deleted = this.category === 'config' ?
-          WorkflowStorage.deleteConfigManagedFiles(this.filesDir, selected) : WorkflowStorage.deleteManagedFiles(selected);
+        let deleted = WorkflowStorage.deleteManagedFilesForCategory(this.filesDir, this.category, selected);
         this.manageMode = false;
         this.selectedDeletePaths = [];
         this.loadFiles();
         promptAction.showToast({ message: '已删除文件：' + deleted, duration: 1500 });
       }
     }).catch(() => {});
+  }
+
+  private deleteSelectedMessage(count: number): string {
+    if (this.category === 'run') {
+      return '将删除当前分类中选中的 ' + count + ' 个运行记录，并清除对应运行目录中的步骤输出文件。';
+    }
+    if (this.category === 'daily') {
+      return '将删除当前分类中选中的 ' + count + ' 个 daily-log 文件，并清理删除后为空的日期目录。';
+    }
+    return '将删除当前分类中选中的 ' + count + ' 个文件。';
   }
 
   @Builder CategoryTab(category: string, label: string) {

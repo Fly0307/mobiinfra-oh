@@ -3,6 +3,7 @@ import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
+import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -10,4 +11,5 @@ export default function testsuite() {
   workflowStorageUnitTest();
   workflowDateContextUnitTest();
   mainTabConfigUnitTest();
+  chatPageTypesUnitTest();
 }

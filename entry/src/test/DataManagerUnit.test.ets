@@ -47,6 +47,7 @@ import {
   createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
 import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
+import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
 import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
 import {
   createDefaultAvatarGenerationParams,
@@ -493,6 +494,17 @@ export default function dataManagerUnitTest() {
       let first = builder.snapshotHash(builder.buildSnapshot(profile, 100));
       profile.domains['eat'].short_summary = '热咖啡党';
       let second = builder.snapshotHash(builder.buildSnapshot(profile, 100));
+      expect(first === second).assertFalse();
+    });
+
+    it('avatarServiceMarksStaleWhenProfileHashChanges', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let first = service.previewProfileSnapshotHash(profile, 100);
+      profile.domains['eat'].short_summary = '热咖啡党';
+      let second = service.previewProfileSnapshotHash(profile, 100);
       expect(first === second).assertFalse();
     });
 

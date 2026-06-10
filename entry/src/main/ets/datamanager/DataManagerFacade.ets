@@ -7,7 +7,13 @@ import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTab
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
-import { AvatarHomeViewModel, createEmptyAvatarHomeViewModel } from './avatar/AvatarTypes';
+import { AvatarService } from './avatar/AvatarService';
+import {
+  AvatarGenerateRequest,
+  AvatarHomeViewModel,
+  AvatarProviderConfig,
+  createEmptyAvatarHomeViewModel
+} from './avatar/AvatarTypes';
 import {
   CollectionEventViewModel,
   CollectionGroupState,
@@ -140,6 +146,7 @@ export class DataManagerFacade {
   private collectionGroupingService: CollectionGroupingService;
   private homeRecommendationService: HomeRecommendationService;
   private imageResolver: DataManagerImageResolver;
+  private avatarService: AvatarService;
 
   constructor(filesDir: string) {
     this.storage = new DataManagerStorage();
@@ -150,10 +157,12 @@ export class DataManagerFacade {
     this.collectionGroupingService = new CollectionGroupingService(this.paths, this.storage, this.modelClient, this.indexService);
     this.homeRecommendationService = new HomeRecommendationService(this.paths, this.storage, this.modelClient, this.indexService);
     this.imageResolver = new DataManagerImageResolver(this.paths, this.storage);
+    this.avatarService = new AvatarService(this.paths, this.storage);
   }
 
   ensureReady(): void {
     this.paths.ensureBaseDirs();
+    this.avatarService.ensureReady();
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
   }
 
@@ -502,7 +511,8 @@ export class DataManagerFacade {
       return domain;
     });
     let recommendations = this.homeRecommendations();
-    let avatar = createHomeProfileAvatarDefaults();
+    let completeness = this.profileCompleteness(profile);
+    let avatar = this.avatarService.homeView(profile, completeness);
     return {
       avatarUri: avatar.avatarUri,
       avatarStatus: avatar.avatarStatus,
@@ -510,12 +520,22 @@ export class DataManagerFacade {
       avatarActionLabel: avatar.avatarActionLabel,
       avatarVersionId: avatar.avatarVersionId,
       updatedLabel: this.lastSyncLabel([]),
-      completeness: this.profileCompleteness(profile),
+      completeness: completeness,
       totalEvents: profile.event_count,
       domains: domains,
       recommendations: recommendations,
       empty: false
     };
+  }
+
+  buildAvatarGenerateRequest(mode: 'text_to_image' | 'image_to_image', sourceImage: string,
+    consentedAt: string): AvatarGenerateRequest {
+    let profile = this.indexService.loadProfileState();
+    return this.avatarService.buildGenerateRequest(profile, this.profileCompleteness(profile), mode, sourceImage, consentedAt);
+  }
+
+  async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
+    return this.avatarService.generate(config, request);
   }
 
   loadCollectionViewModels(): CollectionViewModel[] {

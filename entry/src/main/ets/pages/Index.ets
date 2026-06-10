@@ -1137,7 +1137,7 @@ struct Index {
     }
 
     if (failed.length === 0) {
-      this.output = `全部下载完成!\n模型总大小: ${this.formatSize(completedBytes)}\n\n点击“加载大模型”开始使用`;
+      this.output = `全部下载完成!\n模型总大小: ${this.formatSize(completedBytes)}\n\n切换到聊天页的本地推理模式后会自动加载模型`;
     } else {
       this.output = `${failed.length} 个失败: ${failed.join(', ')}\n已下载: ${this.formatSize(completedBytes)}\n再次点击可继续，已有文件会跳过。`;
     }
@@ -1684,10 +1684,10 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) {
-      if (!this.modelLoaded) {
-        this.output = '请先加载模型';
-      }
+    if (this.userInput.length === 0 || this.isThinking) {
+      return;
+    }
+    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
       return;
     }
     let msg = this.userInput;

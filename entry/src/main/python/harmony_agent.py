@@ -478,8 +478,37 @@ def _capture_screen_file(local_path, factor, label):
         if snapshot_created:
             _cleanup_device_file_async(prefix, device_path)
 
+def _capture_overlay_hide_best_effort():
+    try:
+        res = send_request({"type": "capture_overlay_hide"})
+        if isinstance(res, str):
+            parsed = json.loads(res)
+            if isinstance(parsed, dict):
+                return bool(parsed.get("hidden", False))
+        if isinstance(res, dict):
+            return bool(res.get("hidden", False))
+    except Exception as exc:
+        print(f">> [Capture Overlay] hide skipped: {exc}")
+    return False
+
+def _capture_overlay_restore_best_effort(hidden):
+    try:
+        send_request_best_effort(
+            {"type": "capture_overlay_restore", "hidden": bool(hidden)},
+            "Capture overlay restore"
+        )
+    except Exception as exc:
+        print(f">> [Capture Overlay] restore skipped: {exc}")
+
 def capture_screen(factor=0.25):
-    return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+    hidden = _capture_overlay_hide_best_effort()
+    try:
+        if hidden:
+            # 等待 HarmonyOS 浮窗销毁提交到合成层，避免截图仍捕获上一帧的控制面板。
+            time.sleep(0.12)
+        return run_with_device_control("capture_screen", lambda: _capture_screen_impl(factor))
+    finally:
+        _capture_overlay_restore_best_effort(hidden)
 
 def _capture_screen_impl(factor=0.25):
     # 使用 hdc snapshot_display 截图并拉回 PC，再压缩为 base64 发送给 App/云端模型。
@@ -488,10 +517,17 @@ def _capture_screen_impl(factor=0.25):
     return _capture_screen_file(local_path, factor, "screenshot")
 
 def capture_screen_mobiagent_style(factor=0.5):
-    return run_with_device_control(
-        "capture_screen_mobiagent_style",
-        lambda: _capture_screen_mobiagent_style_impl(factor)
-    )
+    hidden = _capture_overlay_hide_best_effort()
+    try:
+        if hidden:
+            # 云端 Agent 截图同样经过系统截图命令，需要给浮窗隐藏留出一帧以上的缓冲。
+            time.sleep(0.12)
+        return run_with_device_control(
+            "capture_screen_mobiagent_style",
+            lambda: _capture_screen_mobiagent_style_impl(factor)
+        )
+    finally:
+        _capture_overlay_restore_best_effort(hidden)
 
 def _capture_screen_mobiagent_style_impl(factor=0.5):
     """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""

@@ -118,6 +118,132 @@ export class WorkflowStorage {
     }
   }
 
+  static readBytes(path: string): ArrayBuffer {
+    let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+    try {
+      let stat = fs.statSync(path);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      return buf;
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  static writeBytes(path: string, data: ArrayBuffer): void {
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, data);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  static writeBase64Image(path: string, imageBase64: string): void {
+    let helper = new util.Base64Helper();
+    let imageBytes = helper.decodeSync(WorkflowStorage.stripImageDataUri(imageBase64));
+    WorkflowStorage.writeBytes(path, imageBytes.buffer as ArrayBuffer);
+  }
+
+  static readImageAsBase64(path: string): string {
+    let helper = new util.Base64Helper();
+    return helper.encodeToStringSync(new Uint8Array(WorkflowStorage.readBytes(path)));
+  }
+
+  static workflowRunRelativePath(filesDir: string, path: string): string {
+    let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
+    let normalized = path.replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('workflows/')) {
+      return normalized;
+    }
+    let workflowRoot = root + '/' + WORKFLOW_DIR + '/';
+    if (normalized.startsWith(workflowRoot)) {
+      return WORKFLOW_DIR + '/' + normalized.substring(workflowRoot.length);
+    }
+    let marker = '/' + WORKFLOW_DIR + '/';
+    let markerIndex = normalized.indexOf(marker);
+    if (markerIndex >= 0) {
+      return WORKFLOW_DIR + '/' + normalized.substring(markerIndex + marker.length);
+    }
+    return normalized;
+  }
+
+  static workflowImageInputKind(value: string): string {
+    let text = value.trim();
+    if (text.length === 0) {
+      return 'empty';
+    }
+    if (text.startsWith('data:image/') && text.indexOf('base64,') >= 0) {
+      return 'data_uri';
+    }
+    if (WorkflowStorage.looksLikeBase64Image(text)) {
+      return 'base64';
+    }
+    let normalized = text.replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('runs/') ||
+      /\.(jpg|jpeg|png|webp|gif)$/i.test(normalized)) {
+      return 'path';
+    }
+    return 'text';
+  }
+
+  static resolveWorkflowImageInputAsBase64(filesDir: string, value: string): string {
+    let kind = WorkflowStorage.workflowImageInputKind(value);
+    if (kind === 'empty') {
+      return '';
+    }
+    if (kind === 'data_uri') {
+      return WorkflowStorage.stripImageDataUri(value);
+    }
+    if (kind === 'base64') {
+      return value.replace(/\s+/g, '');
+    }
+    if (kind === 'path') {
+      return WorkflowStorage.readImageAsBase64(WorkflowStorage.workflowAbsolutePath(filesDir, value));
+    }
+    return value;
+  }
+
+  private static workflowAbsolutePath(filesDir: string, path: string): string {
+    let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
+    let normalized = path.trim().replace(/\\/g, '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('/')) {
+      return normalized;
+    }
+    if (normalized.startsWith('workflows/')) {
+      return root + '/' + normalized;
+    }
+    if (normalized.startsWith('runs/')) {
+      return WorkflowStorage.rootDir(root) + '/' + normalized;
+    }
+    return root + '/' + normalized;
+  }
+
+  private static stripImageDataUri(value: string): string {
+    let text = value.trim();
+    let marker = 'base64,';
+    let markerIndex = text.indexOf(marker);
+    if (text.startsWith('data:image/') && markerIndex >= 0) {
+      return text.substring(markerIndex + marker.length).replace(/\s+/g, '');
+    }
+    return text.replace(/\s+/g, '');
+  }
+
+  private static looksLikeBase64Image(value: string): boolean {
+    let text = value.replace(/\s+/g, '');
+    return text.startsWith('/9j/') || text.startsWith('iVBORw0KGgo') ||
+      text.startsWith('R0lGOD') || text.startsWith('UklGR');
+  }
+
   static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
     let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
     if (!parsed.steps) {
@@ -227,6 +353,9 @@ export class WorkflowStorage {
   }
 
   private static taskWithLatestValidConfig(filesDir: string, task: WorkflowTask): WorkflowTask {
+    if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id) && task.isUserModified !== true) {
+      return task;
+    }
     if (task.configFileName.length === 0) {
       return task;
     }
@@ -250,7 +379,8 @@ export class WorkflowStorage {
         workflowJson: rawJson,
         lastStatus: task.lastStatus,
         lastRun: task.lastRun,
-        lastMessage: task.lastMessage
+        lastMessage: task.lastMessage,
+        isUserModified: task.isUserModified
       };
     } catch (e) {
       return task;
@@ -258,6 +388,9 @@ export class WorkflowStorage {
   }
 
   static readTaskWorkflowJson(filesDir: string, task: WorkflowTask): string {
+    if (WorkflowStorage.isCodeDefinedDefaultTaskId(task.id) && task.isUserModified !== true) {
+      return task.workflowJson;
+    }
     if (task.configFileName.length > 0) {
       try {
         return WorkflowStorage.readText(WorkflowStorage.configPath(filesDir, task.configFileName));
@@ -367,6 +500,7 @@ export class WorkflowStorage {
 
   private static mergeStoredStateIntoDefaultTask(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
     let sceneId = storedTask.sceneId >= 0 ? storedTask.sceneId : defaultTask.sceneId;
+    let userModified = storedTask.isUserModified === true;
     return {
       id: defaultTask.id,
       sceneId: sceneId,
@@ -376,11 +510,17 @@ export class WorkflowStorage {
       source: WorkflowStorage.nonEmptyOrDefault(storedTask.source, defaultTask.source),
       enabled: storedTask.enabled === false ? false : storedTask.enabled === true ? true : defaultTask.enabled,
       configFileName: WorkflowStorage.nonEmptyOrDefault(storedTask.configFileName, defaultTask.configFileName),
-      workflowJson: WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson),
+      workflowJson: userModified ? WorkflowStorage.nonEmptyOrDefault(storedTask.workflowJson, defaultTask.workflowJson) :
+        defaultTask.workflowJson,
       lastStatus: WorkflowStorage.nonEmptyOrDefault(storedTask.lastStatus, defaultTask.lastStatus),
       lastRun: WorkflowStorage.nonEmptyOrDefault(storedTask.lastRun, defaultTask.lastRun),
-      lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage)
+      lastMessage: WorkflowStorage.nonEmptyOrDefault(storedTask.lastMessage, defaultTask.lastMessage),
+      isUserModified: userModified
     };
+  }
+
+  static mergeCodeDefinedDefaultTaskForTest(defaultTask: WorkflowTask, storedTask: WorkflowTask): WorkflowTask {
+    return WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, storedTask);
   }
 
   private static findDefaultTask(filesDir: string, taskId: string): WorkflowTask | null {
@@ -430,6 +570,9 @@ export class WorkflowStorage {
     let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
     if (defaultTask) {
       WorkflowStorage.unmarkDefaultTaskDeleted(filesDir, task.id);
+      if (task.isUserModified !== true && task.workflowJson !== defaultTask.workflowJson) {
+        task.isUserModified = true;
+      }
       task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
     }
     let found = false;
@@ -828,7 +971,7 @@ export class WorkflowStorage {
     };
     let containsTodayChat: VlmJsonSchemaField = {
       type: 'boolean',
-      description: '如果当前截图中的聊天记录仍然属于今天则为 true；如果已经出现更早日期的聊天记录则为 false'
+      description: '如果当前截图中的聊天记录属于任务执行日期对应的今天则为 true；如果截图中已经出现早于任务执行日期的聊天日期分隔符、明确更早日期内容，或当前可见聊天记录已经不属于任务执行日期，则为 false'
     };
     return {
       summary: summary,
@@ -844,7 +987,25 @@ export class WorkflowStorage {
       inputs: {
         mode: 'summary',
         image: '${steps.1.output.image_b64}',
-        question: '请分析当前微信聊天界面。这是第${loop.index}次截图。请总结当前截图中可见的聊天内容，并判断当前截图中的聊天记录是否仍然属于今天；如果已经出现更早日期的聊天记录，则应判定为 false。',
+        question: '请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n' +
+          '请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n' +
+          '输出格式：\n' +
+          '聊天对象：xxx\n' +
+          '- 发送人｜消息发送绝对时间：消息原文（如含相对时间，在原文对应位置补充[事件绝对时间]）\n' +
+          '规则：\n' +
+          '1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n' +
+          '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部“联系人”名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
+          '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
+          '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
+          '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
+          '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充；原文无事件时间则不补充。\n' +
+          '7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n' +
+          '示例：\n' +
+          '任务执行时间：2026年06月09日 星期二 04:42\n' +
+          '截图时间锚点：昨天 下午 09:15\n' +
+          '消息：明天下午两点前修复新的 bug\n' +
+          '最终输出：\n' +
+          '- 我｜2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug',
         json_schema: WorkflowStorage.weixinTodayJsonSchema() as Object
       }
     };
@@ -937,7 +1098,25 @@ export class WorkflowStorage {
       WorkflowStorage.loopStep(3, [
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
         WorkflowStorage.summaryToolStep(2, '${steps.1.output.image_b64}',
-          '帮我用一段话简要总结当前界面聊天记录的内容（不要使用markdown格式，也不要分点），这是第${loop.index}次截图。'),
+          '请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n' +
+            '请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n' +
+            '输出格式：\n' +
+            '聊天对象：xxx\n' +
+            '- 发送人｜消息发送绝对时间：消息原文（如含相对时间，在原文对应位置补充[事件绝对时间]）\n' +
+            '规则：\n' +
+            '1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n' +
+            '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部联系人名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
+            '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
+            '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
+            '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
+            '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充；原文无事件时间则不补充。\n' +
+            '7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n' +
+            '示例：\n' +
+            '任务执行时间：2026年06月09日 星期二 04:42\n' +
+            '截图时间锚点：昨天 下午 09:15\n' +
+            '消息：明天下午两点前修复新的 bug\n' +
+            '最终输出：\n' +
+            '- 我｜2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug'),
         WorkflowStorage.ifStep(3, WorkflowStorage.condition('${loop.last}', '==', false), [
           WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
           WorkflowStorage.sleepStep(2, 1.0)
@@ -984,7 +1163,8 @@ export class WorkflowStorage {
 
   static listRunFiles(filesDir: string): WorkflowManagedFile[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), ''));
+    return WorkflowStorage.sortManagedFilesForDisplay(WorkflowStorage.listManagedFiles(WorkflowStorage.runsDir(filesDir), '')
+      .filter((file: WorkflowManagedFile): boolean => WorkflowStorage.isRunSummaryFile(file)));
   }
 
   static sortManagedFilesForDisplay(files: WorkflowManagedFile[]): WorkflowManagedFile[] {
@@ -1028,6 +1208,10 @@ export class WorkflowStorage {
     return [];
   }
 
+  private static isRunSummaryFile(file: WorkflowManagedFile): boolean {
+    return file.name.endsWith('/run_summary.json') || file.name === 'run_summary.json';
+  }
+
   static countFiles(path: string): number {
     try {
       let children = fs.listFileSync(path);
@@ -1069,7 +1253,7 @@ export class WorkflowStorage {
     return {
       configCount: WorkflowStorage.countFiles(WorkflowStorage.configDir(filesDir)),
       dailyLogCount: WorkflowStorage.countFiles(WorkflowStorage.dailyLogDir(filesDir)),
-      runCount: WorkflowStorage.countFiles(WorkflowStorage.runsDir(filesDir)),
+      runCount: WorkflowStorage.listRunFiles(filesDir).length,
       totalBytes: WorkflowStorage.calcPathSize(WorkflowStorage.rootDir(filesDir))
     };
   }
@@ -1103,6 +1287,83 @@ export class WorkflowStorage {
       deleted += WorkflowStorage.deleteManagedFile(files[i]);
     }
     return deleted;
+  }
+
+  static managedFileDeleteTarget(filesDir: string, category: string, file: WorkflowManagedFile): string {
+    if (category === 'run') {
+      return WorkflowStorage.runManagedFileDeleteTarget(filesDir, file);
+    }
+    return file.path;
+  }
+
+  static deleteManagedFileForCategory(filesDir: string, category: string, file: WorkflowManagedFile): number {
+    if (category === 'config') {
+      return WorkflowStorage.deleteConfigManagedFile(filesDir, file);
+    }
+    let deleteTarget = WorkflowStorage.managedFileDeleteTarget(filesDir, category, file);
+    let deleted = WorkflowStorage.deletePathRecursively(deleteTarget);
+    if (category === 'daily') {
+      deleted += WorkflowStorage.deleteEmptyParentDirectory(WorkflowStorage.dailyLogDir(filesDir), file.path);
+    }
+    return deleted;
+  }
+
+  static deleteManagedFilesForCategory(filesDir: string, category: string, files: WorkflowManagedFile[]): number {
+    let deleted = 0;
+    for (let i = 0; i < files.length; i++) {
+      deleted += WorkflowStorage.deleteManagedFileForCategory(filesDir, category, files[i]);
+    }
+    return deleted;
+  }
+
+  private static runManagedFileDeleteTarget(filesDir: string, file: WorkflowManagedFile): string {
+    let runsRoot = WorkflowStorage.normalizePath(WorkflowStorage.runsDir(filesDir));
+    let filePath = WorkflowStorage.normalizePath(file.path);
+    let parent = WorkflowStorage.parentPath(filePath);
+    if (WorkflowStorage.isRunSummaryFile(file) && WorkflowStorage.isNestedPath(parent, runsRoot)) {
+      return parent;
+    }
+    return file.path;
+  }
+
+  private static deleteEmptyParentDirectory(categoryRoot: string, filePath: string): number {
+    let root = WorkflowStorage.normalizePath(categoryRoot);
+    let parent = WorkflowStorage.parentPath(WorkflowStorage.normalizePath(filePath));
+    if (!WorkflowStorage.isNestedPath(parent, root)) {
+      return 0;
+    }
+    try {
+      let children = fs.listFileSync(parent);
+      if (children.length === 0) {
+        fs.rmdirSync(parent);
+        return 1;
+      }
+    } catch (e) {
+    }
+    return 0;
+  }
+
+  private static normalizePath(path: string): string {
+    let normalized = path.replace(/\\/g, '/');
+    while (normalized.endsWith('/') && normalized.length > 1) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
+  }
+
+  private static parentPath(path: string): string {
+    let normalized = WorkflowStorage.normalizePath(path);
+    let index = normalized.lastIndexOf('/');
+    if (index <= 0) {
+      return '';
+    }
+    return normalized.substring(0, index);
+  }
+
+  private static isNestedPath(path: string, root: string): boolean {
+    let normalizedPath = WorkflowStorage.normalizePath(path);
+    let normalizedRoot = WorkflowStorage.normalizePath(root);
+    return normalizedPath.length > normalizedRoot.length && normalizedPath.startsWith(normalizedRoot + '/');
   }
 
   private static taskMatchesConfigFile(filesDir: string, task: WorkflowTask, file: WorkflowManagedFile): boolean {

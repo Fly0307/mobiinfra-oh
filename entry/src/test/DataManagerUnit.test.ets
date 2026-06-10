@@ -567,6 +567,17 @@ export default function dataManagerUnitTest() {
       expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertFalse();
     });
 
+    it('avatarGenerateRequestKeepsOriginalPhotoSourceInConsent', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let service = new AvatarService(paths, storage);
+      let request = service.buildGenerateRequest(demoProfileStateForAvatar(), 100, 'image_to_image',
+        'data:image/jpeg;base64,AQID', '2026-06-10T10:07:00.000Z', 'file://photo/reference.jpg');
+      expect(request.sourceImage).assertEqual('data:image/jpeg;base64,AQID');
+      expect(request.consent.photo_used).assertTrue();
+      expect(request.consent.photo_source).assertEqual('file://photo/reference.jpg');
+    });
+
     it('avatarStorageListsVersionViewModelsWithEvidence', 0, () => {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);

@@ -6,6 +6,7 @@ import {
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
 import { AvatarDomainSnapshot, AvatarGenerationMode, AvatarVersionViewModel } from '../../datamanager/avatar/AvatarTypes';
+import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { promptAction } from '@kit.ArkUI';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
@@ -24,6 +25,7 @@ export struct HomePage {
   @State avatarGenerating: boolean = false;
   @State avatarHistoryOpen: boolean = false;
   @State selectedAvatarVersionId: string = '';
+  @State selectedAvatarPhotoUri: string = '';
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -120,6 +122,44 @@ export struct HomePage {
     } catch (e) {
       let err = e as Error;
       console.error('submitAvatarGeneration failed: ' + err.message);
+    } finally {
+      this.avatarGenerating = false;
+    }
+  }
+
+  private async selectAvatarReferencePhoto(): Promise<void> {
+    if (this.avatarGenerating) {
+      return;
+    }
+    try {
+      let picker = new GalleryPhotoPicker();
+      let uris = await picker.selectImageUris(1);
+      if (uris.length === 0) {
+        promptAction.showToast({ message: '未选择照片', duration: 1200 });
+        return;
+      }
+      this.selectedAvatarPhotoUri = uris[0];
+    } catch (e) {
+      let err = e as Error;
+      promptAction.showToast({ message: '选择照片失败：' + err.message, duration: 1800 });
+    }
+  }
+
+  private async submitAvatarPhotoGeneration(): Promise<void> {
+    if (this.avatarGenerating) {
+      return;
+    }
+    if (this.selectedAvatarPhotoUri.length === 0) {
+      promptAction.showToast({ message: '请先选择参考照片', duration: 1200 });
+      return;
+    }
+    this.avatarGenerating = true;
+    try {
+      await this.onGenerateAvatar('image_to_image', this.selectedAvatarPhotoUri);
+      this.avatarGenerationOpen = false;
+    } catch (e) {
+      let err = e as Error;
+      console.error('submitAvatarPhotoGeneration failed: ' + err.message);
     } finally {
       this.avatarGenerating = false;
     }
@@ -488,17 +528,17 @@ export struct HomePage {
             Text('照片参考')
               .fontSize(15)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#9AA2B3')
-            Text('上传照片模式后续接入')
+              .fontColor('#151A28')
+            Text(this.selectedAvatarPhotoUri.length > 0 ? '已选择照片，可结合画像生成' : '选择一张个人照片作为形象参考')
               .fontSize(12)
-              .fontColor('#A6ADBA')
+              .fontColor('#6F7684')
               .margin({ top: 4 })
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          Text('未开放')
+          Text(this.selectedAvatarPhotoUri.length > 0 ? '重选' : '选择')
             .fontSize(12)
-            .fontColor('#A6ADBA')
+            .fontColor('#8066FF')
             .padding({ left: 9, right: 9, top: 5, bottom: 5 })
-            .backgroundColor('#EEF1F6')
+            .backgroundColor('#F1EEFF')
             .borderRadius(10)
         }
         .width('100%')
@@ -506,6 +546,35 @@ export struct HomePage {
         .backgroundColor('#F5F7FB')
         .borderRadius(14)
         .margin({ top: 10 })
+        .onClick(() => {
+          this.selectAvatarReferencePhoto();
+        })
+
+        if (this.selectedAvatarPhotoUri.length > 0) {
+          Column() {
+            Image(this.selectedAvatarPhotoUri)
+              .width('100%')
+              .height(160)
+              .objectFit(ImageFit.Contain)
+              .borderRadius(12)
+              .backgroundColor('#F5F7FB')
+            Button(this.avatarGenerating ? '生成中...' : '使用照片生成')
+              .width('100%')
+              .height(42)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor(this.avatarGenerating ? '#A9B7E9' : '#8066FF')
+              .borderRadius(14)
+              .margin({ top: 10 })
+              .enabled(!this.avatarGenerating)
+              .onClick(() => {
+                this.submitAvatarPhotoGeneration();
+              })
+          }
+          .width('100%')
+          .margin({ top: 10 })
+        }
 
         Row() {
           Column() {

@@ -67,8 +67,9 @@ export class AvatarService {
   }
 
   buildGenerateRequest(profile: ProfileState, completeness: number, mode: AvatarGenerationMode,
-    sourceImage: string, consentedAt: string): AvatarGenerateRequest {
+    sourceImage: string, consentedAt: string, photoSource?: string): AvatarGenerateRequest {
     let snapshot = this.promptBuilder.buildSnapshot(profile, completeness);
+    let consentPhotoSource = photoSource === undefined ? sourceImage : photoSource;
     return {
       mode: mode,
       prompt: this.promptBuilder.buildPrompt(snapshot),
@@ -79,7 +80,7 @@ export class AvatarService {
         mode: mode,
         photo_used: mode === 'image_to_image' && sourceImage.trim().length > 0,
         consented_at: consentedAt,
-        photo_source: sourceImage
+        photo_source: consentPhotoSource
       }
     };
   }

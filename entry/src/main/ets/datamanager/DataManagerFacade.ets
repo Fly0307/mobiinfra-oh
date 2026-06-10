@@ -530,9 +530,9 @@ export class DataManagerFacade {
   }
 
   buildAvatarGenerateRequest(mode: 'text_to_image' | 'image_to_image', sourceImage: string,
-    consentedAt: string): AvatarGenerateRequest {
+    consentedAt: string, photoSource?: string): AvatarGenerateRequest {
     let profile = this.indexService.loadProfileState();
-    return this.avatarService.buildGenerateRequest(profile, this.profileCompleteness(profile), mode, sourceImage, consentedAt);
+    return this.avatarService.buildGenerateRequest(profile, this.profileCompleteness(profile), mode, sourceImage, consentedAt, photoSource);
   }
 
   isAvatarProfileSnapshotUnchanged(): boolean {

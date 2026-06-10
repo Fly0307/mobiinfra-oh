@@ -3,6 +3,8 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { image } from '@kit.ImageKit';
+import { fileIo } from '@kit.CoreFileKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { AppHeader } from '../components/AppHeader';
@@ -257,6 +259,64 @@ struct Index {
     });
   }
 
+  private async avatarProviderSourceImage(mode: AvatarGenerationMode, sourceImage: string): Promise<string> {
+    if (mode !== 'image_to_image') {
+      return '';
+    }
+    let normalized = sourceImage.trim();
+    if (normalized.length === 0) {
+      throw new Error('请先选择参考照片');
+    }
+    if (normalized.startsWith('data:image/') || normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      return normalized;
+    }
+    return await this.imageUriToJpegDataUrl(normalized);
+  }
+
+  private async imageUriToJpegDataUrl(uri: string): Promise<string> {
+    let imageFile: fileIo.File | null = null;
+    let imageSource: image.ImageSource | null = null;
+    let pixelMap: image.PixelMap | null = null;
+    let packer: image.ImagePacker | null = null;
+    try {
+      imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      imageSource = image.createImageSource(imageFile.fd);
+      pixelMap = await imageSource.createPixelMap();
+      packer = image.createImagePacker();
+      let data = await packer.packToData(pixelMap, {
+        format: 'image/jpeg',
+        quality: 90
+      });
+      let helper = new util.Base64Helper();
+      return 'data:image/jpeg;base64,' + helper.encodeToStringSync(new Uint8Array(data));
+    } finally {
+      if (packer !== null) {
+        try {
+          await packer.release();
+        } catch (e) {
+        }
+      }
+      if (pixelMap !== null) {
+        try {
+          await pixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (imageSource !== null) {
+        try {
+          await imageSource.release();
+        } catch (e) {
+        }
+      }
+      if (imageFile !== null) {
+        try {
+          await fileIo.close(imageFile);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
@@ -278,8 +338,9 @@ struct Index {
     }
     dataManagerInfo(`generateHomeAvatar start: mode=${mode}, baseUrl=${config.imageBaseUrl}, model=${config.textToImageModel}`);
     try {
+      let providerSourceImage = await this.avatarProviderSourceImage(mode, sourceImage);
       let request: AvatarGenerateRequest =
-        this.dataManagerFacade.buildAvatarGenerateRequest(mode, sourceImage, new Date().toISOString());
+        this.dataManagerFacade.buildAvatarGenerateRequest(mode, providerSourceImage, new Date().toISOString(), sourceImage);
       let avatar = await this.dataManagerFacade.generateAvatar(config, request);
       this.mergeHomeAvatarView(avatar);
       this.reloadDataManagerViewModels();

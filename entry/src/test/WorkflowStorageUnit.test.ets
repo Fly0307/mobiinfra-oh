@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import { WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
 import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
+import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
 function findWeixinChatSummaryQuestion(steps: WorkflowStep[]): string {
   for (let i = 0; i < steps.length; i++) {
@@ -92,7 +92,7 @@ export default function workflowStorageUnitTest() {
     });
 
     it('defaultWeixinSummaryPromptRequiresChatTimeAnchors', 0, () => {
-      let workflow = ArkJSON.parse(WorkflowStorage.defaultWeixinWorkflow()) as WorkflowDefinition;
+      let workflow = parseJsonCompat<WorkflowDefinition>(WorkflowStorage.defaultWeixinWorkflow());
       let question = findWeixinChatSummaryQuestion(workflow.steps);
 
       expect(question.length > 0).assertTrue();

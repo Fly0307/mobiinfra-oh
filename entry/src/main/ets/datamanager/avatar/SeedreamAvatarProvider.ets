@@ -1,5 +1,6 @@
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { parseJsonCompat } from '../../utils/JsonCompat';
 import {
   AvatarGenerationParams,
   AvatarProviderConfig,
@@ -22,7 +23,7 @@ interface SeedreamResponse {
 }
 
 function seedreamFirstDataString(raw: string, key: string): string {
-  let parsed = ArkJSON.parse(raw) as Record<string, Object | string | number | boolean | null>;
+  let parsed = parseJsonCompat<Record<string, Object | string | number | boolean | null>>(raw);
   let data = parsed['data'];
   if (!Array.isArray(data)) {
     return '';
@@ -168,7 +169,7 @@ export class SeedreamAvatarProvider {
 
       let metadata: AvatarStringMap = createEmptyRawMetadata();
       metadata['raw'] = raw;
-      let parsed = ArkJSON.parse(raw) as SeedreamResponse;
+      let parsed = parseJsonCompat<SeedreamResponse>(raw);
       let requestId = parsed.id === undefined ? '' : parsed.id;
       if (requestId.length > 0) {
         metadata['id'] = requestId;

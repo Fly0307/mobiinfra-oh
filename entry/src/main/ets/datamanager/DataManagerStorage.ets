@@ -1,8 +1,10 @@
-import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
+import { parseJsonCompat, stringifyJsonCompat } from '../utils/JsonCompat';
+import { decodeUtf8Compat, encodeUtf8Compat } from '../utils/TextEncodingCompat';
 
 const EMPTY_SHA256: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
 
 export class DataManagerStorage {
   join(...parts: string[]): string {
@@ -72,7 +74,10 @@ export class DataManagerStorage {
       if (!this.isDirectory(path)) {
         return [];
       }
-      return fs.listFileSync(path).sort();
+      return (fs.listFileSync(path) as ListFileEntry[])
+        .map((entry: ListFileEntry) => this.normalizeListFileEntry(entry))
+        .filter((name: string) => name.length > 0)
+        .sort();
     } catch (e) {
       return [];
     }
@@ -84,11 +89,14 @@ export class DataManagerStorage {
         return fallback;
       }
       let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
-      let stat = fs.statSync(path);
-      let buf = new ArrayBuffer(stat.size);
-      fs.readSync(file.fd, buf);
-      fs.closeSync(file);
-      return util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      try {
+        let stat = fs.statSync(path);
+        let buf = new ArrayBuffer(stat.size);
+        fs.readSync(file.fd, buf);
+        return decodeUtf8Compat(new Uint8Array(buf));
+      } finally {
+        fs.closeSync(file);
+      }
     } catch (e) {
       return fallback;
     }
@@ -99,7 +107,7 @@ export class DataManagerStorage {
     if (parent.length > 0) {
       this.ensureDir(parent);
     }
-    let encoded = util.TextEncoder.create('utf-8').encodeInto(content);
+    let encoded = encodeUtf8Compat(content);
     let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, encoded.buffer);
@@ -113,7 +121,7 @@ export class DataManagerStorage {
     if (parent.length > 0) {
       this.ensureDir(parent);
     }
-    let buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+    let buffer = this.exactArrayBuffer(bytes);
     let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, buffer);
@@ -168,14 +176,14 @@ export class DataManagerStorage {
       return fallback;
     }
     try {
-      return ArkJSON.parse(content) as T;
+      return parseJsonCompat<T>(content);
     } catch (e) {
       return fallback;
     }
   }
 
   writeJsonAtomic(path: string, payload: Object): void {
-    this.writeTextAtomic(path, ArkJSON.stringify(payload, null, 2) + '\n');
+    this.writeTextAtomic(path, stringifyJsonCompat(payload, 2) + '\n');
   }
 
   removeFile(path: string): void {
@@ -262,12 +270,18 @@ export class DataManagerStorage {
     if (value.length === 0) {
       return EMPTY_SHA256;
     }
-    let bytes = util.TextEncoder.create('utf-8').encodeInto(value);
-    let md = cryptoFramework.createMd('SHA256');
-    let blob: cryptoFramework.DataBlob = { data: bytes };
-    md.updateSync(blob);
-    let digest = md.digestSync();
-    return this.bytesToHex(digest.data);
+    let bytes = encodeUtf8Compat(value);
+    try {
+      let md = cryptoFramework.createMd('SHA256');
+      let blob: cryptoFramework.DataBlob = { data: bytes };
+      md.updateSync(blob);
+      let digest = this.bytesToHex(md.digestSync().data);
+      if (digest.length > 0 && digest !== EMPTY_SHA256) {
+        return digest;
+      }
+    } catch (e) {
+    }
+    return this.stableFallbackHash(bytes);
   }
 
   private bytesToHex(bytes: Uint8Array): string {
@@ -276,5 +290,52 @@ export class DataManagerStorage {
       parts.push(bytes[index].toString(16).padStart(2, '0'));
     }
     return parts.join('');
+  }
+
+  private normalizeListFileEntry(entry: ListFileEntry): string {
+    if (typeof entry === 'string') {
+      return this.basename(entry);
+    }
+    let record = entry as Record<string, Object | string | number | boolean | null>;
+    let keys: string[] = ['fileName', 'filename', 'name', 'path', 'uri'];
+    for (let key of keys) {
+      let value = record[key];
+      if (typeof value === 'string' && value.length > 0) {
+        return this.basename(value);
+      }
+    }
+    let text = String(entry);
+    if (text.length === 0 || text === '[object Object]') {
+      return '';
+    }
+    return this.basename(text);
+  }
+
+  private exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    let output = new ArrayBuffer(bytes.byteLength);
+    let view = new Uint8Array(output);
+    for (let index = 0; index < bytes.byteLength; index++) {
+      view[index] = bytes[index];
+    }
+    return output;
+  }
+
+  private stableFallbackHash(bytes: Uint8Array): string {
+    let hashA = 2166136261;
+    let hashB = 16777619;
+    for (let index = 0; index < bytes.length; index++) {
+      hashA ^= bytes[index];
+      hashA = Math.imul(hashA, 16777619);
+      hashB ^= bytes[index];
+      hashB = Math.imul(hashB, 2246822519);
+    }
+    let a = this.uint32Hex(hashA);
+    let b = this.uint32Hex(hashB);
+    let length = this.uint32Hex(bytes.length);
+    return a + b + length + a + b + length + a + b;
+  }
+
+  private uint32Hex(value: number): string {
+    return (value >>> 0).toString(16).padStart(8, '0');
   }
 }

@@ -485,7 +485,7 @@ export default function dataManagerUnitTest() {
       let prompt = builder.buildPrompt(snapshot);
       expect(prompt.indexOf('3D 卡通风格个人数字形象') >= 0).assertTrue();
       expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
-      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入适量 profile 相关物品和事项元素') >= 0).assertTrue();
       expect(prompt.indexOf('gender=male') >= 0).assertTrue();
       expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
       expect(prompt.indexOf('要求无文字') >= 0).assertTrue();
@@ -500,7 +500,7 @@ export default function dataManagerUnitTest() {
       let prompt = builder.buildPrompt(snapshot, 'image_to_image');
       expect(prompt.indexOf('参考照片中的人物') >= 0).assertTrue();
       expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
-      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入适量 profile 相关物品和事项元素') >= 0).assertTrue();
       expect(prompt.indexOf('不是生成另一个陌生角色') >= 0).assertTrue();
       expect(prompt.indexOf('不要让 profile 覆盖或替换参考照片中的人物身份特征') >= 0).assertTrue();
       expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
@@ -596,7 +596,9 @@ export default function dataManagerUnitTest() {
 
     it('avatarStorageListsVersionViewModelsWithEvidence', 0, () => {
       let storage = new DataManagerStorage();
-      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let root = '/tmp/demo-avatar-version-view';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
       let avatarStorage = new AvatarStorage(paths, storage);
       let profile = demoProfileStateForAvatar();
       let snapshot = new AvatarPromptBuilder(storage).buildSnapshot(profile, 100);
@@ -630,7 +632,7 @@ export default function dataManagerUnitTest() {
       let versions = avatarStorage.listVersionViewModels();
       expect(versions.length).assertEqual(1);
       expect(versions[0].versionId).assertEqual('v-history');
-      expect(versions[0].imageUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v-history.jpg');
+      expect(versions[0].imageUri).assertEqual('file:///tmp/demo-avatar-version-view/workflows/avatar/assets/v-history.jpg');
       expect(versions[0].model).assertEqual('doubao-seedream-4-5-251128');
       expect(versions[0].promptSnapshot).assertEqual('avatar prompt');
       expect(versions[0].profileSnapshot.domains.length).assertEqual(4);
@@ -701,6 +703,14 @@ export default function dataManagerUnitTest() {
     it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {
       let storage = new DataManagerStorage();
       let path = '/tmp/demo-byte-writes/exact.bin';
+      try {
+        fs.unlinkSync(path);
+      } catch (e) {
+      }
+      try {
+        fs.unlinkSync(path + '.tmp');
+      } catch (e) {
+      }
       let source = new Uint8Array([9, 1, 2, 3, 8]);
       storage.writeBytesAtomic(path, source.subarray(1, 4));
       let file = fs.openSync(path, fs.OpenMode.READ_ONLY);

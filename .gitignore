@@ -28,3 +28,4 @@ build-profile.json5*
 .vscode/
 /.codex-tmp/
 /.codex
+/docs/superpowers/

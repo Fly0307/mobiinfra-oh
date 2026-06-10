@@ -18,7 +18,7 @@ import {
 } from './WorkflowTypes';
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
-const MAX_GUI_STEPS = 15;
+const MAX_GUI_STEPS = 20;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 interface PlannerResult {
@@ -327,7 +327,6 @@ export class WorkflowRunner {
     let safeName = this.sanitizeFileName(task.source || task.id);
     let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
     WorkflowStorage.ensureDirectory(dir);
-    WorkflowStorage.ensureDirectory(dir + '/steps');
     return dir;
   }
 
@@ -589,7 +588,7 @@ export class WorkflowRunner {
       let shot = await this.hdcBridge.screenshot();
       let imageBase64 = shot.image_b64 || '';
       let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
-      let imagePath = this.stepDir(actualId) + '/' + imageFileName;
+      let imagePath = this.runArtifactPath(actualId, imageFileName);
       WorkflowStorage.writeBase64Image(imagePath, imageBase64);
       output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
       output.image_b64 = imageBase64;
@@ -1280,9 +1279,11 @@ export class WorkflowRunner {
   }
 
   private stepDir(actualId: string): string {
-    let dir = this.runDir + '/steps/' + actualId;
-    WorkflowStorage.ensureDirectory(dir);
-    return dir;
+    return this.runDir + '/steps/' + actualId;
+  }
+
+  private runArtifactPath(actualId: string, fileName: string): string {
+    return this.runDir + '/' + this.sanitizeFileName('step-' + actualId + '-' + fileName);
   }
 
   private screenshotFileName(value: string): string {

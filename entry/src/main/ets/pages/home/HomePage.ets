@@ -5,6 +5,7 @@ import {
   HomeRecommendationViewModel
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFacade';
+import { AvatarGenerationMode } from '../../datamanager/avatar/AvatarTypes';
 import { promptAction } from '@kit.ArkUI';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
@@ -12,10 +13,14 @@ import { promptAction } from '@kit.ArkUI';
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
+  onGenerateAvatar: (mode: AvatarGenerationMode, sourceImage: string) => Promise<void> =
+    async (mode: AvatarGenerationMode, sourceImage: string) => {};
   @State recommendationBatchIndex: number = 0;
   @State selectedRecommendationId: string = '';
   @State agentTaskDraft: string = '';
   @State agentTaskSubmitting: boolean = false;
+  @State avatarGenerationOpen: boolean = false;
+  @State avatarGenerating: boolean = false;
 
   @Builder FeaturePill(icon: string, title: string, desc: string) {
     // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
@@ -63,6 +68,184 @@ export struct HomePage {
         { text: '知道了', color: item.color }
       ]
     }).catch(() => {});
+  }
+
+  private avatarStatusLabel(): string {
+    if (this.avatarGenerating || this.profile.avatarStatus === 'generating') {
+      return '正在生成数字分身';
+    }
+    if (this.profile.avatarStatus === 'stale') {
+      return '可更新数字分身';
+    }
+    if (this.profile.avatarStatus === 'current') {
+      return '你的数字分身已更新';
+    }
+    if (this.profile.avatarStatus === 'failed') {
+      return '上次生成失败，可重试';
+    }
+    return this.profile.empty ? '等待导入数据生成数字分身' : '可生成数字分身';
+  }
+
+  private avatarActionLabel(): string {
+    if (this.avatarGenerating || this.profile.avatarStatus === 'generating') {
+      return '生成中';
+    }
+    if (this.profile.avatarStatus === 'stale') {
+      return '可更新数字分身';
+    }
+    if (this.profile.avatarActionLabel.length > 0) {
+      return this.profile.avatarActionLabel;
+    }
+    return this.profile.avatarUri.length > 0 ? '更新数字分身' : '生成数字分身';
+  }
+
+  private avatarUpdatedLabel(): string {
+    if (this.profile.avatarUpdatedLabel.length > 0) {
+      return this.profile.avatarUpdatedLabel;
+    }
+    return this.profile.updatedLabel;
+  }
+
+  private async submitAvatarGeneration(): Promise<void> {
+    if (this.avatarGenerating) {
+      return;
+    }
+    this.avatarGenerating = true;
+    try {
+      await this.onGenerateAvatar('text_to_image', '');
+      this.avatarGenerationOpen = false;
+    } catch (e) {
+      let err = e as Error;
+      console.error('submitAvatarGeneration failed: ' + err.message);
+    } finally {
+      this.avatarGenerating = false;
+    }
+  }
+
+  @Builder AvatarImage() {
+    if (this.profile.avatarUri.length > 0) {
+      Image(this.profile.avatarUri)
+        .width('74%')
+        .height(245)
+        .objectFit(ImageFit.Contain)
+        .margin({ top: 6 })
+        .onClick(() => {
+          this.avatarGenerationOpen = true;
+        })
+    } else {
+      Image($r('app.media.digital_avatar'))
+        .width('74%')
+        .height(245)
+        .objectFit(ImageFit.Contain)
+        .margin({ top: 6 })
+        .onClick(() => {
+          this.avatarGenerationOpen = true;
+        })
+    }
+  }
+
+  @Builder AvatarGenerationOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.avatarGenerationOpen = false;
+        })
+      Column() {
+        Row() {
+          Text('数字分身')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#151A28')
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(13)
+            .fontColor('#7C8494')
+            .onClick(() => {
+              this.avatarGenerationOpen = false;
+            })
+        }.width('100%')
+
+        Text(this.avatarStatusLabel())
+          .fontSize(14)
+          .fontColor('#4E5668')
+          .width('100%')
+          .margin({ top: 12 })
+
+        Row() {
+          Column() {
+            Text('画像生成')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#151A28')
+            Text('使用当前吃穿住行画像生成首页数字分身')
+              .fontSize(12)
+              .fontColor('#6F7684')
+              .margin({ top: 4 })
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Text('已选择')
+            .fontSize(12)
+            .fontColor('#8066FF')
+            .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+            .backgroundColor('#F1EEFF')
+            .borderRadius(10)
+        }
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+        .backgroundColor('#F8FBFF')
+        .borderRadius(14)
+        .margin({ top: 18 })
+
+        Row() {
+          Column() {
+            Text('照片参考')
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#9AA2B3')
+            Text('上传照片模式后续接入')
+              .fontSize(12)
+              .fontColor('#A6ADBA')
+              .margin({ top: 4 })
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Text('未开放')
+            .fontSize(12)
+            .fontColor('#A6ADBA')
+            .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+            .backgroundColor('#EEF1F6')
+            .borderRadius(10)
+        }
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+        .backgroundColor('#F5F7FB')
+        .borderRadius(14)
+        .margin({ top: 10 })
+
+        Button(this.avatarGenerating ? '生成中...' : this.avatarActionLabel())
+          .width('100%')
+          .height(46)
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+          .backgroundColor(this.avatarGenerating ? '#A9B7E9' : '#8066FF')
+          .borderRadius(15)
+          .margin({ top: 18 })
+          .enabled(!this.avatarGenerating)
+          .onClick(() => {
+            this.submitAvatarGeneration();
+          })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width('88%')
+      .padding({ left: 18, right: 18, top: 20, bottom: 20 })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 22, color: '#26000000', offsetX: 0, offsetY: 12 })
+    }
+    .width('100%')
+    .height('100%')
+    .zIndex(100)
   }
 
   @Builder LifestyleItem(item: HomeDomainViewModel) {
@@ -341,11 +524,7 @@ export struct HomePage {
           AppHeader({ title: '数据归家' })
 
         Column() {
-          Image($r('app.media.digital_avatar'))
-            .width('74%')
-            .height(245)
-            .objectFit(ImageFit.Contain)
-            .margin({ top: 6 })
+          this.AvatarImage()
 
           Row() {
             this.FeaturePill('I', '理解你', '更懂你的偏好')
@@ -361,8 +540,8 @@ export struct HomePage {
 
           Row() {
             Row().width(8).height(8).backgroundColor('#7669FF').borderRadius(4)
-            Text(this.profile.empty ? '等待导入数据生成数字分身' : '你的数字分身已更新').fontSize(16).fontColor('#1B2030').margin({ left: 8 }).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(this.profile.updatedLabel + ' >').fontSize(13).fontColor('#7B8190').margin({ left: 8 }).width(88).textAlign(TextAlign.End).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.avatarStatusLabel()).fontSize(16).fontColor('#1B2030').margin({ left: 8 }).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.avatarUpdatedLabel() + ' >').fontSize(13).fontColor('#7B8190').margin({ left: 8 }).width(88).textAlign(TextAlign.End).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           }
           .width('82%')
           .height(42)
@@ -370,6 +549,9 @@ export struct HomePage {
           .backgroundColor(Color.White)
           .borderRadius(21)
           .margin({ top: 12, bottom: 16 })
+          .onClick(() => {
+            this.avatarGenerationOpen = true;
+          })
         }
         .width('100%')
         .backgroundColor('#EDF5FF')
@@ -441,6 +623,9 @@ export struct HomePage {
       ForEach(this.selectedRecommendationItems(), (item: HomeRecommendationViewModel) => {
         this.RecommendationDetailOverlay(item)
       }, (item: HomeRecommendationViewModel) => item.id)
+      if (this.avatarGenerationOpen) {
+        this.AvatarGenerationOverlay()
+      }
     }
     .width('100%')
     .height('100%')

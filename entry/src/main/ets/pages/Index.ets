@@ -23,6 +23,12 @@ import {
   HomeDomainViewModel,
   HomeProfileViewModel
 } from '../datamanager/DataManagerTypes';
+import {
+  AvatarGenerateRequest,
+  AvatarGenerationMode,
+  AvatarHomeViewModel,
+  AvatarProviderConfig
+} from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
@@ -82,6 +88,16 @@ PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.clo
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+PersistentStorage.persistProp('avatarImageBaseUrl', DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl);
+PersistentStorage.persistProp('avatarImageApiKey', '');
+PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+PersistentStorage.persistProp('avatarImageToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+PersistentStorage.persistProp('avatarImageSize', DEFAULT_ENDPOINT_CONFIG.avatarImageSize);
+PersistentStorage.persistProp('avatarImageResponseFormat', DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat);
+PersistentStorage.persistProp('avatarSequentialImageGeneration', 'disabled');
+PersistentStorage.persistProp('avatarImageStream', false);
+PersistentStorage.persistProp('avatarImageWatermark', DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark);
+PersistentStorage.persistProp('avatarImageTimeoutMs', 60000);
 PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
@@ -118,6 +134,16 @@ struct Index {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+  @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+  @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
+  @StorageLink('avatarImageResponseFormat') avatarImageResponseFormat: string = DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat;
+  @StorageLink('avatarSequentialImageGeneration') avatarSequentialImageGeneration: string = 'disabled';
+  @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
+  @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
+  @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -169,6 +195,72 @@ struct Index {
       apiKey: this.cloudApiKey,
       enabled: this.cloudPlannerBaseUrl.trim().length > 0
     };
+  }
+
+  private getAvatarProviderConfig(): AvatarProviderConfig {
+    return {
+      imageBaseUrl: this.avatarImageBaseUrl.trim().length > 0 ? this.avatarImageBaseUrl :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
+      apiKey: this.avatarImageApiKey,
+      textToImageModel: this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
+      imageToImageModel: this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel :
+        this.avatarTextToImageModel,
+      size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
+      sequentialImageGeneration: this.avatarSequentialImageGeneration.trim().length > 0 ?
+        this.avatarSequentialImageGeneration : 'disabled',
+      stream: this.avatarImageStream,
+      watermark: this.avatarImageWatermark,
+      timeoutMs: this.avatarImageTimeoutMs > 0 ? this.avatarImageTimeoutMs : 60000
+    };
+  }
+
+  private mergeHomeAvatarView(avatar: AvatarHomeViewModel): void {
+    this.homeProfile = {
+      avatarUri: avatar.avatarUri,
+      avatarStatus: avatar.avatarStatus,
+      avatarUpdatedLabel: avatar.avatarUpdatedLabel,
+      avatarActionLabel: avatar.avatarActionLabel,
+      avatarVersionId: avatar.avatarVersionId,
+      updatedLabel: this.homeProfile.updatedLabel,
+      completeness: this.homeProfile.completeness,
+      totalEvents: this.homeProfile.totalEvents,
+      domains: this.homeProfile.domains,
+      recommendations: this.homeProfile.recommendations,
+      empty: this.homeProfile.empty
+    };
+  }
+
+  private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('generateHomeAvatar skipped: facade is null');
+      promptAction.showToast({ message: '数据管理服务未就绪', duration: 1500 });
+      throw new Error('数据管理服务未就绪');
+    }
+    let config = this.getAvatarProviderConfig();
+    if (config.apiKey.trim().length === 0) {
+      dataManagerWarn('generateHomeAvatar skipped: missing avatar api key');
+      promptAction.showToast({ message: '请先配置数字分身图片 API Key', duration: 1800 });
+      throw new Error('缺少数字分身图片 API Key');
+    }
+    dataManagerInfo(`generateHomeAvatar start: mode=${mode}, baseUrl=${config.imageBaseUrl}, model=${config.textToImageModel}`);
+    try {
+      let request: AvatarGenerateRequest =
+        this.dataManagerFacade.buildAvatarGenerateRequest(mode, sourceImage, new Date().toISOString());
+      let avatar = await this.dataManagerFacade.generateAvatar(config, request);
+      this.mergeHomeAvatarView(avatar);
+      this.reloadDataManagerViewModels();
+      promptAction.showToast({ message: '数字分身已生成', duration: 1500 });
+      dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
+    } catch (e) {
+      let err = e as Error;
+      dataManagerError('generateHomeAvatar failed: ' + err.message);
+      this.appendCloudLog('Avatar generation failed: ' + err.message);
+      promptAction.showToast({ message: '数字分身生成失败：' + err.message, duration: 2200 });
+      throw err;
+    }
   }
 
   private initDataManager(): void {
@@ -2002,6 +2094,66 @@ struct Index {
         .margin({ top: 16 })
 
         Column() {
+          Text('数字分身图片')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .width('100%')
+            .margin({ bottom: 12 })
+          Text('图片服务')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+          TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, text: this.avatarImageBaseUrl })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => { this.avatarImageBaseUrl = val; })
+          TextInput({ placeholder: '图片 API Key', text: this.avatarImageApiKey })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.avatarImageApiKey = val; })
+          Text('图片模型')
+            .fontSize(13)
+            .fontColor('#6F7684')
+            .width('100%')
+            .margin({ top: 10 })
+          TextInput({ placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel, text: this.avatarTextToImageModel })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .margin({ top: 6, bottom: 10 })
+            .onChange((val: string) => {
+              this.avatarTextToImageModel = val;
+              this.avatarImageToImageModel = val;
+            })
+          TextInput({ placeholder: '尺寸，默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize, text: this.avatarImageSize })
+            .height(42)
+            .width('100%')
+            .fontSize(13)
+            .backgroundColor('#F2F5FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .onChange((val: string) => { this.avatarImageSize = val; })
+        }
+        .width('92%')
+        .padding(18)
+        .backgroundColor(Color.White)
+        .borderRadius(20)
+        .margin({ top: 16 })
+
+        Column() {
           Text('HDC 控制')
             .fontSize(17)
             .fontWeight(FontWeight.Bold)
@@ -2245,6 +2397,9 @@ struct Index {
             profile: this.homeProfile,
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);
+            },
+            onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
+              await this.generateHomeAvatar(mode, sourceImage);
             }
           })
         }.tabBar(this.TabItem('H', '首页', 0))

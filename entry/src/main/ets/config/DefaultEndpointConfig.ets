@@ -28,6 +28,12 @@ export interface EndpointDefaultConfig {
    * App 内部给 PC 控制端连接的 TCP 端口。
    */
   agentRouterPort: number;
+  avatarImageBaseUrl: string;
+  avatarImageModel: string;
+  avatarImageSize: string;
+  avatarImageResponseFormat: string;
+  avatarImageOutputFormat: string;
+  avatarImageWatermark: boolean;
 }
 
 export interface LegacyEndpointConfig {
@@ -48,7 +54,13 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   cloudDeciderBaseUrl: 'http://166.111.53.96:7003',
   cloudApiKey: 'mobiagent-key',
   cloudDeciderModel: '',
-  agentRouterPort: 9126
+  agentRouterPort: 9126,
+  avatarImageBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+  avatarImageModel: 'doubao-seedream-4-5-251128',
+  avatarImageSize: '2K',
+  avatarImageResponseFormat: 'url',
+  avatarImageOutputFormat: 'jpeg',
+  avatarImageWatermark: true
 };
 
 export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {

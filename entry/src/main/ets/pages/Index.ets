@@ -1850,6 +1850,8 @@ struct Index {
             autoConfirm: $autoConfirm,
             cloudAutoConfirm: $cloudAutoConfirm,
             threadNumInput: $threadNumInput,
+            backendTypeInput: $backendTypeInput,
+            mllmBackendTypeInput: $mllmBackendTypeInput,
             output: this.output,
             cloudOutput: this.cloudOutput,
             downloading: this.downloading,
@@ -1858,6 +1860,7 @@ struct Index {
             hdcAutoConnected: this.hdcAutoConnected,
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
+            selectedModelVariant: this.selectedModelVariant,
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
@@ -1873,7 +1876,13 @@ struct Index {
             onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
             onStartCloudBackend: async () => { await this.startCloudBackend(); },
             onClearScreenshots: () => { this.clearScreenshots(); },
-            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); }
+            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
+            onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
+            onListScreenshots: () => { this.listScreenshots(); },
+            onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
+            onListModelFilesTree: () => { this.listModelFilesTree(); },
+            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+            onUpdateConfigBackendType: (target: string) => { this.updateConfigBackendType(target); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }

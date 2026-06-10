@@ -31,6 +31,8 @@ export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
+  @Link backendTypeInput: string;
+  @Link mllmBackendTypeInput: string;
   @Prop output: string = '';
   @Prop cloudOutput: string = '';
   @Prop downloading: boolean = false;
@@ -39,6 +41,7 @@ export struct SettingsCenterPage {
   @Prop hdcAutoConnected: boolean = false;
   @Prop hdcAutoConnecting: boolean = false;
   @Prop hdcManualPairing: boolean = false;
+  @Prop selectedModelVariant: string = '';
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -79,6 +82,12 @@ export struct SettingsCenterPage {
   onStartCloudBackend: () => Promise<void> = async () => {};
   onClearScreenshots: () => void = () => {};
   onDeleteDebugOutputs: () => void = () => {};
+  onSwitchModelVariant: (variant: string) => void = (variant: string) => {};
+  onListScreenshots: () => void = () => {};
+  onDeleteModelConfigJson: () => void = () => {};
+  onListModelFilesTree: () => void = () => {};
+  onDeleteChunkVisionOmFiles: () => void = () => {};
+  onUpdateConfigBackendType: (target: string) => void = (target: string) => {};
 
   private hdcInputEditable(): boolean {
     return this.hdcManualPairing || !this.hdcAutoConnected;
@@ -138,6 +147,18 @@ export struct SettingsCenterPage {
       .borderRadius(12)
       .padding({ left: 12, right: 12 })
       .onChange((val: string) => { onValueChange(val); })
+  }
+
+  @Builder VariantButton(label: string, variant: string) {
+    Button(label)
+      .height(36)
+      .width('31%')
+      .fontSize(11)
+      .fontColor(this.selectedModelVariant === variant ? Color.White : '#4F68FF')
+      .backgroundColor(this.selectedModelVariant === variant ? '#4F68FF' : '#EEF3FF')
+      .borderRadius(10)
+      .margin({ right: 6, bottom: 8 })
+      .onClick(() => { this.onSwitchModelVariant(variant); })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
@@ -270,6 +291,40 @@ export struct SettingsCenterPage {
         (value: string) => { this.cloudDeciderModel = value; })
       this.SettingInput('模型下载服务', this.serverIp, '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
         (value: string) => { this.serverIp = value; })
+
+      this.FieldLabel('模型变体')
+      Flex({ wrap: FlexWrap.Wrap }) {
+        this.VariantButton('默认', '')
+        this.VariantButton('modelv2', 'modelv2')
+        this.VariantButton('modelv3', 'modelv3')
+        this.VariantButton('modelv4', 'modelv4')
+        this.VariantButton('model_omc', 'model_omc')
+      }
+      .width('100%')
+
+      this.SettingInput('backend_type', this.backendTypeInput, 'cpu / hiai / nnrt',
+        (value: string) => { this.backendTypeInput = value; })
+      this.SettingInput('mllm.backend_type', this.mllmBackendTypeInput, 'cpu / hiai / nnrt',
+        (value: string) => { this.mllmBackendTypeInput = value; })
+      Row() {
+        Button('更新 base')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#4B8BFF')
+          .borderRadius(12)
+          .onClick(() => { this.onUpdateConfigBackendType('base'); })
+        Button('更新 mllm')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#607D8B')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.onUpdateConfigBackendType('mllm'); })
+      }
+      .width('100%')
+      .margin({ top: 10 })
 
       this.FieldLabel('HDC Server')
       TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
@@ -500,6 +555,44 @@ export struct SettingsCenterPage {
           .borderRadius(12)
           .margin({ left: 10 })
           .onClick(() => { router.pushUrl({ url: 'pages/LogView' }); })
+      }
+      .width('100%')
+      .margin({ bottom: 10 })
+      Row() {
+        Button('列出截图')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#38BE8B')
+          .borderRadius(12)
+          .onClick(() => { this.onListScreenshots(); })
+        Button('删除 Config')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#F44336')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.onDeleteModelConfigJson(); })
+      }
+      .width('100%')
+      .margin({ bottom: 10 })
+      Row() {
+        Button('模型文件树')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#4B8BFF')
+          .borderRadius(12)
+          .onClick(() => { this.onListModelFilesTree(); })
+        Button('删除 vision.om')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#FF7043')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .onClick(() => { this.onDeleteChunkVisionOmFiles(); })
       }
       .width('100%')
       Text('MobiInfer LLM Chat')

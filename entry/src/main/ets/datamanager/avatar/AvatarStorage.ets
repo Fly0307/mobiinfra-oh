@@ -55,7 +55,7 @@ export class AvatarStorage {
   }
 
   saveAssetBase64(versionId: string, base64Text: string): string {
-    let helper = util.Base64Helper.create();
+    let helper = new util.Base64Helper();
     let bytes = helper.decodeSync(base64Text);
     let path = this.assetPath(versionId);
     this.storage.writeBytesAtomic(path, bytes);

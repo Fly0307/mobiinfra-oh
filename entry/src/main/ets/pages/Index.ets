@@ -13,6 +13,7 @@ import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT } from './chat/ChatPageTypes';
 import { HomePage } from './home/HomePage';
 import { MainTabIndex } from './main/MainTabConfig';
+import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -2582,13 +2583,43 @@ struct Index {
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }
           })
         }.tabBar(this.TabItem('A', '聊天', MainTabIndex.Chat))
-        TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
         TabContent() {
           TaskPage({
             taskScene: $taskScene,
             onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
           })
-        }.tabBar(this.TabItem('T', '任务', 4))
+        }.tabBar(this.TabItem('T', '任务', MainTabIndex.Task))
+        TabContent() {
+          SettingsCenterPage({
+            autoConfirm: $autoConfirm,
+            cloudAutoConfirm: $cloudAutoConfirm,
+            threadNumInput: $threadNumInput,
+            output: this.output,
+            cloudOutput: this.cloudOutput,
+            downloading: this.downloading,
+            connected: this.connected,
+            hdcAutoStatus: this.hdcAutoStatus,
+            hdcAutoConnected: this.hdcAutoConnected,
+            hdcAutoConnecting: this.hdcAutoConnecting,
+            hdcManualPairing: this.hdcManualPairing,
+            onCheckServer: () => { this.checkServer(); },
+            onDownloadAll: () => { this.downloadAll(); },
+            onDeleteModelFiles: () => { this.deleteModelFiles(); },
+            onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
+            onShowConfigJson: () => { this.showConfigJson(); },
+            onDiscoverHdc: async () => {
+              this.hdcManualPairing = false;
+              await this.discoverHdcServer(true, true);
+            },
+            onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
+            onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
+            onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
+            onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
+            onStartCloudBackend: async () => { await this.startCloudBackend(); },
+            onClearScreenshots: () => { this.clearScreenshots(); },
+            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); }
+          })
+        }.tabBar(this.TabItem('C', '设置', MainTabIndex.Settings))
       }
       .onChange((index: number) => { this.currentTab = index; })
       .width('100%')

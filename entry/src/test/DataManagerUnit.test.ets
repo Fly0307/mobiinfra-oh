@@ -49,8 +49,14 @@ import {
 import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
 import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
 import {
+  createDefaultAvatarGenerationParams,
   createEmptyAvatarHomeViewModel
 } from '../main/ets/datamanager/avatar/AvatarTypes';
+import {
+  createSeedreamRequestBody,
+  normalizeSeedreamImageBase64,
+  normalizeSeedreamImageUrl
+} from '../main/ets/datamanager/avatar/SeedreamAvatarProvider';
 import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
@@ -557,6 +563,30 @@ export default function dataManagerUnitTest() {
       expect(bytes[1]).assertEqual(2);
       expect(bytes[2]).assertEqual(3);
       expect(fs.statSync(path).size).assertEqual(3);
+    });
+
+    it('seedreamTextToImageRequestBodyMatchesArkShape', 0, () => {
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '生成数字分身', '', createDefaultAvatarGenerationParams('2K', 'url', true));
+      expect(String(body['model'])).assertEqual('doubao-seedream-4-5-251128');
+      expect(String(body['prompt'])).assertEqual('生成数字分身');
+      expect(String(body['sequential_image_generation'])).assertEqual('disabled');
+      expect(String(body['response_format'])).assertEqual('url');
+      expect(String(body['size'])).assertEqual('2K');
+      expect(Boolean(body['stream'])).assertFalse();
+      expect(Boolean(body['watermark'])).assertTrue();
+      expect(body['image'] === undefined).assertTrue();
+    });
+
+    it('seedreamImageToImageRequestBodyIncludesImage', 0, () => {
+      let body = createSeedreamRequestBody('doubao-seedream-4-5-251128', '照片增强数字分身', 'https://example.com/photo.png', createDefaultAvatarGenerationParams('2K', 'url', true));
+      expect(String(body['image'])).assertEqual('https://example.com/photo.png');
+    });
+
+    it('seedreamResponseNormalizersReadFirstDataItem', 0, () => {
+      let url = normalizeSeedreamImageUrl('{"data":[{"url":"https://example.com/avatar.png"}]}');
+      expect(url).assertEqual('https://example.com/avatar.png');
+      let base64 = normalizeSeedreamImageBase64('{"data":[{"b64_json":"aGVsbG8="}]}');
+      expect(base64).assertEqual('aGVsbG8=');
     });
 
     it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {

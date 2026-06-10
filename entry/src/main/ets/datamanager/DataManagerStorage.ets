@@ -108,6 +108,39 @@ export class DataManagerStorage {
     }
   }
 
+  writeBytes(path: string, bytes: Uint8Array): void {
+    let parent = this.dirname(path);
+    if (parent.length > 0) {
+      this.ensureDir(parent);
+    }
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes.buffer);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  writeBytesAtomic(path: string, bytes: Uint8Array): void {
+    let temporary = path + '.tmp';
+    this.writeBytes(temporary, bytes);
+    try {
+      if (this.exists(path)) {
+        fs.unlinkSync(path);
+      }
+    } catch (e) {
+    }
+    try {
+      fs.renameSync(temporary, path);
+    } catch (e) {
+      this.writeBytes(path, bytes);
+      try {
+        fs.unlinkSync(temporary);
+      } catch (err) {
+      }
+    }
+  }
+
   writeTextAtomic(path: string, content: string): void {
     let temporary = path + '.tmp';
     this.writeText(temporary, content);
@@ -244,4 +277,3 @@ export class DataManagerStorage {
     return parts.join('');
   }
 }
-

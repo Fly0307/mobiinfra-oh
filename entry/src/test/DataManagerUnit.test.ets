@@ -38,12 +38,15 @@ import {
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
+  ProfileClaim,
   ProfileDomainState,
   ProfileState,
   SourceEntry,
   createJsonMap,
   createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
+import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
+import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
 import {
   createEmptyAvatarHomeViewModel
 } from '../main/ets/datamanager/avatar/AvatarTypes';
@@ -93,6 +96,48 @@ function demoPlannerEvent(id: string, deadline: string, todoType: string = 'buy'
     domains: ['eat'],
     keywords: ['咖啡豆'],
     image_paths: []
+  };
+}
+
+function demoProfileDomainState(domain: string, displayName: string, shortSummary: string, summary: string, claims: string[]): ProfileDomainState {
+  let profileClaims: ProfileClaim[] = claims.map((statement: string): ProfileClaim => {
+    return {
+      statement: statement,
+      kind: 'preference',
+      confidence: 'high',
+      event_ids: ['e1', 'e2'],
+      evidence_count: 2,
+      start_date: '2026-06-01',
+      end_date: '2026-06-10',
+      example: statement
+    };
+  });
+  return {
+    domain: domain,
+    display_name: displayName,
+    input_hash: domain + '-hash',
+    event_ids: ['e1', 'e2'],
+    event_count: 2,
+    date_range: createStringMap(),
+    short_summary: shortSummary,
+    summary: summary,
+    claims: profileClaims,
+    generation: 'model'
+  };
+}
+
+function demoProfileStateForAvatar(): ProfileState {
+  let domains = new Object() as Record<string, ProfileDomainState>;
+  domains['eat'] = demoProfileDomainState('eat', '吃', '咖啡轻食', '近期记录显示用户关注咖啡、轻食和外卖效率。', ['经常围绕咖啡和轻食做选择']);
+  domains['wear'] = demoProfileDomainState('wear', '穿', '简洁舒适', '穿搭相关记录偏向简洁、舒适和实用。', []);
+  domains['live'] = demoProfileDomainState('live', '住', '桌面收纳', '居住相关记录关注桌面整理和空间收纳。', []);
+  domains['travel'] = demoProfileDomainState('travel', '行', '地铁通勤', '出行记录以地铁通勤和计划执行为主。', []);
+  return {
+    generated_at: '2026-06-10 10:07:00',
+    event_count: 12,
+    event_date_range: createStringMap(),
+    domains: domains,
+    claim_count: 1
   };
 }
 
@@ -420,6 +465,68 @@ export default function dataManagerUnitTest() {
       expect(paths.avatarRoot).assertEqual('/tmp/demo-files/workflows/avatar');
       expect(paths.avatarVersionsRoot).assertEqual('/tmp/demo-files/workflows/avatar/versions');
       expect(paths.avatarAssetsRoot).assertEqual('/tmp/demo-files/workflows/avatar/assets');
+    });
+
+    it('avatarPromptBuilderCreatesStableSnapshotAndPrompt', 0, () => {
+      let builder = new AvatarPromptBuilder(new DataManagerStorage());
+      let snapshot = builder.buildSnapshot(demoProfileStateForAvatar(), 100);
+      expect(snapshot.domains.length).assertEqual(4);
+      expect(snapshot.prompt_profile_text.indexOf('咖啡轻食') >= 0).assertTrue();
+      let prompt = builder.buildPrompt(snapshot);
+      expect(prompt.indexOf('personal digital avatar') >= 0).assertTrue();
+      expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
+      expect(prompt.indexOf('no text') >= 0).assertTrue();
+      expect(prompt.indexOf('event_id')).assertEqual(-1);
+      expect(prompt.indexOf('API')).assertEqual(-1);
+    });
+
+    it('avatarPromptBuilderHashChangesWhenProfileChanges', 0, () => {
+      let builder = new AvatarPromptBuilder(new DataManagerStorage());
+      let profile = demoProfileStateForAvatar();
+      let first = builder.snapshotHash(builder.buildSnapshot(profile, 100));
+      profile.domains['eat'].short_summary = '热咖啡党';
+      let second = builder.snapshotHash(builder.buildSnapshot(profile, 100));
+      expect(first === second).assertFalse();
+    });
+
+    it('avatarStorageBuildsVersionUriAndActionLabels', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let emptyView = avatarStorage.homeViewFromState(avatarStorage.emptyState(), null);
+      expect(emptyView.avatarStatus).assertEqual('empty');
+      expect(emptyView.avatarActionLabel).assertEqual('生成数字分身');
+      let currentState = avatarStorage.emptyState();
+      currentState.status = 'current';
+      currentState.current_version_id = 'v1';
+      currentState.updated_at = '2026-06-10 10:07:00';
+      let view = avatarStorage.homeViewFromState(currentState, {
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      expect(view.avatarUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+      expect(view.avatarActionLabel).assertEqual('数字分身已更新');
     });
 
     it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {

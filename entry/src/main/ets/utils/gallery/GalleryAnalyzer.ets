@@ -1,7 +1,7 @@
 import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
-import { hilog } from '@kit.PerformanceAnalysisKit';
+import { AppLogger } from '../AppLogger';
 import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
 import { GalleryEmbeddingService } from './GalleryEmbeddingService';
@@ -23,8 +23,6 @@ import {
   GalleryProgressHandler
 } from './GalleryTypes';
 
-const GALLERY_LOG_DOMAIN = 0x0000;
-const GALLERY_LOG_TAG = 'Gallery';
 const GALLERY_LOG_STORAGE_KEY = 'galleryLogs';
 const GALLERY_LOG_MAX_CHARS = 60000;
 
@@ -1038,12 +1036,12 @@ export class GalleryAnalyzer {
   }
 
   private logInfo(message: string): void {
-    hilog.info(GALLERY_LOG_DOMAIN, GALLERY_LOG_TAG, '%{public}s', message);
+    AppLogger.info('Gallery.Analyzer', message);
     this.captureLog('INFO', message);
   }
 
   private logError(message: string): void {
-    hilog.error(GALLERY_LOG_DOMAIN, GALLERY_LOG_TAG, '%{public}s', message);
+    AppLogger.error('Gallery.Analyzer', message);
     this.captureLog('ERROR', message);
   }
 

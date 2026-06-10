@@ -1,3 +1,5 @@
+import { AppLogger } from './AppLogger';
+
 type CancelHandler = () => Promise<void> | void;
 type VoidHandler = () => void;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
@@ -22,7 +24,7 @@ export class AgentExecutionController {
   private static captureOverlayHidden: boolean = false;
 
   private static warn(message: string, err: Object): void {
-    console.warn(`[AgentExecutionController] ${message}: ${String(err)}`);
+    AppLogger.warn('AgentExecution', message + ': ' + String(err));
   }
 
   static initialize(): void {

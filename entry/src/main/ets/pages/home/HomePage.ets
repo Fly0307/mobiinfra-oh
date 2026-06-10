@@ -8,6 +8,7 @@ import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFa
 import { AvatarDomainSnapshot, AvatarGenerationMode, AvatarVersionViewModel } from '../../datamanager/avatar/AvatarTypes';
 import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { promptAction } from '@kit.ArkUI';
+import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
@@ -122,7 +123,7 @@ export struct HomePage {
       this.avatarGenerationOpen = false;
     } catch (e) {
       let err = e as Error;
-      console.error('submitAvatarGeneration failed: ' + err.message);
+      AppLogger.error('Home.Avatar', 'submitAvatarGeneration failed: ' + err.message);
     } finally {
       this.avatarGenerating = false;
     }
@@ -160,7 +161,7 @@ export struct HomePage {
       this.avatarGenerationOpen = false;
     } catch (e) {
       let err = e as Error;
-      console.error('submitAvatarPhotoGeneration failed: ' + err.message);
+      AppLogger.error('Home.Avatar', 'submitAvatarPhotoGeneration failed: ' + err.message);
     } finally {
       this.avatarGenerating = false;
     }

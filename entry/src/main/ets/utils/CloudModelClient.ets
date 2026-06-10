@@ -5,6 +5,7 @@ import {
   CLOUD_DECIDER_SYSTEM_PROMPT,
   CLOUD_DECIDER_USER_PROMPT
 } from './CloudDeciderPrompt';
+import { AppLogger } from './AppLogger';
 
 // OpenAI-compatible 云端模型客户端。Planner 和 Decider 可以指向不同 base URL，
 // 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
@@ -161,7 +162,7 @@ export class CloudModelClient {
       try {
         pending[i].destroy();
       } catch (e) {
-        console.warn('[CloudModelClient] destroy pending request failed: ' + String(e));
+        AppLogger.warn('CloudModel', 'destroy pending request failed: ' + String(e));
       }
     }
   }

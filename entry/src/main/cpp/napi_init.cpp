@@ -45,9 +45,9 @@
 #ifdef LOG_TAG
 #undef LOG_TAG
 #endif
-#define LOG_TAG "MnnLlm"
-#define LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "MobiInfra"
+#define LOGI(fmt, ...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
+#define LOGE(fmt, ...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
 
 using namespace MNN::Transformer;
 
@@ -91,7 +91,7 @@ static void logReader(int readFd) {
     while (true) {
         ssize_t n = read(readFd, buf, sizeof(buf));
         if (n <= 0) break;
-        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, "MnnLlmCap", "%.*s", (int)n, buf);
+        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeCapture] %.*s", (int)n, buf);
         pending.append(buf, n);
         size_t pos;
         while ((pos = pending.find('\n')) != std::string::npos) {
@@ -209,11 +209,11 @@ static void appLog(const char* fmt, ...) {
 #undef LOGI
 #undef LOGE
 #define LOGI(fmt, ...) do { \
-    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, fmt, ##__VA_ARGS__); \
+    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog(fmt, ##__VA_ARGS__); \
 } while(0)
 #define LOGE(fmt, ...) do { \
-    OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, fmt, ##__VA_ARGS__); \
+    OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog("[ERR] " fmt, ##__VA_ARGS__); \
 } while(0)
 

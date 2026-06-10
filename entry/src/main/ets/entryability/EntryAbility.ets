@@ -1,10 +1,9 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
-import { hilog } from '@kit.PerformanceAnalysisKit';
+import { AppLogger } from '../utils/AppLogger';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 
-const DOMAIN = 0x0000;
 const FLOAT_PANEL_COLLAPSED_WIDTH_VP = 88;
 const FLOAT_PANEL_HEIGHT_VP = 72;
 const FLOAT_PANEL_EXPANDED_WIDTH_RATIO = 0.84;
@@ -45,7 +44,7 @@ export default class EntryAbility extends UIAbility {
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('Ability', 'Failed to set colorMode. Cause: ' + JSON.stringify(err));
     }
     // AgentExecutionController 统一管理本地/云端 Agent 的执行态、取消态和浮窗同步。
     AgentExecutionController.initialize();
@@ -67,10 +66,10 @@ export default class EntryAbility extends UIAbility {
         abilityName: 'EntryAbility'
       };
       this.context.startAbility(wantInfo).catch((err: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Failed to bring app to foreground. Cause: %{public}s', JSON.stringify(err));
+        AppLogger.error('Ability', 'Failed to bring app to foreground. Cause: ' + JSON.stringify(err));
       });
     });
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    AppLogger.info('Ability', 'Ability onCreate');
   }
 
   onDestroy(): void {
@@ -79,42 +78,42 @@ export default class EntryAbility extends UIAbility {
     AgentExecutionController.setFloatPanelMoveHandler(null);
     AgentExecutionController.setCaptureOverlayHandler(null);
     AgentExecutionController.setReturnToAppHandler(null);
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
+    AppLogger.info('Ability', 'Ability onDestroy');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+    AppLogger.info('Ability', 'Ability onWindowStageCreate');
 
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
-        hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
+        AppLogger.error('Ability', 'Failed to load the content. Cause: ' + JSON.stringify(err));
         return;
       }
-      hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+      AppLogger.info('Ability', 'Succeeded in loading the content.');
     });
   }
 
   onWindowStageDestroy(): void {
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageDestroy');
+    AppLogger.info('Ability', 'Ability onWindowStageDestroy');
   }
 
   onForeground(): void {
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
+    AppLogger.info('Ability', 'Ability onForeground');
     this.destroyFloatWindow();
     try {
       // 当应用回到前台，停止后台长时任务，省电
       backgroundTaskManager.stopBackgroundRunning(this.context).then(() => {
-        hilog.info(DOMAIN, 'testTag', 'stopBackgroundRunning succeeded');
+        AppLogger.info('BackgroundTask', 'stopBackgroundRunning succeeded');
       }).catch((err: Error) => {
-        hilog.info(DOMAIN, 'testTag', 'stopBackgroundRunning failed Cause: ' + JSON.stringify(err));
+        AppLogger.warn('BackgroundTask', 'stopBackgroundRunning failed Cause: ' + JSON.stringify(err));
       });
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'stopBackgroundRunning error');
+      AppLogger.error('BackgroundTask', 'stopBackgroundRunning error: ' + JSON.stringify(err));
     }
   }
 
   onBackground(): void {
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+    AppLogger.info('Ability', 'Ability onBackground');
     this.syncFloatWindow();
     if (!AgentExecutionController.isExecutionActive()) {
       return;
@@ -137,13 +136,13 @@ export default class EntryAbility extends UIAbility {
         // 当应用退到后台时，立刻向系统申请数据传输类的长时运行权限
         backgroundTaskManager.startBackgroundRunning(this.context,
           backgroundTaskManager.BackgroundMode.DATA_TRANSFER, wantAgentObj).then(() => {
-          hilog.info(DOMAIN, 'testTag', 'startBackgroundRunning succeeded');
+          AppLogger.info('BackgroundTask', 'startBackgroundRunning succeeded');
         }).catch((err: Error) => {
-          hilog.error(DOMAIN, 'testTag', 'startBackgroundRunning failed Cause: ' + JSON.stringify(err));
+          AppLogger.error('BackgroundTask', 'startBackgroundRunning failed Cause: ' + JSON.stringify(err));
         });
       });
     } catch (error) {
-      hilog.error(DOMAIN, 'testTag', 'startBackgroundRunning error Cause: ' + JSON.stringify(error));
+      AppLogger.error('BackgroundTask', 'startBackgroundRunning error Cause: ' + JSON.stringify(error));
     }
   }
 
@@ -176,8 +175,7 @@ export default class EntryAbility extends UIAbility {
         if (this.floatWindow) {
           this.registerFloatPanelRectChange(this.floatWindow);
         }
-        hilog.error(DOMAIN, 'testTag', 'Failed to hide float window for capture. Cause: %{public}s',
-          JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to hide float window for capture. Cause: ' + JSON.stringify(err));
         return false;
       }
     }
@@ -195,8 +193,7 @@ export default class EntryAbility extends UIAbility {
       await this.floatWindow.showWindow();
       return true;
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to restore float window after capture. Cause: %{public}s',
-        JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to restore float window after capture. Cause: ' + JSON.stringify(err));
       return false;
     }
   }
@@ -211,7 +208,7 @@ export default class EntryAbility extends UIAbility {
         density: density
       };
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to get display size. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to get display size. Cause: ' + JSON.stringify(err));
     }
     return {
       width: DEFAULT_DISPLAY_WIDTH,
@@ -232,7 +229,7 @@ export default class EntryAbility extends UIAbility {
       try {
         this.edgeFlowWindow.showWindow();
       } catch (err) {
-        hilog.error(DOMAIN, 'testTag', 'Failed to show edge flow window. Cause: %{public}s', JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to show edge flow window. Cause: ' + JSON.stringify(err));
       }
       onReady();
       return;
@@ -252,16 +249,14 @@ export default class EntryAbility extends UIAbility {
       try {
         win.setWindowBackgroundColor('#00000000');
       } catch (err) {
-        hilog.error(DOMAIN, 'testTag', 'Failed to configure edge flow window. Cause: %{public}s', JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to configure edge flow window. Cause: ' + JSON.stringify(err));
       }
       win.setWindowTouchable(false).catch((err: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Failed to disable edge flow window touch. Cause: %{public}s',
-          JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to disable edge flow window touch. Cause: ' + JSON.stringify(err));
       });
       win.setUIContent('pages/EdgeFlowWindow', (err) => {
         if (err.code) {
-          hilog.error(DOMAIN, 'testTag', 'Failed to load edge flow window content. Cause: %{public}s',
-            JSON.stringify(err));
+          AppLogger.error('FloatWindow', 'Failed to load edge flow window content. Cause: ' + JSON.stringify(err));
           onReady();
           return;
         }
@@ -269,14 +264,13 @@ export default class EntryAbility extends UIAbility {
         try {
           win.setWindowBackgroundColor('#00000000');
         } catch (error) {
-          hilog.error(DOMAIN, 'testTag', 'Failed to keep edge flow window transparent. Cause: %{public}s',
-            JSON.stringify(error));
+          AppLogger.error('FloatWindow', 'Failed to keep edge flow window transparent. Cause: ' + JSON.stringify(error));
         }
         onReady();
-        hilog.info(DOMAIN, 'testTag', 'Transparent edge flow window created and shown');
+        AppLogger.info('FloatWindow', 'Transparent edge flow window created and shown');
       });
     }).catch((err: Error) => {
-      hilog.error(DOMAIN, 'testTag', 'Failed to create edge flow window. Cause: ' + JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to create edge flow window. Cause: ' + JSON.stringify(err));
       onReady();
     });
   }
@@ -288,7 +282,7 @@ export default class EntryAbility extends UIAbility {
       try {
         this.floatWindow.showWindow();
       } catch (err) {
-        hilog.error(DOMAIN, 'testTag', 'Failed to show float window. Cause: %{public}s', JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to show float window. Cause: ' + JSON.stringify(err));
       }
       return;
     }
@@ -305,25 +299,23 @@ export default class EntryAbility extends UIAbility {
       try {
         win.setWindowBackgroundColor('#00000000');
       } catch (err) {
-        hilog.error(DOMAIN, 'testTag', 'Failed to configure float window background. Cause: %{public}s',
-          JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to configure float window background. Cause: ' + JSON.stringify(err));
       }
       win.setUIContent('pages/FloatWindow', (err) => {
         if (err.code) {
-          hilog.error(DOMAIN, 'testTag', 'Failed to load float window content. Cause: %{public}s', JSON.stringify(err));
+          AppLogger.error('FloatWindow', 'Failed to load float window content. Cause: ' + JSON.stringify(err));
           return;
         }
         win.showWindow();
         try {
           win.setWindowBackgroundColor('#00000000');
         } catch (error) {
-          hilog.error(DOMAIN, 'testTag', 'Failed to keep float window transparent. Cause: %{public}s',
-            JSON.stringify(error));
+          AppLogger.error('FloatWindow', 'Failed to keep float window transparent. Cause: ' + JSON.stringify(error));
         }
-        hilog.info(DOMAIN, 'testTag', 'Float window created and shown');
+        AppLogger.info('FloatWindow', 'Float window created and shown');
       });
     }).catch((err: Error) => {
-      hilog.error(DOMAIN, 'testTag', 'Failed to create float window. Cause: ' + JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to create float window. Cause: ' + JSON.stringify(err));
     });
   }
 
@@ -352,7 +344,7 @@ export default class EntryAbility extends UIAbility {
       this.floatWindow.resize(panelWidth, panelHeight);
       this.floatWindow.moveWindowTo(this.floatPanelX, this.floatPanelY);
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to layout float window. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to layout float window. Cause: ' + JSON.stringify(err));
     }
   }
 
@@ -375,8 +367,7 @@ export default class EntryAbility extends UIAbility {
       this.captureFloatPanelMoveStart();
       // 系统浮窗移动必须在触摸按下回调链路中调用 startMoving，组件 PanGesture 只会移动内部内容。
       this.floatWindow.startMoving().catch((err: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Failed to start moving float window. Cause: %{public}s',
-          JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to start moving float window. Cause: ' + JSON.stringify(err));
       });
       return;
     }
@@ -398,7 +389,7 @@ export default class EntryAbility extends UIAbility {
       this.floatPanelWidth = rect.width;
       this.floatPanelHeight = rect.height;
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to sync float window rect. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to sync float window rect. Cause: ' + JSON.stringify(err));
     }
   }
 
@@ -416,7 +407,7 @@ export default class EntryAbility extends UIAbility {
       win.on('windowRectChange', this.floatPanelRectChangeCallback);
     } catch (err) {
       this.floatPanelRectChangeCallback = null;
-      hilog.error(DOMAIN, 'testTag', 'Failed to watch float window rect. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to watch float window rect. Cause: ' + JSON.stringify(err));
     }
   }
 
@@ -427,7 +418,7 @@ export default class EntryAbility extends UIAbility {
     try {
       this.floatWindow.off('windowRectChange', this.floatPanelRectChangeCallback);
     } catch (err) {
-      hilog.error(DOMAIN, 'testTag', 'Failed to unwatch float window rect. Cause: %{public}s', JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to unwatch float window rect. Cause: ' + JSON.stringify(err));
     }
     this.floatPanelRectChangeCallback = null;
   }
@@ -469,18 +460,18 @@ export default class EntryAbility extends UIAbility {
     if (this.floatWindow) {
       this.unregisterFloatPanelRectChange();
       this.floatWindow.destroyWindow().then(() => {
-        hilog.info(DOMAIN, 'testTag', 'Float window destroyed');
+        AppLogger.info('FloatWindow', 'Float window destroyed');
         this.floatWindow = null;
       }).catch((err: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Failed to destroy float window. Cause: ' + JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to destroy float window. Cause: ' + JSON.stringify(err));
       });
     }
     if (this.edgeFlowWindow) {
       this.edgeFlowWindow.destroyWindow().then(() => {
-        hilog.info(DOMAIN, 'testTag', 'Edge flow window destroyed');
+        AppLogger.info('FloatWindow', 'Edge flow window destroyed');
         this.edgeFlowWindow = null;
       }).catch((err: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Failed to destroy edge flow window. Cause: ' + JSON.stringify(err));
+        AppLogger.error('FloatWindow', 'Failed to destroy edge flow window. Cause: ' + JSON.stringify(err));
       });
     }
   }

@@ -35,6 +35,7 @@ import {
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
+import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
   GalleryAnalysisResult,
@@ -2717,7 +2718,7 @@ struct GalleryPage {
       action: 'ohos.want.action.viewData',
       uri: mapUrl
     }).catch((e: BusinessError) => {
-      console.warn('open external capture map failed: code=' + e.code + ', message=' + e.message);
+      AppLogger.warn('Gallery.Location', 'open external capture map failed: code=' + e.code + ', message=' + e.message);
       showToastSafely('无法打开地图链接', 1600);
     });
   }

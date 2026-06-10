@@ -37,6 +37,7 @@ import {
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { AppLogger } from '../utils/AppLogger';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -183,6 +184,7 @@ struct Index {
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLog(message: string): void {
+    AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
     let nextLogs = this.cloudOutput.length > 0 ? this.cloudOutput + '\n' + line : line;
@@ -194,6 +196,7 @@ struct Index {
   }
 
   private resetCloudLog(message: string): void {
+    AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
@@ -453,7 +456,7 @@ struct Index {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
       let err = e as Error;
-      console.error('initLogFile failed: ' + err.message);
+      AppLogger.error('NativeRuntime', 'initLogFile failed: ' + err.message);
     }
     this.prepareCustomOpp();
     this.initDataManager();
@@ -1301,6 +1304,7 @@ struct Index {
   private async requestHdcHealth(baseUrl: string): Promise<HdcHealthResponse | null> {
     let httpReq = http.createHttp();
     try {
+      AppLogger.debug('HDC', 'health request url=' + this.hdcApiUrl(baseUrl, '/api/health'));
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
         connectTimeout: 2500,
@@ -1309,10 +1313,19 @@ struct Index {
       };
       let resp = await httpReq.request(this.hdcApiUrl(baseUrl, '/api/health'), options);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        AppLogger.debug('HDC', 'health non-2xx baseUrl=' + baseUrl + ' http=' + resp.responseCode);
         return null;
       }
-      return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
+      try {
+        return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
+      } catch (parseErr) {
+        let err = parseErr as Error;
+        AppLogger.debug('HDC', 'health parse failed baseUrl=' + baseUrl + ' message=' + err.message);
+        return null;
+      }
     } catch (e) {
+      let err = e as Error;
+      AppLogger.debug('HDC', 'health request failed baseUrl=' + baseUrl + ' message=' + err.message);
       return null;
     } finally {
       httpReq.destroy();
@@ -1330,9 +1343,23 @@ struct Index {
     return fallback;
   }
 
+  private hdcHealthDebugText(health: HdcHealthResponse): string {
+    let target = health.target && health.target.length > 0 ? health.target : '(empty)';
+    let appServer = health.app_server_url && health.app_server_url.length > 0 ? health.app_server_url : '(empty)';
+    return 'status=' + health.status +
+      ', hdc_connected=' + String(health.hdc_connected === true) +
+      ', tunnel_ready=' + String(health.tunnel_ready === true) +
+      ', fport_ready=' + String(health.fport_ready === true) +
+      ', rport_ready=' + String(health.rport_ready === true) +
+      ', loop_alive=' + String(health.loop_alive === true) +
+      ', target=' + target +
+      ', app_server_url=' + appServer;
+  }
+
   private async requestManualHdcConnect(serverUrl: string, target: string): Promise<HdcConnectAttempt> {
     let httpReq = http.createHttp();
     try {
+      AppLogger.debug('HDC', 'manual connect request server=' + serverUrl + ', target=' + target);
       let connectPayload: HdcConnectRequest = {
         target: target,
         kill_others: true,
@@ -1348,6 +1375,8 @@ struct Index {
       };
       let resp = await httpReq.request(this.hdcApiUrl(serverUrl, '/api/hdc/connect'), options);
       let body = String(resp.result);
+      AppLogger.debug('HDC', 'manual connect response server=' + serverUrl + ', http=' + resp.responseCode +
+        ', bodyLength=' + body.length);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
         return {
           ok: false,
@@ -1377,6 +1406,7 @@ struct Index {
         };
       } catch (parseErr) {
         let e = parseErr as Error;
+        AppLogger.debug('HDC', 'manual connect parse failed server=' + serverUrl + ', message=' + e.message);
         return {
           ok: false,
           responseCode: resp.responseCode,
@@ -1386,6 +1416,8 @@ struct Index {
       }
     } catch (err) {
       let e = err as Error;
+      AppLogger.debug('HDC', 'manual connect request failed server=' + serverUrl + ', target=' + target +
+        ', message=' + e.message);
       return {
         ok: false,
         responseCode: 0,
@@ -1425,11 +1457,15 @@ struct Index {
   private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
     let serverUrl = this.manualHdcServerUrl();
     let target = this.wirelessIp.trim();
+    AppLogger.debug('HDC', 'manual fallback start server=' + (serverUrl.length > 0 ? serverUrl : '(empty)') +
+      ', target=' + (target.length > 0 ? target : '(empty)') + ', useCloudLog=' + String(useCloudLog));
     if (serverUrl.length === 0) {
+      AppLogger.debug('HDC', 'manual fallback skipped reason=missing-server');
       this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.', useCloudLog);
       return false;
     }
     if (target.length === 0) {
+      AppLogger.debug('HDC', 'manual fallback skipped reason=missing-target server=' + serverUrl);
       this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.', useCloudLog);
       return false;
     }
@@ -1437,13 +1473,19 @@ struct Index {
     this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
     this.hdcAutoStatus = 'Manual HDC fallback is running...';
     let attempt = await this.requestManualHdcConnect(serverUrl, target);
+    AppLogger.debug('HDC', 'manual fallback attempt ok=' + String(attempt.ok) +
+      ', http=' + attempt.responseCode + ', message=' + attempt.message);
     if (!attempt.ok || !attempt.health) {
       this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
+      AppLogger.debug('HDC', 'manual fallback failed selected=' + this.hdcServerIp +
+        ', reason=' + attempt.message);
       this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
       return false;
     }
 
     this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC fallback succeeded');
+    AppLogger.debug('HDC', 'manual fallback success selected=' + this.hdcServerIp +
+      ', health=' + this.hdcHealthDebugText(attempt.health));
     this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
     return true;
   }
@@ -1467,6 +1509,8 @@ struct Index {
 
   private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
     if (this.hdcAutoConnecting && !force) {
+      AppLogger.debug('HDC', 'discover skipped: already connecting, connected=' + String(this.hdcAutoConnected) +
+        ', current=' + this.hdcServerIp);
       return this.hdcAutoConnected;
     }
 
@@ -1474,20 +1518,25 @@ struct Index {
     this.hdcAutoStatus = 'Auto-discovering HDC Server...';
     let candidates = this.hdcDiscoveryCandidates();
     let lastMessage = '';
+    AppLogger.debug('HDC', 'discover start force=' + String(force) + ', candidates=' + candidates.join(', '));
     try {
       for (let i = 0; i < candidates.length; i++) {
         let candidate = candidates[i];
+        AppLogger.debug('HDC', 'discover candidate[' + i + ']=' + candidate);
         let health = await this.requestHdcHealth(candidate);
         if (!health) {
           lastMessage = 'No response from ' + candidate;
+          AppLogger.debug('HDC', 'discover candidate[' + i + '] no response');
           continue;
         }
+        AppLogger.debug('HDC', 'discover candidate[' + i + '] health ' + this.hdcHealthDebugText(health));
         if (this.hdcHealthReady(health)) {
           this.hdcServerIp = candidate;
           this.hdcAutoConnected = true;
           this.hdcManualPairing = false;
           let targetText = health.target && health.target.length > 0 ? ', target=' + health.target : '';
           this.hdcAutoStatus = 'Auto HDC connected: ' + candidate + targetText;
+          AppLogger.debug('HDC', 'discover success selected=' + this.hdcServerIp);
           this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
           return true;
         }
@@ -1495,23 +1544,30 @@ struct Index {
       }
       this.hdcAutoConnected = false;
       this.hdcAutoStatus = 'Auto HDC discovery failed. Use manual pairing if needed. ' + lastMessage;
+      AppLogger.debug('HDC', 'discover failed lastMessage=' + lastMessage);
       this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
       return false;
     } finally {
+      AppLogger.debug('HDC', 'discover end connected=' + String(this.hdcAutoConnected) +
+        ', selected=' + this.hdcServerIp);
       this.hdcAutoConnecting = false;
     }
   }
 
   private async ensureHdcServerReadyForTask(useCloudLog: boolean): Promise<boolean> {
+    AppLogger.debug('HDC', 'ensure start useCloudLog=' + String(useCloudLog) + ', current=' + this.hdcServerIp);
     if (await this.discoverHdcServer(useCloudLog, true)) {
+      AppLogger.debug('HDC', 'ensure success via=auto selected=' + this.hdcServerIp);
       return true;
     }
 
     if (await this.connectManualHdcTarget(useCloudLog)) {
+      AppLogger.debug('HDC', 'ensure success via=manual selected=' + this.hdcServerIp);
       return true;
     }
 
     this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.', useCloudLog);
+    AppLogger.debug('HDC', 'ensure failed selected=' + this.hdcServerIp);
     return false;
   }
 

@@ -3,6 +3,7 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
+import { AppLogger } from './AppLogger';
 
 type RequestValue = Object | string | number | boolean | null;
 type AgentRouteMode = 'local' | 'cloud';
@@ -708,6 +709,7 @@ export class AgentRouterServer {
   }
 
   private log(mode: AgentRouteMode, message: string): void {
+    AppLogger.info('AgentRouter.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler?.(message);
       return;

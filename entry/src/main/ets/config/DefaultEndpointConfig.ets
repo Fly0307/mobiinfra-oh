@@ -32,6 +32,7 @@ export interface EndpointDefaultConfig {
   avatarImageModel: string;
   avatarImageSize: string;
   avatarImageResponseFormat: string;
+  avatarImageOutputFormat: string;
   avatarImageWatermark: boolean;
 }
 
@@ -58,6 +59,7 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   avatarImageModel: 'doubao-seedream-4-5-251128',
   avatarImageSize: '2K',
   avatarImageResponseFormat: 'url',
+  avatarImageOutputFormat: 'jpeg',
   avatarImageWatermark: true
 };
 

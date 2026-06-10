@@ -46,20 +46,20 @@ export class AvatarStorage {
     return this.storage.join(this.paths.avatarVersionsRoot, versionId + '.json');
   }
 
-  assetPath(versionId: string): string {
-    return this.storage.join(this.paths.avatarAssetsRoot, versionId + '.png');
+  assetPath(versionId: string, outputFormat?: string): string {
+    return this.storage.join(this.paths.avatarAssetsRoot, versionId + this.avatarAssetExtension(outputFormat));
   }
 
-  relativeAvatarAssetPath(versionId: string): string {
-    return 'assets/' + versionId + '.png';
+  relativeAvatarAssetPath(versionId: string, outputFormat?: string): string {
+    return 'assets/' + versionId + this.avatarAssetExtension(outputFormat);
   }
 
-  saveAssetBase64(versionId: string, base64Text: string): string {
+  saveAssetBase64(versionId: string, base64Text: string, outputFormat?: string): string {
     let helper = new util.Base64Helper();
     let bytes = helper.decodeSync(base64Text);
-    let path = this.assetPath(versionId);
+    let path = this.assetPath(versionId, outputFormat);
     this.storage.writeBytesAtomic(path, bytes);
-    return this.relativeAvatarAssetPath(versionId);
+    return this.relativeAvatarAssetPath(versionId, outputFormat);
   }
 
   saveVersion(version: AvatarVersionState): void {
@@ -130,5 +130,22 @@ export class AvatarStorage {
       return '生成失败，可重试';
     }
     return '生成数字分身';
+  }
+
+  private avatarAssetExtension(outputFormat?: string): string {
+    if (outputFormat === undefined) {
+      return '.png';
+    }
+    let normalized = outputFormat.trim().toLowerCase();
+    if (normalized === 'jpg' || normalized === 'jpeg') {
+      return '.jpg';
+    }
+    if (normalized === 'png') {
+      return '.png';
+    }
+    if (normalized === 'webp') {
+      return '.webp';
+    }
+    return '.jpg';
   }
 }

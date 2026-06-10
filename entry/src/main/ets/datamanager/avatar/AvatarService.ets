@@ -85,6 +85,7 @@ export class AvatarService {
       let params = {
         size: config.size,
         response_format: config.responseFormat,
+        output_format: config.outputFormat,
         sequential_image_generation: config.sequentialImageGeneration,
         stream: config.stream,
         watermark: config.watermark
@@ -105,7 +106,7 @@ export class AvatarService {
 
       let versionId = this.nextVersionId();
       let createdAt = nowIsoLocal();
-      let imagePath = this.avatarStorage.saveAssetBase64(versionId, result.imageBytesBase64);
+      let imagePath = this.avatarStorage.saveAssetBase64(versionId, result.imageBytesBase64, params.output_format);
       let version: AvatarVersionState = {
         version_id: versionId,
         created_at: createdAt,

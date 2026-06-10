@@ -94,6 +94,7 @@ PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.
 PersistentStorage.persistProp('avatarImageToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
 PersistentStorage.persistProp('avatarImageSize', DEFAULT_ENDPOINT_CONFIG.avatarImageSize);
 PersistentStorage.persistProp('avatarImageResponseFormat', DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat);
+PersistentStorage.persistProp('avatarImageOutputFormat', DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat);
 PersistentStorage.persistProp('avatarSequentialImageGeneration', 'disabled');
 PersistentStorage.persistProp('avatarImageStream', false);
 PersistentStorage.persistProp('avatarImageWatermark', DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark);
@@ -140,6 +141,7 @@ struct Index {
   @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
   @StorageLink('avatarImageResponseFormat') avatarImageResponseFormat: string = DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat;
+  @StorageLink('avatarImageOutputFormat') avatarImageOutputFormat: string = DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat;
   @StorageLink('avatarSequentialImageGeneration') avatarSequentialImageGeneration: string = 'disabled';
   @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
@@ -210,6 +212,8 @@ struct Index {
       size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
       responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
         DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
+      outputFormat: this.avatarImageOutputFormat.trim().length > 0 ? this.avatarImageOutputFormat :
+        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat,
       sequentialImageGeneration: this.avatarSequentialImageGeneration.trim().length > 0 ?
         this.avatarSequentialImageGeneration : 'disabled',
       stream: this.avatarImageStream,

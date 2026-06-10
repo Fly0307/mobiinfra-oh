@@ -515,6 +515,7 @@ export default function dataManagerUnitTest() {
         generation_params: {
           size: '2K',
           response_format: 'url',
+          output_format: 'jpeg',
           sequential_image_generation: 'disabled',
           stream: false,
           watermark: true
@@ -567,6 +568,7 @@ export default function dataManagerUnitTest() {
         generation_params: {
           size: '2K',
           response_format: 'url',
+          output_format: 'jpeg',
           sequential_image_generation: 'disabled',
           stream: false,
           watermark: true
@@ -592,6 +594,15 @@ export default function dataManagerUnitTest() {
       let relativePath = avatarStorage.saveAssetBase64('v1', 'AQID');
       expect(relativePath).assertEqual('assets/v1.png');
       expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+    });
+
+    it('avatarStorageSaveAssetBase64UsesJpegExtensionForJpegOutputFormat', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let relativePath = avatarStorage.saveAssetBase64('v2', 'AQID', 'jpeg');
+      expect(relativePath).assertEqual('assets/v2.jpg');
+      expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v2.jpg');
     });
 
     it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {
@@ -620,6 +631,7 @@ export default function dataManagerUnitTest() {
       expect(String(body['prompt'])).assertEqual('生成数字分身');
       expect(String(body['sequential_image_generation'])).assertEqual('disabled');
       expect(String(body['response_format'])).assertEqual('url');
+      expect(String(body['output_format'])).assertEqual('jpeg');
       expect(String(body['size'])).assertEqual('2K');
       expect(Boolean(body['stream'])).assertFalse();
       expect(Boolean(body['watermark'])).assertTrue();

@@ -37,6 +37,7 @@ export interface AvatarConsentSnapshot {
 export interface AvatarGenerationParams {
   size: string;
   response_format: string;
+  output_format: string;
   sequential_image_generation: string;
   stream: boolean;
   watermark: boolean;
@@ -73,6 +74,7 @@ export interface AvatarProviderConfig {
   imageToImageModel: string;
   size: string;
   responseFormat: string;
+  outputFormat: string;
   sequentialImageGeneration: string;
   stream: boolean;
   watermark: boolean;
@@ -123,10 +125,12 @@ export function createEmptyAvatarState(): AvatarState {
   };
 }
 
-export function createDefaultAvatarGenerationParams(size: string, responseFormat: string, watermark: boolean): AvatarGenerationParams {
+export function createDefaultAvatarGenerationParams(size: string, responseFormat: string, watermark: boolean,
+  outputFormat: string = 'jpeg'): AvatarGenerationParams {
   return {
     size: size,
     response_format: responseFormat,
+    output_format: outputFormat,
     sequential_image_generation: 'disabled',
     stream: false,
     watermark: watermark

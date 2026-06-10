@@ -49,6 +49,10 @@ export function createSeedreamRequestBody(model: string, prompt: string, image: 
   body['prompt'] = prompt;
   body['sequential_image_generation'] = params.sequential_image_generation;
   body['response_format'] = params.response_format;
+  let outputFormat = params.output_format.trim();
+  if (outputFormat.length > 0) {
+    body['output_format'] = outputFormat;
+  }
   body['size'] = params.size;
   body['stream'] = params.stream;
   body['watermark'] = params.watermark;

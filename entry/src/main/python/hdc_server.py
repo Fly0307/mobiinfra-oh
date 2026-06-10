@@ -1353,7 +1353,11 @@ def handle_workflow_action(action, payload):
     if action == 'screenshot':
         ensure_workflow_agent_ready()
         factor = float(payload.get('factor', 0.5))
-        image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(factor)
+        # Workflow App side already hides/restores the overlay around this HTTP request.
+        image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(
+            factor,
+            manage_overlay=False
+        )
         return {
             'status': 'ok',
             'image_b64': image_b64,

@@ -1,3 +1,5 @@
+import { AvatarHomeViewModel } from './avatar/AvatarTypes';
+
 export const DATA_MANAGER_STORAGE_ROOT_NAME: string = 'workflows';
 export const DAILY_LOG_DIR_NAME: string = 'daily-log';
 export const PROFILE_CONSOLIDATION_DIR_NAME: string = 'profile-consolidation';
@@ -363,7 +365,7 @@ export interface HomeRecommendationPlannerEvent {
   image_paths: string[];
 }
 
-export interface HomeProfileViewModel {
+export interface HomeProfileViewModel extends AvatarHomeViewModel {
   updatedLabel: string;
   completeness: number;
   totalEvents: number;

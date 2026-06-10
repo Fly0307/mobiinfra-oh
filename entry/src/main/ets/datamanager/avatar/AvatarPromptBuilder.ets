@@ -9,6 +9,7 @@ import {
 import { normalizeFreeText } from '../DataManagerUtils';
 import {
   AvatarDomainSnapshot,
+  AvatarGenerationMode,
   AvatarProfileSnapshot
 } from './AvatarTypes';
 
@@ -44,15 +45,23 @@ export class AvatarPromptBuilder {
     return this.storage.sha256Text(ArkJSON.stringify(snapshot));
   }
 
-  buildPrompt(snapshot: AvatarProfileSnapshot): string {
+  buildPrompt(snapshot: AvatarProfileSnapshot, mode: AvatarGenerationMode = 'text_to_image'): string {
     let lines: string[] = [
-      'Create a warm, trustworthy personal digital avatar for a mobile life-assistant home page.',
-      'The image should be a clean vertical half-body portrait, simple soft background, no text, no watermark, no logo, suitable for a top home-page avatar area.',
-      'Use the following evidence-based lifestyle profile as subtle visual inspiration. Do not infer income, job, health, identity, sensitive demographics, or personality traits not supported by the profile.',
-      this.supplementalProfileText(snapshot),
-      snapshot.prompt_profile_text,
-      'Style: vivid but realistic, friendly, polished, modern, light futuristic assistant feeling, balanced colors, clear face and upper body, high quality.'
+      '任务目标: 一个生动、温暖且极具表现力、亲和力的 3D 卡通风格个人数字形象，用于移动生活助手 App 的主页。'
     ];
+    if (mode === 'image_to_image') {
+      lines.push(this.photoReferencePrompt());
+    }
+    lines.push(
+      '构图与姿态: 清晰聚焦于脸部和上半身。',
+      '细节与灵感（结合变量）: 请自然融入以下个人生活方式和描述，启发角色的服装、细微配饰、色彩倾向和整体氛围。',
+      this.supplementalProfileText(snapshot),
+      '个人 profile 内容:',
+      snapshot.prompt_profile_text,
+      '(约束：严格仅反映所提供的文本内容。)',
+      '风格与灯光: 高品质现代 3D 动画风格（皮克斯/迪士尼灵感），精致、亲切，带有淡淡的未来感智能助手美学。柔和的光线，鲜艳但平衡的色彩。',
+      '背景与排除项: 简单、柔和、整洁的微渐变背景，适合主页展示。要求无文字、无水印、无 Logo、无繁杂的背景元素。'
+    );
     return lines.join('\n');
   }
 
@@ -109,5 +118,9 @@ export class AvatarPromptBuilder {
       parts.push('age=' + age);
     }
     return 'Supplemental demographic profile: ' + (parts.length > 0 ? parts.join(', ') : 'not specified');
+  }
+
+  private photoReferencePrompt(): string {
+    return '参考照片约束: 当提供个人参考照片时，请以参考照片中的人物作为主要身份与形象基础：保留参考照片中的核心脸部特征、发型轮廓、年龄感、性别表达、整体气质和亲和力；将其转化为高品质现代 3D 卡通风格个人数字分身，而不是生成另一个陌生角色。个人 profile 内容只用于补充服装、配饰、色彩、生活方式氛围和细节灵感；不要让 profile 覆盖或替换参考照片中的人物身份特征。忽略参考照片中的背景、无关人物、文字、水印和杂乱物体。';
   }
 }

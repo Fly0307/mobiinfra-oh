@@ -72,7 +72,7 @@ export class AvatarService {
     let consentPhotoSource = photoSource === undefined ? sourceImage : photoSource;
     return {
       mode: mode,
-      prompt: this.promptBuilder.buildPrompt(snapshot),
+      prompt: this.promptBuilder.buildPrompt(snapshot, mode),
       sourceImage: sourceImage,
       profileSnapshot: snapshot,
       profileSnapshotHash: this.promptBuilder.snapshotHash(snapshot),

@@ -17,6 +17,23 @@ import {
 } from '../../utils/gallery/GalleryMonthlyInsights';
 import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { GalleryReverseGeocoder } from '../../utils/gallery/GalleryReverseGeocoder';
+import {
+  DEFAULT_GALLERY_AMAP_WEB_KEY,
+  DEFAULT_GALLERY_API_BASE_URL,
+  DEFAULT_GALLERY_API_KEY,
+  DEFAULT_GALLERY_EMBEDDING_API_KEY,
+  DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+  DEFAULT_GALLERY_EMBEDDING_CONCURRENCY,
+  DEFAULT_GALLERY_EMBEDDING_MODE,
+  DEFAULT_GALLERY_EMBEDDING_MODEL,
+  DEFAULT_GALLERY_IMAGE_SCALE,
+  DEFAULT_GALLERY_MODEL,
+  DEFAULT_GALLERY_MODEL_CONCURRENCY,
+  DEFAULT_GALLERY_OCR_CONCURRENCY,
+  DEFAULT_GALLERY_SKIP_OCR,
+  DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
+  registerGallerySettingsDefaults
+} from '../../utils/gallery/GallerySettingsDefaults';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
 import {
   GalleryAnalysisResult,
@@ -31,20 +48,6 @@ import {
 } from '../../utils/gallery/GalleryTypes';
 import { GallerySearchHit, GallerySearchService } from '../../utils/gallery/GallerySearchService';
 
-const DEFAULT_GALLERY_API_BASE_URL = 'https://api.modelbest.cn/v1';
-const DEFAULT_GALLERY_API_KEY = 'sk-pQ8L2zF3XmR5kY9wV4jB7hN1tC6vM0xG3aD5sH2bJ9lK4cZ8';
-const DEFAULT_GALLERY_MODEL = 'MiniCPM-V-4.6-Instruct';
-const DEFAULT_GALLERY_SKIP_OCR = 'false';
-const DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER = 'true';
-const DEFAULT_GALLERY_OCR_CONCURRENCY = '3';
-const DEFAULT_GALLERY_MODEL_CONCURRENCY = '2';
-const DEFAULT_GALLERY_EMBEDDING_CONCURRENCY = '2';
-const DEFAULT_GALLERY_EMBEDDING_MODE = 'huawei_local';
-const DEFAULT_GALLERY_EMBEDDING_BASE_URL = 'https://api.siliconflow.cn/v1';
-const DEFAULT_GALLERY_EMBEDDING_API_KEY = 'sk-ftatcmqivwegrrazieeiiwswmotmryswxwhjuakxwsmsudrs';
-const DEFAULT_GALLERY_EMBEDDING_MODEL = 'BAAI/bge-m3';
-const DEFAULT_GALLERY_IMAGE_SCALE = '0.9';
-const DEFAULT_GALLERY_AMAP_WEB_KEY = '';
 const GALLERY_RESULT_PAGE_SIZE = 10;
 
 interface GalleryCoordinate {
@@ -59,20 +62,7 @@ interface GalleryCategoryFilter {
   count: number;
 }
 
-PersistentStorage.persistProp('galleryApiBaseUrl', DEFAULT_GALLERY_API_BASE_URL);
-PersistentStorage.persistProp('galleryApiKey', DEFAULT_GALLERY_API_KEY);
-PersistentStorage.persistProp('galleryModel', DEFAULT_GALLERY_MODEL);
-PersistentStorage.persistProp('gallerySkipOcr', DEFAULT_GALLERY_SKIP_OCR);
-PersistentStorage.persistProp('galleryUseOcrKeywordFilter', DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER);
-PersistentStorage.persistProp('galleryOcrConcurrency', DEFAULT_GALLERY_OCR_CONCURRENCY);
-PersistentStorage.persistProp('galleryModelConcurrency', DEFAULT_GALLERY_MODEL_CONCURRENCY);
-PersistentStorage.persistProp('galleryEmbeddingConcurrency', DEFAULT_GALLERY_EMBEDDING_CONCURRENCY);
-PersistentStorage.persistProp('galleryEmbeddingMode', DEFAULT_GALLERY_EMBEDDING_MODE);
-PersistentStorage.persistProp('galleryEmbeddingBaseUrl', DEFAULT_GALLERY_EMBEDDING_BASE_URL);
-PersistentStorage.persistProp('galleryEmbeddingApiKey', DEFAULT_GALLERY_EMBEDDING_API_KEY);
-PersistentStorage.persistProp('galleryEmbeddingModel', DEFAULT_GALLERY_EMBEDDING_MODEL);
-PersistentStorage.persistProp('galleryImageScale', DEFAULT_GALLERY_IMAGE_SCALE);
-PersistentStorage.persistProp('galleryAmapWebKey', DEFAULT_GALLERY_AMAP_WEB_KEY);
+registerGallerySettingsDefaults();
 
 @Entry
 @Component

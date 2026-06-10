@@ -5,6 +5,8 @@ import {
   chatModeActionLabel,
   chatModeLabel,
   chatModePlaceholder,
+  cloudAgentDisplayText,
+  hasCloudAgentDisplayOutput,
   isSupportedChatMode
 } from '../main/ets/pages/chat/ChatPageTypes';
 
@@ -21,6 +23,18 @@ export default function chatPageTypesUnitTest() {
       expect(chatModePlaceholder(CHAT_MODE_LOCAL_INFERENCE)).assertEqual('输入本地模型消息...');
       expect(isSupportedChatMode(CHAT_MODE_LOCAL_INFERENCE)).assertTrue();
       expect(isSupportedChatMode('unknown')).assertFalse();
+    });
+
+    it('keepsDefaultCloudStatusOutOfConversation', 0, () => {
+      expect(hasCloudAgentDisplayOutput('请先配置 Planner 和 Decider 云端服务')).assertFalse();
+      expect(hasCloudAgentDisplayOutput('')).assertFalse();
+    });
+
+    it('extractsPlannerResponseAsConversationText', 0, () => {
+      let logs = '[23:00:19] 手动调用 Planner，任务：你好\n' +
+        '[23:00:22] Planner 手动返回：\n你好！我是 MobiAgent。';
+      expect(hasCloudAgentDisplayOutput(logs)).assertTrue();
+      expect(cloudAgentDisplayText(logs)).assertEqual('你好！我是 MobiAgent。');
     });
   });
 }

@@ -1,8 +1,10 @@
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
+  cloudAgentDisplayText,
   chatModeLabel,
-  chatModePlaceholder
+  chatModePlaceholder,
+  hasCloudAgentDisplayOutput
 } from './ChatPageTypes';
 
 @Component
@@ -54,6 +56,32 @@ export struct ChatPage {
       return '本地模型未加载';
     }
     return this.chatHistory.length > 0 ? this.chatHistory : this.localOutput;
+  }
+
+  private hasConversationContent(): boolean {
+    if (this.isCloudMode()) {
+      return this.cloudThinking || hasCloudAgentDisplayOutput(this.cloudOutput) || this.cloudDebugImagePath.length > 0;
+    }
+    return this.localThinking || this.chatHistory.trim().length > 0 || this.localOutput.trim().length > 0 ||
+      this.localDebugImagePath.length > 0;
+  }
+
+  private activeConversationText(): string {
+    if (this.isCloudMode()) {
+      let text = cloudAgentDisplayText(this.cloudOutput);
+      if (text.length > 0) {
+        return text;
+      }
+      return this.cloudThinking ? '云端智能体正在处理...' : '';
+    }
+    let text = this.chatHistory.trim().length > 0 ? this.chatHistory.trim() : this.localOutput.trim();
+    if (text.length > 0) {
+      return text;
+    }
+    if (!this.modelLoaded) {
+      return '本地模型未加载';
+    }
+    return this.localThinking ? '本地模型正在生成...' : '';
   }
 
   @Builder ModeChip(mode: string) {
@@ -129,6 +157,109 @@ export struct ChatPage {
     .border({ width: 1, color: '#EDF0F5' })
   }
 
+  @Builder EmptyWelcome() {
+    Column() {
+      Row() {
+        Text('H')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+          .width(54)
+          .height(54)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#5968FF')
+          .borderRadius(18)
+        Text('我是 MobiAgent')
+          .fontSize(34)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#D8D5EA')
+          .margin({ left: 18 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .margin({ top: 120 })
+
+      Text('随时为你答疑、规划，也可以下发自动化任务')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#9AA3B2')
+        .width('100%')
+        .margin({ top: 22 })
+        .maxLines(2)
+
+      Flex({ wrap: FlexWrap.Wrap }) {
+        this.PromptChip('整理今天截图里的关键信息')
+        this.PromptChip('规划一个收集微信聊天记录的 workflow')
+        this.PromptChip('打开淘宝搜索耳机并比较价格')
+      }
+      .width('100%')
+      .margin({ top: 28 })
+
+      Blank()
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
+  @Builder ConversationPanel() {
+    Scroll() {
+      Column() {
+        Row() {
+          Text(this.isCloudMode() ? '云' : '本')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+            .width(42)
+            .height(42)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(this.isCloudMode() ? '#5968FF' : '#111827')
+            .borderRadius(16)
+          Column() {
+            Text(chatModeLabel(this.chatMode))
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#111827')
+            Text(this.activeConversationText())
+              .fontSize(15)
+              .fontColor('#1F2937')
+              .lineHeight(22)
+              .width('100%')
+              .margin({ top: 8 })
+          }
+          .layoutWeight(1)
+          .padding({ left: 14, right: 14, top: 14, bottom: 14 })
+          .backgroundColor('#F8FAFD')
+          .borderRadius(18)
+          .border({ width: 1, color: '#E8ECF3' })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+        .margin({ top: 28 })
+
+        if (this.isBusy()) {
+          Text('处理中...')
+            .fontSize(13)
+            .fontColor('#6B7280')
+            .margin({ left: 56, top: 12 })
+        }
+
+        Row() {
+          this.DebugImagePreview()
+        }
+        .width('100%')
+        .margin({ left: 56, top: 12 })
+
+        Blank()
+          .height(150)
+      }
+      .width('100%')
+    }
+    .layoutWeight(1)
+    .width('100%')
+  }
+
   private async runPrimaryAction(): Promise<void> {
     if (this.isCloudMode()) {
       await this.onRunCloudPlanner();
@@ -189,54 +320,15 @@ export struct ChatPage {
           .justifyContent(FlexAlign.Center)
           .margin({ top: 24 })
 
-          Row() {
-            Text('H')
-              .fontSize(20)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .width(54)
-              .height(54)
-              .textAlign(TextAlign.Center)
-              .backgroundColor('#5968FF')
-              .borderRadius(18)
-            Text('我是 MobiAgent')
-              .fontSize(34)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#D8D5EA')
-              .margin({ left: 18 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.hasConversationContent()) {
+            this.ConversationPanel()
+          } else {
+            this.EmptyWelcome()
           }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .margin({ top: 120 })
-
-          Text('随时为你答疑、规划，也可以下发自动化任务')
-            .fontSize(18)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#9AA3B2')
-            .width('100%')
-            .margin({ top: 22 })
-            .maxLines(2)
-
-          Flex({ wrap: FlexWrap.Wrap }) {
-            this.PromptChip('整理今天截图里的关键信息')
-            this.PromptChip('规划一个收集微信聊天记录的 workflow')
-            this.PromptChip('打开淘宝搜索耳机并比较价格')
-          }
-          .width('100%')
-          .margin({ top: 28 })
-
-          Column() {
-            this.StatusPanel()
-          }
-          .width('100%')
-          .margin({ top: 18 })
-
-          Blank()
         }
         .width('100%')
         .padding({ left: 28, right: 28 })
+        .layoutWeight(1)
       }
       .width('100%')
       .height('100%')

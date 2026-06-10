@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
+import fs from '@ohos.file.fs';
 import {
   atomicizeCandidateFacts,
   findExactExistingMatch,
@@ -527,6 +528,35 @@ export default function dataManagerUnitTest() {
       });
       expect(view.avatarUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
       expect(view.avatarActionLabel).assertEqual('数字分身已更新');
+    });
+
+    it('avatarStorageSaveAssetBase64ReturnsDisplayableVersionUri', 0, () => {
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths('/tmp/demo-files', storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let relativePath = avatarStorage.saveAssetBase64('v1', 'AQID');
+      expect(relativePath).assertEqual('assets/v1.png');
+      expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+    });
+
+    it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {
+      let storage = new DataManagerStorage();
+      let path = '/tmp/demo-byte-writes/exact.bin';
+      let source = new Uint8Array([9, 1, 2, 3, 8]);
+      storage.writeBytesAtomic(path, source.subarray(1, 4));
+      let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let buffer = new ArrayBuffer(3);
+      try {
+        fs.readSync(file.fd, buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+      let bytes = new Uint8Array(buffer);
+      expect(bytes.length).assertEqual(3);
+      expect(bytes[0]).assertEqual(1);
+      expect(bytes[1]).assertEqual(2);
+      expect(bytes[2]).assertEqual(3);
+      expect(fs.statSync(path).size).assertEqual(3);
     });
 
     it('homeViewModelKeepsAvatarDefaultsForNonEmptyProfile', 0, () => {

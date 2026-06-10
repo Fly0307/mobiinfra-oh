@@ -113,9 +113,10 @@ export class DataManagerStorage {
     if (parent.length > 0) {
       this.ensureDir(parent);
     }
+    let buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
     let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, bytes.buffer);
+      fs.writeSync(file.fd, buffer);
     } finally {
       fs.closeSync(file);
     }

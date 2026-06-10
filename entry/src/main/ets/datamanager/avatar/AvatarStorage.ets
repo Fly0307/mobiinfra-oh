@@ -51,7 +51,7 @@ export class AvatarStorage {
   }
 
   relativeAvatarAssetPath(versionId: string): string {
-    return 'avatar/assets/' + versionId + '.png';
+    return 'assets/' + versionId + '.png';
   }
 
   saveAssetBase64(versionId: string, base64Text: string): string {

@@ -227,8 +227,11 @@ export struct ChatPage {
           .width('100%')
           .margin({ top: 28 })
 
-          this.StatusPanel()
-            .margin({ top: 18 })
+          Column() {
+            this.StatusPanel()
+          }
+          .width('100%')
+          .margin({ top: 18 })
 
           Blank()
         }

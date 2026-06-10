@@ -40,6 +40,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
+import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
@@ -292,6 +293,9 @@ struct Index {
       });
       let helper = new util.Base64Helper();
       return 'data:image/jpeg;base64,' + helper.encodeToStringSync(new Uint8Array(data));
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       if (packer !== null) {
         try {
@@ -323,7 +327,7 @@ struct Index {
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
-      promptAction.showToast({ message: '数据管理服务未就绪', duration: 1500 });
+      showToastSafely('数据管理服务未就绪', 1500);
       throw new Error('数据管理服务未就绪');
     }
     if (this.dataManagerFacade.isAvatarProfileSnapshotUnchanged()) {
@@ -336,7 +340,7 @@ struct Index {
     let config = this.getAvatarProviderConfig();
     if (config.apiKey.trim().length === 0) {
       dataManagerWarn('generateHomeAvatar skipped: missing avatar api key');
-      promptAction.showToast({ message: '请先配置数字分身图片 API Key', duration: 1800 });
+      showToastSafely('请先配置数字分身图片 API Key', 1800);
       throw new Error('缺少数字分身图片 API Key');
     }
     dataManagerInfo(`generateHomeAvatar start: mode=${mode}, baseUrl=${config.imageBaseUrl}, model=${config.textToImageModel}`);
@@ -347,14 +351,14 @@ struct Index {
       let avatar = await this.dataManagerFacade.generateAvatar(config, request);
       this.mergeHomeAvatarView(avatar);
       this.reloadDataManagerViewModels();
-      promptAction.showToast({ message: '数字分身已生成', duration: 1500 });
+      showToastSafely('数字分身已生成', 1500);
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
       let err = e as Error;
       this.reloadDataManagerViewModels();
       dataManagerError('generateHomeAvatar failed: ' + err.message);
       this.appendCloudLog('Avatar generation failed: ' + err.message);
-      promptAction.showToast({ message: '数字分身生成失败：' + err.message, duration: 2200 });
+      showToastSafely('数字分身生成失败：' + err.message, 2200);
       throw err;
     }
   }
@@ -400,7 +404,7 @@ struct Index {
     }
     if (!this.dataManagerFacade.hasDailyLogData()) {
       dataManagerInfo('refreshDataManager skipped: no daily-log data');
-      promptAction.showToast({ message: '暂无数据', duration: 1500 });
+      showToastSafely('暂无数据', 1500);
       return;
     }
     this.dataManagerRefreshing = true;
@@ -419,7 +423,7 @@ struct Index {
       this.dataManagerProgressMessage = summary.message;
       this.dataManagerProgressPercent = 100;
       if (summary.skipped) {
-        promptAction.showToast({ message: '已是最新数据', duration: 1500 });
+        showToastSafely('已是最新数据', 1500);
       }
       dataManagerInfo('refreshDataManager success: ' + summary.message);
     } catch (e) {
@@ -556,7 +560,7 @@ struct Index {
   private prepareCustomOpp(): boolean {
     let ctx = getContext(this) as common.UIAbilityContext;
     try {
-      let res = mnnllm.prepareCustomOpp(ctx.resourceManager, this.filesDir + '/custom_opp');
+      let res: string = mnnllm.prepareCustomOpp(ctx.resourceManager, this.filesDir + '/custom_opp');
       this.customOppReady = (res === 'ok');
       if (!this.customOppReady) {
         this.output = '自定义算子准备失败: ' + res;
@@ -679,8 +683,13 @@ struct Index {
       fs.rmdirSync(path);
       return deleted + 1;
     } catch {
-      fs.unlinkSync(path);
-      return 1;
+      try {
+        fs.unlinkSync(path);
+        return 1;
+      } catch (e) {
+        let err = e as Error;
+        throw err;
+      }
     }
   }
 
@@ -1695,7 +1704,7 @@ struct Index {
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     this.isThinking = true;
     try {
-      let reply = await mnnllm.chat(msg);
+      let reply: string = await mnnllm.chat(msg);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let e = err as Error;

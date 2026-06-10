@@ -110,6 +110,9 @@ export class SeedreamAvatarProvider {
       let bytes = new Uint8Array(response.result as ArrayBuffer);
       let helper = new util.Base64Helper();
       return helper.encodeToStringSync(bytes);
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       httpReq.destroy();
     }
@@ -183,6 +186,9 @@ export class SeedreamAvatarProvider {
         providerRequestId: requestId,
         rawMetadata: metadata
       };
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       httpReq.destroy();
     }

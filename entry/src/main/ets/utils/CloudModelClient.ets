@@ -290,6 +290,9 @@ export class CloudModelClient {
         throw new Error('Cloud response has no choices');
       }
       return parsed.choices[0].message.content;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
@@ -620,6 +623,9 @@ export class CloudModelClient {
         throw new Error('Embedding response has no vectors');
       }
       return parsed.data[0].embedding;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();

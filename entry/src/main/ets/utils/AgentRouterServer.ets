@@ -733,10 +733,18 @@ export class AgentRouterServer {
     let imgPath = filesDir + '/agent_snapshot_' + ts + '.jpg';
     let base64Helper = new util.Base64Helper();
     let imgBuffer = base64Helper.decodeSync(imageBase64);
-    let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-    fs.writeSync(file.fd, imgBuffer.buffer);
-    fs.closeSync(file);
-    return imgPath;
+    try {
+      let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, imgBuffer.buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+      return imgPath;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    }
   }
 
   private getString(req: RequestMap, key: string): string {
@@ -753,7 +761,12 @@ export class AgentRouterServer {
     let sendOptions: socket.TCPSendOptions = {
       data: payload + '<<EOF>>'
     };
-    client.send(sendOptions);
+    try {
+      client.send(sendOptions);
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    }
   }
 
   private sendStatus(client: socket.TCPSocketConnection, status: string, result?: string, message?: string): void {

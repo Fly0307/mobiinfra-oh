@@ -103,30 +103,40 @@ export class DataManagerStorage {
   }
 
   writeText(path: string, content: string): void {
-    let parent = this.dirname(path);
-    if (parent.length > 0) {
-      this.ensureDir(parent);
-    }
-    let encoded = encodeUtf8Compat(content);
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, encoded.buffer);
-    } finally {
-      fs.closeSync(file);
+      let parent = this.dirname(path);
+      if (parent.length > 0) {
+        this.ensureDir(parent);
+      }
+      let encoded = encodeUtf8Compat(content);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, encoded.buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
   writeBytes(path: string, bytes: Uint8Array): void {
-    let parent = this.dirname(path);
-    if (parent.length > 0) {
-      this.ensureDir(parent);
-    }
-    let buffer = this.exactArrayBuffer(bytes);
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, buffer);
-    } finally {
-      fs.closeSync(file);
+      let parent = this.dirname(path);
+      if (parent.length > 0) {
+        this.ensureDir(parent);
+      }
+      let buffer = this.exactArrayBuffer(bytes);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 

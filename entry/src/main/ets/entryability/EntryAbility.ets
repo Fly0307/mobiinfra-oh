@@ -229,7 +229,11 @@ export default class EntryAbility extends UIAbility {
 
   private createEdgeFlowWindow(onReady: () => void): void {
     if (this.edgeFlowWindow) {
-      this.edgeFlowWindow.showWindow();
+      try {
+        this.edgeFlowWindow.showWindow();
+      } catch (err) {
+        hilog.error(DOMAIN, 'testTag', 'Failed to show edge flow window. Cause: %{public}s', JSON.stringify(err));
+      }
       onReady();
       return;
     }
@@ -281,7 +285,11 @@ export default class EntryAbility extends UIAbility {
     // 小型浮窗只承载实时状态和终止按钮，不负责模型推理或任务调度。
     if (this.floatWindow) {
       this.layoutFloatPanelWindow(AgentExecutionController.isFloatPanelExpanded());
-      this.floatWindow.showWindow();
+      try {
+        this.floatWindow.showWindow();
+      } catch (err) {
+        hilog.error(DOMAIN, 'testTag', 'Failed to show float window. Cause: %{public}s', JSON.stringify(err));
+      }
       return;
     }
     let config: window.Configuration = {
@@ -340,8 +348,12 @@ export default class EntryAbility extends UIAbility {
       this.floatPanelY = Math.max(0,
         displaySize.height - panelHeight - this.vpToPx(FLOAT_PANEL_BOTTOM_MARGIN_VP, displaySize.density));
     }
-    this.floatWindow.resize(panelWidth, panelHeight);
-    this.floatWindow.moveWindowTo(this.floatPanelX, this.floatPanelY);
+    try {
+      this.floatWindow.resize(panelWidth, panelHeight);
+      this.floatWindow.moveWindowTo(this.floatPanelX, this.floatPanelY);
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to layout float window. Cause: %{public}s', JSON.stringify(err));
+    }
   }
 
   private getExpandedFloatPanelWidth(displaySize: DisplaySize): number {

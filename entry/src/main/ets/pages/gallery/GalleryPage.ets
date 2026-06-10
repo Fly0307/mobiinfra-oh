@@ -35,6 +35,7 @@ import {
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
+import { showToastSafely } from '../../utils/PromptSafe';
 import {
   GalleryAnalysisResult,
   GalleryAnalyzeOutcome,
@@ -190,7 +191,7 @@ struct GalleryPage {
       this.galleryAnswerMeta = '';
       this.galleryAnswerError = '';
       this.gallerySearchRevision += 1;
-      promptAction.showToast({ message: '请输入要检索的问题', duration: 1200 });
+      showToastSafely('请输入要检索的问题', 1200);
       return;
     }
     let hits = GallerySearchService.search(query, this.results, 20);
@@ -202,7 +203,7 @@ struct GalleryPage {
   private async runGalleryQuestionAnswer(): Promise<void> {
     let query = this.galleryQuestion.trim();
     if (query.length === 0) {
-      promptAction.showToast({ message: '请输入要问的问题', duration: 1200 });
+      showToastSafely('请输入要问的问题', 1200);
       return;
     }
     this.runGalleryKeywordSearch();
@@ -225,7 +226,7 @@ struct GalleryPage {
       this.galleryAnswerMeta = this.galleryAnswerMetaText(answer);
     } catch (e) {
       this.galleryAnswerError = this.errorMessage(e);
-      promptAction.showToast({ message: '图库问答失败：' + this.errorMessage(e), duration: 1800 });
+      showToastSafely('图库问答失败：' + this.errorMessage(e), 1800);
     } finally {
       this.galleryAnswerLoading = false;
       this.gallerySearchRevision += 1;
@@ -287,20 +288,20 @@ struct GalleryPage {
 
   private async startManualAnalyze(): Promise<void> {
     if (this.analyzing) {
-      promptAction.showToast({ message: '图库分析正在进行', duration: 1200 });
+      showToastSafely('图库分析正在进行', 1200);
       return;
     }
     try {
       let picker = new GalleryPhotoPicker();
       let uris = await picker.selectImageUris(9);
       if (uris.length === 0) {
-        promptAction.showToast({ message: '未选择图片', duration: 1200 });
+        showToastSafely('未选择图片', 1200);
         return;
       }
       let ctx = getContext(this) as common.UIAbilityContext;
       let locationGranted = await this.ensureMediaLocationPermission(ctx);
       if (!locationGranted) {
-        promptAction.showToast({ message: '未获得媒体位置权限，将跳过拍摄位置读取', duration: 1600 });
+        showToastSafely('未获得媒体位置权限，将跳过拍摄位置读取', 1600);
       }
       this.analyzing = true;
       this.manualAnalyzing = true;
@@ -337,32 +338,32 @@ struct GalleryPage {
       this.progressRevision += 1;
       this.refreshAnalyzeStats();
       this.setLastRun(new Date().getTime());
-      promptAction.showToast({ message: '图库分析完成', duration: 1500 });
+      showToastSafely('图库分析完成', 1500);
     } catch (e) {
       this.analyzing = false;
       this.manualAnalyzing = false;
       this.clearManualProgressState();
       this.setLastRunLabel('分析失败');
-      promptAction.showToast({ message: '图库分析失败：' + this.errorMessage(e), duration: 2000 });
+      showToastSafely('图库分析失败：' + this.errorMessage(e), 2000);
     }
   }
 
   private async startAutoAnalyze(): Promise<void> {
     if (this.analyzing) {
-      promptAction.showToast({ message: '图库分析正在进行', duration: 1200 });
+      showToastSafely('图库分析正在进行', 1200);
       return;
     }
     try {
       let ctx = getContext(this) as common.UIAbilityContext;
       let granted = await this.ensureGalleryReadPermission(ctx);
       if (!granted) {
-        promptAction.showToast({ message: '未获得图库读取权限', duration: 1600 });
+        showToastSafely('未获得图库读取权限', 1600);
         return;
       }
       let scanner = new GalleryAutoScanner();
       let inputs = await scanner.scanAllImages(ctx);
       if (inputs.length === 0) {
-        promptAction.showToast({ message: '未扫描到图库图片', duration: 1200 });
+        showToastSafely('未扫描到图库图片', 1200);
         return;
       }
       // 每次全量扫描先创建新的会话快照；后续暂停/恢复都从该快照继续。
@@ -374,18 +375,18 @@ struct GalleryPage {
       this.analyzing = false;
       this.autoScanStatus = 'failed';
       this.setLastRunLabel('分析失败');
-      promptAction.showToast({ message: '自动分析失败：' + this.errorMessage(e), duration: 2000 });
+      showToastSafely('自动分析失败：' + this.errorMessage(e), 2000);
     }
   }
 
   private async continueAutoAnalyze(): Promise<void> {
     if (this.analyzing) {
-      promptAction.showToast({ message: '图库分析正在进行', duration: 1200 });
+      showToastSafely('图库分析正在进行', 1200);
       return;
     }
     let session = GalleryStorage.loadScanSession(this.filesDir);
     if (!session) {
-      promptAction.showToast({ message: '没有可继续的扫描任务', duration: 1200 });
+      showToastSafely('没有可继续的扫描任务', 1200);
       return;
     }
     try {
@@ -394,7 +395,7 @@ struct GalleryPage {
       this.analyzing = false;
       this.autoScanStatus = 'failed';
       this.setLastRunLabel('分析失败');
-      promptAction.showToast({ message: '继续分析失败：' + this.errorMessage(e), duration: 2000 });
+      showToastSafely('继续分析失败：' + this.errorMessage(e), 2000);
     }
   }
 
@@ -403,7 +404,7 @@ struct GalleryPage {
       return;
     }
     if (this.pauseRequested || this.autoScanStatus === 'pausing') {
-      promptAction.showToast({ message: '正在暂停，已开始处理的图片完成后会停止', duration: 1600 });
+      showToastSafely('正在暂停，已开始处理的图片完成后会停止', 1600);
       return;
     }
     // 并发分析无法立刻终止已进入流水线的图片，因此先进入 pausing 状态并给用户明确反馈。
@@ -417,7 +418,7 @@ struct GalleryPage {
       session.status = 'pausing';
       GalleryStorage.saveScanSession(this.filesDir, session);
     }
-    promptAction.showToast({ message: '正在暂停，已开始处理的图片完成后会停止', duration: 1800 });
+    showToastSafely('正在暂停，已开始处理的图片完成后会停止', 1800);
   }
 
   private async runScanSession(session: GalleryScanSession): Promise<void> {
@@ -479,7 +480,7 @@ struct GalleryPage {
       this.autoScanStatus = 'paused';
       this.applyScanSession(session);
       this.setLastRunLabel('已暂停');
-      promptAction.showToast({ message: '自动分析已暂停', duration: 1200 });
+      showToastSafely('自动分析已暂停', 1200);
       return;
     }
     this.recountScanSession(session);
@@ -493,7 +494,7 @@ struct GalleryPage {
     } else {
       this.setLastRunLabel('已暂停');
     }
-    promptAction.showToast({ message: sessionCompleted ? '自动分析完成' : '自动分析已暂停', duration: 1500 });
+    showToastSafely(sessionCompleted ? '自动分析完成' : '自动分析已暂停', 1500);
   }
 
   private async ensureGalleryReadPermission(ctx: common.UIAbilityContext): Promise<boolean> {
@@ -724,7 +725,7 @@ struct GalleryPage {
     } catch (e) {
       this.monthlyAiErrorKey = insight.key;
       this.monthlyAiErrorText = this.errorMessage(e);
-      promptAction.showToast({ message: 'AI 月度总结失败：' + this.errorMessage(e), duration: 1800 });
+      showToastSafely('AI 月度总结失败：' + this.errorMessage(e), 1800);
     }
     this.monthlyAiLoadingKey = '';
   }
@@ -986,7 +987,7 @@ struct GalleryPage {
   private openSkippedPanel(): void {
     let items = this.skippedScanItems();
     if (items.length === 0) {
-      promptAction.showToast({ message: '当前没有跳过的图片', duration: 1200 });
+      showToastSafely('当前没有跳过的图片', 1200);
       return;
     }
     this.skippedPanelItems = items;
@@ -1091,7 +1092,7 @@ struct GalleryPage {
 
   private confirmClearAnalysis(): void {
     if (this.analyzing) {
-      promptAction.showToast({ message: '图库分析正在进行，无法清空', duration: 1200 });
+      showToastSafely('图库分析正在进行，无法清空', 1200);
       return;
     }
     promptAction.showDialog({
@@ -1132,7 +1133,7 @@ struct GalleryPage {
     this.scanRevision += 1;
     this.autoScanStatus = 'idle';
     this.setLastRunLabel('尚未开始');
-    promptAction.showToast({ message: '图库缓存已清理', duration: 1200 });
+    showToastSafely('图库缓存已清理', 1200);
   }
 
   private hasPausedScan(): boolean {
@@ -1539,7 +1540,7 @@ struct GalleryPage {
               .margin({ left: 10 })
               .onClick(() => {
                 this.settingsOpen = false;
-                promptAction.showToast({ message: '图库采集设置已保存', duration: 1200 });
+                showToastSafely('图库采集设置已保存', 1200);
               })
           }.width('100%').margin({ top: 16 })
         }
@@ -2541,7 +2542,7 @@ struct GalleryPage {
     let latitude = Number(location.latitude);
     let longitude = Number(location.longitude);
     if (!GalleryExifUtils.isValidLocation(latitude, longitude)) {
-      promptAction.showToast({ message: '没有可定位的经纬度', duration: 1200 });
+      showToastSafely('没有可定位的经纬度', 1200);
       return;
     }
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -2661,7 +2662,7 @@ struct GalleryPage {
     } catch (e) {
       this.locationResolveErrorKey = key;
       this.locationResolveErrorText = this.errorMessage(e);
-      promptAction.showToast({ message: '地址解析失败：' + this.errorMessage(e), duration: 1800 });
+      showToastSafely('地址解析失败：' + this.errorMessage(e), 1800);
     } finally {
       if (this.locationResolvingKey === key) {
         this.locationResolvingKey = '';
@@ -2704,12 +2705,12 @@ struct GalleryPage {
 
   private openExternalCaptureMap(ctx: common.UIAbilityContext, location: GalleryCoordinate): void {
     if (!location) {
-      promptAction.showToast({ message: '无法生成地图链接', duration: 1200 });
+      showToastSafely('无法生成地图链接', 1200);
       return;
     }
     let mapUrl = GalleryExifUtils.mapUrl(location.latitude, location.longitude);
     if (mapUrl.length === 0) {
-      promptAction.showToast({ message: '无法生成地图链接', duration: 1200 });
+      showToastSafely('无法生成地图链接', 1200);
       return;
     }
     ctx.startAbility({
@@ -2717,7 +2718,7 @@ struct GalleryPage {
       uri: mapUrl
     }).catch((e: BusinessError) => {
       console.warn('open external capture map failed: code=' + e.code + ', message=' + e.message);
-      promptAction.showToast({ message: '无法打开地图链接', duration: 1600 });
+      showToastSafely('无法打开地图链接', 1600);
     });
   }
 

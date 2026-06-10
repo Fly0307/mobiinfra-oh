@@ -690,6 +690,9 @@ export class GalleryAnalyzer {
       });
       let helper = new util.Base64Helper();
       return helper.encodeToStringSync(new Uint8Array(data));
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       try {
         await packer.release();

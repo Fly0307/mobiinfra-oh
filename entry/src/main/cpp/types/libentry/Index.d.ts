@@ -1,4 +1,33 @@
 // ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
+export interface LibEntryNative {
+  loadModel: (configPath: string) => string;
+  generate: (prompt: string) => string;
+  chat: (userMessage: string) => string;
+  reset: () => string;
+  copyModel: (src: string, dst: string) => string;
+  prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
+
+  agentPrefill: (prefix: string) => Promise<string>;
+  agentStep: (variablePart: string, onToken?: (token: string) => void) => Promise<string>;
+  agentReset: () => Promise<string>;
+
+  omcTest: (modelDir: string) => Promise<string>;
+  opTest: (config: string) => Promise<string>;
+
+  setConvMode: (mode: string) => string;
+  setConvQuant: (mode: string) => string;
+  setInt8XScale: (scale: number) => string;
+  setCpuPrecision: (mode: string) => string;
+  setCpuMemory: (mode: string) => string;
+
+  initLogFile: (path: string) => string;
+  getLogs: () => string;
+  clearLogs: () => string;
+}
+
+declare const native: LibEntryNative;
+export default native;
+
 export const loadModel: (configPath: string) => string;
 export const generate: (prompt: string) => string;
 export const chat: (userMessage: string) => string;

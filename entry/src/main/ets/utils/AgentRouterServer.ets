@@ -36,6 +36,11 @@ interface CloudDebugResponse {
   response: string;
 }
 
+interface CaptureOverlayResponse {
+  status: string;
+  hidden: boolean;
+}
+
 export class AgentRouterServer {
   private server: socket.TCPSocketServer | null = null;
   private isRunning: boolean = false;
@@ -259,6 +264,23 @@ export class AgentRouterServer {
       this.currentTask = '';
       this.finishExecution();
       this.log(this.routeMode, '>> [PC Error] ' + this.getString(req, 'message'));
+      this.sendStatus(client, 'ok');
+      return;
+    }
+
+    if (reqType === 'capture_overlay_hide') {
+      let hidden = await AgentExecutionController.hideCaptureOverlay();
+      let response: CaptureOverlayResponse = {
+        status: 'ok',
+        hidden: hidden
+      };
+      this.sendJson(client, ArkJSON.stringify(response));
+      return;
+    }
+
+    if (reqType === 'capture_overlay_restore') {
+      let hidden = this.getBoolean(req, 'hidden');
+      await AgentExecutionController.restoreCaptureOverlay(hidden);
       this.sendStatus(client, 'ok');
       return;
     }
@@ -720,6 +742,11 @@ export class AgentRouterServer {
   private getString(req: RequestMap, key: string): string {
     let value = req[key];
     return typeof value === 'string' ? value : '';
+  }
+
+  private getBoolean(req: RequestMap, key: string): boolean {
+    let value = req[key];
+    return value === true || value === 'true';
   }
 
   private sendJson(client: socket.TCPSocketConnection, payload: string): void {

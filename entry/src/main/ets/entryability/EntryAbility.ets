@@ -58,6 +58,9 @@ export default class EntryAbility extends UIAbility {
     AgentExecutionController.setFloatPanelMoveHandler((phase: string) => {
       this.handleFloatPanelMove(phase);
     });
+    AgentExecutionController.setCaptureOverlayHandler(async (hidden: boolean): Promise<boolean> => {
+      return await this.handleCaptureOverlayVisibility(hidden);
+    });
     AgentExecutionController.setReturnToAppHandler(() => {
       let wantInfo: Want = {
         bundleName: 'com.example.mnnllmchat',
@@ -74,6 +77,7 @@ export default class EntryAbility extends UIAbility {
     AgentExecutionController.setFloatWindowSyncHandler(null);
     AgentExecutionController.setFloatPanelLayoutHandler(null);
     AgentExecutionController.setFloatPanelMoveHandler(null);
+    AgentExecutionController.setCaptureOverlayHandler(null);
     AgentExecutionController.setReturnToAppHandler(null);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
@@ -150,6 +154,51 @@ export default class EntryAbility extends UIAbility {
       return;
     }
     this.destroyFloatWindow();
+  }
+
+  private async handleCaptureOverlayVisibility(hidden: boolean): Promise<boolean> {
+    if (hidden) {
+      if (!this.floatWindow) {
+        return false;
+      }
+      try {
+        // HarmonyOS Window 没有 hideWindow 接口。截图前只销毁可点击的执行状态面板，
+        // 保留不可触摸的边缘流光层，避免面板内容进入截图并影响视觉识别。
+        let win = this.floatWindow;
+        this.syncFloatPanelWindowRect();
+        this.unregisterFloatPanelRectChange();
+        await win.destroyWindow();
+        if (this.floatWindow === win) {
+          this.floatWindow = null;
+        }
+        return true;
+      } catch (err) {
+        if (this.floatWindow) {
+          this.registerFloatPanelRectChange(this.floatWindow);
+        }
+        hilog.error(DOMAIN, 'testTag', 'Failed to hide float window for capture. Cause: %{public}s',
+          JSON.stringify(err));
+        return false;
+      }
+    }
+
+    if (!AgentExecutionController.isExecutionActive()) {
+      return false;
+    }
+    if (!this.floatWindow) {
+      // 截图后按原执行态重建状态面板，位置与展开态由已缓存的布局状态恢复。
+      this.createFloatPanelWindow();
+      return true;
+    }
+    try {
+      this.layoutFloatPanelWindow(AgentExecutionController.isFloatPanelExpanded());
+      await this.floatWindow.showWindow();
+      return true;
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to restore float window after capture. Cause: %{public}s',
+        JSON.stringify(err));
+      return false;
+    }
   }
 
   private getDisplaySize(): DisplaySize {
@@ -424,4 +473,3 @@ export default class EntryAbility extends UIAbility {
     }
   }
 }
-

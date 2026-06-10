@@ -1,5 +1,6 @@
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
+import { AgentExecutionController } from './AgentExecutionController';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 
 interface HdcBridgeRequest {
@@ -42,6 +43,12 @@ export class HdcWorkflowBridge {
       url = url.substring(0, url.length - 1);
     }
     return url + '/api/workflow';
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(resolve, ms);
+    });
   }
 
   async request(action: string, payload: WorkflowJsonMap = {}): Promise<HdcBridgeResponse> {
@@ -100,14 +107,22 @@ export class HdcWorkflowBridge {
   }
 
   async screenshot(): Promise<HdcBridgeResponse> {
-    let payload: ScreenshotPayload = {
-      factor: 0.5
-    };
-    let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
-    if (response.status !== 'ok' || !response.image_b64) {
-      throw new Error(response.message || 'screenshot failed');
+    let restoreToken = await AgentExecutionController.hideCaptureOverlay();
+    try {
+      if (restoreToken) {
+        await this.sleep(120);
+      }
+      let payload: ScreenshotPayload = {
+        factor: 0.5
+      };
+      let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
+      if (response.status !== 'ok' || !response.image_b64) {
+        throw new Error(response.message || 'screenshot failed');
+      }
+      return response;
+    } finally {
+      await AgentExecutionController.restoreCaptureOverlay(restoreToken);
     }
-    return response;
   }
 
   async executeModelAction(responseText: string, width: number, height: number): Promise<HdcBridgeResponse> {

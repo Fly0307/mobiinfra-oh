@@ -2,6 +2,7 @@ type CancelHandler = () => Promise<void> | void;
 type VoidHandler = () => void;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
 type FloatPanelMoveHandler = (phase: string) => void;
+type CaptureOverlayHandler = (hidden: boolean) => Promise<boolean>;
 
 const PAUSE_POLL_INTERVAL_MS = 200;
 
@@ -16,6 +17,9 @@ export class AgentExecutionController {
   private static floatPanelLayoutHandler: FloatPanelLayoutHandler | null = null;
   private static floatPanelMoveHandler: FloatPanelMoveHandler | null = null;
   private static returnToAppHandler: VoidHandler | null = null;
+  private static captureOverlayHandler: CaptureOverlayHandler | null = null;
+  private static captureOverlayHideDepth: number = 0;
+  private static captureOverlayHidden: boolean = false;
 
   private static warn(message: string, err: Object): void {
     console.warn(`[AgentExecutionController] ${message}: ${String(err)}`);
@@ -67,6 +71,8 @@ export class AgentExecutionController {
     AgentExecutionController.cancelRequested = false;
     AgentExecutionController.pauseRequested = false;
     AgentExecutionController.floatPanelExpanded = false;
+    AgentExecutionController.captureOverlayHideDepth = 0;
+    AgentExecutionController.captureOverlayHidden = false;
     AppStorage.setOrCreate('agentExecutionActive', false);
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
@@ -80,6 +86,8 @@ export class AgentExecutionController {
     AgentExecutionController.executionActive = false;
     AgentExecutionController.pauseRequested = false;
     AgentExecutionController.floatPanelExpanded = false;
+    AgentExecutionController.captureOverlayHideDepth = 0;
+    AgentExecutionController.captureOverlayHidden = false;
     AppStorage.setOrCreate('agentCancelRequested', true);
     AppStorage.setOrCreate('agentExecutionActive', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
@@ -167,6 +175,53 @@ export class AgentExecutionController {
 
   static setReturnToAppHandler(handler: VoidHandler | null): void {
     AgentExecutionController.returnToAppHandler = handler;
+  }
+
+  static setCaptureOverlayHandler(handler: CaptureOverlayHandler | null): void {
+    AgentExecutionController.captureOverlayHandler = handler;
+  }
+
+  static async hideCaptureOverlay(): Promise<boolean> {
+    if (!AgentExecutionController.executionActive) {
+      return false;
+    }
+    AgentExecutionController.captureOverlayHideDepth += 1;
+    if (AgentExecutionController.captureOverlayHidden) {
+      return false;
+    }
+    if (!AgentExecutionController.captureOverlayHandler) {
+      return false;
+    }
+    try {
+      let hidden = await AgentExecutionController.captureOverlayHandler(true);
+      AgentExecutionController.captureOverlayHidden = hidden;
+      return hidden;
+    } catch (e) {
+      AgentExecutionController.warn('capture overlay hide failed', e as Object);
+      return false;
+    }
+  }
+
+  static async restoreCaptureOverlay(token: boolean): Promise<void> {
+    void token;
+    if (AgentExecutionController.captureOverlayHideDepth > 0) {
+      AgentExecutionController.captureOverlayHideDepth -= 1;
+    }
+    if (AgentExecutionController.captureOverlayHideDepth > 0) {
+      return;
+    }
+    if (!AgentExecutionController.captureOverlayHidden) {
+      return;
+    }
+    AgentExecutionController.captureOverlayHidden = false;
+    if (!AgentExecutionController.captureOverlayHandler) {
+      return;
+    }
+    try {
+      await AgentExecutionController.captureOverlayHandler(false);
+    } catch (e) {
+      AgentExecutionController.warn('capture overlay restore failed', e as Object);
+    }
   }
 
   static returnToApp(): boolean {

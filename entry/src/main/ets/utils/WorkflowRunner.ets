@@ -3,6 +3,7 @@ import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
+import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
 import {
   WorkflowCondition,
@@ -176,6 +177,8 @@ export class WorkflowRunner {
   private aliasStack: Record<string, string>[] = [];
   private runtimeStack: RuntimeScope[] = [];
   private runDir: string = '';
+  private runStartedAt: Date = new Date(0);
+  private dateContext: WorkflowDateContext = new WorkflowDateContext(new Date(0));
   private runDate: string = '';
   private workflowFile: string = '';
   private runningTask: WorkflowTask | null = null;
@@ -195,7 +198,7 @@ export class WorkflowRunner {
 
   private workflowJsonForRun(task: WorkflowTask): string {
     try {
-      return WorkflowStorage.readText(this.workflowFile);
+      return WorkflowStorage.readTaskWorkflowJson(this.filesDir, task);
     } catch (e) {
       let err = e as Error;
       this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
@@ -215,12 +218,16 @@ export class WorkflowRunner {
     this.currentPackageName = '';
     this.latestDailyLogPath = '';
     this.pendingSummaryJobs = [];
-    this.runDate = this.formatDate(new Date());
+    this.runStartedAt = new Date();
+    this.dateContext = new WorkflowDateContext(this.runStartedAt);
+    this.runDate = this.dateContext.runDate();
     this.runDir = this.createRunDir(task);
 
     this.log('====== Workflow started ======');
     this.log('任务：' + task.title);
+    this.log('run 目录已创建：' + this.runDir);
     AgentExecutionController.beginExecution('Workflow 启动：' + task.title);
+    this.writeRunSummary('running');
 
     let status = 'success';
     let message = 'Workflow 执行完成';
@@ -228,7 +235,6 @@ export class WorkflowRunner {
     try {
       let steps = this.normalizeSteps(this.workflow.steps);
       await this.executeSteps(steps, '', {});
-      await this.flushPendingSummaryJobs();
       if (AgentExecutionController.isCancelRequested()) {
         status = 'cancelled';
         message = '用户取消 workflow';
@@ -238,6 +244,27 @@ export class WorkflowRunner {
       status = AgentExecutionController.isCancelRequested() ? 'cancelled' : 'failed';
       message = err.message || String(e);
       this.log('Workflow 失败：' + message);
+    }
+
+    if (status !== 'cancelled' && !AgentExecutionController.isCancelRequested()) {
+      try {
+        await this.flushPendingSummaryJobs();
+        if (AgentExecutionController.isCancelRequested()) {
+          status = 'cancelled';
+          message = '用户取消 workflow';
+        }
+      } catch (e) {
+        let err = e as Error;
+        let flushMessage = err.message || String(e);
+        this.log('Workflow deferred summary flush failed: ' + flushMessage);
+        if (AgentExecutionController.isCancelRequested()) {
+          status = 'cancelled';
+          message = '用户取消 workflow';
+        } else if (status === 'success') {
+          status = 'failed';
+          message = flushMessage;
+        }
+      }
     }
 
     this.writeRunSummary(status);
@@ -296,7 +323,7 @@ export class WorkflowRunner {
 
   private createRunDir(task: WorkflowTask): string {
     WorkflowStorage.ensureWorkspace(this.filesDir);
-    let stamp = this.formatTimestamp(new Date());
+    let stamp = this.formatTimestamp(this.runStartedAt);
     let safeName = this.sanitizeFileName(task.source || task.id);
     let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
     WorkflowStorage.ensureDirectory(dir);
@@ -497,7 +524,7 @@ export class WorkflowRunner {
     try {
       let template = await this.hdcBridge.loadPromptTemplate('planner_oneshot_harmony.md');
       if (template.trim().length === 0) {
-        return fallbackPrompt;
+        return this.withExecutionDatePrompt(fallbackPrompt, 'Planner 用户任务');
       }
       let prompt = template.replace('{task_description}', taskDescription)
         .replace('<task_description>', taskDescription)
@@ -506,15 +533,20 @@ export class WorkflowRunner {
       if (prompt.indexOf(taskDescription) === -1) {
         prompt += '\n\n原始用户任务描述："' + taskDescription + '"';
       }
-      return prompt;
+      return this.withExecutionDatePrompt(prompt, 'Planner 用户任务');
     } catch (e) {
       let err = e as Error;
       this.log('加载共享 planner prompt 失败，使用内置 fallback：' + (err.message || String(e)));
-      return fallbackPrompt;
+      return this.withExecutionDatePrompt(fallbackPrompt, 'Planner 用户任务');
     }
   }
 
+  private withExecutionDatePrompt(prompt: string, sectionTitle: string): string {
+    return this.dateContext.withDatePrompt(prompt, sectionTitle);
+  }
+
   private async runDeciderLoop(taskDescription: string): Promise<string> {
+    let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
     let stopReason = 'MAX_STEPS_REACHED';
     for (let i = 0; i < MAX_GUI_STEPS; i++) {
@@ -531,7 +563,7 @@ export class WorkflowRunner {
       let width = shot.width || 0;
       let height = shot.height || 0;
       this.log('Decider 截图完成：' + width + 'x' + height);
-      let response = await this.cloudClient.chatQwenDecider(taskDescription, history, imageBase64, this.cloudConfigProvider());
+      let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
       this.log('Decider response:\n' + response);
       let parsed = this.extractJsonMap(response);
       let action = this.getMapString(parsed, 'action').toLowerCase();
@@ -555,11 +587,15 @@ export class WorkflowRunner {
     };
     if (action === 'screenshot') {
       let shot = await this.hdcBridge.screenshot();
-      output.image_path = shot.image_b64 || '';
-      output.image_b64 = shot.image_b64 || '';
+      let imageBase64 = shot.image_b64 || '';
+      let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
+      let imagePath = this.stepDir(actualId) + '/' + imageFileName;
+      WorkflowStorage.writeBase64Image(imagePath, imageBase64);
+      output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
+      output.image_b64 = imageBase64;
       output.width = shot.width || 0;
       output.height = shot.height || 0;
-      output.file_name = step.file_name || 'screenshot.jpg';
+      output.file_name = imageFileName;
       return output as Object as WorkflowJsonMap;
     }
 
@@ -622,15 +658,17 @@ export class WorkflowRunner {
     if (question.length === 0 || image.length === 0) {
       throw new Error('vlm_qa requires question and image');
     }
+    let imageBase64 = WorkflowStorage.resolveWorkflowImageInputAsBase64(this.filesDir, image);
     let requiresStructuredOutput = inputs.json_schema !== undefined && inputs.json_schema !== null;
-    let prompt = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
+    let promptBody = mode === 'summary' ? '请基于给定图片做总结：' + question : question;
+    let prompt = this.withExecutionDatePrompt(promptBody, 'VLM 图片问答问题');
     if (requiresStructuredOutput) {
       prompt += '\n请严格输出一个 JSON 对象，不要输出 markdown 或额外解释。JSON Schema：' +
         ArkJSON.stringify(inputs.json_schema);
     }
     if (mode === 'summary' && inputs.blocking !== true && !requiresStructuredOutput) {
       this.log('VLM QA summary 已转为后台执行，先继续后续滑动步骤：' + actualId);
-      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, image));
+      this.pendingSummaryJobs.push(this.createSummaryJob(actualId, prompt, imageBase64));
       let deferredOutput: ToolOutput = {
         step_dir: this.stepDir(actualId),
         tool_name: toolName,
@@ -642,7 +680,7 @@ export class WorkflowRunner {
       return deferredOutput as Object as WorkflowJsonMap;
     }
     this.log('VLM QA request started: ' + actualId);
-    let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
+    let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
     this.log('VLM QA response:\n' + response);
     let output: ToolOutput = {
       step_dir: this.stepDir(actualId),
@@ -663,18 +701,18 @@ export class WorkflowRunner {
     return output as Object as WorkflowJsonMap;
   }
 
-  private createSummaryJob(actualId: string, prompt: string, image: string): PendingSummaryJob {
+  private createSummaryJob(actualId: string, prompt: string, imageBase64: string): PendingSummaryJob {
     return {
       actual_id: actualId,
       prompt: prompt,
-      image: image,
-      promise: this.startSummaryJob(actualId, prompt, image)
+      image: imageBase64,
+      promise: this.startSummaryJob(actualId, prompt, imageBase64)
     };
   }
 
-  private async startSummaryJob(actualId: string, prompt: string, image: string): Promise<SummaryJobResult> {
+  private async startSummaryJob(actualId: string, prompt: string, imageBase64: string): Promise<SummaryJobResult> {
     try {
-      let response = await this.cloudClient.chatImageQuestion(prompt, image, this.cloudConfigProvider());
+      let response = await this.cloudClient.chatImageQuestion(prompt, imageBase64, this.cloudConfigProvider());
       return this.normalizeSummaryJobResult({
         ok: true,
         actual_id: actualId,
@@ -726,6 +764,10 @@ export class WorkflowRunner {
     let failures: string[] = [];
     for (let i = 0; i < jobs.length; i++) {
       let result = await this.resolveSummaryJob(jobs[i]);
+      if (AgentExecutionController.isCancelRequested()) {
+        this.log('用户取消 workflow，停止等待后台 summary 写入');
+        break;
+      }
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
         let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(result.response));
@@ -929,12 +971,27 @@ export class WorkflowRunner {
     let current: WorkflowJsonValue = root;
     for (let i = start; i < parts.length; i++) {
       let map = current as WorkflowJsonMap;
-      current = map[parts[i]];
+      let key = parts[i];
+      current = map[key];
+      if ((current === undefined || current === null) && key === 'image_path') {
+        current = this.legacyImagePathAlias(map);
+      }
       if (current === undefined || current === null) {
         return null;
       }
     }
     return current;
+  }
+
+  private legacyImagePathAlias(map: WorkflowJsonMap): WorkflowJsonValue {
+    if (map['action'] !== 'screenshot') {
+      return null;
+    }
+    let imageBase64 = map['image_b64'];
+    if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
+      return imageBase64;
+    }
+    return null;
   }
 
   private stepResultToMap(result: WorkflowStepResult): WorkflowJsonMap {
@@ -1030,7 +1087,7 @@ export class WorkflowRunner {
   }
 
   private appendDailySummaryLog(summaryText: string): string {
-    let text = summaryText.trim();
+    let text = this.dateContext.normalizeDailyLogText(summaryText.trim());
     if (text.length === 0) {
       return '';
     }
@@ -1228,6 +1285,16 @@ export class WorkflowRunner {
     return dir;
   }
 
+  private screenshotFileName(value: string): string {
+    let safeName = this.sanitizeFileName(value);
+    let lower = safeName.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') ||
+      lower.endsWith('.webp') || lower.endsWith('.gif')) {
+      return safeName;
+    }
+    return safeName + '.jpg';
+  }
+
   private sanitizeFileName(value: string): string {
     let sanitized = value.trim();
     sanitized = sanitized.replace(/[\\/:*?"<>|]+/g, '_');
@@ -1236,13 +1303,6 @@ export class WorkflowRunner {
       return 'workflow';
     }
     return sanitized;
-  }
-
-  private formatDate(date: Date): string {
-    let y = date.getFullYear();
-    let m = (date.getMonth() + 1).toString().padStart(2, '0');
-    let d = date.getDate().toString().padStart(2, '0');
-    return y + '-' + m + '-' + d;
   }
 
   private formatTimestamp(date: Date): string {

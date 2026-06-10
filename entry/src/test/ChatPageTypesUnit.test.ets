@@ -18,6 +18,7 @@ export default function chatPageTypesUnitTest() {
 
     it('keepsLocalInferenceAsSecondaryMode', 0, () => {
       expect(chatModeLabel(CHAT_MODE_LOCAL_INFERENCE)).assertEqual('本地推理');
+      expect(chatModePlaceholder(CHAT_MODE_LOCAL_INFERENCE)).assertEqual('输入本地模型消息...');
       expect(isSupportedChatMode(CHAT_MODE_LOCAL_INFERENCE)).assertTrue();
       expect(isSupportedChatMode('unknown')).assertFalse();
     });

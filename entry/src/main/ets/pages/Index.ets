@@ -457,13 +457,14 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
-    this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
-      this.output = msg;
-      let match = msg.match(/<img>(.*?)<hw>/);
-      if (match && match[1]) {
-        this.debugImagePath = 'file://' + match[1];
-      }
-    }, async (response: string) => {
+    this.agentRouter.configureLocal(mnnllm.agentPrefill, mnnllm.agentStep, mnnllm.agentReset, mnnllm.chat, mnnllm.reset,
+      (msg: string) => {
+        this.output = msg;
+        let match = msg.match(/<img>(.*?)<hw>/);
+        if (match && match[1]) {
+          this.debugImagePath = 'file://' + match[1];
+        }
+      }, async (response: string) => {
       if (this.autoConfirm) { return true; }
       return new Promise<boolean>((resolve) => {
         promptAction.showDialog({

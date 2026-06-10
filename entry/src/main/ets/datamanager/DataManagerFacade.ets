@@ -250,11 +250,21 @@ export class DataManagerFacade {
       let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
-      if (groups.updatedGroupDocs > 0 || !recommendations.reused) {
+      if (groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
+        let actions: string[] = [];
+        if (groups.updatedGroupDocs > 0) {
+          actions.push(`补充更新 ${groups.updatedGroupDocs} 个采集分组`);
+        }
+        if (!recommendations.reused) {
+          actions.push(`生成 ${recommendations.recommendationCount} 条待办推荐`);
+        }
+        if (recommendations.prunedCount > 0) {
+          actions.push(`清理 ${recommendations.prunedCount} 条过期待办推荐`);
+        }
         skipped.skipped = false;
-        skipped.message = `daily-log 无新增，补充更新 ${groups.updatedGroupDocs} 个采集分组，生成 ${recommendations.recommendationCount} 条待办推荐`;
+        skipped.message = `daily-log 无新增，${actions.join('，')}`;
       }
-      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}`);
+      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}, prunedRecommendations=${recommendations.prunedCount}`);
       this.emitProgress(progress, '完成', 'daily-log 无新增', 100, 100, 100);
       return skipped;
     }
@@ -550,6 +560,7 @@ export class DataManagerFacade {
   }
 
   loadHomeViewModel(): HomeProfileViewModel {
+    this.homeRecommendationService.pruneInactiveRecommendationsForToday();
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
       return createEmptyHomeProfileViewModel();

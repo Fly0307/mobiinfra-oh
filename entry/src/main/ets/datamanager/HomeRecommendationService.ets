@@ -24,6 +24,12 @@ export interface HomeRecommendationBuildResult {
   totalEvents: number;
   recommendationCount: number;
   reused: boolean;
+  prunedCount: number;
+}
+
+export interface HomeRecommendationPruneResult {
+  document: HomeRecommendationsDocument;
+  prunedCount: number;
 }
 
 interface HomeRecommendationPlanningContext {
@@ -77,6 +83,52 @@ export function isCurrentOrFutureTodoDeadline(deadline: string, today: string): 
   return isIsoDate(deadline) && isIsoDate(today) && deadline >= today;
 }
 
+export function pruneHomeRecommendationsDocument(document: HomeRecommendationsDocument, candidateEventIds: string[]): HomeRecommendationPruneResult {
+  let candidates: Record<string, boolean> = new Object() as Record<string, boolean>;
+  (candidateEventIds || []).forEach((id: string) => {
+    let normalized = normalizeFreeText(id);
+    if (normalized.length > 0) {
+      candidates[normalized] = true;
+    }
+  });
+
+  let recommendations: HomeRecommendationState[] = [];
+  let prunedCount = 0;
+  (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+    let sourceEventIds = item.source_event_ids || [];
+    if (sourceEventIds.length === 0) {
+      prunedCount++;
+      return;
+    }
+    for (let sourceEventId of sourceEventIds) {
+      let normalized = normalizeFreeText(sourceEventId);
+      if (normalized.length === 0 || candidates[normalized] !== true) {
+        prunedCount++;
+        return;
+      }
+    }
+    recommendations.push(item);
+  });
+
+  if (prunedCount === 0) {
+    return {
+      document: document,
+      prunedCount: 0
+    };
+  }
+
+  let prunedDocument: HomeRecommendationsDocument = {
+    generated_at: normalizeFreeText(document.generated_at),
+    input_hash: normalizeFreeText(document.input_hash),
+    total_events: candidateEventIds.length,
+    recommendations: recommendations
+  };
+  return {
+    document: prunedDocument,
+    prunedCount: prunedCount
+  };
+}
+
 export function recommendationTodoDeadlineMeta(deadline: string): string {
   if (!isIsoDate(deadline)) {
     return '';
@@ -114,16 +166,22 @@ export class HomeRecommendationService {
     let context = this.planningContext();
     let inputHash = this.inputHash(context, modelConfig);
     let previous = this.loadDocument();
+    let pruneResult = pruneHomeRecommendationsDocument(previous, context.candidateEventIds);
+    previous = pruneResult.document;
     let previousGenerated = normalizeFreeText(previous.generated_at).length > 0;
     let previousHasInputHash = normalizeFreeText(previous.input_hash).length > 0;
     let previousEmptyButMissing = (previous.recommendations || []).length === 0 && (!previousGenerated || !previousHasInputHash);
     let shouldRebuildEmpty = forceWhenEmpty && context.candidateEventIds.length > 0 && previousEmptyButMissing;
     if (previous.input_hash === inputHash && !shouldRebuildEmpty) {
-      dataManagerInfo(`Home recommendations reused: events=${context.candidateEventIds.length}, recommendations=${previous.recommendations.length}`);
+      if (pruneResult.prunedCount > 0) {
+        this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), previous as Object);
+      }
+      dataManagerInfo(`Home recommendations reused: events=${context.candidateEventIds.length}, recommendations=${previous.recommendations.length}, pruned=${pruneResult.prunedCount}`);
       return {
         totalEvents: context.candidateEventIds.length,
         recommendationCount: previous.recommendations.length,
-        reused: true
+        reused: true,
+        prunedCount: pruneResult.prunedCount
       };
     }
     if (shouldRebuildEmpty) {
@@ -141,12 +199,25 @@ export class HomeRecommendationService {
     return {
       totalEvents: context.candidateEventIds.length,
       recommendationCount: recommendations.length,
-      reused: false
+      reused: false,
+      prunedCount: pruneResult.prunedCount
     };
   }
 
   loadDocument(): HomeRecommendationsDocument {
     return this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
+  }
+
+  pruneInactiveRecommendationsForToday(): number {
+    this.paths.ensureBaseDirs();
+    let context = this.planningContext();
+    let document = this.loadDocument();
+    let result = pruneHomeRecommendationsDocument(document, context.candidateEventIds);
+    if (result.prunedCount > 0) {
+      this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), result.document as Object);
+      dataManagerInfo(`Home recommendations pruned: events=${context.candidateEventIds.length}, pruned=${result.prunedCount}, recommendations=${result.document.recommendations.length}`);
+    }
+    return result.prunedCount;
   }
 
   private planningContext(): HomeRecommendationPlanningContext {

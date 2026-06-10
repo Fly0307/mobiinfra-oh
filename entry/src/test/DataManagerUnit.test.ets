@@ -21,6 +21,7 @@ import {
   homeRecommendationSourceInputFingerprint,
   isHomeRecommendationSourceReusable,
   isCurrentOrFutureTodoDeadline,
+  pruneHomeRecommendationsDocument,
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
@@ -538,6 +539,48 @@ export default function dataManagerUnitTest() {
       expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e2'], [])).assertFalse();
       expect(isHomeRecommendationSourceReusable('hash-1', 'hash-1', ['e1'], ['e1', 'e2'], ['e1'])).assertFalse();
       expect(isHomeRecommendationSourceReusable('', 'hash-1', ['e1'], ['e1'], [])).assertFalse();
+    });
+
+    it('homeRecommendationPruneRemovesInactiveSources', 0, () => {
+      let emptySource = demoRecommendationState('todo-empty', false);
+      emptySource.source_event_ids = [];
+      let missingSource = demoRecommendationState('todo-missing', false);
+      missingSource.source_event_ids = ['missing'];
+      let mixedSource = demoRecommendationState('todo-mixed', false);
+      mixedSource.source_event_ids = ['e1', 'missing'];
+      let active = demoRecommendationState('todo-active', false);
+      active.source_event_ids = ['e1'];
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'same-input-hash',
+        total_events: 4,
+        recommendations: [emptySource, missingSource, mixedSource, active]
+      };
+
+      let result = pruneHomeRecommendationsDocument(document, ['e1', 'e2']);
+      expect(result.prunedCount).assertEqual(3);
+      expect(result.document.input_hash).assertEqual('same-input-hash');
+      expect(result.document.total_events).assertEqual(2);
+      expect(result.document.recommendations.length).assertEqual(1);
+      expect(result.document.recommendations[0].id).assertEqual('todo-active');
+    });
+
+    it('homeRecommendationPruneKeepsActiveCompletedAndHashMismatch', 0, () => {
+      let activeCompleted = demoRecommendationState('todo-completed', true);
+      activeCompleted.source_event_ids = ['e1'];
+      activeCompleted.source_input_hash = 'old-source-hash';
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'same-input-hash',
+        total_events: 1,
+        recommendations: [activeCompleted]
+      };
+
+      let result = pruneHomeRecommendationsDocument(document, ['e1']);
+      expect(result.prunedCount).assertEqual(0);
+      expect(result.document.recommendations.length).assertEqual(1);
+      expect(result.document.recommendations[0].completed).assertTrue();
+      expect(result.document.recommendations[0].source_input_hash).assertEqual('old-source-hash');
     });
 
     it('homeRecommendationCompletionDocumentToggle', 0, () => {

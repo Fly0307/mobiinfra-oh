@@ -457,7 +457,13 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
-    this.agentRouter.configureLocal(mnnllm.agentPrefill, mnnllm.agentStep, mnnllm.agentReset, mnnllm.chat, mnnllm.reset,
+    this.agentRouter.configureLocal(
+      (prefix: string): Promise<string> => mnnllm.agentPrefill(prefix),
+      (variablePart: string, onToken?: (token: string) => void): Promise<string> =>
+        mnnllm.agentStep(variablePart, onToken),
+      (): Promise<string> => mnnllm.agentReset(),
+      (userMessage: string): string => mnnllm.chat(userMessage),
+      (): string => mnnllm.reset(),
       (msg: string) => {
         this.output = msg;
         let match = msg.match(/<img>(.*?)<hw>/);

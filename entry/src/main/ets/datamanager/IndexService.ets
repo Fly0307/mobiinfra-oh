@@ -9,7 +9,6 @@ import {
   ConsolidatedState,
   DataManagerModelConfig,
   DataManagerProgressCallback,
-  DOMAIN_DESCRIPTIONS,
   DOMAIN_DISPLAY_NAMES,
   DOMAIN_KEYS,
   EntityMention,
@@ -32,6 +31,7 @@ import {
   createStringMap
 } from './DataManagerTypes';
 import {
+  addDays,
   dateToTime,
   deriveProfileDomains,
   displayDomainName,
@@ -50,7 +50,6 @@ import {
   normalizeProfileShortSummary,
   nowIsoLocal,
   parseNumberedEntries,
-  profileShortSummaryFromText,
   publicEvent,
   sourceSearchText,
   stableUnique,
@@ -95,13 +94,8 @@ interface IndexManifest {
   index_dir: string;
   run_root: string;
   enrichment: EnrichmentManifest;
-  domains: string[];
   entity_types: string[];
   sources: SourceManifestMap;
-  event_count: number;
-  profile_generated_at: string;
-  profile_claim_count: number;
-  profile_domains: NumberMap;
 }
 
 type EventGroupMap = Record<string, IndexedEvent[]>;
@@ -110,28 +104,22 @@ type TemporalDocumentMap = Record<string, TemporalDocument>;
 type ProfileDomainMap = Record<string, ProfileDomainState>;
 
 interface InvertedDocument {
-  normalization: string;
   postings: StringArrayMap;
 }
 
 interface SourceDocument {
-  normalization: string;
-  sources: StringArrayMap;
   postings: StringArrayMap;
 }
 
 interface DomainDocument {
-  domains: StringMap;
   postings: StringArrayMap;
 }
 
 interface WorkflowSceneDocument {
-  scenes: StringMap;
   postings: StringArrayMap;
 }
 
 interface HomeTodoDocument {
-  normalization: string;
   deadline_postings: StringArrayMap;
   no_deadline_event_ids: string[];
   type_postings: StringArrayMap;
@@ -147,9 +135,6 @@ interface EntityDefinition {
 type EntityDefinitionMap = Record<string, EntityDefinition>;
 
 interface EntityDocument {
-  types: string[];
-  type_descriptions: StringMap;
-  entity_types: string[];
   entities: EntityDefinitionMap;
   alias_postings: StringArrayMap;
 }
@@ -163,10 +148,6 @@ interface ImageReferenceCandidate {
 type ImageReferenceCandidateMap = Record<string, ImageReferenceCandidate[]>;
 
 const ENTITY_TYPE_KEYS: string[] = ['person', 'place', 'merchant'];
-const ENTITY_TYPE_DESCRIPTIONS: StringMap = createStringMap();
-ENTITY_TYPE_DESCRIPTIONS['person'] = '现实中的个人或联系人';
-ENTITY_TYPE_DESCRIPTIONS['place'] = '现实地点、地址、场馆或地理位置';
-ENTITY_TYPE_DESCRIPTIONS['merchant'] = '提供商品或服务的商户、门店或商业品牌';
 
 const PROFILE_MODEL_MAX_TOKENS: number = 3000;
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
@@ -214,6 +195,15 @@ export function isHomeTodoIndexCandidate(todo: IndexedEventTodo, eventSceneIds: 
   return true;
 }
 
+export function isRecentNoDeadlineHomeTodoEvent(eventDate: string, today: string, recentDays: number): boolean {
+  if (!isIsoDate(eventDate) || !isIsoDate(today)) {
+    return false;
+  }
+  let days = Math.max(0, recentDays);
+  let recentLowerBoundExclusive = addDays(today, -days);
+  return eventDate > recentLowerBoundExclusive;
+}
+
 function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
   for (let sceneId of selectedSceneIds) {
     if (eventSceneIds.indexOf(sceneId) >= 0) {
@@ -241,6 +231,50 @@ export function eventEnrichInputFingerprint(event: IndexedEvent): string {
 
 export function isEventEnrichInputReusable(previousHash: string, currentHash: string, previousEventExists: boolean): boolean {
   return previousEventExists && normalizeFreeText(previousHash).length > 0 && previousHash === currentHash;
+}
+
+function profileGenerationFromModelPayload(payload: ProfileModelPayload, claims: ProfileClaim[]): string {
+  let generation = normalizeFreeText(payload.generation);
+  if (claims.length === 0) {
+    if (generation === 'model') {
+      return 'model_empty';
+    }
+    return generation.length > 0 ? generation : 'model_empty';
+  }
+  return 'model';
+}
+
+export function isProfileDomainStateReusable(domain: ProfileDomainState | undefined, eventCount: number): boolean {
+  if (!domain || !Array.isArray(domain.claims)) {
+    return false;
+  }
+  let generation = normalizeFreeText(domain.generation);
+  if (generation === 'model' || generation === 'model_empty') {
+    return true;
+  }
+  return generation === 'empty' && eventCount === 0;
+}
+
+export function buildProfileDomainStateFromPayload(domain: string, inputHash: string, eventIds: string[], eventCount: number,
+  dateRange: StringMap, payload: ProfileModelPayload, claims: ProfileClaim[]): ProfileDomainState {
+  let generation = profileGenerationFromModelPayload(payload, claims);
+  let hasModelClaims = generation === 'model' && claims.length > 0;
+  let range: StringMap = createStringMap();
+  range.start_date = dateRange ? dateRange.start_date || '' : '';
+  range.end_date = dateRange ? dateRange.end_date || '' : '';
+  let domainState: ProfileDomainState = {
+    domain: domain,
+    display_name: DOMAIN_DISPLAY_NAMES[domain] || domain,
+    input_hash: inputHash,
+    event_ids: eventIds.slice(),
+    event_count: eventCount,
+    date_range: range,
+    short_summary: hasModelClaims ? normalizeProfileShortSummary(payload.short_summary) : '',
+    summary: hasModelClaims ? normalizeFreeText(payload.summary) : '',
+    claims: hasModelClaims ? claims : [],
+    generation: generation
+  };
+  return domainState;
 }
 
 export class IndexService {
@@ -346,7 +380,7 @@ export class IndexService {
     let currentIds = Object.keys(events).sort();
     let previousIds = Object.keys(previousEvents).sort();
     let entityDocument = reuseAllowed && enrichedEventsCount === 0 && this.sameStringArrays(currentIds, previousIds) &&
-      this.sameStringArrays(this.entityTypeList(previousEntity), ENTITY_TYPE_KEYS) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
+      this.hasEntityIndexData(previousEntity) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
     await this.writeTemporalDocuments(events, modelConfig, reuseAllowed);
     this.emitProgress(progress, '生成画像', '正在生成用户画像', 90, 100, 90);
@@ -361,13 +395,8 @@ export class IndexService {
       index_dir: 'workflows/profile-consolidation/indexes',
       run_root: 'workflows/runs',
       enrichment: enrichment,
-      domains: DOMAIN_KEYS,
       entity_types: ENTITY_TYPE_KEYS,
-      sources: sources,
-      event_count: Object.keys(events).length,
-      profile_generated_at: profile.generated_at,
-      profile_claim_count: profile.claim_count,
-      profile_domains: this.profileDomainCounts(profile)
+      sources: sources
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
     dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${reusedEvents}, enriched=${enrichedEventsCount}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
@@ -505,18 +534,25 @@ export class IndexService {
     return result;
   }
 
-  loadHomeTodoCandidateEvents(today: string, noDeadlineLimit: number): EventMap {
+  loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
     let document = this.storage.readJson<HomeTodoDocument>(
       this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
-    let eventIds: string[] = [];
+    let deadlineEventIds: string[] = [];
     let deadlinePostings = document.deadline_postings || {};
     Object.keys(deadlinePostings).sort().forEach((deadline: string) => {
-      if (isIsoDate(deadline) && isIsoDate(today) && deadline > today) {
-        eventIds = eventIds.concat(deadlinePostings[deadline] || []);
+      if (isIsoDate(deadline) && isIsoDate(today) && deadline >= today) {
+        deadlineEventIds = deadlineEventIds.concat(deadlinePostings[deadline] || []);
       }
     });
-    eventIds = eventIds.concat((document.no_deadline_event_ids || []).slice(0, Math.max(0, noDeadlineLimit)));
-    return this.loadEventsByIds(stableUnique(eventIds));
+    let result = this.loadEventsByIds(stableUnique(deadlineEventIds));
+    let noDeadlineEvents = this.loadEventsByIds(stableUnique(document.no_deadline_event_ids || []));
+    Object.keys(noDeadlineEvents).forEach((eventId: string) => {
+      let event = noDeadlineEvents[eventId];
+      if (isRecentNoDeadlineHomeTodoEvent(event.event_date, today, noDeadlineRecentDays)) {
+        result[eventId] = event;
+      }
+    });
+    return result;
   }
 
   private queryCandidateIds(options: QueryOptions): string[] {
@@ -1238,7 +1274,6 @@ export class IndexService {
     });
     Object.keys(postings).forEach((term: string) => postings[term] = stableUnique(postings[term]).sort());
     let document: InvertedDocument = {
-      normalization: 'lowercase compact text with adjacent CJK/alphanumeric bigram postings; one-character queries scan searchable text',
       postings: postings
     };
     return document;
@@ -1246,15 +1281,8 @@ export class IndexService {
 
   private buildSourceDocument(events: EventMap): SourceDocument {
     let postings: StringArrayMap = {};
-    let sources: StringArrayMap = {};
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
-      event.sources.forEach((source: string) => {
-        if (!sources[source]) {
-          sources[source] = [];
-        }
-        sources[source].push(eventId);
-      });
       indexTerms(sourceSearchText(event)).forEach((term: string) => {
         if (!postings[term]) {
           postings[term] = [];
@@ -1263,10 +1291,7 @@ export class IndexService {
       });
     });
     Object.keys(postings).forEach((term: string) => postings[term] = stableUnique(postings[term]).sort());
-    Object.keys(sources).forEach((source: string) => sources[source] = stableUnique(sources[source]).sort());
     let document: SourceDocument = {
-      normalization: 'lowercase compact text with adjacent CJK/alphanumeric bigram postings; one-character queries scan searchable text',
-      sources: sources,
       postings: postings
     };
     return document;
@@ -1307,7 +1332,6 @@ export class IndexService {
       return right.event_id.localeCompare(left.event_id);
     });
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; deadline_postings include absolute YYYY-MM-DD deadlines; no_deadline_event_ids are newest first; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: noDeadlineEvents.map((event: IndexedEvent): string => event.event_id),
       type_postings: typePostings
@@ -1342,18 +1366,15 @@ export class IndexService {
     });
     Object.keys(postings).forEach((domain: string) => postings[domain] = stableUnique(postings[domain]).sort());
     let document: DomainDocument = {
-      domains: DOMAIN_DESCRIPTIONS,
       postings: postings
     };
     return document;
   }
 
   private buildWorkflowSceneDocument(events: EventMap): WorkflowSceneDocument {
-    let scenes: StringMap = createStringMap();
     let postings: StringArrayMap = {};
     workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
-      scenes[key] = scene.label;
       postings[key] = [];
     });
     Object.keys(events).sort().forEach((eventId: string) => {
@@ -1368,7 +1389,6 @@ export class IndexService {
     });
     Object.keys(postings).forEach((sceneId: string) => postings[sceneId] = stableUnique(postings[sceneId]).sort());
     let document: WorkflowSceneDocument = {
-      scenes: scenes,
       postings: postings
     };
     return document;
@@ -1477,9 +1497,6 @@ export class IndexService {
     });
     Object.keys(aliasPostings).forEach((key: string) => aliasPostings[key] = stableUnique(aliasPostings[key]).sort());
     let document: EntityDocument = {
-      types: ENTITY_TYPE_KEYS,
-      type_descriptions: ENTITY_TYPE_DESCRIPTIONS,
-      entity_types: ENTITY_TYPE_KEYS,
       entities: this.nonEmptyEntityDefinitions(entities),
       alias_postings: aliasPostings
     };
@@ -1697,14 +1714,11 @@ export class IndexService {
       let inputHash = this.profileDomainInputHash(domain, domainEvents, modelConfig);
       let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
       let domainState: ProfileDomainState;
-      if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && Array.isArray(previousDomain.claims)) {
+      if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
         domainState = this.copyProfileDomain(previousDomain);
         domainState.event_ids = eventIds;
         domainState.event_count = eventIds.length;
         domainState.date_range = this.eventDateRange(domainEvents);
-        if (domainState.short_summary.length === 0 && domainState.event_count > 0) {
-          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, domainState.claims || []);
-        }
         dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
       } else if (domainEvents.length === 0) {
         domainState = {
@@ -1722,24 +1736,7 @@ export class IndexService {
       } else {
         let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
         let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
-        domainState = {
-          domain: domain,
-          display_name: DOMAIN_DISPLAY_NAMES[domain] || domain,
-          input_hash: inputHash,
-          event_ids: eventIds,
-          event_count: domainEvents.length,
-          date_range: this.eventDateRange(domainEvents),
-          short_summary: normalizeProfileShortSummary(payload.short_summary),
-          summary: normalizeFreeText(payload.summary),
-          claims: claims,
-          generation: modelConfig.enabled ? 'model' : 'heuristic'
-        };
-        if (domainState.summary.length === 0 && claims.length > 0) {
-          domainState.summary = this.profileSummaryFromClaims(domain, claims);
-        }
-        if (domainState.short_summary.length === 0) {
-          domainState.short_summary = this.profileShortSummary(domain, domainState.summary, claims);
-        }
+        domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
       }
       domainsState[domain] = domainState;
       domainIndex++;
@@ -1766,7 +1763,7 @@ export class IndexService {
     let parts: string[] = [
       domain,
       'short_summary_v1',
-      modelConfig.enabled ? 'model' : 'heuristic',
+      modelConfig.enabled ? 'model' : 'model_unavailable',
       modelConfig.enabled ? String(PROFILE_MODEL_MAX_TOKENS) : '0',
       modelConfig.enabled ? String(PROFILE_MODEL_PROMPT_CHAR_LIMIT) : '0',
       modelConfig.enabled ? String(PROFILE_MODEL_MERGE_CHAR_LIMIT) : '0'
@@ -1890,30 +1887,6 @@ export class IndexService {
       }
     }
     return false;
-  }
-
-  private profileSummaryFromClaims(domain: string, claims: ProfileClaim[]): string {
-    let statements = claims
-      .map((claim: ProfileClaim) => normalizeFreeText(claim.statement).replace(/。$/g, ''))
-      .filter((statement: string) => statement.length > 0);
-    if (statements.length === 0) {
-      return '';
-    }
-    return `${DOMAIN_DISPLAY_NAMES[domain] || domain}领域呈现出这些倾向：${statements.slice(0, 3).join('；')}。`;
-  }
-
-  private profileShortSummary(domain: string, summary: string, claims: ProfileClaim[]): string {
-    for (let claim of claims) {
-      let fromClaim = profileShortSummaryFromText(domain, claim.statement, '');
-      if (fromClaim.length === 4) {
-        return fromClaim;
-      }
-    }
-    let fromSummary = profileShortSummaryFromText(domain, summary, '');
-    if (fromSummary.length === 4) {
-      return fromSummary;
-    }
-    return profileShortSummaryFromText(domain, '', '近期记录');
   }
 
   private renderProfileMarkdown(profile: ProfileState): string {
@@ -2084,14 +2057,6 @@ export class IndexService {
     return count;
   }
 
-  private profileDomainCounts(profile: ProfileState): NumberMap {
-    let result: NumberMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => {
-      result[domain] = profile.domains[domain] ? profile.domains[domain].claims.length : 0;
-    });
-    return result;
-  }
-
   private emptyProfileState(): ProfileState {
     let domains: ProfileDomainMap = {};
     DOMAIN_KEYS.forEach((domain: string) => {
@@ -2131,21 +2096,14 @@ export class IndexService {
       mode: '',
       base_url: ''
     };
-    let profileDomains: NumberMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => profileDomains[domain] = 0);
     let manifest: IndexManifest = {
       generated_at: '',
       input_root: '',
       index_dir: '',
       run_root: '',
       enrichment: enrichment,
-      domains: [],
       entity_types: [],
-      sources: sources,
-      event_count: 0,
-      profile_generated_at: '',
-      profile_claim_count: 0,
-      profile_domains: profileDomains
+      sources: sources
     };
     return manifest;
   }
@@ -2153,7 +2111,6 @@ export class IndexService {
   private emptyInvertedDocument(): InvertedDocument {
     let postings: StringArrayMap = {};
     let document: InvertedDocument = {
-      normalization: '',
       postings: postings
     };
     return document;
@@ -2163,7 +2120,6 @@ export class IndexService {
     let deadlinePostings: StringArrayMap = {};
     let typePostings: StringArrayMap = {};
     let document: HomeTodoDocument = {
-      normalization: 'home recommendation todo candidates; chat scene requires deadline except buy todos',
       deadline_postings: deadlinePostings,
       no_deadline_event_ids: [],
       type_postings: typePostings
@@ -2172,11 +2128,8 @@ export class IndexService {
   }
 
   private emptySourceDocument(): SourceDocument {
-    let sources: StringArrayMap = {};
     let postings: StringArrayMap = {};
     let document: SourceDocument = {
-      normalization: '',
-      sources: sources,
       postings: postings
     };
     return document;
@@ -2186,22 +2139,18 @@ export class IndexService {
     let postings: StringArrayMap = {};
     DOMAIN_KEYS.forEach((domain: string) => postings[domain] = []);
     let document: DomainDocument = {
-      domains: DOMAIN_DESCRIPTIONS,
       postings: postings
     };
     return document;
   }
 
   private emptyWorkflowSceneDocument(): WorkflowSceneDocument {
-    let scenes: StringMap = createStringMap();
     let postings: StringArrayMap = {};
     workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
-      scenes[key] = scene.label;
       postings[key] = [];
     });
     let document: WorkflowSceneDocument = {
-      scenes: scenes,
       postings: postings
     };
     return document;
@@ -2211,17 +2160,14 @@ export class IndexService {
     let entities: EntityDefinitionMap = {};
     let aliasPostings: StringArrayMap = {};
     let document: EntityDocument = {
-      types: ENTITY_TYPE_KEYS,
-      type_descriptions: ENTITY_TYPE_DESCRIPTIONS,
-      entity_types: ENTITY_TYPE_KEYS,
       entities: entities,
       alias_postings: aliasPostings
     };
     return document;
   }
 
-  private entityTypeList(document: EntityDocument): string[] {
-    return (document.types && document.types.length > 0) ? document.types : (document.entity_types || []);
+  private hasEntityIndexData(document: EntityDocument): boolean {
+    return document.entities !== undefined && document.alias_postings !== undefined;
   }
 
   private emptyTemporalDocument(): TemporalDocument {

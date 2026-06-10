@@ -172,6 +172,8 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
+  private homeRecommendationViewDateKey: string = '';
+  private homeRecommendationDateTimerId: number = -1;
   
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -375,8 +377,48 @@ struct Index {
     }
     this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
+    this.homeRecommendationViewDateKey = this.currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
+  }
+
+  private padDatePart(value: number): string {
+    return value < 10 ? '0' + String(value) : String(value);
+  }
+
+  private currentLocalDateKey(): string {
+    let date = new Date();
+    return `${date.getFullYear()}-${this.padDatePart(date.getMonth() + 1)}-${this.padDatePart(date.getDate())}`;
+  }
+
+  private reloadHomeViewModelIfDateChanged(): void {
+    let today = this.currentLocalDateKey();
+    if (this.homeRecommendationViewDateKey === today) {
+      return;
+    }
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('reloadHomeViewModelIfDateChanged skipped: facade is null');
+      return;
+    }
+    this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    this.homeRecommendationViewDateKey = today;
+    dataManagerInfo(`home recommendation view date changed: today=${today}, recommendations=${this.homeProfile.recommendations.length}`);
+  }
+
+  private startHomeRecommendationDateTimer(): void {
+    if (this.homeRecommendationDateTimerId !== -1) {
+      return;
+    }
+    this.homeRecommendationDateTimerId = setInterval(() => {
+      this.reloadHomeViewModelIfDateChanged();
+    }, 60 * 1000);
+  }
+
+  private stopHomeRecommendationDateTimer(): void {
+    if (this.homeRecommendationDateTimerId !== -1) {
+      clearInterval(this.homeRecommendationDateTimerId);
+      this.homeRecommendationDateTimerId = -1;
+    }
   }
 
   private updateDataManagerProgress(progress: DataManagerProgress): void {
@@ -450,6 +492,7 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
+    this.startHomeRecommendationDateTimer();
     this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
       this.output = msg;
       let match = msg.match(/<img>(.*?)<hw>/);
@@ -517,6 +560,19 @@ struct Index {
     this.discoverHdcServer(false, false).catch(() => {
       this.hdcAutoConnecting = false;
     });
+  }
+
+  onPageShow(): void {
+    this.reloadHomeViewModelIfDateChanged();
+    this.startHomeRecommendationDateTimer();
+  }
+
+  onPageHide(): void {
+    this.stopHomeRecommendationDateTimer();
+  }
+
+  aboutToDisappear(): void {
+    this.stopHomeRecommendationDateTimer();
   }
 
   private migrateDefaultEndpointValues(): void {
@@ -1626,6 +1682,16 @@ struct Index {
     this.currentTab = 3;
   }
 
+  private setHomeRecommendationCompleted(id: string, completed: boolean): void {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('setHomeRecommendationCompleted skipped: facade is null');
+      return;
+    }
+    if (this.dataManagerFacade.setHomeRecommendationCompleted(id, completed)) {
+      this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    }
+  }
+
   private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
     let task = taskText.trim();
     if (task.length === 0) {
@@ -2489,6 +2555,9 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            onSetRecommendationCompleted: (id: string, completed: boolean) => {
+              this.setHomeRecommendationCompleted(id, completed);
+            },
             avatarVersions: this.avatarVersions,
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);

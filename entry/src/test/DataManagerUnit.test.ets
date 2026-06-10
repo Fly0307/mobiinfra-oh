@@ -21,26 +21,47 @@ import { GalleryExifUtils } from '../main/ets/utils/gallery/GalleryExifUtils';
 import {
   homeRecommendationSourceInputFingerprint,
   isHomeRecommendationSourceReusable,
-  isFutureTodoDeadline,
+  isCurrentOrFutureTodoDeadline,
+  pruneHomeRecommendationsDocument,
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
   eventEnrichInputFingerprint,
   isEventEnrichInputReusable,
   isHomeTodoIndexCandidate,
+  isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
-  resolveQueryLimit
+  resolveQueryLimit,
+  buildProfileDomainStateFromPayload,
+  isProfileDomainStateReusable
 } from '../main/ets/datamanager/IndexService';
-import { shouldKeepTodoAgentTask } from '../main/ets/datamanager/DataPipelineModelClient';
+import {
+  buildFactSplitPromptPreview,
+  buildEnrichPromptPreview,
+  DataPipelineModelClient,
+  shouldKeepTodoAgentTask
+} from '../main/ets/datamanager/DataPipelineModelClient';
+import {
+  homeProfileCompleteness,
+  homeProfileDomainDescription,
+  homeProfileDomainFullDescription,
+  setHomeRecommendationCompletedInDocument,
+  shouldShowHomeRecommendationInView
+} from '../main/ets/datamanager/DataManagerFacade';
 import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupState,
+  HomeRecommendationsDocument,
+  HomeRecommendationState,
+  HomeDomainViewModel,
   IndexedEvent,
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
+  DataManagerModelConfig,
   ProfileClaim,
   ProfileDomainState,
+  ProfileModelPayload,
   ProfileState,
   SourceEntry,
   createJsonMap,
@@ -107,7 +128,93 @@ function demoPlannerEvent(id: string, deadline: string, todoType: string = 'buy'
   };
 }
 
-function demoProfileDomainState(domain: string, displayName: string, shortSummary: string, summary: string, claims: string[]): ProfileDomainState {
+function demoRecommendationState(id: string, completed: boolean): HomeRecommendationState {
+  return {
+    id: id,
+    tag: '待购买',
+    title: '购买咖啡豆',
+    desc: '记得购买咖啡豆',
+    meta: '',
+    domain: 'eat',
+    source_event_ids: ['e1'],
+    source_input_hash: 'hash-' + id,
+    completed: completed
+  };
+}
+
+function demoHomeDomain(domain: string, desc: string): HomeDomainViewModel {
+  return {
+    domain: domain,
+    icon: domain,
+    title: domain,
+    desc: desc,
+    fullDesc: desc,
+    claims: [],
+    color: '#000000',
+    eventCount: desc === '暂无数据' ? 0 : 1
+  };
+}
+
+function demoHomeRecommendationEvent(id: string, eventDate: string, deadline: string): IndexedEvent {
+  let event = demoIndexedEvent(id, '微信里提到一个待办事项', '微信', 'work', '待办');
+  event.event_date = eventDate;
+  event.todo = {
+    type: deadline.length > 0 ? '' : 'buy',
+    deadline: deadline,
+    text: '处理待办事项',
+    agent_task: ''
+  };
+  return event;
+}
+
+function disabledModelConfig(): DataManagerModelConfig {
+  return {
+    baseUrl: '',
+    apiKey: '',
+    enabled: false
+  };
+}
+
+function demoProfileClaim(statement: string): ProfileClaim {
+  return {
+    statement: statement,
+    kind: 'preference',
+    confidence: 'medium',
+    event_ids: ['e1', 'e2'],
+    evidence_count: 2,
+    start_date: '2026-05-29',
+    end_date: '2026-05-30',
+    example: '用户记录了咖啡相关消费'
+  };
+}
+
+function demoProfileDomainState(generation: string): ProfileDomainState {
+  let range = createStringMap();
+  range.start_date = '2026-05-29';
+  range.end_date = '2026-05-30';
+  return {
+    domain: 'eat',
+    display_name: '吃',
+    input_hash: 'hash',
+    event_ids: ['e1', 'e2'],
+    event_count: 2,
+    date_range: range,
+    short_summary: '',
+    summary: '',
+    claims: [],
+    generation: generation
+  };
+}
+
+function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
+  let map: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
+  events.forEach((event: IndexedEvent) => {
+    map[event.event_id] = event;
+  });
+  return map;
+}
+
+function demoAvatarProfileDomainState(domain: string, displayName: string, shortSummary: string, summary: string, claims: string[]): ProfileDomainState {
   let profileClaims: ProfileClaim[] = claims.map((statement: string): ProfileClaim => {
     return {
       statement: statement,
@@ -136,10 +243,10 @@ function demoProfileDomainState(domain: string, displayName: string, shortSummar
 
 function demoProfileStateForAvatar(): ProfileState {
   let domains = new Object() as Record<string, ProfileDomainState>;
-  domains['eat'] = demoProfileDomainState('eat', '吃', '咖啡轻食', '近期记录显示用户关注咖啡、轻食和外卖效率。', ['经常围绕咖啡和轻食做选择']);
-  domains['wear'] = demoProfileDomainState('wear', '穿', '简洁舒适', '穿搭相关记录偏向简洁、舒适和实用。', []);
-  domains['live'] = demoProfileDomainState('live', '住', '桌面收纳', '居住相关记录关注桌面整理和空间收纳。', []);
-  domains['travel'] = demoProfileDomainState('travel', '行', '地铁通勤', '出行记录以地铁通勤和计划执行为主。', []);
+  domains['eat'] = demoAvatarProfileDomainState('eat', '吃', '咖啡轻食', '近期记录显示用户关注咖啡、轻食和外卖效率。', ['经常围绕咖啡和轻食做选择']);
+  domains['wear'] = demoAvatarProfileDomainState('wear', '穿', '简洁舒适', '穿搭相关记录偏向简洁、舒适和实用。', []);
+  domains['live'] = demoAvatarProfileDomainState('live', '住', '桌面收纳', '居住相关记录关注桌面整理和空间收纳。', []);
+  domains['travel'] = demoAvatarProfileDomainState('travel', '行', '地铁通勤', '出行记录以地铁通勤和计划执行为主。', []);
   return {
     generated_at: '2026-06-10 10:07:00',
     event_count: 12,
@@ -212,6 +319,92 @@ export default function dataManagerUnitTest() {
       expect(normalizeProfileShortSummary('健康轻食餐')).assertEqual('');
       expect(profileShortSummaryFromText('eat', '近期咖啡、奶茶等话题反复出现。', '')).assertEqual('咖啡奶茶');
       expect(profileShortSummaryFromText('travel', '', '近期记录')).assertEqual('近期记录');
+    });
+
+    it('profileGenerationReturnsEmptyWhenModelUnavailable', 0, async () => {
+      let client = new DataPipelineModelClient();
+      let event = demoIndexedEvent('e1', '近期咖啡、奶茶等话题反复出现。', '微信', 'eat', '咖啡');
+      let payload = await client.generateProfile('eat', [event], [], disabledModelConfig());
+      expect(payload.summary).assertEqual('');
+      expect(payload.short_summary).assertEqual('');
+      expect(payload.claims.length).assertEqual(0);
+      expect(payload.generation).assertEqual('model_unavailable');
+    });
+
+    it('profileDomainStateDoesNotDeriveMissingSummary', 0, () => {
+      let range = createStringMap();
+      range.start_date = '2026-05-29';
+      range.end_date = '2026-05-30';
+      let payload: ProfileModelPayload = {
+        short_summary: '咖啡奶茶',
+        summary: '模型给出的摘要不应在无有效 claims 时落盘',
+        claims: [],
+        generation: 'model'
+      };
+      let emptyState = buildProfileDomainStateFromPayload('eat', 'hash', ['e1', 'e2'], 2, range, payload, []);
+      expect(emptyState.summary).assertEqual('');
+      expect(emptyState.short_summary).assertEqual('');
+      expect(emptyState.claims.length).assertEqual(0);
+      expect(emptyState.generation).assertEqual('model_empty');
+
+      let modelState = buildProfileDomainStateFromPayload('eat', 'hash', ['e1', 'e2'], 2, range, {
+        short_summary: '',
+        summary: '',
+        claims: [],
+        generation: 'model'
+      }, [demoProfileClaim('用户在多条记录中关注咖啡和奶茶。')]);
+      expect(modelState.summary).assertEqual('');
+      expect(modelState.short_summary).assertEqual('');
+      expect(modelState.claims.length).assertEqual(1);
+      expect(modelState.generation).assertEqual('model');
+    });
+
+    it('profileDomainReuseRejectsHeuristicAndFailureStates', 0, () => {
+      expect(isProfileDomainStateReusable(demoProfileDomainState('heuristic'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_error'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_unavailable'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model'), 2)).assertTrue();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('model_empty'), 2)).assertTrue();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('empty'), 2)).assertFalse();
+      expect(isProfileDomainStateReusable(demoProfileDomainState('empty'), 0)).assertTrue();
+    });
+
+    it('homeProfileDescriptionShowsExistingProfileWithoutShortSummary', 0, () => {
+      let state = demoProfileDomainState('model');
+      state.summary = '模型已经生成了完整的饮食画像。';
+      state.claims = [demoProfileClaim('用户在多条记录中关注咖啡和奶茶。')];
+      expect(homeProfileDomainDescription(state)).assertEqual('查看画像');
+      expect(homeProfileDomainFullDescription(state)).assertEqual('模型已经生成了完整的饮食画像。');
+
+      state.short_summary = '咖啡奶茶';
+      expect(homeProfileDomainDescription(state)).assertEqual('咖啡奶茶');
+    });
+
+    it('homeProfileCompletenessCountsVisibleProfileDomains', 0, () => {
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '暂无数据'),
+        demoHomeDomain('wear', '暂无数据'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(0);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '暂无数据'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(25);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '简约舒适'),
+        demoHomeDomain('live', '暂无数据'),
+        demoHomeDomain('travel', '暂无数据')
+      ])).assertEqual(50);
+      expect(homeProfileCompleteness([
+        demoHomeDomain('eat', '查看画像'),
+        demoHomeDomain('wear', '简约舒适'),
+        demoHomeDomain('live', '整洁有序'),
+        demoHomeDomain('travel', '地铁通勤')
+      ])).assertEqual(100);
     });
 
     it('atomicizeCandidateFacts', 0, () => {
@@ -379,10 +572,10 @@ export default function dataManagerUnitTest() {
     });
 
     it('homeRecommendationTodoDeadlineFilter', 0, () => {
-      expect(isFutureTodoDeadline('2026-06-06', '2026-06-05')).assertTrue();
-      expect(isFutureTodoDeadline('2026-06-05', '2026-06-05')).assertFalse();
-      expect(isFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
-      expect(isFutureTodoDeadline('', '2026-06-05')).assertFalse();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-06', '2026-06-05')).assertTrue();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-05', '2026-06-05')).assertTrue();
+      expect(isCurrentOrFutureTodoDeadline('2026-06-04', '2026-06-05')).assertFalse();
+      expect(isCurrentOrFutureTodoDeadline('', '2026-06-05')).assertFalse();
       expect(recommendationTodoDeadlineMeta('2026-06-06')).assertEqual('6月6日截止');
     });
 
@@ -407,6 +600,102 @@ export default function dataManagerUnitTest() {
       expect(isHomeRecommendationSourceReusable('', 'hash-1', ['e1'], ['e1'], [])).assertFalse();
     });
 
+    it('homeRecommendationPruneRemovesInactiveSources', 0, () => {
+      let emptySource = demoRecommendationState('todo-empty', false);
+      emptySource.source_event_ids = [];
+      let missingSource = demoRecommendationState('todo-missing', false);
+      missingSource.source_event_ids = ['missing'];
+      let mixedSource = demoRecommendationState('todo-mixed', false);
+      mixedSource.source_event_ids = ['e1', 'missing'];
+      let active = demoRecommendationState('todo-active', false);
+      active.source_event_ids = ['e1'];
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'same-input-hash',
+        total_events: 4,
+        recommendations: [emptySource, missingSource, mixedSource, active]
+      };
+
+      let result = pruneHomeRecommendationsDocument(document, ['e1', 'e2']);
+      expect(result.prunedCount).assertEqual(3);
+      expect(result.document.input_hash).assertEqual('same-input-hash');
+      expect(result.document.total_events).assertEqual(2);
+      expect(result.document.recommendations.length).assertEqual(1);
+      expect(result.document.recommendations[0].id).assertEqual('todo-active');
+    });
+
+    it('homeRecommendationPruneKeepsActiveCompletedAndHashMismatch', 0, () => {
+      let activeCompleted = demoRecommendationState('todo-completed', true);
+      activeCompleted.source_event_ids = ['e1'];
+      activeCompleted.source_input_hash = 'old-source-hash';
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'same-input-hash',
+        total_events: 1,
+        recommendations: [activeCompleted]
+      };
+
+      let result = pruneHomeRecommendationsDocument(document, ['e1']);
+      expect(result.prunedCount).assertEqual(0);
+      expect(result.document.recommendations.length).assertEqual(1);
+      expect(result.document.recommendations[0].completed).assertTrue();
+      expect(result.document.recommendations[0].source_input_hash).assertEqual('old-source-hash');
+    });
+
+    it('homeRecommendationCompletionDocumentToggle', 0, () => {
+      let document: HomeRecommendationsDocument = {
+        generated_at: '2026-06-05T00:00:00',
+        input_hash: 'input',
+        total_events: 1,
+        recommendations: [demoRecommendationState('todo-1', false)]
+      };
+      expect(setHomeRecommendationCompletedInDocument(document, 'todo-1', true)).assertTrue();
+      expect(document.recommendations[0].completed).assertTrue();
+      expect(setHomeRecommendationCompletedInDocument(document, 'todo-1', false)).assertTrue();
+      expect(document.recommendations[0].completed).assertFalse();
+      expect(setHomeRecommendationCompletedInDocument(document, 'missing', true)).assertFalse();
+      expect(document.recommendations[0].completed).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterKeepsFutureDeadlineEvenWhenEventOld', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-05-01', '2026-06-10');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertTrue();
+    });
+
+    it('homeRecommendationViewFilterKeepsTodayDeadlineAndRejectsPastDeadline', 0, () => {
+      let todayEvent = demoHomeRecommendationEvent('e1', '2026-06-09', '2026-06-09');
+      let pastEvent = demoHomeRecommendationEvent('e2', '2026-06-08', '2026-06-08');
+      expect(shouldShowHomeRecommendationInView(['e1'], demoEventMap([todayEvent]), '2026-06-09')).assertTrue();
+      expect(shouldShowHomeRecommendationInView(['e2'], demoEventMap([pastEvent]), '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterKeepsRecentNoDeadlineEvent', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-06-02', '');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertTrue();
+    });
+
+    it('homeRecommendationViewFilterRejectsOldNoDeadlineEvent', 0, () => {
+      let event = demoHomeRecommendationEvent('e1', '2026-06-01', '');
+      let map = demoEventMap([event]);
+      expect(shouldShowHomeRecommendationInView(['e1'], map, '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationViewFilterRejectsMissingOrPartiallyExpiredSources', 0, () => {
+      let recent = demoHomeRecommendationEvent('e1', '2026-06-08', '');
+      let old = demoHomeRecommendationEvent('e2', '2026-06-01', '');
+      expect(shouldShowHomeRecommendationInView(['missing'], demoEventMap([recent]), '2026-06-09')).assertFalse();
+      expect(shouldShowHomeRecommendationInView(['e1', 'e2'], demoEventMap([recent, old]), '2026-06-09')).assertFalse();
+    });
+
+    it('homeRecommendationGenerationFilterUsesRecentNoDeadlineWindow', 0, () => {
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-02', '2026-06-09', 7)).assertTrue();
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-01', '2026-06-09', 7)).assertFalse();
+      expect(isRecentNoDeadlineHomeTodoEvent('2026-06-08', '2026-06-09', 7)).assertTrue();
+      expect(isRecentNoDeadlineHomeTodoEvent('', '2026-06-09', 7)).assertFalse();
+    });
+
     it('homeTodoIndexAllowsChatBuyWithoutDeadline', 0, () => {
       let todo: IndexedEventTodo = { type: 'buy', deadline: '', text: '购买咖啡豆', agent_task: '在淘宝中购买咖啡豆' };
       expect(isHomeTodoIndexCandidate(todo, [3], [3])).assertTrue();
@@ -422,6 +711,65 @@ export default function dataManagerUnitTest() {
       expect(shouldKeepTodoAgentTask('buy', ['聊天', '购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('buy', ['购物'])).assertFalse();
       expect(shouldKeepTodoAgentTask('plan', ['聊天'])).assertFalse();
+    });
+
+    it('factSplitPromptPreviewUsesSemanticBatchPayload', 0, () => {
+      let entry: SourceEntry = {
+        source_date: '2026-06-05',
+        file_name: 'chat.md',
+        entry_index: 7,
+        entry_text: '微信聊天里提到今天买 iPhone 16 Pro，淘宝页面显示价格 7999 元。',
+        workflow_metadata: createJsonMap(),
+        workflow_scene_id: 3,
+        source_ref: '2026-06-05/chat.md#7'
+      };
+      let preview = buildFactSplitPromptPreview([entry]);
+
+      expect(preview.userPrompt.indexOf('"source_ref"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"source_date"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"workflow_scene_label"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"entry_text"') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"file_name"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"entry_index"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('"workflow_metadata"') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('聊天') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('iPhone 16 Pro') >= 0).assertTrue();
+
+      expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('source_ref：输入 entry 的唯一引用标识') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('source_date：daily-log 文件日期') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_label：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('entry_text：原始日志条目正文') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('"items"') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('"facts"') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('一条原始记录中如果包含多件不同事情') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('订单、账单、交易、消费记录') >= 0).assertTrue();
+    });
+
+    it('enrichPromptPreviewExplainsFieldsAndOmitsSceneIds', 0, () => {
+      let chatEvent = demoIndexedEvent('e1', '微信里提到这周六要买咖啡豆', '微信', 'eat', '咖啡豆');
+      chatEvent.workflow_scene_ids = [3];
+      chatEvent.normalized_fact = '与朋友聊天时提到这周六要在淘宝购买咖啡豆';
+      let shoppingEvent = demoIndexedEvent('e2', '淘宝浏览运动鞋', '淘宝', 'wear', '运动鞋');
+      shoppingEvent.workflow_scene_ids = [0];
+      shoppingEvent.normalized_fact = '在淘宝查看一双运动鞋商品详情';
+      let events: IndexedEvent[] = [chatEvent, shoppingEvent];
+      let preview = buildEnrichPromptPreview(events);
+
+      expect(preview.userPrompt.indexOf('workflow_scene_labels') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('workflow_scene_ids') < 0).assertTrue();
+      expect(preview.userPrompt.indexOf('微信里提到这周六要买咖啡豆') >= 0).assertTrue();
+      expect(preview.userPrompt.indexOf('与朋友聊天时提到这周六要在淘宝购买咖啡豆') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_labels：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('keywords 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('domains 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('eat|wear|live|travel|work|other') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('entities 规则') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('person') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('place') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('merchant') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('聊天：提取两类待办') >= 0).assertTrue();
     });
 
     it('eventEnrichInputFingerprintIgnoresGeneratedTodo', 0, () => {

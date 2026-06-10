@@ -593,22 +593,9 @@ export class DataManagerFacade {
     if (!profile || profile.event_count === 0) {
       return createEmptyHomeProfileViewModel();
     }
-    let domains = defaultHomeDomains().map((item: HomeDomainViewModel) => {
-      let doc = profile.domains[item.domain];
-      let domain: HomeDomainViewModel = {
-        domain: item.domain,
-        icon: item.icon,
-        title: item.title,
-        desc: homeProfileDomainDescription(doc),
-        fullDesc: homeProfileDomainFullDescription(doc),
-        claims: this.domainClaimStatements(doc),
-        color: item.color,
-        eventCount: doc ? doc.event_count : 0
-      };
-      return domain;
-    });
+    let domains = this.homeProfileDomains(profile);
     let recommendations = this.homeRecommendations();
-    let completeness = this.profileCompleteness(profile);
+    let completeness = homeProfileCompleteness(domains);
     let avatar = this.avatarService.homeView(profile, completeness);
     return {
       avatarUri: avatar.avatarUri,
@@ -940,19 +927,24 @@ export class DataManagerFacade {
   }
 
   private profileCompleteness(profile: ProfileState): number {
-    let lifestyleDomains = ['eat', 'wear', 'live', 'travel'];
-    let score = 0;
-    lifestyleDomains.forEach((domain: string) => {
-      let doc = profile.domains[domain];
-      if (!doc || doc.event_count === 0) {
-        return;
-      }
-      score += 18;
-      if (normalizeFreeText(doc.summary).length > 0 || (doc.claims || []).length > 0) {
-        score += 7;
-      }
+    return homeProfileCompleteness(this.homeProfileDomains(profile));
+  }
+
+  private homeProfileDomains(profile: ProfileState): HomeDomainViewModel[] {
+    return defaultHomeDomains().map((item: HomeDomainViewModel) => {
+      let doc = profile.domains[item.domain];
+      let domain: HomeDomainViewModel = {
+        domain: item.domain,
+        icon: item.icon,
+        title: item.title,
+        desc: homeProfileDomainDescription(doc),
+        fullDesc: homeProfileDomainFullDescription(doc),
+        claims: this.domainClaimStatements(doc),
+        color: item.color,
+        eventCount: doc ? doc.event_count : 0
+      };
+      return domain;
     });
-    return Math.min(100, score);
   }
 
   private homeRecommendations(): HomeRecommendationViewModel[] {

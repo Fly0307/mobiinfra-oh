@@ -8,6 +8,7 @@ import { SeedreamAvatarProvider } from './SeedreamAvatarProvider';
 import {
   AvatarGenerateRequest,
   AvatarGenerationMode,
+  AvatarGenerationParams,
   AvatarHomeViewModel,
   AvatarProviderConfig,
   AvatarProviderRequest,
@@ -82,7 +83,7 @@ export class AvatarService {
     this.avatarStorage.saveState(generatingState);
 
     try {
-      let params = {
+      let params: AvatarGenerationParams = {
         size: config.size,
         response_format: config.responseFormat,
         output_format: config.outputFormat,

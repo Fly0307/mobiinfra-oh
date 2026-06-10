@@ -30,7 +30,7 @@ function seedreamFirstDataString(raw: string, key: string): string {
   if (data.length === 0) {
     return '';
   }
-  let first = data[0];
+  let first: Object | string | number | boolean | null = data[0];
   if (first === null || typeof first !== 'object') {
     return '';
   }

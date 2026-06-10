@@ -487,7 +487,7 @@ export class WorkflowRunner {
         let err = e as Error;
         this.debug('hdcBridge.startApp failed appName=' + planner.appName + ', packageName=' + planner.packageName +
           ', durationMs=' + this.elapsedMs(startAppStartedAt) + ', message=' + (err.message || String(e)));
-        throw e;
+        throw err;
       }
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
@@ -533,7 +533,7 @@ export class WorkflowRunner {
       let err = e as Error;
       this.debug('Planner request failed durationMs=' + this.elapsedMs(plannerStartedAt) +
         ', message=' + (err.message || String(e)));
-      throw e;
+      throw err;
     }
     this.log('Planner response:\n' + response);
     let data = this.extractJsonMap(response, true);

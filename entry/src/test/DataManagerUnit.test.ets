@@ -631,7 +631,7 @@ export default function dataManagerUnitTest() {
       expect(String(body['prompt'])).assertEqual('生成数字分身');
       expect(String(body['sequential_image_generation'])).assertEqual('disabled');
       expect(String(body['response_format'])).assertEqual('url');
-      expect(String(body['output_format'])).assertEqual('jpeg');
+      expect(body['output_format'] === undefined).assertTrue();
       expect(String(body['size'])).assertEqual('2K');
       expect(Boolean(body['stream'])).assertFalse();
       expect(Boolean(body['watermark'])).assertTrue();

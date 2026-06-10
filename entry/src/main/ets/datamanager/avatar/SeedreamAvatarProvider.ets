@@ -42,6 +42,10 @@ function seedreamFirstDataString(raw: string, key: string): string {
   return value.trim();
 }
 
+function seedreamSupportsOutputFormat(model: string): boolean {
+  return model.toLowerCase().indexOf('seedream-4-5') < 0;
+}
+
 export function createSeedreamRequestBody(model: string, prompt: string, image: string,
   params: AvatarGenerationParams): SeedreamRequestBody {
   let body = new Object() as SeedreamRequestBody;
@@ -50,7 +54,7 @@ export function createSeedreamRequestBody(model: string, prompt: string, image: 
   body['sequential_image_generation'] = params.sequential_image_generation;
   body['response_format'] = params.response_format;
   let outputFormat = params.output_format.trim();
-  if (outputFormat.length > 0) {
+  if (outputFormat.length > 0 && seedreamSupportsOutputFormat(model)) {
     body['output_format'] = outputFormat;
   }
   body['size'] = params.size;

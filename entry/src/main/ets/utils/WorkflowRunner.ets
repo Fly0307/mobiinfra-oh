@@ -5,6 +5,8 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
+import { AgentPromptTemplates } from './AgentPromptTemplates';
+import { AgentActionParser } from './AgentActionParser';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -521,7 +523,7 @@ export class WorkflowRunner {
       '\n如果不知道 package_name，可以留空，但 app_name 必须填写。' +
       '\n用户任务：' + taskDescription;
     try {
-      let template = await this.hdcBridge.loadPromptTemplate('planner_oneshot_harmony.md');
+      let template = AgentPromptTemplates.load('planner_oneshot_harmony.md');
       if (template.trim().length === 0) {
         return this.withExecutionDatePrompt(fallbackPrompt, 'Planner 用户任务');
       }
@@ -564,14 +566,16 @@ export class WorkflowRunner {
       this.log('Decider 截图完成：' + width + 'x' + height);
       let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
       this.log('Decider response:\n' + response);
-      let parsed = this.extractJsonMap(response);
-      let action = this.getMapString(parsed, 'action').toLowerCase();
+      let parsedAction = AgentActionParser.parse(response);
+      let parsed = parsedAction.data;
+      let action = parsedAction.action;
       AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
         stopReason = 'TASK_COMPLETED_' + action;
         break;
       }
-      await this.hdcBridge.executeModelAction(response, width * 2, height * 2);
+      let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
+      await this.hdcBridge.guiAction(hdcPayload);
       history.push(ArkJSON.stringify(parsed));
     }
     return stopReason;
@@ -1207,27 +1211,11 @@ export class WorkflowRunner {
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {
-    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
-      return ArkJSON.parse(text) as WorkflowJsonMap;
+      return AgentActionParser.extractJsonMap(raw, true);
     } catch (e) {
       let err = e as Error;
-      let candidates = WorkflowJsonRepair.repairCandidates(text);
-      let repairMessage = '';
-      for (let i = 0; i < candidates.length; i++) {
-        try {
-          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
-          this.log('JSON parse repaired after model returned non-strict JSON');
-          return parsed;
-        } catch (repairError) {
-          let repairErr = repairError as Error;
-          repairMessage = repairErr.message || String(repairError);
-        }
-      }
       let message = 'JSON parse failed, raw response preserved: ' + (err.message || String(e));
-      if (repairMessage.length > 0) {
-        message += '; repair failed: ' + repairMessage;
-      }
       this.log(message);
       if (failOnParseError) {
         throw new Error('Planner JSON 解析失败，终止执行，不再进入 Decider：' + (err.message || String(e)));

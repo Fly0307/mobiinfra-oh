@@ -198,14 +198,15 @@ struct Index {
   }
 
   private getAvatarProviderConfig(): AvatarProviderConfig {
+    let textModel = this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
+    let imageModel = this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel : textModel;
     return {
       imageBaseUrl: this.avatarImageBaseUrl.trim().length > 0 ? this.avatarImageBaseUrl :
         DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
       apiKey: this.avatarImageApiKey,
-      textToImageModel: this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
-      imageToImageModel: this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel :
-        this.avatarTextToImageModel,
+      textToImageModel: textModel,
+      imageToImageModel: imageModel,
       size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
       responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
         DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
@@ -256,6 +257,7 @@ struct Index {
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
       let err = e as Error;
+      this.reloadDataManagerViewModels();
       dataManagerError('generateHomeAvatar failed: ' + err.message);
       this.appendCloudLog('Avatar generation failed: ' + err.message);
       promptAction.showToast({ message: '数字分身生成失败：' + err.message, duration: 2200 });

@@ -9,7 +9,10 @@ import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { AppHeader } from '../components/AppHeader';
 import { CollectionPage } from './collection/CollectionPage';
+import { ChatPage } from './chat/ChatPage';
+import { CHAT_MODE_CLOUD_AGENT } from './chat/ChatPageTypes';
 import { HomePage } from './home/HomePage';
+import { MainTabIndex } from './main/MainTabConfig';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -127,6 +130,7 @@ struct Index {
   @State backendTypeInput: string = 'cpu';
   @State mllmBackendTypeInput: string = 'cpu';
   @State currentTab: number = 0;
+  @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
   @State assistantSettingsOpen: boolean = false;
@@ -1623,7 +1627,7 @@ struct Index {
     if (!result.success) {
       throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
     }
-    this.currentTab = 3;
+    this.currentTab = MainTabIndex.Chat;
   }
 
   private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
@@ -1658,7 +1662,7 @@ struct Index {
       return;
     }
 
-    this.currentTab = 3;
+    this.currentTab = MainTabIndex.Chat;
     this.resetCloudLog('准备执行 Workflow：' + task.title);
     this.appendCloudLog('Workflow 编排将在 App 沙箱内执行；PC 端仅负责 HDC 截图和动作桥接。');
     this.appendCloudLog('HDC Server=' + this.hdcServerIp);
@@ -1678,6 +1682,56 @@ struct Index {
       this.appendCloudLog('Workflow 执行异常：' + e.message);
       AgentExecutionController.finishExecution('Workflow failed');
     }
+  }
+
+  private async sendLocalChatMessage(): Promise<void> {
+    if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) {
+      if (!this.modelLoaded) {
+        this.output = '请先加载模型';
+      }
+      return;
+    }
+    let msg = this.userInput;
+    this.userInput = '';
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    this.isThinking = true;
+    try {
+      let reply = await mnnllm.chat(msg);
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+    } catch (err) {
+      let e = err as Error;
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${e.message}\n`);
+    } finally {
+      this.isThinking = false;
+    }
+  }
+
+  private async submitLocalAgentTask(): Promise<void> {
+    if (this.userInput.length === 0) {
+      this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (!await this.ensureLocalAgentReady()) {
+      return;
+    }
+    this.agentRouter.submitLocalTask(this.userInput);
+    AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
+    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
+  }
+
+  private async submitCurrentCloudTask(): Promise<void> {
+    let result = await this.submitDirectCloudAgentTask(this.cloudUserInput);
+    if (!result.success && result.error.length > 0) {
+      this.appendCloudLog(result.error);
+    }
+  }
+
+  private clearCloudDebugImage(): void {
+    this.cloudDebugImagePath = '';
+  }
+
+  private clearLocalDebugImage(): void {
+    this.debugImagePath = '';
   }
 
   @Builder AssistantPage() {
@@ -2506,7 +2560,28 @@ struct Index {
             onRefresh: () => { this.refreshDataManager(); }
           })
         }.tabBar(this.TabItem('C', '采集', 1))
-        TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
+        TabContent() {
+          ChatPage({
+            chatMode: $chatMode,
+            cloudUserInput: $cloudUserInput,
+            userInput: $userInput,
+            cloudOutput: this.cloudOutput,
+            cloudDebugImagePath: this.cloudDebugImagePath,
+            cloudThinking: this.cloudThinking,
+            localOutput: this.output,
+            localDebugImagePath: this.debugImagePath,
+            chatHistory: this.chatHistory,
+            localThinking: this.isThinking,
+            modelLoaded: this.modelLoaded,
+            onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+            onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
+            onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
+            onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
+            onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
+            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }
+          })
+        }.tabBar(this.TabItem('A', '聊天', MainTabIndex.Chat))
         TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
         TabContent() {
           TaskPage({

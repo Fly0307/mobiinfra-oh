@@ -484,6 +484,8 @@ export default function dataManagerUnitTest() {
       expect(snapshot.prompt_profile_text.indexOf('咖啡轻食') >= 0).assertTrue();
       let prompt = builder.buildPrompt(snapshot);
       expect(prompt.indexOf('3D 卡通风格个人数字形象') >= 0).assertTrue();
+      expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
       expect(prompt.indexOf('gender=male') >= 0).assertTrue();
       expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();
       expect(prompt.indexOf('要求无文字') >= 0).assertTrue();
@@ -497,6 +499,8 @@ export default function dataManagerUnitTest() {
       let snapshot = builder.buildSnapshot(demoProfileStateForAvatar(), 100);
       let prompt = builder.buildPrompt(snapshot, 'image_to_image');
       expect(prompt.indexOf('参考照片中的人物') >= 0).assertTrue();
+      expect(prompt.indexOf('4:3 横向首页场景图') >= 0).assertTrue();
+      expect(prompt.indexOf('围绕人物自然融入少量 profile 相关物品和事项元素') >= 0).assertTrue();
       expect(prompt.indexOf('不是生成另一个陌生角色') >= 0).assertTrue();
       expect(prompt.indexOf('不要让 profile 覆盖或替换参考照片中的人物身份特征') >= 0).assertTrue();
       expect(prompt.indexOf('咖啡轻食') >= 0).assertTrue();

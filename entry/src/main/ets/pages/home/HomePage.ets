@@ -198,19 +198,25 @@ export struct HomePage {
   @Builder AvatarImage() {
     if (this.profile.avatarUri.length > 0) {
       Image(this.profile.avatarUri)
-        .width('74%')
-        .height(245)
-        .objectFit(ImageFit.Contain)
-        .margin({ top: 6 })
+        .width('92%')
+        .height(270)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor('#E8F1FF')
+        .borderRadius(20)
+        .clip(true)
+        .margin({ top: 8 })
         .onClick(() => {
           this.avatarGenerationOpen = true;
         })
     } else {
       Image($r('app.media.digital_avatar'))
-        .width('74%')
-        .height(245)
-        .objectFit(ImageFit.Contain)
-        .margin({ top: 6 })
+        .width('92%')
+        .height(270)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor('#E8F1FF')
+        .borderRadius(20)
+        .clip(true)
+        .margin({ top: 8 })
         .onClick(() => {
           this.avatarGenerationOpen = true;
         })

@@ -6,6 +6,7 @@
 **/build
 /.hvigor
 /.hvigor-user-home
+/.hdc-auto-cache/
 .cxx
 /.clangd
 /.clang-format
@@ -27,4 +28,3 @@ build-profile.json5*
 .vscode/
 /.codex-tmp/
 /.codex
-/docs/superpowers/

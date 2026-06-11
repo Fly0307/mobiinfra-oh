@@ -204,5 +204,80 @@ export default function chatSessionStorageUnitTest() {
 
       cleanupPath(root);
     });
+
+    it('copiesTaskResultImageIntoTargetSessionAssets', 0, () => {
+      let root = nextTestRoot('image-assets');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.appendMessage(root, session.id,
+        createChatMessage('r1', 'task', CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', 1001));
+      let sourcePath = root + '/agent_snapshot_1001.jpg';
+      ChatSessionStorage.writeText(sourcePath, 'fake-image');
+
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: session.id,
+        activeMessages: session.messages,
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: session
+      };
+      let next = ChatSessionController.attachTaskResultImage(root, state, session.id, 'file://' + sourcePath);
+      let expectedPath = ChatSessionStorage.sessionAssetPath(root, session.id, 'agent_snapshot_1001.jpg');
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(ChatSessionStorage.pathExists(sourcePath)).assertTrue();
+      expect(ChatSessionStorage.pathExists(expectedPath)).assertTrue();
+      expect(next.activeMessages[0].imagePath === undefined ? '' : next.activeMessages[0].imagePath)
+        .assertEqual('file://' + expectedPath);
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.messages[0].imagePath === undefined ? '' : reloaded.messages[0].imagePath)
+          .assertEqual('file://' + expectedPath);
+      }
+
+      cleanupPath(root);
+    });
+
+    it('deleteSessionRemovesSessionAssetFiles', 0, () => {
+      let root = nextTestRoot('delete-assets');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, session.id);
+      let imagePath = ChatSessionStorage.sessionAssetPath(root, session.id, 'agent_snapshot_1001.jpg');
+      ChatSessionStorage.writeText(imagePath, 'fake-image');
+
+      let deleted = ChatSessionStorage.deleteSession(root, session.id);
+
+      expect(deleted).assertTrue();
+      expect(ChatSessionStorage.pathExists(imagePath)).assertFalse();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, session.id))).assertFalse();
+
+      cleanupPath(root);
+    });
+
+    it('deleteSessionKeepsOtherSessionAssetFiles', 0, () => {
+      let root = nextTestRoot('delete-assets-isolated');
+      prepareTestRoot(root);
+
+      let first = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let second = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, first.id);
+      ChatSessionStorage.ensureSessionAssetsDir(root, second.id);
+      let firstImagePath = ChatSessionStorage.sessionAssetPath(root, first.id, 'agent_snapshot_1001.jpg');
+      let secondImagePath = ChatSessionStorage.sessionAssetPath(root, second.id, 'agent_snapshot_2001.jpg');
+      ChatSessionStorage.writeText(firstImagePath, 'first-image');
+      ChatSessionStorage.writeText(secondImagePath, 'second-image');
+
+      let deleted = ChatSessionStorage.deleteSession(root, first.id);
+
+      expect(deleted).assertTrue();
+      expect(ChatSessionStorage.pathExists(firstImagePath)).assertFalse();
+      expect(ChatSessionStorage.pathExists(secondImagePath)).assertTrue();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, second.id))).assertTrue();
+
+      cleanupPath(root);
+    });
   });
 }

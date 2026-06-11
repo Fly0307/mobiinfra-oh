@@ -14,6 +14,7 @@ import {
 
 const CHAT_SESSION_DIR: string = 'chat-sessions';
 const CHAT_SESSION_RECORD_DIR: string = 'sessions';
+const CHAT_SESSION_ASSET_DIR: string = 'assets';
 const CHAT_SESSION_INDEX_FILE: string = 'session-index.json';
 
 export class ChatSessionStorage {
@@ -23,6 +24,14 @@ export class ChatSessionStorage {
 
   static sessionsDir(filesDir: string): string {
     return ChatSessionStorage.rootDir(filesDir) + '/' + CHAT_SESSION_RECORD_DIR;
+  }
+
+  static assetsDir(filesDir: string): string {
+    return ChatSessionStorage.rootDir(filesDir) + '/' + CHAT_SESSION_ASSET_DIR;
+  }
+
+  static sessionAssetsDir(filesDir: string, sessionId: string): string {
+    return ChatSessionStorage.assetsDir(filesDir) + '/' + sessionId;
   }
 
   static indexPath(filesDir: string): string {
@@ -35,6 +44,10 @@ export class ChatSessionStorage {
 
   static sessionPath(filesDir: string, sessionId: string): string {
     return ChatSessionStorage.sessionsDir(filesDir) + '/' + ChatSessionStorage.sessionFileName(sessionId);
+  }
+
+  static sessionAssetPath(filesDir: string, sessionId: string, fileName: string): string {
+    return ChatSessionStorage.sessionAssetsDir(filesDir, sessionId) + '/' + ChatSessionStorage.safeAssetFileName(fileName);
   }
 
   static pathExists(path: string): boolean {
@@ -61,6 +74,12 @@ export class ChatSessionStorage {
   static ensureWorkspace(filesDir: string): void {
     ChatSessionStorage.ensureDirectory(ChatSessionStorage.rootDir(filesDir));
     ChatSessionStorage.ensureDirectory(ChatSessionStorage.sessionsDir(filesDir));
+    ChatSessionStorage.ensureDirectory(ChatSessionStorage.assetsDir(filesDir));
+  }
+
+  static ensureSessionAssetsDir(filesDir: string, sessionId: string): void {
+    ChatSessionStorage.ensureWorkspace(filesDir);
+    ChatSessionStorage.ensureDirectory(ChatSessionStorage.sessionAssetsDir(filesDir, sessionId));
   }
 
   static readText(path: string): string {
@@ -185,6 +204,32 @@ export class ChatSessionStorage {
     return session;
   }
 
+  static adoptImageForSession(filesDir: string, sessionId: string, imagePath: string): string {
+    if (filesDir.length === 0 || sessionId.length === 0 || imagePath.length === 0) {
+      return imagePath;
+    }
+    let sourcePath = ChatSessionStorage.stripFileUri(imagePath);
+    if (sourcePath.length === 0) {
+      return imagePath;
+    }
+    ChatSessionStorage.ensureSessionAssetsDir(filesDir, sessionId);
+    let assetDir = ChatSessionStorage.sessionAssetsDir(filesDir, sessionId);
+    if (sourcePath.indexOf(assetDir + '/') === 0) {
+      return 'file://' + sourcePath;
+    }
+    if (!ChatSessionStorage.pathExists(sourcePath)) {
+      return imagePath;
+    }
+    let targetPath = ChatSessionStorage.uniqueAssetPath(filesDir, sessionId,
+      ChatSessionStorage.fileNameFromPath(sourcePath));
+    try {
+      fs.copyFileSync(sourcePath, targetPath);
+      return 'file://' + targetPath;
+    } catch (e) {
+      return imagePath;
+    }
+  }
+
   static upsertSummary(filesDir: string, summary: ChatSessionSummary): void {
     let sessions = ChatSessionStorage.loadIndex(filesDir).filter((item: ChatSessionSummary) => item.id !== summary.id);
     sessions.push(summary);
@@ -206,6 +251,7 @@ export class ChatSessionStorage {
         return false;
       }
     }
+    ChatSessionStorage.deletePathRecursive(ChatSessionStorage.sessionAssetsDir(filesDir, sessionId));
     ChatSessionStorage.removeFromIndex(filesDir, sessionId);
     return true;
   }
@@ -231,5 +277,65 @@ export class ChatSessionStorage {
       });
     }
     return normalized;
+  }
+
+  private static stripFileUri(path: string): string {
+    return path.startsWith('file://') ? path.substring(7) : path;
+  }
+
+  private static fileNameFromPath(path: string): string {
+    let slashIndex = path.lastIndexOf('/');
+    let fileName = slashIndex >= 0 ? path.substring(slashIndex + 1) : path;
+    return ChatSessionStorage.safeAssetFileName(fileName);
+  }
+
+  private static safeAssetFileName(fileName: string): string {
+    let safe = '';
+    for (let i = 0; i < fileName.length; i++) {
+      let code = fileName.charCodeAt(i);
+      let char = fileName.charAt(i);
+      let isNumber = code >= 48 && code <= 57;
+      let isUpper = code >= 65 && code <= 90;
+      let isLower = code >= 97 && code <= 122;
+      let isSymbol = char === '.' || char === '_' || char === '-';
+      let nextChar = (isNumber || isUpper || isLower || isSymbol) ? char : '_';
+      safe += nextChar;
+    }
+    return safe.length > 0 ? safe : 'agent_snapshot_' + String(new Date().getTime()) + '.jpg';
+  }
+
+  private static uniqueAssetPath(filesDir: string, sessionId: string, fileName: string): string {
+    let safeFileName = ChatSessionStorage.safeAssetFileName(fileName);
+    let targetPath = ChatSessionStorage.sessionAssetPath(filesDir, sessionId, safeFileName);
+    if (!ChatSessionStorage.pathExists(targetPath)) {
+      return targetPath;
+    }
+    let dotIndex = safeFileName.lastIndexOf('.');
+    let baseName = dotIndex > 0 ? safeFileName.substring(0, dotIndex) : safeFileName;
+    let extension = dotIndex > 0 ? safeFileName.substring(dotIndex) : '';
+    let suffix = 1;
+    while (true) {
+      let candidate = ChatSessionStorage.sessionAssetPath(filesDir, sessionId,
+        baseName + '-' + String(suffix) + extension);
+      if (!ChatSessionStorage.pathExists(candidate)) {
+        return candidate;
+      }
+      suffix += 1;
+    }
+  }
+
+  private static deletePathRecursive(path: string): void {
+    try {
+      let children = fs.listFileSync(path);
+      for (let i = 0; i < children.length; i++) {
+        ChatSessionStorage.deletePathRecursive(path + '/' + children[i]);
+      }
+      fs.rmdirSync(path);
+    } catch (e) {
+      try {
+        fs.unlinkSync(path);
+      } catch (err) {
+      }
+    }
   }
 }

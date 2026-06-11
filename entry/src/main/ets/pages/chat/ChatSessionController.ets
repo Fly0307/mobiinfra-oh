@@ -125,6 +125,7 @@ export class ChatSessionController {
     if (resultIndex < 0) {
       return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
     }
+    let sessionImagePath = ChatSessionStorage.adoptImageForSession(filesDir, sessionId, imagePath);
     let resultMessage = messages[resultIndex];
     messages[resultIndex] = {
       id: resultMessage.id,
@@ -134,7 +135,7 @@ export class ChatSessionController {
       trace: resultMessage.trace.slice(),
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
-      imagePath: imagePath
+      imagePath: sessionImagePath
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();

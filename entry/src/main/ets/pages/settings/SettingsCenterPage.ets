@@ -322,6 +322,11 @@ export struct SettingsCenterPage {
         this.WechatAutoSummaryInput('默认最近联系人数量', this.wechatAutoSummaryDefaultMaxContacts,
           DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS, normalizeWechatAutoSummaryMaxContacts,
           (value: string) => { this.wechatAutoSummaryDefaultMaxContacts = value; })
+        Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
+          .fontSize(12)
+          .fontColor('#D26B31')
+          .width('100%')
+          .margin({ top: 8, bottom: 8 })
 
         Row() {
           Text('高级参数')

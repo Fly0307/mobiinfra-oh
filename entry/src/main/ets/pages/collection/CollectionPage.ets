@@ -205,9 +205,9 @@ export struct CollectionPage {
         .width('100%')
         .margin({ top: 14 })
 
-        this.WechatInput('时间范围（天）', this.wechatDaysText(), this.wechatAutoSummaryDefaultDays,
+        this.WechatInput('时间范围（天）', this.wechatDaysInput, '默认 ' + this.wechatAutoSummaryDefaultDays,
           (value: string) => { this.wechatDaysInput = value; })
-        this.WechatInput('最近联系人数量', this.wechatMaxContactsText(), this.wechatAutoSummaryDefaultMaxContacts,
+        this.WechatInput('最近联系人数量', this.wechatMaxContactsInput, '默认 ' + this.wechatAutoSummaryDefaultMaxContacts,
           (value: string) => { this.wechatMaxContactsInput = value; })
         if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
           this.WechatInput('指定联系人', this.wechatTargetContactInput, '请输入微信联系人名称',

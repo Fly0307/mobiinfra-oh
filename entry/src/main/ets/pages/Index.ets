@@ -1002,7 +1002,9 @@ struct Index {
           stringifyJsonCompat(response.conversations as Object, 2));
       }
       if (response.daily_log_entries !== undefined) {
-        storage.writeDailyLog(runId, request.mode, request.days, this.currentLocalDateKey(), response.daily_log_entries);
+        let dailyLogMode = response.mode !== undefined && response.mode.length > 0 ? response.mode : request.mode;
+        let dailyLogDays = response.days !== undefined ? response.days : request.days;
+        storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, this.currentLocalDateKey(), response.daily_log_entries);
       }
 
       let contactCount = 0;

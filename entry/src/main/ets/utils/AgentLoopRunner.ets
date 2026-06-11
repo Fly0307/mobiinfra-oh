@@ -329,14 +329,14 @@ export class AgentLoopRunner {
         imgTag + '\n' + finalPrompt;
     }
     this.log('local', '>> [Action] full prompt:\n' + finalPrompt);
-    AppStorage.set('floatText', 'Inferencing...');
+    AgentExecutionController.updateFloatText('Inferencing...');
     let chat = this.localApi['chat'];
     if (typeof chat !== 'function') {
       throw new Error('Local chat API is unavailable');
     }
     let response = await chat(finalPrompt) as string;
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('local', '>> [Action] model response:\n' + response);
     if (!await this.localApprovalHandler(response)) {
       throw new Error('User rejected');
@@ -346,14 +346,14 @@ export class AgentLoopRunner {
 
   private async localAgentPrefill(prefix: string): Promise<void> {
     this.log('local', '>> [Agent Prefill] prompt chars=' + prefix.length + '\n' + prefix);
-    AppStorage.set('floatText', 'Prefill...');
+    AgentExecutionController.updateFloatText('Prefill...');
     let agentPrefill = this.localApi['agentPrefill'];
     if (typeof agentPrefill !== 'function') {
       throw new Error('Local agentPrefill API is unavailable');
     }
     let result = await agentPrefill(prefix) as string;
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('local', '>> [Agent Prefill Done] ' + result);
   }
 
@@ -368,7 +368,7 @@ export class AgentLoopRunner {
         imgTag + finalVariable;
     }
     this.log('local', '>> [Agent Step] variable prompt:\n' + finalVariable);
-    AppStorage.set('floatText', 'Thinking...');
+    AgentExecutionController.updateFloatText('Thinking...');
     let agentStep = this.localApi['agentStep'];
     if (typeof agentStep !== 'function') {
       throw new Error('Local agentStep API is unavailable');
@@ -379,10 +379,10 @@ export class AgentLoopRunner {
         throw new Error('__agent_cancelled__');
       }
       streamedText += token;
-      AppStorage.set('floatText', streamedText);
+      AgentExecutionController.replaceFloatText(streamedText);
     }) as string;
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('local', '>> [Agent Step] model response:\n' + response);
     if (!await this.localApprovalHandler(response)) {
       throw new Error('User rejected');
@@ -391,11 +391,11 @@ export class AgentLoopRunner {
   }
 
   private async runCloudPlanner(prompt: string): Promise<string> {
-    AppStorage.set('floatText', 'Cloud planning...');
+    AgentExecutionController.updateFloatText('Cloud planning...');
     this.log('cloud', '>> [Cloud Planner] prompt:\n' + prompt);
     let response = await this.cloudClient.chatPlanner(prompt, this.cloudConfigProvider());
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Planner] model response:\n' + response);
     if (!await this.cloudApprovalHandler(response)) {
       throw new Error('User rejected');
@@ -411,11 +411,11 @@ export class AgentLoopRunner {
     let qwenTask = this.cloudTask.length > 0 ? this.cloudTask : '';
     let debugPrompt = this.cloudClient.formatQwenDeciderPromptForLog(qwenTask, this.cloudActionHistory, imageBase64);
     this.log('cloud', '>> [Cloud Decider Prompt]\n' + debugPrompt);
-    AppStorage.set('floatText', 'Cloud thinking...');
+    AgentExecutionController.updateFloatText('Cloud thinking...');
     let response = await this.cloudClient.chatQwenDecider(qwenTask, this.cloudActionHistory, imageBase64,
       this.cloudConfigProvider());
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Agent Step] model response:\n' + response);
     if (!await this.cloudApprovalHandler(response)) {
       throw new Error('User rejected');
@@ -424,10 +424,10 @@ export class AgentLoopRunner {
   }
 
   private async runCloudDeciderPrompt(prompt: string, imageBase64: string): Promise<string> {
-    AppStorage.set('floatText', 'Cloud thinking...');
+    AgentExecutionController.updateFloatText('Cloud thinking...');
     let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider());
     this.checkCancellation();
-    AppStorage.set('floatText', 'AI Agent running...');
+    AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Action] model response:\n' + response);
     if (!await this.cloudApprovalHandler(response)) {
       throw new Error('User rejected');

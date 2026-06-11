@@ -10,6 +10,7 @@ import { AgentActionParser } from './AgentActionParser';
 import {
   WorkflowCondition,
   WorkflowDefinition,
+  HdcBridgeResponse,
   WorkflowJsonMap,
   WorkflowJsonValue,
   WorkflowRunResult,
@@ -64,6 +65,15 @@ interface GuiActionOutput {
   height?: number;
   file_name?: string;
   result?: string;
+  reused_screenshot?: boolean;
+  source_screenshot?: string;
+}
+
+interface WorkflowScreenshotCache {
+  image_b64: string;
+  width: number;
+  height: number;
+  source: string;
 }
 
 interface GuiActionPayload {
@@ -189,6 +199,7 @@ export class WorkflowRunner {
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
   private pendingSummaryJobs: PendingSummaryJob[] = [];
+  private latestWorkflowScreenshot: WorkflowScreenshotCache | null = null;
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
     hdcServerIp: string, logHandler: (message: string) => void) {
@@ -221,6 +232,7 @@ export class WorkflowRunner {
     this.currentPackageName = '';
     this.latestDailyLogPath = '';
     this.pendingSummaryJobs = [];
+    this.clearWorkflowScreenshotCache();
     this.runStartedAt = new Date();
     this.dateContext = new WorkflowDateContext(this.runStartedAt);
     this.runDate = this.dateContext.runDate();
@@ -462,7 +474,9 @@ export class WorkflowRunner {
       this.currentAppName = planner.appName;
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
+      this.clearWorkflowScreenshotCache();
       await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
+      this.clearWorkflowScreenshotCache();
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
         task_description: taskDescription,
@@ -548,6 +562,44 @@ export class WorkflowRunner {
     return this.dateContext.withDatePrompt(prompt, sectionTitle);
   }
 
+  private async captureWorkflowScreenshot(source: string): Promise<WorkflowScreenshotCache> {
+    let shot = await this.hdcBridge.screenshot();
+    let screenshot = this.normalizeWorkflowScreenshot(shot, source);
+    this.latestWorkflowScreenshot = screenshot;
+    return screenshot;
+  }
+
+  private normalizeWorkflowScreenshot(shot: HdcBridgeResponse, source: string): WorkflowScreenshotCache {
+    let imageBase64 = shot.image_b64 || '';
+    if (imageBase64.length === 0) {
+      throw new Error(shot.message || 'screenshot failed');
+    }
+    return {
+      image_b64: imageBase64,
+      width: shot.width || 0,
+      height: shot.height || 0,
+      source: source
+    };
+  }
+
+  private clearWorkflowScreenshotCache(): void {
+    this.latestWorkflowScreenshot = null;
+  }
+
+  private writeScreenshotOutput(output: GuiActionOutput, actualId: string, fileName: string,
+    screenshot: WorkflowScreenshotCache, reused: boolean): void {
+    let imageFileName = this.screenshotFileName(fileName);
+    let imagePath = this.runArtifactPath(actualId, imageFileName);
+    WorkflowStorage.writeBase64Image(imagePath, screenshot.image_b64);
+    output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
+    output.image_b64 = screenshot.image_b64;
+    output.width = screenshot.width;
+    output.height = screenshot.height;
+    output.file_name = imageFileName;
+    output.reused_screenshot = reused;
+    output.source_screenshot = screenshot.source;
+  }
+
   private async runDeciderLoop(taskDescription: string): Promise<string> {
     let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
@@ -561,10 +613,10 @@ export class WorkflowRunner {
         throw new Error('用户取消 workflow');
       }
       AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + MAX_GUI_STEPS + ': 识别屏幕并决策');
-      let shot = await this.hdcBridge.screenshot();
-      let imageBase64 = shot.image_b64 || '';
-      let width = shot.width || 0;
-      let height = shot.height || 0;
+      let shot = await this.captureWorkflowScreenshot('decider:' + String(i + 1));
+      let imageBase64 = shot.image_b64;
+      let width = shot.width;
+      let height = shot.height;
       this.log('Decider 截图完成：' + width + 'x' + height);
       let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
       this.log('Decider response:\n' + response);
@@ -577,6 +629,7 @@ export class WorkflowRunner {
         break;
       }
       let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
+      this.clearWorkflowScreenshotCache();
       await this.hdcBridge.guiAction(hdcPayload);
       history.push(ArkJSON.stringify(parsed));
     }
@@ -591,16 +644,12 @@ export class WorkflowRunner {
       device: step.device || 'Harmony'
     };
     if (action === 'screenshot') {
-      let shot = await this.hdcBridge.screenshot();
-      let imageBase64 = shot.image_b64 || '';
-      let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
-      let imagePath = this.runArtifactPath(actualId, imageFileName);
-      WorkflowStorage.writeBase64Image(imagePath, imageBase64);
-      output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
-      output.image_b64 = imageBase64;
-      output.width = shot.width || 0;
-      output.height = shot.height || 0;
-      output.file_name = imageFileName;
+      let cached = this.latestWorkflowScreenshot;
+      let screenshot = cached === null ? await this.captureWorkflowScreenshot('step:' + actualId) : cached;
+      this.writeScreenshotOutput(output, actualId, step.file_name || 'screenshot.jpg', screenshot, cached !== null);
+      if (cached !== null) {
+        this.log('Step ' + actualId + ' reused screenshot from ' + screenshot.source);
+      }
       return output as Object as WorkflowJsonMap;
     }
 
@@ -646,6 +695,7 @@ export class WorkflowRunner {
     if (action === 'app_start') {
       payload.reset_first = true;
     }
+    this.clearWorkflowScreenshotCache();
     let response = await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
     output.result = response.message || 'ok';
     return output as Object as WorkflowJsonMap;

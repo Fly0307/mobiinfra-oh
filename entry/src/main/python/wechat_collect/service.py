@@ -14,12 +14,20 @@ import posixpath
 import shlex
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .parser import Contact, extract_contacts, load_ui_tree
+from .parser import (
+    Contact,
+    build_chat_payload,
+    extract_contacts,
+    load_ui_tree,
+    parse_chat_time,
+    safe_filename,
+)
+from .render import markdown_path_for_json, print_json_and_markdown
 
 
 DEFAULT_DAYS = 7
@@ -219,30 +227,202 @@ def collect_action(
     hdc_prefix: str,
     gui_search: Callable[[str], Any],
 ) -> dict[str, Any]:
-    """规范化微信采集请求并返回 Task 3 阶段的空采集结果骨架。"""
+    """通过 HDC 适配器执行微信采集服务编排。"""
+
+    prefix = _split_hdc_prefix(hdc_prefix)
+    remote_path = "/data/local/tmp/ui_tree.json"
+
+    def dump_provider(path: Path) -> dict[str, Any]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _run_hdc(prefix + ["shell", "uitest", "dumpLayout", "-p", remote_path])
+        _run_hdc(prefix + ["file", "recv", remote_path, str(path.parent)])
+
+        received_path = path.parent / Path(remote_path).name
+        if received_path.exists() and received_path != path:
+            received_path.replace(path)
+        if not path.exists():
+            raise RuntimeError(f"ui dump file not found: {path}")
+        return load_ui_tree(path)
+
+    def tap_contact(contact: Contact) -> None:
+        _run_hdc(prefix + ["shell", "uiInput", "click", str(contact.tap_x), str(contact.tap_y)])
+
+    def press_back() -> None:
+        _run_hdc(prefix + ["shell", "uiInput", "keyEvent", "Back"])
+
+    return collect_action_with_device(
+        payload,
+        dump_provider=dump_provider,
+        tap_contact=tap_contact,
+        press_back=press_back,
+        swipe_history=lambda chat_root, request: None,
+        gui_search=gui_search,
+    )
+
+
+def collect_action_with_device(
+    payload: dict[str, Any],
+    dump_provider: Callable[[Path], dict[str, Any]],
+    tap_contact: Callable[[Contact], None],
+    press_back: Callable[[], None],
+    swipe_history: Callable[[dict[str, Any], WechatCollectRequest], Any],
+    gui_search: Callable[[str], Any],
+) -> dict[str, Any]:
+    """使用注入的设备操作执行可测试的微信采集编排。
+
+    该入口只负责编排首页 dump、联系人点击、聊天页 dump、导出文件和 daily-log
+    生成。真实设备操作由调用方注入，单元测试可替换为假设备实现。
+    """
 
     request = normalize_collect_request(payload)
     output_dir = _resolve_output_dir(request.output_dir, "wechat-collect-")
 
     started_at = datetime.now().replace(microsecond=0)
-    finished_at = datetime.now().replace(microsecond=0)
+    run_id = output_dir.name or f"{started_at.strftime('%Y%m%dT%H%M%S')}-wechat"
     contacts_requested = 1 if request.mode == "target_contact" else request.max_contacts
-    return {
+    conversations: list[dict[str, Any]] = []
+    home_dump = ""
+
+    if request.mode == "recent_contacts":
+        home_path = output_dir / "home.json"
+        home_root = dump_provider(home_path)
+        home_dump = str(home_path)
+        contacts = collect_recent_contacts_from_dumps(
+            lambda: home_root,
+            lambda root: None,
+            max_contacts=request.max_contacts,
+            stable_swipes=1,
+            max_list_swipes=0,
+        )
+
+        for index, contact in enumerate(contacts, start=1):
+            tap_contact(contact)
+            collection_error: BaseException | None = None
+            try:
+                chat_path = output_dir / f"chat_{index:02d}_{safe_filename(contact.name)}.json"
+                chat_root = dump_provider(chat_path)
+                updated_root = swipe_history(chat_root, request)
+                if isinstance(updated_root, dict):
+                    chat_root = updated_root
+                conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+            except BaseException as exc:
+                collection_error = exc
+                raise
+            finally:
+                _press_back_after_tap(press_back, collection_error)
+    else:
+        search_result = gui_search(request.target_contact)
+        if search_result is False:
+            raise RuntimeError("指定联系人搜索失败")
+
+        contact = Contact(
+            name=request.target_contact,
+            last_time="",
+            preview="",
+            bounds=None,
+            tap_x=0,
+            tap_y=0,
+            raw_texts=[request.target_contact],
+        )
+        chat_path = output_dir / f"chat_01_{safe_filename(request.target_contact)}.json"
+        chat_root = dump_provider(chat_path)
+        updated_root = swipe_history(chat_root, request)
+        if isinstance(updated_root, dict):
+            chat_root = updated_root
+        conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+
+    daily_log_entries = daily_log_entries_from_conversations(conversations, request.days)
+    finished_at = datetime.now().replace(microsecond=0)
+    result = {
         "status": "ok",
-        "message": "wechat_collect service skeleton ready",
-        "run_id": f"{started_at.strftime('%Y%m%dT%H%M%S')}-wechat",
+        "message": f"collected {len(conversations)} conversations",
+        "run_id": run_id,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "mode": request.mode,
         "days": request.days,
         "target_contact": request.target_contact,
         "contacts_requested": contacts_requested,
-        "contacts_collected": 0,
-        "conversations": [],
+        "contacts_collected": len(conversations),
+        "conversations": conversations,
+        "daily_log_entries": daily_log_entries,
         "artifacts": {
             "output_dir": str(output_dir),
+            **_aggregate_artifact_paths(output_dir),
         },
+        **({"home_dump": home_dump} if home_dump else {}),
     }
+    result["artifacts"].update(_write_payloads(output_dir, result))
+    return result
+
+
+def _write_payloads(output_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
+    """写入聚合 JSON 与 Markdown，并返回产物路径。"""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "wechat_collect.json"
+    print_json_and_markdown(payload, json_path)
+    markdown_path = markdown_path_for_json(json_path)
+    return {
+        "aggregate_json": str(json_path),
+        "aggregate_markdown": str(markdown_path),
+    }
+
+
+def _conversation_from_chat_root(contact: Contact, root: dict[str, Any], dump_path: str) -> dict[str, Any]:
+    """把单个聊天页 dump 转成统一会话记录。"""
+
+    chat_payload = build_chat_payload(root, fallback_title=contact.name)
+    messages = chat_payload["messages"]
+    return {
+        "contact": asdict(contact),
+        "title": chat_payload["title"],
+        "dump": dump_path,
+        "snapshots": [dump_path],
+        "messages": messages,
+        "time_range": _messages_time_range(messages),
+    }
+
+
+def _aggregate_artifact_paths(output_dir: Path) -> dict[str, str]:
+    json_path = output_dir / "wechat_collect.json"
+    return {
+        "aggregate_json": str(json_path),
+        "aggregate_markdown": str(markdown_path_for_json(json_path)),
+    }
+
+
+def _messages_time_range(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """从时间分隔消息中提取当前会话的可读时间范围。"""
+
+    parsed_times = []
+    reference = datetime.now()
+    for message in messages:
+        if message.get("kind") != "time":
+            continue
+        parsed = parse_chat_time(str(message.get("text") or ""), reference)
+        if parsed is not None:
+            parsed_times.append(parsed)
+
+    if not parsed_times:
+        return {"start": "", "end": ""}
+    return {
+        "start": min(parsed_times).isoformat(timespec="minutes"),
+        "end": max(parsed_times).isoformat(timespec="minutes"),
+    }
+
+
+def _press_back_after_tap(press_back: Callable[[], None], original_error: BaseException | None) -> None:
+    """点击进入聊天后返回列表；返回失败时优先保留原始采集异常。"""
+
+    try:
+        press_back()
+    except BaseException as back_error:
+        if original_error is not None:
+            back_error.__context__ = None
+            original_error.__context__ = back_error
+            return
+        raise
 
 
 def _normalize_remote_dump_path(value: Any) -> str:
@@ -390,6 +570,7 @@ __all__ = [
     "WechatCollectRequest",
     "collect_recent_contacts_from_dumps",
     "collect_action",
+    "collect_action_with_device",
     "daily_log_entries_from_conversations",
     "normalize_collect_request",
     "uidump_action",

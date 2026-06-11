@@ -92,9 +92,9 @@ def collect_recent_contacts_from_dumps(
 ) -> list[Contact]:
     """从多页微信首页 dump 中收集最近联系人。
 
-    每轮先读取当前 dump 并提取联系人，再把当前页第一个未见过的联系人
-    纳入结果。若数量不足且页面尚未稳定，会调用调用方注入的滑动函数，
-    然后读取下一页 dump。
+    每轮先读取当前 dump 并提取联系人，按页面顺序把当前页所有未见过的
+    联系人纳入结果。若数量不足且页面尚未稳定，会调用调用方注入的滑动
+    函数，然后读取下一页 dump。
     """
 
     if max_contacts <= 0:
@@ -119,7 +119,8 @@ def collect_recent_contacts_from_dumps(
                 continue
             seen_names.add(name)
             contacts.append(contact)
-            break
+            if len(contacts) >= max_contacts:
+                return contacts
 
         if len(contacts) >= max_contacts:
             return contacts

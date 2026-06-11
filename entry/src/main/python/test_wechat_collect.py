@@ -244,16 +244,12 @@ class WechatCollectServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target_contact"):
             normalize_collect_request({"mode": "target_contact", "days": 7})
 
-    def test_collect_recent_contacts_scrolls_until_unique_limit(self):
+    def test_collect_recent_contacts_uses_full_current_page_before_swiping(self):
         first_dump = load_fixture("home.json")
-        second_dump = json.loads(json.dumps(first_dump, ensure_ascii=False))
-        first = extract_contacts(first_dump)[0]
-        second_dump["children"][0]["children"][0]["children"][0]["attributes"]["text"] = "新联系人"
-        dumps = [first_dump, second_dump]
         swipes = []
 
         def dump_provider():
-            return dumps[len(swipes)]
+            return first_dump
 
         def swipe_next(root):
             swipes.append(root)
@@ -266,7 +262,31 @@ class WechatCollectServiceTests(unittest.TestCase):
             max_list_swipes=3,
         )
 
-        self.assertEqual([contact.name for contact in contacts], [first.name, "新联系人"])
+        self.assertEqual([contact.name for contact in contacts], ["小赵", "项目群"])
+        self.assertEqual(swipes, [])
+
+    def test_collect_recent_contacts_scrolls_until_unique_limit(self):
+        first_dump = load_fixture("home.json")
+        second_dump = json.loads(json.dumps(first_dump, ensure_ascii=False))
+        second_dump["children"][0]["children"][0]["children"][0]["attributes"]["text"] = "新联系人"
+        dumps = [first_dump, second_dump, second_dump, second_dump]
+        swipes = []
+
+        def dump_provider():
+            return dumps[len(swipes)]
+
+        def swipe_next(root):
+            swipes.append(root)
+
+        contacts = collect_recent_contacts_from_dumps(
+            dump_provider,
+            swipe_next,
+            max_contacts=4,
+            stable_swipes=2,
+            max_list_swipes=3,
+        )
+
+        self.assertEqual([contact.name for contact in contacts], ["小赵", "项目群", "文件传输助手", "新联系人"])
         self.assertEqual(len(swipes), 1)
 
     def test_daily_log_entries_include_complete_message_excerpt(self):

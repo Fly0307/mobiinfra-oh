@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """微信采集服务层。
 
-本模块面向后续 HTTP/HDC 服务集成，集中处理请求参数校验、最近联系人
-滚动去重和 daily-log 文本生成。这里不直接调用设备命令，调用方需要注入
-dump 与滑动函数，便于单元测试和后续接入不同服务入口。
+本模块面向 HTTP/HDC workflow bridge 集成，集中处理请求参数校验、UI dump
+桥接动作、最近联系人滚动去重和 daily-log 文本生成。部分 workflow 动作会
+执行受控 HDC 命令；其余采集逻辑通过调用方注入 dump 与滑动函数，便于单元测试
+和后续接入不同服务入口。
 """
 
 from __future__ import annotations
 
 import math
+import posixpath
 import shlex
 import subprocess
 import tempfile
@@ -28,6 +30,7 @@ DEFAULT_STABLE_SWIPES = 3
 DEFAULT_MAX_HISTORY_SWIPES = 80
 DEFAULT_WAIT = 1.0
 DEFAULT_MAX_LIST_SWIPES = 20
+DEFAULT_HDC_TIMEOUT = 20
 
 SUPPORTED_MODES = {"recent_contacts", "target_contact"}
 
@@ -189,13 +192,8 @@ def _split_hdc_prefix(hdc_prefix: str) -> list[str]:
 def uidump_action(payload: dict[str, Any], hdc_prefix: str) -> dict[str, Any]:
     """执行一次 UI dump 并把结果加载成 JSON 树返回给 workflow bridge。"""
 
-    remote_path = str(payload.get("remote_path") or "/data/local/tmp/ui_tree.json").strip()
-    if not remote_path.startswith("/data/local/tmp/"):
-        raise ValueError("remote_path must start with /data/local/tmp/")
-
-    output_dir_value = payload.get("output_dir") or tempfile.mkdtemp(prefix="wechat-uidump-")
-    output_dir = Path(str(output_dir_value)).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    remote_path = _normalize_remote_dump_path(payload.get("remote_path"))
+    output_dir = _resolve_output_dir(payload.get("output_dir"), "wechat-uidump-")
 
     prefix = _split_hdc_prefix(hdc_prefix)
     _run_hdc(prefix + ["shell", "uitest", "dumpLayout", "-p", remote_path])
@@ -224,12 +222,11 @@ def collect_action(
     """规范化微信采集请求并返回 Task 3 阶段的空采集结果骨架。"""
 
     request = normalize_collect_request(payload)
-    output_dir_value = request.output_dir or tempfile.mkdtemp(prefix="wechat-collect-")
-    output_dir = Path(output_dir_value).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _resolve_output_dir(request.output_dir, "wechat-collect-")
 
     started_at = datetime.now().replace(microsecond=0)
     finished_at = datetime.now().replace(microsecond=0)
+    contacts_requested = 1 if request.mode == "target_contact" else request.max_contacts
     return {
         "status": "ok",
         "message": "wechat_collect service skeleton ready",
@@ -238,7 +235,8 @@ def collect_action(
         "finished_at": finished_at.isoformat(),
         "mode": request.mode,
         "days": request.days,
-        "contacts_requested": request.max_contacts,
+        "target_contact": request.target_contact,
+        "contacts_requested": contacts_requested,
         "contacts_collected": 0,
         "conversations": [],
         "artifacts": {
@@ -247,8 +245,48 @@ def collect_action(
     }
 
 
-def _run_hdc(args: list[str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, capture_output=True, text=True)
+def _normalize_remote_dump_path(value: Any) -> str:
+    if value is None:
+        text = "/data/local/tmp/ui_tree.json"
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        raise ValueError("remote_path must be a string")
+
+    if not text:
+        text = "/data/local/tmp/ui_tree.json"
+    normalized = posixpath.normpath(text)
+    if not normalized.startswith("/data/local/tmp/"):
+        raise ValueError("remote_path must stay under /data/local/tmp/")
+    filename = posixpath.basename(normalized)
+    if not filename or filename in (".", ".."):
+        raise ValueError("remote_path must be a file path")
+    if not filename.endswith(".json"):
+        raise ValueError("remote_path must end with .json")
+    return normalized
+
+
+def _resolve_output_dir(value: Any, temp_prefix: str) -> Path:
+    if value is None:
+        path = Path(tempfile.mkdtemp(prefix=temp_prefix))
+    elif isinstance(value, str):
+        text = value.strip()
+        path = Path(text).expanduser() if text else Path(tempfile.mkdtemp(prefix=temp_prefix))
+    else:
+        raise ValueError("output_dir must be a string")
+
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"output_dir is not a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _run_hdc(args: list[str], timeout: int = DEFAULT_HDC_TIMEOUT) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as ex:
+        message = f"HDC command timed out after {timeout}s: {' '.join(args)}"
+        raise RuntimeError(message) from ex
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(args)}"
         raise RuntimeError(message)

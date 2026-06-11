@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime
@@ -24,6 +25,7 @@ from wechat_collect import (
     daily_log_entries_from_conversations,
     normalize_collect_request,
 )
+from wechat_collect import service as wechat_collect_service
 
 
 ROOT = Path(__file__).resolve().parent / "wechat_collect" / "fixtures"
@@ -339,6 +341,79 @@ class WechatCollectServiceTests(unittest.TestCase):
         self.assertIn("完整消息摘录", entries[0])
         self.assertIn("我：我想要买一个iPhone 17Pro", entries[0])
         self.assertIn("小赵：需要给妹妹买一些少儿读物", entries[0])
+
+    def test_uidump_action_builds_hdc_commands_and_normalizes_dump_name(self):
+        commands = []
+
+        def fake_run_hdc(args):
+            commands.append(args)
+            if args[:4] == ["hdc", "-t", "SERIAL", "file"]:
+                output_dir = Path(args[-1])
+                (output_dir / "custom_tree.json").write_text("{}", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(wechat_collect_service, "_run_hdc", side_effect=fake_run_hdc), \
+                    patch.object(wechat_collect_service, "load_ui_tree", return_value={"root": True}):
+                result = wechat_collect_service.uidump_action({
+                    "remote_path": "/data/local/tmp/custom_tree.json",
+                    "output_dir": temp_dir,
+                }, "hdc -t SERIAL")
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["ui_tree"], {"root": True})
+            self.assertEqual(result["dump_path"], str(Path(temp_dir) / "ui_tree.json"))
+            self.assertTrue((Path(temp_dir) / "ui_tree.json").exists())
+
+        self.assertEqual(commands, [
+            ["hdc", "-t", "SERIAL", "shell", "uitest", "dumpLayout", "-p", "/data/local/tmp/custom_tree.json"],
+            ["hdc", "-t", "SERIAL", "file", "recv", "/data/local/tmp/custom_tree.json", temp_dir],
+        ])
+
+    def test_uidump_action_rejects_remote_path_traversal(self):
+        bad_paths = [
+            "/data/local/tmp/../x.json",
+            "/data/local/tmp/",
+            "/data/local/tmp/not_json.txt",
+            "/sdcard/ui_tree.json",
+        ]
+
+        for remote_path in bad_paths:
+            with self.subTest(remote_path=remote_path):
+                with patch.object(wechat_collect_service, "_run_hdc") as run_hdc:
+                    with self.assertRaises(ValueError):
+                        wechat_collect_service.uidump_action({"remote_path": remote_path}, "hdc")
+                run_hdc.assert_not_called()
+
+    def test_uidump_action_rejects_invalid_output_dir(self):
+        with self.assertRaisesRegex(ValueError, "output_dir must be a string"):
+            wechat_collect_service.uidump_action({"output_dir": []}, "hdc")
+
+        with tempfile.NamedTemporaryFile() as temp_file:
+            with self.assertRaisesRegex(ValueError, "output_dir is not a directory"):
+                wechat_collect_service.uidump_action({"output_dir": temp_file.name}, "hdc")
+
+    def test_run_hdc_converts_timeout_to_runtime_error(self):
+        with patch.object(
+            wechat_collect_service.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["hdc", "list", "targets"], 20),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 20s"):
+                wechat_collect_service._run_hdc(["hdc", "list", "targets"])
+
+    def test_collect_action_target_contact_skeleton_uses_single_requested_contact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = wechat_collect_service.collect_action({
+                "mode": "target_contact",
+                "target_contact": "小赵",
+                "max_contacts": 10,
+                "output_dir": temp_dir,
+            }, "hdc", gui_search=lambda name: None)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["contacts_requested"], 1)
+        self.assertEqual(result["target_contact"], "小赵")
 
 
 if __name__ == "__main__":

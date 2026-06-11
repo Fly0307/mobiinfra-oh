@@ -1302,21 +1302,39 @@ def ensure_workflow_agent_ready():
     if not is_hdc_connected():
         raise RuntimeError('HDC target is not connected')
 
-def ensure_wechat_collect_ready():
-    ensure_workflow_agent_ready()
+def ensure_wechat_collect_service_ready():
     if wechat_collect_service is None:
         raise RuntimeError("wechat_collect module is unavailable")
 
+def ensure_workflow_hdc_ready():
+    if not is_hdc_connected():
+        raise RuntimeError('HDC target is not connected')
+
+def ensure_wechat_collect_ready(require_agent=False):
+    ensure_wechat_collect_service_ready()
+    ensure_workflow_hdc_ready()
+    if require_agent:
+        if harmony_agent is None:
+            raise RuntimeError('harmony_agent.py is unavailable')
+        if not hasattr(harmony_agent, 'run_gui_task'):
+            raise RuntimeError('harmony_agent.run_gui_task is unavailable')
+
 def workflow_uidump_action(payload):
     ensure_wechat_collect_ready()
-    return wechat_collect_service.uidump_action(payload or {}, hdc_prefix())
+    return run_with_hdc_control(
+        "workflow_uidump",
+        lambda: wechat_collect_service.uidump_action(payload or {}, hdc_prefix())
+    )
 
 def workflow_wechat_collect_action(payload):
-    ensure_wechat_collect_ready()
-    return wechat_collect_service.collect_action(
-        payload or {},
-        hdc_prefix(),
-        gui_search=lambda contact_name: harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面"),
+    ensure_wechat_collect_ready(require_agent=True)
+    return run_with_hdc_control(
+        "workflow_wechat_collect",
+        lambda: wechat_collect_service.collect_action(
+            payload or {},
+            hdc_prefix(),
+            gui_search=lambda contact_name: harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面"),
+        )
     )
 
 def run_remote_command(cmd):

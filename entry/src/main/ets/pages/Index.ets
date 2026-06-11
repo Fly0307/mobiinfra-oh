@@ -25,6 +25,7 @@ import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionC
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
+import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -56,6 +57,24 @@ import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import {
+  DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
+  WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY,
+  WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY,
+  WECHAT_AUTO_SUMMARY_ENABLED_KEY,
+  WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY,
+  WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY,
+  WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY,
+  WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY,
+  WECHAT_AUTO_SUMMARY_WAIT_KEY
+} from '../utils/wechat/WechatAutoSummaryTypes';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
@@ -142,6 +161,14 @@ PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_WAIT_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_WAIT);
 
 @Entry
 @Component
@@ -163,6 +190,7 @@ struct Index {
   @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
+  @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -182,6 +210,19 @@ struct Index {
   @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
   @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
+  @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
+  @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string = DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
+  @StorageLink('wechatAutoSummaryDefaultMaxContacts') wechatAutoSummaryDefaultMaxContacts: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS;
+  @StorageLink('wechatAutoSummarySwipeSpeed') wechatAutoSummarySwipeSpeed: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED;
+  @StorageLink('wechatAutoSummaryHistorySwipeRatio') wechatAutoSummaryHistorySwipeRatio: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO;
+  @StorageLink('wechatAutoSummaryStableSwipes') wechatAutoSummaryStableSwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES;
+  @StorageLink('wechatAutoSummaryMaxHistorySwipes') wechatAutoSummaryMaxHistorySwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
+  @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -2598,7 +2639,11 @@ struct Index {
             collectionModule: $collectionModule,
             viewModels: this.collectionViews,
             refreshing: this.dataManagerRefreshing,
-            onRefresh: () => { this.refreshDataManager(); }
+            onRefresh: () => { this.refreshDataManager(); },
+            onOpenDataCollectionSettings: () => {
+              this.settingsSectionId = SettingsSectionId.DataCollection;
+              this.currentTab = MainTabIndex.Settings;
+            }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))
         TabContent() {
@@ -2648,6 +2693,7 @@ struct Index {
             threadNumInput: $threadNumInput,
             backendTypeInput: $backendTypeInput,
             mllmBackendTypeInput: $mllmBackendTypeInput,
+            selectedSectionId: $settingsSectionId,
             output: this.output,
             cloudOutput: this.cloudOutput,
             downloading: this.downloading,

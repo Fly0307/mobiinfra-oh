@@ -1,5 +1,5 @@
 import { AppHeader } from '../../components/AppHeader';
-import { promptAction, router } from '@kit.ArkUI';
+import { router } from '@kit.ArkUI';
 import {
   CollectionGroupViewModel,
   CollectionViewModel
@@ -20,6 +20,7 @@ export struct CollectionPage {
   @Prop refreshing: boolean = false;
   @State private groupPageIndex: number = 0;
   onRefresh: () => void = () => {};
+  onOpenDataCollectionSettings: () => void = () => {};
 
   private currentView(): CollectionViewModel {
     if (this.viewModels.length > this.collectionModule) {
@@ -315,7 +316,7 @@ export struct CollectionPage {
         .backgroundColor('#725CFF')
         .borderRadius(18)
         .margin({ top: COLLECTION_SECTION_GAP })
-        .onClick(() => { promptAction.showToast({ message: '新增采集源功能即将接入', duration: 1500 }); })
+        .onClick(() => { this.onOpenDataCollectionSettings(); })
 
         Column() {
           Text('图库分析').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)

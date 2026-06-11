@@ -19,6 +19,23 @@ import {
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import {
+  DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
+  normalizeWechatAutoSummaryDays,
+  normalizeWechatAutoSummaryHistorySwipeRatio,
+  normalizeWechatAutoSummaryMaxContacts,
+  normalizeWechatAutoSummaryMaxHistorySwipes,
+  normalizeWechatAutoSummaryStableSwipes,
+  normalizeWechatAutoSummarySwipeSpeed,
+  normalizeWechatAutoSummaryWait
+} from '../../utils/wechat/WechatAutoSummaryTypes';
+import {
   isSettingsSectionSelected,
   normalizeSettingsSectionId,
   SETTINGS_SECTION_ITEMS,
@@ -38,6 +55,7 @@ export struct SettingsCenterPage {
   @Link threadNumInput: string;
   @Link backendTypeInput: string;
   @Link mllmBackendTypeInput: string;
+  @Link selectedSectionId: number;
   @Prop output: string = '';
   @Prop cloudOutput: string = '';
   @Prop downloading: boolean = false;
@@ -74,7 +92,21 @@ export struct SettingsCenterPage {
   @StorageLink('galleryEmbeddingModel') galleryEmbeddingModel: string = DEFAULT_GALLERY_EMBEDDING_MODEL;
   @StorageLink('galleryImageScale') galleryImageScale: string = DEFAULT_GALLERY_IMAGE_SCALE;
   @StorageLink('galleryAmapWebKey') galleryAmapWebKey: string = DEFAULT_GALLERY_AMAP_WEB_KEY;
-  @State selectedSectionId: number = SETTINGS_SECTION_NONE;
+  @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
+  @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
+  @StorageLink('wechatAutoSummaryDefaultMaxContacts') wechatAutoSummaryDefaultMaxContacts: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS;
+  @StorageLink('wechatAutoSummarySwipeSpeed') wechatAutoSummarySwipeSpeed: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED;
+  @StorageLink('wechatAutoSummaryHistorySwipeRatio') wechatAutoSummaryHistorySwipeRatio: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO;
+  @StorageLink('wechatAutoSummaryStableSwipes') wechatAutoSummaryStableSwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES;
+  @StorageLink('wechatAutoSummaryMaxHistorySwipes') wechatAutoSummaryMaxHistorySwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
+  @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
+  @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
@@ -198,6 +230,14 @@ export struct SettingsCenterPage {
       .onChange((val: string) => { onValueChange(val); })
   }
 
+  @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
+    normalizeValue: (value: string) => number, onValueChange: (value: string) => void) {
+    this.SettingInput(label, value, placeholder, (input: string) => {
+      // 微信采集设置即时写入 PersistentStorage，写入前先按服务端允许范围归一化。
+      onValueChange(String(normalizeValue(input)));
+    })
+  }
+
   @Builder VariantButton(label: string, variant: string) {
     Button(label)
       .height(36)
@@ -261,6 +301,63 @@ export struct SettingsCenterPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .margin({ top: 10 })
+  }
+
+  private isWechatAutoSummaryEnabled(): boolean {
+    return this.wechatAutoSummaryEnabled === 'true';
+  }
+
+  private setWechatAutoSummaryEnabled(value: boolean): void {
+    this.wechatAutoSummaryEnabled = value ? 'true' : 'false';
+  }
+
+  @Builder WechatAutoSummarySettings() {
+    Column() {
+      this.SettingToggle('微信消息自动汇总', '开启后采集任务会按默认参数汇总最近微信会话',
+        this.isWechatAutoSummaryEnabled(), (value: boolean) => { this.setWechatAutoSummaryEnabled(value); })
+      if (this.isWechatAutoSummaryEnabled()) {
+        this.WechatAutoSummaryInput('默认时间范围（天）', this.wechatAutoSummaryDefaultDays,
+          DEFAULT_WECHAT_AUTO_SUMMARY_DAYS, normalizeWechatAutoSummaryDays,
+          (value: string) => { this.wechatAutoSummaryDefaultDays = value; })
+        this.WechatAutoSummaryInput('默认最近联系人数量', this.wechatAutoSummaryDefaultMaxContacts,
+          DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS, normalizeWechatAutoSummaryMaxContacts,
+          (value: string) => { this.wechatAutoSummaryDefaultMaxContacts = value; })
+
+        Row() {
+          Text('高级参数')
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .layoutWeight(1)
+          Text(this.wechatAutoSummaryAdvancedOpen ? '收起' : '展开')
+            .fontSize(12)
+            .fontColor('#5B68FF')
+        }
+        .width('100%')
+        .padding({ top: 12, bottom: 8 })
+        .onClick(() => { this.wechatAutoSummaryAdvancedOpen = !this.wechatAutoSummaryAdvancedOpen; })
+
+        if (this.wechatAutoSummaryAdvancedOpen) {
+          this.WechatAutoSummaryInput('滑动速度', this.wechatAutoSummarySwipeSpeed,
+            DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED, normalizeWechatAutoSummarySwipeSpeed,
+            (value: string) => { this.wechatAutoSummarySwipeSpeed = value; })
+          this.WechatAutoSummaryInput('历史滑动距离比例', this.wechatAutoSummaryHistorySwipeRatio,
+            DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO, normalizeWechatAutoSummaryHistorySwipeRatio,
+            (value: string) => { this.wechatAutoSummaryHistorySwipeRatio = value; })
+          this.WechatAutoSummaryInput('稳定停止次数', this.wechatAutoSummaryStableSwipes,
+            DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES, normalizeWechatAutoSummaryStableSwipes,
+            (value: string) => { this.wechatAutoSummaryStableSwipes = value; })
+          this.WechatAutoSummaryInput('最大历史滑动次数', this.wechatAutoSummaryMaxHistorySwipes,
+            DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES, normalizeWechatAutoSummaryMaxHistorySwipes,
+            (value: string) => { this.wechatAutoSummaryMaxHistorySwipes = value; })
+          this.WechatAutoSummaryInput('导航等待秒数', this.wechatAutoSummaryWait,
+            DEFAULT_WECHAT_AUTO_SUMMARY_WAIT, normalizeWechatAutoSummaryWait,
+            (value: string) => { this.wechatAutoSummaryWait = value; })
+        }
+      }
+    }
+    .width('100%')
+    .margin({ bottom: 12 })
   }
 
   @Builder SettingsListItem(item: SettingsSectionItem) {
@@ -389,6 +486,7 @@ export struct SettingsCenterPage {
   @Builder DataCollectionSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.DataCollection)
+      this.WechatAutoSummarySettings()
       this.SettingInput('图库 API Base URL', this.galleryApiBaseUrl, DEFAULT_GALLERY_API_BASE_URL,
         (value: string) => { this.galleryApiBaseUrl = value; })
       this.SettingInput('图库 API Key', this.galleryApiKey, '图库分析服务密钥',

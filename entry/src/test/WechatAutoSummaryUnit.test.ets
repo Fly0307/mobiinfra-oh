@@ -173,7 +173,9 @@ export default function wechatAutoSummaryUnitTest() {
       ]);
 
       expect(content.indexOf('DAILY_LOG_METADATA') >= 0).assertTrue();
+      expect(content.indexOf('"workflow_metadata"') >= 0).assertTrue();
       expect(content.indexOf('"task_scene_id": 3') >= 0).assertTrue();
+      expect(content.indexOf('"latest_entry_index": 2') >= 0).assertTrue();
       expect(content.indexOf('1. 小赵提醒下午三点开会') >= 0).assertTrue();
     });
 

@@ -14,6 +14,10 @@ interface WechatAutoSummaryDailyMetadata {
   run_id: string;
   mode: string;
   days: number;
+}
+
+interface WechatAutoSummaryDailyMetadataEnvelope {
+  workflow_metadata: WechatAutoSummaryDailyMetadata;
   latest_entry_index: number;
 }
 
@@ -30,12 +34,15 @@ export function renderWechatAutoSummaryDailyLog(runId: string, mode: string, day
     collector: 'wechat_auto_summary',
     run_id: runId,
     mode: mode,
-    days: days,
+    days: days
+  };
+  let envelope: WechatAutoSummaryDailyMetadataEnvelope = {
+    workflow_metadata: metadata,
     latest_entry_index: entries.length
   };
   let lines: string[] = [
     '<!-- DAILY_LOG_METADATA',
-    stringifyJsonCompat(metadata as Object, 2),
+    stringifyJsonCompat(envelope as Object, 2),
     '-->',
     ''
   ];

@@ -170,12 +170,21 @@ def daily_log_entries_from_conversations(conversations: list[dict[str, Any]], da
         title = _conversation_title(conversation, contact_name)
         messages = _conversation_messages(conversation)
         message_count = sum(1 for message in messages if message.get("kind") == "message")
+        visible_page_only = _conversation_is_visible_page_only(conversation)
 
-        lines = [
-            f"微信联系人「{contact_name}」最近 {days} 天消息采集",
-            f"联系人：{contact_name}",
-            f"会话标题：{title}",
-        ]
+        if visible_page_only:
+            lines = [
+                f"微信联系人「{contact_name}」当前可见页面消息采集",
+                f"采集范围：请求最近 {days} 天，未展开历史",
+                f"联系人：{contact_name}",
+                f"会话标题：{title}",
+            ]
+        else:
+            lines = [
+                f"微信联系人「{contact_name}」最近 {days} 天消息采集",
+                f"联系人：{contact_name}",
+                f"会话标题：{title}",
+            ]
         time_range = _format_time_range(conversation.get("time_range"))
         if time_range:
             lines.append(f"时间范围：{time_range}")
@@ -250,6 +259,22 @@ def collect_action(
     def press_back() -> None:
         _run_hdc(prefix + ["shell", "uiInput", "keyEvent", "Back"])
 
+    def swipe_contacts(root: dict[str, Any], request: WechatCollectRequest) -> None:
+        command = [
+            *prefix,
+            "shell",
+            "uitest",
+            "uiInput",
+            "swipe",
+            "628",
+            "2200",
+            "628",
+            "700",
+        ]
+        if request.swipe_speed > 0:
+            command.append(str(request.swipe_speed))
+        _run_hdc(command)
+
     return collect_action_with_device(
         payload,
         dump_provider=dump_provider,
@@ -257,6 +282,7 @@ def collect_action(
         press_back=press_back,
         swipe_history=lambda chat_root, request: None,
         gui_search=gui_search,
+        swipe_contacts=swipe_contacts,
     )
 
 
@@ -267,6 +293,7 @@ def collect_action_with_device(
     press_back: Callable[[], None],
     swipe_history: Callable[[dict[str, Any], WechatCollectRequest], Any],
     gui_search: Callable[[str], Any],
+    swipe_contacts: Callable[[dict[str, Any], WechatCollectRequest], Any] | None = None,
 ) -> dict[str, Any]:
     """使用注入的设备操作执行可测试的微信采集编排。
 
@@ -284,16 +311,28 @@ def collect_action_with_device(
     home_dump = ""
 
     if request.mode == "recent_contacts":
-        home_path = output_dir / "home.json"
-        home_root = dump_provider(home_path)
-        home_dump = str(home_path)
+        home_dump_index = 0
+        home_dump_paths: list[str] = []
+
+        def dump_home_page() -> dict[str, Any]:
+            nonlocal home_dump_index
+            home_dump_index += 1
+            home_path = output_dir / ("home.json" if home_dump_index == 1 else f"home_{home_dump_index:02d}.json")
+            home_dump_paths.append(str(home_path))
+            return dump_provider(home_path)
+
+        def swipe_home_list(root: dict[str, Any]) -> None:
+            if swipe_contacts is not None:
+                swipe_contacts(root, request)
+
         contacts = collect_recent_contacts_from_dumps(
-            lambda: home_root,
-            lambda root: None,
+            dump_home_page,
+            swipe_home_list,
             max_contacts=request.max_contacts,
-            stable_swipes=1,
-            max_list_swipes=0,
+            stable_swipes=request.stable_swipes,
+            max_list_swipes=request.max_list_swipes,
         )
+        home_dump = home_dump_paths[0] if home_dump_paths else ""
 
         for index, contact in enumerate(contacts, start=1):
             tap_contact(contact)
@@ -312,7 +351,7 @@ def collect_action_with_device(
                 _press_back_after_tap(press_back, collection_error)
     else:
         search_result = gui_search(request.target_contact)
-        if search_result is False:
+        if not _gui_search_succeeded(search_result):
             raise RuntimeError("指定联系人搜索失败")
 
         contact = Contact(
@@ -325,11 +364,18 @@ def collect_action_with_device(
             raw_texts=[request.target_contact],
         )
         chat_path = output_dir / f"chat_01_{safe_filename(request.target_contact)}.json"
-        chat_root = dump_provider(chat_path)
-        updated_root = swipe_history(chat_root, request)
-        if isinstance(updated_root, dict):
-            chat_root = updated_root
-        conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+        collection_error: BaseException | None = None
+        try:
+            chat_root = dump_provider(chat_path)
+            updated_root = swipe_history(chat_root, request)
+            if isinstance(updated_root, dict):
+                chat_root = updated_root
+            conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+        except BaseException as exc:
+            collection_error = exc
+            raise
+        finally:
+            _press_back_after_tap(press_back, collection_error)
 
     daily_log_entries = daily_log_entries_from_conversations(conversations, request.days)
     finished_at = datetime.now().replace(microsecond=0)
@@ -375,13 +421,24 @@ def _conversation_from_chat_root(contact: Contact, root: dict[str, Any], dump_pa
     chat_payload = build_chat_payload(root, fallback_title=contact.name)
     messages = chat_payload["messages"]
     return {
-        "contact": asdict(contact),
+        "contact": _serialize_contact(contact),
         "title": chat_payload["title"],
         "dump": dump_path,
         "snapshots": [dump_path],
         "messages": messages,
+        "history_mode": "visible_page_only",
         "time_range": _messages_time_range(messages),
     }
+
+
+def _serialize_contact(contact: Contact) -> dict[str, Any]:
+    """转换联系人结构，保证内存结果与 JSON 产物的列表/字典形态一致。"""
+
+    item = asdict(contact)
+    bounds = item.get("bounds")
+    if isinstance(bounds, tuple):
+        item["bounds"] = list(bounds)
+    return item
 
 
 def _aggregate_artifact_paths(output_dir: Path) -> dict[str, str]:
@@ -405,11 +462,22 @@ def _messages_time_range(messages: list[dict[str, Any]]) -> dict[str, str]:
             parsed_times.append(parsed)
 
     if not parsed_times:
-        return {"start": "", "end": ""}
+        return {"start": "", "end": "", "mode": "visible_page_only"}
     return {
         "start": min(parsed_times).isoformat(timespec="minutes"),
         "end": max(parsed_times).isoformat(timespec="minutes"),
+        "mode": "visible_page_only",
     }
+
+
+def _gui_search_succeeded(result: Any) -> bool:
+    """判断 GUI 搜索是否成功；兼容旧的 True/None 与结构化返回值。"""
+
+    if result is False:
+        return False
+    if isinstance(result, dict):
+        return str(result.get("status") or "").strip().lower() == "ok"
+    return True
 
 
 def _press_back_after_tap(press_back: Callable[[], None], original_error: BaseException | None) -> None:
@@ -523,6 +591,13 @@ def _conversation_messages(conversation: dict[str, Any]) -> list[dict[str, Any]]
     if not isinstance(messages, list):
         return []
     return [message for message in messages if isinstance(message, dict)]
+
+
+def _conversation_is_visible_page_only(conversation: dict[str, Any]) -> bool:
+    if conversation.get("history_mode") == "visible_page_only":
+        return True
+    time_range = conversation.get("time_range")
+    return isinstance(time_range, dict) and time_range.get("mode") == "visible_page_only"
 
 
 def _format_time_range(value: Any) -> str:

@@ -441,7 +441,15 @@ class WechatCollectServiceTests(unittest.TestCase):
             self.assertTrue(Path(result["artifacts"]["aggregate_json"]).exists())
             self.assertTrue(Path(result["artifacts"]["aggregate_markdown"]).exists())
             self.assertEqual(result["conversations"][0]["title"], "小赵")
-            self.assertTrue(result["daily_log_entries"][0].startswith("微信联系人「小赵」最近 7 天消息采集"))
+            self.assertEqual(result["conversations"][0]["history_mode"], "visible_page_only")
+            self.assertEqual(result["conversations"][0]["time_range"]["mode"], "visible_page_only")
+            self.assertTrue(result["daily_log_entries"][0].startswith("微信联系人「小赵」当前可见页面消息采集"))
+            self.assertIn("请求最近 7 天，未展开历史", result["daily_log_entries"][0])
+
+            loaded = json.loads(Path(result["artifacts"]["aggregate_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(loaded["contacts_collected"], result["contacts_collected"])
+            self.assertEqual(loaded["conversations"][0]["contact"]["bounds"], result["conversations"][0]["contact"]["bounds"])
+            self.assertIsInstance(result["conversations"][0]["contact"]["bounds"], list)
 
     def test_collect_action_target_contact_requires_gui_search_success(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -459,6 +467,97 @@ class WechatCollectServiceTests(unittest.TestCase):
                     swipe_history=lambda chat_root, request: None,
                     gui_search=lambda name: False,
                 )
+
+    def test_collect_action_target_contact_rejects_structured_search_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(RuntimeError, "指定联系人搜索失败"):
+                wechat_collect_service.collect_action_with_device(
+                    {
+                        "mode": "target_contact",
+                        "target_contact": "小赵",
+                        "output_dir": temp_dir,
+                        "wait": 0,
+                    },
+                    dump_provider=lambda path: load_fixture("chat_xiao_zhao.json"),
+                    tap_contact=lambda contact: None,
+                    press_back=lambda: None,
+                    swipe_history=lambda chat_root, request: None,
+                    gui_search=lambda name: {"status": "error"},
+                )
+
+    def test_collect_action_target_contact_success_presses_back(self):
+        backs = []
+
+        def dump_provider(path):
+            root = load_fixture("chat_xiao_zhao.json")
+            path.write_text(json.dumps(root, ensure_ascii=False), encoding="utf-8")
+            return root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = wechat_collect_service.collect_action_with_device(
+                {
+                    "mode": "target_contact",
+                    "target_contact": "小赵",
+                    "output_dir": temp_dir,
+                    "wait": 0,
+                },
+                dump_provider=dump_provider,
+                tap_contact=lambda contact: None,
+                press_back=lambda: backs.append("back"),
+                swipe_history=lambda chat_root, request: None,
+                gui_search=lambda name: {"status": "ok"},
+            )
+
+        self.assertEqual(result["contacts_collected"], 1)
+        self.assertEqual(backs, ["back"])
+
+    def test_collect_action_target_contact_failure_after_search_still_presses_back(self):
+        backs = []
+
+        def dump_provider(path):
+            raise ValueError("bad target dump")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "bad target dump"):
+                wechat_collect_service.collect_action_with_device(
+                    {
+                        "mode": "target_contact",
+                        "target_contact": "小赵",
+                        "output_dir": temp_dir,
+                        "wait": 0,
+                    },
+                    dump_provider=dump_provider,
+                    tap_contact=lambda contact: None,
+                    press_back=lambda: backs.append("back"),
+                    swipe_history=lambda chat_root, request: None,
+                    gui_search=lambda name: True,
+                )
+
+        self.assertEqual(backs, ["back"])
+
+    def test_collect_action_target_contact_preserves_collection_error_when_back_fails(self):
+        def dump_provider(path):
+            raise ValueError("bad target dump")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "bad target dump") as cm:
+                wechat_collect_service.collect_action_with_device(
+                    {
+                        "mode": "target_contact",
+                        "target_contact": "小赵",
+                        "output_dir": temp_dir,
+                        "wait": 0,
+                    },
+                    dump_provider=dump_provider,
+                    tap_contact=lambda contact: None,
+                    press_back=lambda: (_ for _ in ()).throw(RuntimeError("back failed")),
+                    swipe_history=lambda chat_root, request: None,
+                    gui_search=lambda name: True,
+                )
+
+        self.assertIsInstance(cm.exception.__context__, RuntimeError)
+        self.assertEqual(str(cm.exception.__context__), "back failed")
+        self.assertIsNone(cm.exception.__context__.__context__)
 
     def test_collect_action_recent_contact_failure_after_tap_still_presses_back(self):
         dumps = [load_fixture("home.json")]
@@ -488,6 +587,46 @@ class WechatCollectServiceTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["tap:小赵", "back"])
+
+    def test_collect_action_recent_contacts_scrolls_home_list_with_fake_device(self):
+        first_home = load_fixture("home.json")
+        second_home = json.loads(json.dumps(first_home, ensure_ascii=False))
+        second_home["children"][0]["children"][0]["children"][0]["attributes"]["text"] = "新联系人"
+        home_dumps = [first_home, second_home]
+        chat_dump = load_fixture("chat_xiao_zhao.json")
+        taps = []
+        swipes = []
+
+        def dump_provider(path):
+            if path.name.startswith("home"):
+                root = home_dumps.pop(0)
+            else:
+                root = chat_dump
+            path.write_text(json.dumps(root, ensure_ascii=False), encoding="utf-8")
+            return root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = wechat_collect_service.collect_action_with_device(
+                {
+                    "mode": "recent_contacts",
+                    "days": 7,
+                    "max_contacts": 4,
+                    "stable_swipes": 2,
+                    "max_list_swipes": 2,
+                    "output_dir": temp_dir,
+                    "wait": 0,
+                },
+                dump_provider=dump_provider,
+                tap_contact=lambda contact: taps.append(contact.name),
+                press_back=lambda: None,
+                swipe_history=lambda chat_root, request: None,
+                swipe_contacts=lambda home_root, request: swipes.append("swipe"),
+                gui_search=lambda name: None,
+            )
+
+        self.assertEqual(swipes, ["swipe"])
+        self.assertIn("新联系人", taps)
+        self.assertEqual(result["contacts_collected"], 4)
 
     def test_collect_action_adapter_preserves_full_hdc_prefix(self):
         commands = []

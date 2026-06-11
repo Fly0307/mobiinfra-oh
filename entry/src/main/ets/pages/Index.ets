@@ -9,7 +9,19 @@ import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
-import { CHAT_MODE_CLOUD_AGENT } from './chat/ChatPageTypes';
+import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_MESSAGE_KIND_CHAT,
+  CHAT_MESSAGE_KIND_TASK_RESULT,
+  CHAT_MESSAGE_KIND_TASK_TRACE,
+  CHAT_MODE_LOCAL_INFERENCE,
+  ChatMessage,
+  ChatSessionRecord,
+  ChatSessionSummary,
+  buildCloudContextMessages,
+  createChatMessage
+} from './chat/ChatSessionTypes';
+import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
@@ -160,6 +172,11 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State chatSessions: ChatSessionSummary[] = [];
+  @State activeChatSessionId: string = '';
+  @State activeChatMessages: ChatMessage[] = [];
+  @State chatSessionDrawerOpen: boolean = false;
+  @State restoringLocalSession: boolean = false;
   @State hdcAutoConnected: boolean = false;
   @State hdcAutoConnecting: boolean = false;
   @State hdcManualPairing: boolean = false;
@@ -177,10 +194,278 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
-  
+
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private cloudClient: CloudModelClient = new CloudModelClient();
+
+  private nextChatMessageId(prefix: string = 'msg'): string {
+    return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
+  }
+
+  private currentChatSessionViewState(): ChatSessionViewState {
+    return {
+      sessions: this.chatSessions,
+      activeSessionId: this.activeChatSessionId,
+      activeMessages: this.activeChatMessages,
+      mode: this.chatMode,
+      activeSession: null
+    };
+  }
+
+  private applyChatSessionViewState(state: ChatSessionViewState): void {
+    this.chatSessions = state.sessions;
+    this.activeChatSessionId = state.activeSessionId;
+    this.activeChatMessages = state.activeMessages;
+    this.chatMode = state.mode;
+  }
+
+  private initChatSessions(): void {
+    this.applyChatSessionViewState(ChatSessionController.init(this.filesDir, this.chatMode));
+  }
+
+  private ensureActiveChatSession(): ChatSessionRecord | null {
+    let state = ChatSessionController.ensureActive(this.filesDir, this.currentChatSessionViewState(), this.chatMode);
+    this.applyChatSessionViewState(state);
+    return state.activeSession;
+  }
+
+  private appendActiveChatMessage(message: ChatMessage): void {
+    let state = ChatSessionController.appendMessage(this.filesDir, this.currentChatSessionViewState(), this.chatMode,
+      message);
+    this.applyChatSessionViewState(state);
+  }
+
+  private appendActiveTaskTraceLine(line: string, messageId: string = ''): void {
+    let state = ChatSessionController.appendTaskTraceLine(this.filesDir, this.currentChatSessionViewState(),
+      this.chatMode, line, messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private compactTraceText(text: string, maxLength: number = 180): string {
+    let compact = text.trim().replace(/\s+/g, ' ');
+    if (compact.length <= maxLength) {
+      return compact;
+    }
+    return compact.substring(0, maxLength) + '...';
+  }
+
+  private extractJsonObjectText(text: string): string {
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) {
+      return '';
+    }
+    return text.substring(start, end + 1);
+  }
+
+  private parseAgentResponsePayload(message: string): JsonMap | null {
+    if (message.indexOf('model response') < 0) {
+      return null;
+    }
+    let jsonText = this.extractJsonObjectText(message);
+    if (jsonText.length === 0) {
+      return null;
+    }
+    try {
+      return ArkJSON.parse(jsonText) as JsonMap;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private jsonStringValue(map: JsonMap, key: string): string {
+    let value = map[key];
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return '';
+  }
+
+  private jsonMapValue(map: JsonMap, key: string): JsonMap | null {
+    let value = map[key];
+    if (value !== null && typeof value === 'object') {
+      return value as JsonMap;
+    }
+    return null;
+  }
+
+  private agentActionTarget(payload: JsonMap): string {
+    let params = this.jsonMapValue(payload, 'parameters');
+    if (params === null) {
+      return '';
+    }
+    let target = this.jsonStringValue(params, 'target_element');
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'app_name');
+    }
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'package_name');
+    }
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'target');
+    }
+    let text = this.jsonStringValue(params, 'text');
+    if (target.length > 0 && text.length > 0) {
+      return target + '，输入：' + text;
+    }
+    if (target.length === 0 && text.length > 0) {
+      return text;
+    }
+    return target;
+  }
+
+  private formatAgentTraceLog(message: string): string {
+    let payload = this.parseAgentResponsePayload(message);
+    if (payload === null) {
+      return '';
+    }
+    let action = this.jsonStringValue(payload, 'action');
+    if (action.length === 0) {
+      return '';
+    }
+    let reasoning = this.jsonStringValue(payload, 'reasoning');
+    if (reasoning.length === 0) {
+      reasoning = this.jsonStringValue(payload, 'reason');
+    }
+    let target = this.agentActionTarget(payload);
+    let lines: string[] = [];
+    if (reasoning.length > 0) {
+      lines.push('Reasoning：' + this.compactTraceText(reasoning));
+    }
+    lines.push('动作：' + action);
+    if (target.length > 0) {
+      lines.push('目标：' + this.compactTraceText(target, 120));
+    }
+    return lines.join('\n');
+  }
+
+  private createChatSession(mode: string): void {
+    let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), mode);
+    this.applyChatSessionViewState(state);
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE && this.modelLoaded) {
+      try {
+        mnnllm.reset();
+      } catch (e) {
+        let err = e as Error;
+        this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('system'), 'system',
+          CHAT_MESSAGE_KIND_CHAT, '本地上下文清理失败：' + err.message, new Date().getTime()));
+      }
+    }
+  }
+
+  private async selectChatSession(sessionId: string): Promise<void> {
+    if (this.cloudThinking || this.isThinking || this.restoringLocalSession) {
+      showToastSafely('当前会话处理中，稍后再切换', 1500);
+      return;
+    }
+    let state = ChatSessionController.selectSession(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (state.activeSession === null || state.activeSession.id !== sessionId) {
+      showToastSafely('会话文件不存在，已从列表移除', 1500);
+      return;
+    }
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+  }
+
+  private async switchChatMode(mode: string): Promise<void> {
+    if (this.chatMode === mode && this.activeChatSessionId.length > 0) {
+      return;
+    }
+    let state = ChatSessionController.switchMode(this.filesDir, this.currentChatSessionViewState(), mode);
+    this.applyChatSessionViewState(state);
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+  }
+
+  private async confirmDeleteChatSession(session: ChatSessionSummary): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '删除会话',
+        message: '将删除“' + session.title + '”及其对应文件，此操作不可恢复。',
+        buttons: [
+          { text: '取消', color: '#666666' },
+          { text: '删除', color: '#FF4D4F' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => {
+        resolve(false);
+      });
+    });
+  }
+
+  private chatSessionExistsInState(state: ChatSessionViewState, sessionId: string): boolean {
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async deleteChatSession(sessionId: string): Promise<void> {
+    let target: ChatSessionSummary | null = null;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        target = this.chatSessions[i];
+        break;
+      }
+    }
+    if (target !== null) {
+      let confirmed = await this.confirmDeleteChatSession(target);
+      if (!confirmed) {
+        return;
+      }
+    }
+    let state = ChatSessionController.deleteSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      this.chatMode);
+    this.applyChatSessionViewState(state);
+    if (this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('删除会话失败', 1500);
+      return;
+    }
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+    showToastSafely('会话已删除', 1500);
+  }
+
+  private toggleActiveTaskTrace(messageId: string): void {
+    let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private async restoreLocalChatContext(session: ChatSessionRecord): Promise<void> {
+    if (!this.modelLoaded) {
+      return;
+    }
+    this.restoringLocalSession = true;
+    try {
+      mnnllm.reset();
+      for (let i = 0; i < session.messages.length; i++) {
+        let message = session.messages[i];
+        if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+          mnnllm.chat(message.content);
+        }
+      }
+    } catch (e) {
+      let err = e as Error;
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('system'), 'system', CHAT_MESSAGE_KIND_CHAT,
+        '本地上下文恢复失败：' + err.message, new Date().getTime()));
+    } finally {
+      this.restoringLocalSession = false;
+    }
+  }
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLog(message: string): void {
@@ -193,6 +478,14 @@ struct Index {
     }
     this.cloudOutput = nextLogs;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
+    let traceLine = this.formatAgentTraceLog(message);
+    if (traceLine.length > 0) {
+      this.appendActiveTaskTraceLine(traceLine);
+    }
+    if (message.indexOf('Task completed') >= 0) {
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+        CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+    }
   }
 
   private resetCloudLog(message: string): void {
@@ -460,6 +753,7 @@ struct Index {
     }
     this.prepareCustomOpp();
     this.initDataManager();
+    this.initChatSessions();
     this.agentRouter.configureLocal(
       (prefix: string): Promise<string> => mnnllm.agentPrefill(prefix),
       (variablePart: string, onToken?: (token: string) => void): Promise<string> =>
@@ -469,6 +763,14 @@ struct Index {
       (): string => mnnllm.reset(),
       (msg: string) => {
         this.output = msg;
+        let traceLine = this.formatAgentTraceLog(msg);
+        if (traceLine.length > 0) {
+          this.appendActiveTaskTraceLine(traceLine);
+        }
+        if (msg.indexOf('Task completed') >= 0 || msg.indexOf('done') >= 0) {
+          this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+        }
         let match = msg.match(/<img>(.*?)<hw>/);
         if (match && match[1]) {
           this.debugImagePath = 'file://' + match[1];
@@ -856,24 +1158,24 @@ struct Index {
       this.output = '请输入有效的线程数（正整数）';
       return;
     }
-    
+
     let cfgPath = this.modelDir + '/config.json';
     try {
       if (!fs.accessSync(cfgPath)) {
         this.output = `文件不存在: ${cfgPath}`;
         return;
       }
-      
+
       // 读取文件。
       let fileRead = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
       let stat = fs.statSync(cfgPath);
       let buf = new ArrayBuffer(stat.size);
       fs.readSync(fileRead.fd, buf);
       fs.closeSync(fileRead);
-      
+
       let textDecoder = util.TextDecoder.create('utf-8');
       let content = textDecoder.decodeWithStream(new Uint8Array(buf));
-      
+
       // 修改 JSON。
       let configObj = ArkJSON.parse(content) as JsonMap;
       configObj['thread_num'] = num;
@@ -881,14 +1183,14 @@ struct Index {
         let mllmObj = configObj['mllm'] as JsonMap;
         mllmObj['thread_num'] = num;
       }
-      
+
       // 写入文件。
       let newStr = ArkJSON.stringify(configObj, null, 4);
       let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
       let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
       fs.writeSync(fileWrite.fd, byteStr.buffer);
       fs.closeSync(fileWrite);
-      
+
       this.output = `更新线程数成功: ${num}\n====== 新配置 ======\n${newStr}`;
     } catch (e) {
       this.output = `更新 config.json 失败: ${e}`;
@@ -1003,9 +1305,9 @@ struct Index {
       listing += '点击“下载全部”开始下载';
       this.output = listing;
       this.connected = true;
-    } catch (err) {
-      let e = err as BusinessError;
-      this.output = `连接失败: code=${e.code} ${e.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
+    } catch (e) {
+      let err = e as BusinessError;
+      this.output = `连接失败: code=${err.code} ${err.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
       this.connected = false;
     } finally {
       httpReq.destroy();
@@ -1189,9 +1491,9 @@ struct Index {
     try {
       let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
-    } catch (err) {
-      let e = err as Error;
-      this.appendCloudLog('Planner 连接失败：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('Planner 连接失败：' + err.message);
     } finally {
       this.cloudThinking = false;
     }
@@ -1205,14 +1507,30 @@ struct Index {
     if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
       return;
     }
+    let task = this.cloudUserInput.trim();
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
-    this.appendCloudLog(`手动调用 Planner，任务：${this.cloudUserInput}`);
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      this.appendCloudLog('会话初始化失败，无法调用 Planner。');
+      this.cloudThinking = false;
+      return;
+    }
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime());
+    let contextMessages = buildCloudContextMessages(activeSession.messages.concat([userMessage]));
+    this.appendActiveChatMessage(userMessage);
+    this.appendCloudLog(`手动调用 Planner，任务：${task}`);
     try {
-      let response = await this.cloudClient.chatPlanner(this.cloudUserInput, this.getCloudConfig());
+      let response = await this.cloudClient.chatPlannerMessages(contextMessages, this.getCloudConfig());
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime()));
       this.appendCloudLog(`Planner 手动返回：\n${response}`);
-    } catch (err) {
-      let e = err as Error;
-      this.appendCloudLog('云端 Planner 推理失败：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime()));
+      this.appendCloudLog('云端 Planner 推理失败：' + err.message);
     } finally {
       this.cloudThinking = false;
     }
@@ -1318,8 +1636,8 @@ struct Index {
       }
       try {
         return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
-      } catch (parseErr) {
-        let err = parseErr as Error;
+      } catch (e) {
+        let err = e as Error;
         AppLogger.debug('HDC', 'health parse failed baseUrl=' + baseUrl + ' message=' + err.message);
         return null;
       }
@@ -1404,25 +1722,25 @@ struct Index {
           message: parsed.message || body,
           health: parsed
         };
-      } catch (parseErr) {
-        let e = parseErr as Error;
-        AppLogger.debug('HDC', 'manual connect parse failed server=' + serverUrl + ', message=' + e.message);
+      } catch (e) {
+        let err = e as Error;
+        AppLogger.debug('HDC', 'manual connect parse failed server=' + serverUrl + ', message=' + err.message);
         return {
           ok: false,
           responseCode: resp.responseCode,
           body: body,
-          message: 'Invalid HDC connect response: ' + e.message
+          message: 'Invalid HDC connect response: ' + err.message
         };
       }
-    } catch (err) {
-      let e = err as Error;
+    } catch (e) {
+      let err = e as Error;
       AppLogger.debug('HDC', 'manual connect request failed server=' + serverUrl + ', target=' + target +
-        ', message=' + e.message);
+        ', message=' + err.message);
       return {
         ok: false,
         responseCode: 0,
         body: '',
-        message: e.message
+        message: err.message
       };
     } finally {
       httpReq.destroy();
@@ -1615,9 +1933,9 @@ struct Index {
       }
       this.logAgentLoopReady('PC Agent loop 恢复失败：HTTP ' + resp.responseCode + ' ' + message, useCloudLog);
       return false;
-    } catch (err) {
-      let e = err as BusinessError;
-      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + e.message, useCloudLog);
+    } catch (e) {
+      let err = e as BusinessError;
+      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + err.message, useCloudLog);
       return false;
     } finally {
       httpReq.destroy();
@@ -1654,9 +1972,9 @@ struct Index {
         this.output = `自动加载模型失败: ${this.output}`;
       }
       return this.modelLoaded;
-    } catch (err) {
-      let e = err as Error;
-      this.output = '自动加载模型失败: ' + e.message;
+    } catch (e) {
+      let err = e as Error;
+      this.output = '自动加载模型失败: ' + err.message;
       return false;
     }
   }
@@ -1747,10 +2065,10 @@ struct Index {
       }
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, result.status, message);
       this.appendCloudLog('Workflow 运行摘要：' + result.runDir);
-    } catch (err) {
-      let e = err as Error;
-      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', e.message);
-      this.appendCloudLog('Workflow 执行异常：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', err.message);
+      this.appendCloudLog('Workflow 执行异常：' + err.message);
       AgentExecutionController.finishExecution('Workflow failed');
     }
   }
@@ -1763,15 +2081,21 @@ struct Index {
       return;
     }
     let msg = this.userInput;
-    this.userInput = '';
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      msg, new Date().getTime()));
     this.isThinking = true;
     try {
       let reply: string = await mnnllm.chat(msg);
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
-    } catch (err) {
-      let e = err as Error;
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${e.message}\n`);
+    } catch (e) {
+      let err = e as Error;
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime()));
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${err.message}\n`);
     } finally {
       this.isThinking = false;
     }
@@ -1785,14 +2109,36 @@ struct Index {
     if (!await this.ensureLocalAgentReady()) {
       return;
     }
-    this.agentRouter.submitLocalTask(this.userInput);
+    let task = this.userInput;
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      task, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
+      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(), []));
+    this.agentRouter.submitLocalTask(task);
     AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
-    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
+    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${task}\nPC 脚本检测到任务后将自动开始。`;
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+      CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
   }
 
   private async submitCurrentCloudTask(): Promise<void> {
+    let task = this.cloudUserInput.trim();
+    if (task.length > 0) {
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+        task, new Date().getTime()));
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
+        CHAT_MESSAGE_KIND_TASK_TRACE, '云端任务执行过程', new Date().getTime(), []));
+    }
     let result = await this.submitDirectCloudAgentTask(this.cloudUserInput);
+    if (result.success) {
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+        CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
+      this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    }
     if (!result.success && result.error.length > 0) {
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+        CHAT_MESSAGE_KIND_TASK_RESULT, '任务下发失败：' + result.error, new Date().getTime()));
       this.appendCloudLog(result.error);
     }
   }
@@ -1902,6 +2248,18 @@ struct Index {
             chatHistory: this.chatHistory,
             localThinking: this.isThinking,
             modelLoaded: this.modelLoaded,
+            sessions: this.chatSessions,
+            activeSessionId: this.activeChatSessionId,
+            messages: this.activeChatMessages,
+            sessionDrawerOpen: this.chatSessionDrawerOpen,
+            restoringLocalSession: this.restoringLocalSession,
+            onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
+            onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
+            onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
+            onCreateSession: (mode: string) => { this.createChatSession(mode); },
+            onSelectSession: async (id: string) => { await this.selectChatSession(id); },
+            onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },

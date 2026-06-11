@@ -532,6 +532,12 @@ export class CloudModelClient {
     return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
   }
 
+  async chatPlannerMessages(messages: CloudChatMessage[], config: CloudModelConfig): Promise<string> {
+    return this.chatMessages(config.plannerBaseUrl, messages, config.apiKey, undefined, undefined, undefined, {
+      chat_template_kwargs: { enable_thinking: false }
+    });
+  }
+
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
     // 通用图文 Decider：完整 prompt 与当前截图作为同一条 user 消息发送。
     let imageUrl: CloudImageUrl = {

@@ -27,6 +27,10 @@ export function chatModeActionLabel(mode: string): string {
   return '发送';
 }
 
+export function chatInputAfterAcceptedSend(currentInput: string, accepted: boolean): string {
+  return accepted ? '' : currentInput;
+}
+
 export function hasCloudAgentDisplayOutput(output: string): boolean {
   let text = output.trim();
   return text.length > 0 && text !== CLOUD_AGENT_DEFAULT_OUTPUT && text !== '云端智能体准备就绪';

@@ -3,6 +3,7 @@ import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
   chatModeActionLabel,
+  chatInputAfterAcceptedSend,
   chatModeLabel,
   chatModePlaceholder,
   cloudAgentDisplayText,
@@ -35,6 +36,11 @@ export default function chatPageTypesUnitTest() {
         '[23:00:22] Planner 手动返回：\n你好！我是 MobiAgent。';
       expect(hasCloudAgentDisplayOutput(logs)).assertTrue();
       expect(cloudAgentDisplayText(logs)).assertEqual('你好！我是 MobiAgent。');
+    });
+
+    it('clearsDraftOnlyAfterAcceptedSend', 0, () => {
+      expect(chatInputAfterAcceptedSend('请问您做什么呢？', true)).assertEqual('');
+      expect(chatInputAfterAcceptedSend('请问您做什么呢？', false)).assertEqual('请问您做什么呢？');
     });
   });
 }

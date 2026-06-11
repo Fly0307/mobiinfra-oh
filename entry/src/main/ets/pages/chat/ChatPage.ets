@@ -1,17 +1,20 @@
+import { inputMethod } from '@kit.IMEKit';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
-  cloudAgentDisplayText,
   chatModeLabel,
-  chatModePlaceholder,
-  hasCloudAgentDisplayOutput
+  chatModePlaceholder
 } from './ChatPageTypes';
+import { ChatMessage, ChatSessionSummary } from './ChatSessionTypes';
+import { ChatMessageList } from './ChatMessageList';
+import { ChatSessionDrawer } from './ChatSessionDrawer';
 
 @Component
 export struct ChatPage {
   @Link chatMode: string;
   @Link cloudUserInput: string;
   @Link userInput: string;
+  @State previewImagePath: string = '';
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
@@ -20,6 +23,18 @@ export struct ChatPage {
   @Prop chatHistory: string = '';
   @Prop localThinking: boolean = false;
   @Prop modelLoaded: boolean = false;
+  @Prop sessions: ChatSessionSummary[] = [];
+  @Prop activeSessionId: string = '';
+  @Prop messages: ChatMessage[] = [];
+  @Prop sessionDrawerOpen: boolean = false;
+  @Prop restoringLocalSession: boolean = false;
+  onSwitchMode: (mode: string) => Promise<void> = async () => {};
+  onOpenSessionDrawer: () => void = () => {};
+  onCloseSessionDrawer: () => void = () => {};
+  onCreateSession: (mode: string) => void = () => {};
+  onSelectSession: (id: string) => Promise<void> = async () => {};
+  onDeleteSession: (id: string) => Promise<void> = async () => {};
+  onToggleTaskTrace: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
@@ -48,35 +63,27 @@ export struct ChatPage {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
   }
 
-  private statusText(): string {
-    if (this.isCloudMode()) {
-      return this.cloudOutput.length > 0 ? this.cloudOutput : '云端智能体准备就绪';
-    }
-    if (!this.modelLoaded) {
-      return '本地模型未加载';
-    }
-    return this.chatHistory.length > 0 ? this.chatHistory : this.localOutput;
+  private hasConversationContent(): boolean {
+    return this.messages.length > 0 || this.isBusy() || this.activeDebugImagePath().length > 0;
   }
 
-  private hasConversationContent(): boolean {
-    if (this.isCloudMode()) {
-      return this.cloudThinking || hasCloudAgentDisplayOutput(this.cloudOutput) || this.cloudDebugImagePath.length > 0;
+  private activeDebugImagePath(): string {
+    return this.isCloudMode() ? this.cloudDebugImagePath : this.localDebugImagePath;
+  }
+
+  private openDebugImagePreview(path: string): void {
+    if (path.length > 0) {
+      this.previewImagePath = path;
     }
-    return this.localThinking || this.chatHistory.trim().length > 0 || this.localOutput.trim().length > 0 ||
-      this.localDebugImagePath.length > 0;
+  }
+
+  private closeDebugImagePreview(): void {
+    this.previewImagePath = '';
   }
 
   private activeConversationText(): string {
     if (this.isCloudMode()) {
-      let text = cloudAgentDisplayText(this.cloudOutput);
-      if (text.length > 0) {
-        return text;
-      }
       return this.cloudThinking ? '云端智能体正在处理...' : '';
-    }
-    let text = this.chatHistory.trim().length > 0 ? this.chatHistory.trim() : this.localOutput.trim();
-    if (text.length > 0) {
-      return text;
     }
     if (!this.modelLoaded) {
       return '本地模型未加载';
@@ -94,8 +101,8 @@ export struct ChatPage {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.chatMode === mode ? '#111827' : '#F4F6FA')
       .borderRadius(17)
-      .onClick(() => {
-        this.chatMode = mode;
+      .onClick(async () => {
+        await this.onSwitchMode(mode);
       })
   }
 
@@ -105,6 +112,8 @@ export struct ChatPage {
       .fontColor('#232936')
       .height(42)
       .padding({ left: 16, right: 16 })
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
       .backgroundColor(Color.White)
       .borderRadius(21)
       .border({ width: 1, color: '#E7EAF0' })
@@ -122,7 +131,7 @@ export struct ChatPage {
         .objectFit(ImageFit.Contain)
         .backgroundColor(Color.Black)
         .borderRadius(12)
-        .onClick(() => { this.onClearCloudDebugImage(); })
+        .onClick(() => { this.openDebugImagePreview(this.cloudDebugImagePath); })
     } else if (!this.isCloudMode() && this.localDebugImagePath.length > 0) {
       Image(this.localDebugImagePath)
         .width(86)
@@ -130,31 +139,8 @@ export struct ChatPage {
         .objectFit(ImageFit.Contain)
         .backgroundColor(Color.Black)
         .borderRadius(12)
-        .onClick(() => { this.onClearLocalDebugImage(); })
+        .onClick(() => { this.openDebugImagePreview(this.localDebugImagePath); })
     }
-  }
-
-  @Builder StatusPanel() {
-    Row() {
-      Scroll() {
-        Text(this.statusText())
-          .fontSize(12)
-          .fontFamily('monospace')
-          .fontColor('#4B5563')
-          .width('100%')
-          .padding(12)
-      }
-      .layoutWeight(1)
-      .constraintSize({ minHeight: 76, maxHeight: 132 })
-      .backgroundColor('#F8FAFD')
-      .borderRadius(14)
-      this.DebugImagePreview()
-    }
-    .width('100%')
-    .padding(14)
-    .backgroundColor(Color.White)
-    .borderRadius(18)
-    .border({ width: 1, color: '#EDF0F5' })
   }
 
   @Builder EmptyWelcome() {
@@ -179,7 +165,7 @@ export struct ChatPage {
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
-      .margin({ top: 120 })
+      .margin({ top: 64 })
 
       Text('随时为你答疑、规划，也可以下发自动化任务')
         .fontSize(18)
@@ -192,75 +178,91 @@ export struct ChatPage {
       Flex({ wrap: FlexWrap.Wrap }) {
         this.PromptChip('整理今天截图里的关键信息')
         this.PromptChip('规划一个收集微信聊天记录的 workflow')
-        this.PromptChip('打开淘宝搜索耳机并比较价格')
+        this.PromptChip('淘宝搜索耳机比价')
       }
       .width('100%')
       .margin({ top: 28 })
 
       Blank()
+        .height(190)
     }
     .width('100%')
     .layoutWeight(1)
   }
 
   @Builder ConversationPanel() {
-    Scroll() {
-      Column() {
-        Row() {
-          Text(this.isCloudMode() ? '云' : '本')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
-            .width(42)
-            .height(42)
-            .textAlign(TextAlign.Center)
-            .backgroundColor(this.isCloudMode() ? '#5968FF' : '#111827')
-            .borderRadius(16)
-          Column() {
-            Text(chatModeLabel(this.chatMode))
-              .fontSize(13)
+    if (this.messages.length > 0) {
+      ChatMessageList({
+        messages: this.messages,
+        thinking: this.isBusy(),
+        debugImagePath: this.activeDebugImagePath(),
+        modeLabel: chatModeLabel(this.chatMode),
+        modeMark: this.isCloudMode() ? '云' : '本',
+        onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
+        onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); }
+      })
+    } else {
+      Scroll() {
+        Column() {
+          Row() {
+            Text(this.isCloudMode() ? '云' : '本')
+              .fontSize(16)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#111827')
-            Text(this.activeConversationText())
-              .fontSize(15)
-              .fontColor('#1F2937')
-              .lineHeight(22)
-              .width('100%')
-              .margin({ top: 8 })
+              .fontColor(Color.White)
+              .width(42)
+              .height(42)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.isCloudMode() ? '#5968FF' : '#111827')
+              .borderRadius(16)
+            Column() {
+              Text(chatModeLabel(this.chatMode))
+                .fontSize(13)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#111827')
+              Text(this.activeConversationText())
+                .fontSize(15)
+                .fontColor('#1F2937')
+                .lineHeight(22)
+                .width('100%')
+                .margin({ top: 8 })
+            }
+            .layoutWeight(1)
+            .padding({ left: 14, right: 14, top: 14, bottom: 14 })
+            .backgroundColor('#F8FAFD')
+            .borderRadius(18)
+            .border({ width: 1, color: '#E8ECF3' })
           }
-          .layoutWeight(1)
-          .padding({ left: 14, right: 14, top: 14, bottom: 14 })
-          .backgroundColor('#F8FAFD')
-          .borderRadius(18)
-          .border({ width: 1, color: '#E8ECF3' })
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+          .margin({ top: 28 })
+
+          if (this.isBusy()) {
+            Text('处理中...')
+              .fontSize(13)
+              .fontColor('#6B7280')
+              .margin({ left: 56, top: 12 })
+          }
+
+          Row() {
+            this.DebugImagePreview()
+          }
+          .width('100%')
+          .margin({ left: 56, top: 12 })
+
+          Blank()
+            .height(150)
         }
         .width('100%')
-        .alignItems(VerticalAlign.Top)
-        .margin({ top: 28 })
-
-        if (this.isBusy()) {
-          Text('处理中...')
-            .fontSize(13)
-            .fontColor('#6B7280')
-            .margin({ left: 56, top: 12 })
-        }
-
-        Row() {
-          this.DebugImagePreview()
-        }
-        .width('100%')
-        .margin({ left: 56, top: 12 })
-
-        Blank()
-          .height(150)
       }
+      .layoutWeight(1)
       .width('100%')
     }
-    .layoutWeight(1)
-    .width('100%')
   }
 
   private async runPrimaryAction(): Promise<void> {
+    if (this.activeInput().trim().length > 0 && !this.isBusy()) {
+      this.dismissChatInput();
+    }
     if (this.isCloudMode()) {
       await this.onRunCloudPlanner();
       return;
@@ -269,11 +271,72 @@ export struct ChatPage {
   }
 
   private async runTaskAction(): Promise<void> {
+    if (this.activeInput().trim().length > 0 && !this.isBusy()) {
+      this.dismissChatInput();
+    }
     if (this.isCloudMode()) {
       await this.onSubmitCloudTask();
       return;
     }
     await this.onSubmitLocalTask();
+  }
+
+  private dismissChatInput(): void {
+    try {
+      inputMethod.getController().stopInputSession().catch(() => {});
+    } catch (e) {
+    }
+
+    try {
+      this.getUIContext().getFocusController().clearFocus();
+    } catch (e) {
+    }
+  }
+
+  @Builder ImagePreviewOverlay() {
+    if (this.previewImagePath.length > 0) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Row() {
+            Blank()
+              .layoutWeight(1)
+            Text('关闭')
+              .fontSize(14)
+              .fontColor(Color.White)
+              .height(36)
+              .padding({ left: 16, right: 16 })
+              .backgroundColor('#33000000')
+              .borderRadius(18)
+              .onClick(() => {
+                this.closeDebugImagePreview();
+              })
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 28 })
+
+          Image(this.previewImagePath)
+            .width('92%')
+            .height('78%')
+            .objectFit(ImageFit.Contain)
+            .borderRadius(18)
+            .margin({ top: 24 })
+            .backgroundColor(Color.Black)
+
+          Text('调试截图')
+            .fontSize(13)
+            .fontColor('#E5E7EB')
+            .margin({ top: 12 })
+            .maxLines(1)
+        }
+        .width('100%')
+        .height('100%')
+        .alignItems(HorizontalAlign.Center)
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#D9000000')
+      .zIndex(90)
+    }
   }
 
   build() {
@@ -286,6 +349,9 @@ export struct ChatPage {
             .width(44)
             .height(44)
             .textAlign(TextAlign.Center)
+            .onClick(() => {
+              this.onOpenSessionDrawer();
+            })
           Row() {
             Text('MobiAgent')
               .fontSize(24)
@@ -361,15 +427,15 @@ export struct ChatPage {
         .margin({ bottom: 12 })
 
         Row() {
-          Text('语')
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#111827')
-            .width(44)
-            .height(44)
-            .textAlign(TextAlign.Center)
-            .borderRadius(22)
-            .border({ width: 2, color: '#111827' })
+          // Text('语')
+          //   .fontSize(18)
+          //   .fontWeight(FontWeight.Bold)
+          //   .fontColor('#111827')
+          //   .width(44)
+          //   .height(44)
+          //   .textAlign(TextAlign.Center)
+          //   .borderRadius(22)
+          //   .border({ width: 2, color: '#111827' })
           TextInput({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
             .height(52)
@@ -394,6 +460,32 @@ export struct ChatPage {
         .margin({ left: 20, right: 20, bottom: 28 })
       }
       .width('100%')
+
+      if (this.sessionDrawerOpen) {
+        Row() {
+          ChatSessionDrawer({
+            sessions: this.sessions,
+            activeSessionId: this.activeSessionId,
+            restoringLocalSession: this.restoringLocalSession,
+            onClose: () => { this.onCloseSessionDrawer(); },
+            onCreateSession: (mode: string) => { this.onCreateSession(mode); },
+            onSelectSession: async (id: string) => { await this.onSelectSession(id); },
+            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); }
+          })
+          Blank()
+            .layoutWeight(1)
+            .height('100%')
+            .backgroundColor('#66000000')
+            .onClick(() => {
+              this.onCloseSessionDrawer();
+            })
+        }
+        .width('100%')
+        .height('100%')
+        .alignItems(VerticalAlign.Top)
+      }
+
+      this.ImagePreviewOverlay()
     }
     .width('100%')
     .height('100%')

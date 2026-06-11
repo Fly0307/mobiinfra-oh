@@ -28,11 +28,13 @@ export interface WechatAutoSummaryRequest {
   days: number;
   max_contacts: number;
   target_contact: string;
+  max_list_swipes?: number;
   swipe_speed: number;
   history_swipe_ratio: number;
   stable_swipes: number;
   max_history_swipes: number;
   wait: number;
+  output_dir?: string;
 }
 
 // 单条聊天消息的结构，sender 仅在服务端能识别发言人时返回。
@@ -42,20 +44,36 @@ export interface WechatAutoSummaryMessage {
   sender?: string;
 }
 
+// 服务端会标注采集覆盖的时间语义；visible_page_only 表示只汇总本次可见页采集结果。
+export interface WechatAutoSummaryTimeRange {
+  start?: string;
+  end?: string;
+  mode?: string;
+}
+
 export interface WechatAutoSummaryConversation {
   title: string;
   contact?: WechatAutoSummaryJsonMap;
+  dump?: string;
+  snapshots?: string[];
   messages: WechatAutoSummaryMessage[];
+  time_range?: WechatAutoSummaryTimeRange;
+  history_mode?: string;
 }
 
 export interface WechatAutoSummaryResponse {
   status: string;
   message?: string;
   run_id?: string;
+  started_at?: string;
+  finished_at?: string;
   mode?: string;
   days?: number;
+  target_contact?: string;
   contacts_requested?: number;
   contacts_collected?: number;
+  home_dump?: string;
+  history_mode?: string;
   conversations?: WechatAutoSummaryConversation[];
   daily_log_entries?: string[];
   artifacts?: WechatAutoSummaryJsonMap;
@@ -65,7 +83,7 @@ function isInvalidNumber(value: number): boolean {
   return isNaN(value) || !isFinite(value);
 }
 
-function clampRoundedSetting(value: string, fallback: number, min: number, max: number): number {
+function clampIntegerSetting(value: string, fallback: number, min: number, max: number): number {
   let text = value.trim();
   if (text.length === 0) {
     return fallback;
@@ -74,22 +92,60 @@ function clampRoundedSetting(value: string, fallback: number, min: number, max: 
   if (isInvalidNumber(parsed)) {
     return fallback;
   }
-  let rounded = Math.round(parsed);
-  if (rounded < min) {
+  let truncated = parsed < 0 ? Math.ceil(parsed) : Math.floor(parsed);
+  if (truncated < min) {
     return min;
   }
-  if (rounded > max) {
+  if (truncated > max) {
     return max;
   }
-  return rounded;
+  return truncated;
+}
+
+function clampFloatSetting(value: string, fallback: number, min: number, max: number): number {
+  let text = value.trim();
+  if (text.length === 0) {
+    return fallback;
+  }
+  let parsed = Number(text);
+  if (isInvalidNumber(parsed)) {
+    return fallback;
+  }
+  if (parsed < min) {
+    return min;
+  }
+  if (parsed > max) {
+    return max;
+  }
+  return parsed;
 }
 
 export function normalizeWechatAutoSummaryDays(value: string): number {
-  return clampRoundedSetting(value, 7, 1, 90);
+  return clampIntegerSetting(value, 7, 1, 90);
 }
 
 export function normalizeWechatAutoSummaryMaxContacts(value: string): number {
-  return clampRoundedSetting(value, 10, 1, 50);
+  return clampIntegerSetting(value, 10, 1, 50);
+}
+
+export function normalizeWechatAutoSummarySwipeSpeed(value: string): number {
+  return clampIntegerSetting(value, 2500, 0, 20000);
+}
+
+export function normalizeWechatAutoSummaryHistorySwipeRatio(value: string): number {
+  return clampFloatSetting(value, 0.65, 0.1, 0.95);
+}
+
+export function normalizeWechatAutoSummaryStableSwipes(value: string): number {
+  return clampIntegerSetting(value, 3, 1, 10);
+}
+
+export function normalizeWechatAutoSummaryMaxHistorySwipes(value: string): number {
+  return clampIntegerSetting(value, 80, 1, 300);
+}
+
+export function normalizeWechatAutoSummaryWait(value: string): number {
+  return clampFloatSetting(value, 1.0, 0, 10);
 }
 
 export function normalizeWechatAutoSummaryMode(value: string): string {
@@ -106,6 +162,27 @@ export function validateWechatAutoSummaryRequest(request: WechatAutoSummaryReque
   }
   if (isInvalidNumber(request.max_contacts) || request.max_contacts < 1 || request.max_contacts > 50) {
     return '联系人数量需在 1 到 50 个之间';
+  }
+  if (isInvalidNumber(request.swipe_speed) || request.swipe_speed < 0 || request.swipe_speed > 20000) {
+    return '滑动速度需在 0 到 20000 之间';
+  }
+  if (isInvalidNumber(request.history_swipe_ratio) || request.history_swipe_ratio < 0.1 ||
+    request.history_swipe_ratio > 0.95) {
+    return '历史滑动距离比例需在 0.1 到 0.95 之间';
+  }
+  if (isInvalidNumber(request.stable_swipes) || request.stable_swipes < 1 || request.stable_swipes > 10) {
+    return '稳定判定次数需在 1 到 10 次之间';
+  }
+  if (isInvalidNumber(request.max_history_swipes) || request.max_history_swipes < 1 ||
+    request.max_history_swipes > 300) {
+    return '历史页最大滑动次数需在 1 到 300 次之间';
+  }
+  if (isInvalidNumber(request.wait) || request.wait < 0 || request.wait > 10) {
+    return '页面等待时间需在 0 到 10 秒之间';
+  }
+  if (request.max_list_swipes !== undefined &&
+    (isInvalidNumber(request.max_list_swipes) || request.max_list_swipes < 0 || request.max_list_swipes > 300)) {
+    return '联系人列表最大滑动次数需在 0 到 300 次之间';
   }
   if (normalizeWechatAutoSummaryMode(request.mode) === WECHAT_AUTO_SUMMARY_MODE_TARGET &&
     request.target_contact.trim().length === 0) {

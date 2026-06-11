@@ -19,6 +19,11 @@ from wechat_collect.collector import (
     parse_chat_time,
     render_markdown,
 )
+from wechat_collect import (
+    collect_recent_contacts_from_dumps,
+    daily_log_entries_from_conversations,
+    normalize_collect_request,
+)
 
 
 ROOT = Path(__file__).resolve().parent / "wechat_collect" / "fixtures"
@@ -216,6 +221,73 @@ class WechatCollectParserTests(unittest.TestCase):
                     collect_visible_chats(CollectOptions(dump_dir=temp_dir, wait=0))
 
         self.assertEqual(calls, [])
+
+
+class WechatCollectServiceTests(unittest.TestCase):
+    def test_normalize_collect_request_clamps_supported_ranges(self):
+        request = normalize_collect_request({
+            "days": 120,
+            "max_contacts": 80,
+            "swipe_speed": 2500,
+            "history_swipe_ratio": 0.65,
+            "stable_swipes": 3,
+            "max_history_swipes": 80,
+            "wait": 1.0,
+        })
+
+        self.assertEqual(request.mode, "recent_contacts")
+        self.assertEqual(request.days, 90)
+        self.assertEqual(request.max_contacts, 50)
+        self.assertEqual(request.swipe_speed, 2500)
+
+    def test_normalize_collect_request_requires_target_contact_name(self):
+        with self.assertRaisesRegex(ValueError, "target_contact"):
+            normalize_collect_request({"mode": "target_contact", "days": 7})
+
+    def test_collect_recent_contacts_scrolls_until_unique_limit(self):
+        first_dump = load_fixture("home.json")
+        second_dump = json.loads(json.dumps(first_dump, ensure_ascii=False))
+        first = extract_contacts(first_dump)[0]
+        second_dump["children"][0]["children"][0]["children"][0]["attributes"]["text"] = "新联系人"
+        dumps = [first_dump, second_dump]
+        swipes = []
+
+        def dump_provider():
+            return dumps[len(swipes)]
+
+        def swipe_next(root):
+            swipes.append(root)
+
+        contacts = collect_recent_contacts_from_dumps(
+            dump_provider,
+            swipe_next,
+            max_contacts=2,
+            stable_swipes=2,
+            max_list_swipes=3,
+        )
+
+        self.assertEqual([contact.name for contact in contacts], [first.name, "新联系人"])
+        self.assertEqual(len(swipes), 1)
+
+    def test_daily_log_entries_include_complete_message_excerpt(self):
+        chat_payload = build_chat_payload(load_fixture("chat_xiao_zhao.json"))
+        conversations = [{
+            "contact": {"name": "小赵"},
+            "title": chat_payload["title"],
+            "messages": chat_payload["messages"],
+            "time_range": {
+                "start": "2026-06-08",
+                "end": "2026-06-11",
+            },
+        }]
+
+        entries = daily_log_entries_from_conversations(conversations, days=7)
+
+        self.assertEqual(len(entries), 1)
+        self.assertIn("微信联系人「小赵」最近 7 天消息采集", entries[0])
+        self.assertIn("完整消息摘录", entries[0])
+        self.assertIn("我：我想要买一个iPhone 17Pro", entries[0])
+        self.assertIn("小赵：需要给妹妹买一些少儿读物", entries[0])
 
 
 if __name__ == "__main__":

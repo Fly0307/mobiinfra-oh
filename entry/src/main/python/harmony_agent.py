@@ -36,7 +36,12 @@ NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
 HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
 HDC_TARGET_OVERRIDE = HDC_TARGET
 HDC_TARGET_CHECKED_AT = 0.0
-HDC_TARGET_CACHE_TTL = 2.0
+HDC_TARGET_LAST_OK_AT = 0.0
+HDC_TARGET_CACHE_TTL = float(os.environ.get("HDC_TARGET_CACHE_TTL", "5"))
+HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
+HDC_TARGET_STALE_GRACE = float(os.environ.get("HDC_TARGET_STALE_GRACE", "30"))
+HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "10"))
+HDC_CLEANUP_TIMEOUT = float(os.environ.get("HDC_CLEANUP_TIMEOUT", "3"))
 LAST_TASK_COMPLETED = False
 DEVICE_CONTROL_LOCK = threading.RLock()
 AGENT_LOOP_STOP_EVENT = threading.Event()
@@ -71,8 +76,18 @@ LLM_APP_BUNDLE = "com.example.mnnllmchat"
 LLM_APP_ABILITY = "EntryAbility"
 
 def quiet_system(cmd):
-    # 跨平台静默执行 HDC 辅助命令，避免无任务轮询时刷屏。
-    return os.system(f"{cmd} >{NULL_DEVICE} 2>&1")
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=HDC_COMMAND_TIMEOUT
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print(f">> [HDC timeout] command exceeded {HDC_COMMAND_TIMEOUT}s: {cmd}")
+        return 124
 
 def is_wireless_hdc_target(target):
     return ":" in target
@@ -91,20 +106,29 @@ def parse_hdc_targets(output):
             targets.append(target)
     return targets
 
-def list_hdc_targets():
+def list_hdc_targets(return_error=False):
+    targets = []
+    error = ""
     try:
         result = subprocess.run(
             ["hdc", "list", "targets"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=HDC_LIST_TARGETS_TIMEOUT
         )
         if result.returncode != 0:
-            return []
-        return parse_hdc_targets(result.stdout)
+            error = result.stderr.strip() or result.stdout.strip()
+        else:
+            targets = parse_hdc_targets(result.stdout)
+    except subprocess.TimeoutExpired:
+        error = f"command timed out after {HDC_LIST_TARGETS_TIMEOUT}s: hdc list targets"
     except Exception as ex:
-        print(f">> [HDC警告] 获取目标设备失败: {ex}")
-        return []
+        error = str(ex)
+    if error:
+        print(f">> [HDC warning] list targets failed: {error}")
+    if return_error:
+        return targets, error
+    return targets
 
 def choose_hdc_target(targets, preferred_target=""):
     if not targets:
@@ -124,10 +148,12 @@ def choose_hdc_target(targets, preferred_target=""):
         return wireless_targets[0]
     return targets[0]
 
-def set_hdc_target(target, checked_at=0.0):
-    global HDC_TARGET, HDC_TARGET_CHECKED_AT
+def set_hdc_target(target, checked_at=0.0, mark_ok=False):
+    global HDC_TARGET, HDC_TARGET_CHECKED_AT, HDC_TARGET_LAST_OK_AT
     HDC_TARGET = target.strip() if isinstance(target, str) else ""
     HDC_TARGET_CHECKED_AT = checked_at
+    if mark_ok and HDC_TARGET and checked_at > 0:
+        HDC_TARGET_LAST_OK_AT = checked_at
     # hmdriver2 may read HDC_TARGET during import; keep runtime selection visible without
     # treating it as the startup override used by choose_hdc_target().
     if HDC_TARGET:
@@ -140,6 +166,21 @@ def clear_hdc_target_cache():
         return
     set_hdc_target("")
 
+def keep_cached_hdc_target_after_probe_error(error, now):
+    global HDC_TARGET_CHECKED_AT
+    if not error or not HDC_TARGET or HDC_TARGET_LAST_OK_AT <= 0:
+        return ""
+    age = now - HDC_TARGET_LAST_OK_AT
+    if age > HDC_TARGET_STALE_GRACE:
+        return ""
+    HDC_TARGET_CHECKED_AT = now
+    remaining = max(0.0, HDC_TARGET_STALE_GRACE - age)
+    print(
+        f">> [HDC] list targets failed; keeping cached target "
+        f"{HDC_TARGET} for {remaining:.1f}s: {error}"
+    )
+    return HDC_TARGET
+
 def get_hdc_target(force=False):
     global HDC_TARGET, HDC_TARGET_CHECKED_AT
     now = time.monotonic()
@@ -147,16 +188,19 @@ def get_hdc_target(force=False):
             now - HDC_TARGET_CHECKED_AT < HDC_TARGET_CACHE_TTL):
         return HDC_TARGET
 
-    targets = list_hdc_targets()
+    targets, error = list_hdc_targets(return_error=True)
     target = choose_hdc_target(targets, HDC_TARGET)
     if not target:
+        stale_target = keep_cached_hdc_target_after_probe_error(error, now)
+        if stale_target:
+            return stale_target
         if HDC_TARGET:
             print(f">> [HDC] 目标设备已失效，清理缓存: {HDC_TARGET}")
         set_hdc_target("", checked_at=now)
         return ""
     if target != HDC_TARGET:
         print(f">> [HDC] 使用目标设备: {target}")
-    set_hdc_target(target, checked_at=now)
+    set_hdc_target(target, checked_at=now, mark_ok=True)
     return HDC_TARGET
 
 def hdc_prefix(force=False):
@@ -181,7 +225,15 @@ def _refresh_hdc_forwarding_for_target(target, verbose=False):
     prefix = hdc_prefix_for_target(target)
     quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
     if verbose:
-        return os.system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
+        try:
+            return subprocess.run(
+                f"{prefix} fport tcp:{PORT} tcp:{PORT}",
+                shell=True,
+                timeout=HDC_COMMAND_TIMEOUT
+            ).returncode
+        except subprocess.TimeoutExpired:
+            print(f">> [HDC timeout] fport exceeded {HDC_COMMAND_TIMEOUT}s")
+            return 124
     return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
 
 def _refresh_hdc_forwarding_impl(verbose=False):
@@ -404,14 +456,26 @@ def load_prompt(filename):
 def run_cmd(cmd):
     return subprocess.check_output(cmd, shell=True, text=True)
 
-def _run_timed_command(label, cmd, capture_output=True):
+def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIMEOUT):
     started = time.perf_counter()
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=capture_output,
-        text=True
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=capture_output,
+            text=True,
+            timeout=timeout
+        )
+    except subprocess.TimeoutExpired as ex:
+        elapsed = time.perf_counter() - started
+        print(f">> [HDC Timing] {label}: {elapsed:.3f}s (timeout)")
+        output = ""
+        if capture_output:
+            output = (ex.stderr or ex.stdout or "")
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            output = str(output).strip()
+        raise RuntimeError(output or f"{label} timed out after {timeout}s")
     elapsed = time.perf_counter() - started
     print(f">> [HDC Timing] {label}: {elapsed:.3f}s")
     if result.returncode != 0:
@@ -424,14 +488,19 @@ def _run_timed_command(label, cmd, capture_output=True):
 def _cleanup_device_file_async(prefix, device_path):
     def cleanup():
         started = time.perf_counter()
-        subprocess.run(
-            f"{prefix} shell rm \"{device_path}\"",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        elapsed = time.perf_counter() - started
-        print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s")
+        try:
+            subprocess.run(
+                f"{prefix} shell rm \"{device_path}\"",
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=HDC_CLEANUP_TIMEOUT
+            )
+            elapsed = time.perf_counter() - started
+            print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s")
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - started
+            print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s (timeout)")
 
     threading.Thread(
         target=cleanup,

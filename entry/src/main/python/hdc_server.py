@@ -3,6 +3,7 @@ import subprocess
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import os
 import argparse
+import errno
 import time
 import threading
 import socket
@@ -19,8 +20,10 @@ except Exception as ex:
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
-HDC_HEALTH_CACHE_TTL = 2.0
-HDC_COMMAND_TIMEOUT = 20
+HDC_HEALTH_CACHE_TTL = float(os.environ.get("HDC_HEALTH_CACHE_TTL", "5"))
+HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "20"))
+HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
+HDC_STALE_TARGET_GRACE = float(os.environ.get("HDC_STALE_TARGET_GRACE", "30"))
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
@@ -59,6 +62,7 @@ def make_hdc_tunnel_status(status, message, target="", tunnel_ready=False, fport
     }
 
 _hdc_health_checked_at = 0.0
+_hdc_health_last_ok_at = 0.0
 _hdc_health_connected = False
 _hdc_health_target = ""
 _hdc_tunnel_checked_at = 0.0
@@ -66,6 +70,24 @@ _hdc_tunnel_status = make_hdc_tunnel_status("unknown", "HDC tunnel has not been 
 _auto_discovery_last_attempt = 0.0
 _auto_discovery_running = False
 auto_discovery_lock = threading.RLock()
+
+CLIENT_DISCONNECT_ERRNOS = {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}
+CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
+
+def is_client_disconnect_error(exc):
+    if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+        return True
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        win_error = getattr(exc, "winerror", None)
+        return err_no in CLIENT_DISCONNECT_ERRNOS or win_error in CLIENT_DISCONNECT_WINERRORS
+    return False
+
+def log_client_disconnect(handler, status_code):
+    print(
+        f">> [HTTP] client disconnected before {status_code} response: "
+        f"{handler.command} {handler.path} from {handler.client_address}"
+    )
 
 # PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
 # workflow bridge 直接通过 /api/workflow 执行动作；9126 轮询 Agent 默认启动，
@@ -124,11 +146,18 @@ class HDCServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not Found")
 
     def write_json(self, status_code, payload):
-        self.send_response(status_code)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+        try:
+            self.send_response(status_code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+            return True
+        except Exception as exc:
+            if is_client_disconnect_error(exc):
+                log_client_disconnect(self, status_code)
+                return False
+            raise
 
     def handle_workflow_request(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -240,7 +269,7 @@ def parse_hdc_targets(output):
     return targets
 
 def list_hdc_targets():
-    result = run_process(["hdc", "list", "targets"])
+    result = run_process(["hdc", "list", "targets"], timeout=HDC_LIST_TARGETS_TIMEOUT)
     if result.returncode != 0:
         return [], result.stderr.strip() or result.stdout.strip()
     return parse_hdc_targets(result.stdout), ""
@@ -732,11 +761,13 @@ def select_hdc_candidate(candidates, prompt_user):
         print("输入无效，请输入列表中的序号或完整 target。")
 
 def mark_active_hdc_target(target, source=""):
-    global _hdc_health_checked_at, _hdc_health_connected
+    global _hdc_health_checked_at, _hdc_health_last_ok_at, _hdc_health_connected
     if not target:
         return ""
     set_harmony_agent_target(target)
-    _hdc_health_checked_at = time.monotonic()
+    checked_at = time.monotonic()
+    _hdc_health_checked_at = checked_at
+    _hdc_health_last_ok_at = checked_at
     _hdc_health_connected = True
     if is_wireless_hdc_target(target):
         cache_wireless_hdc_target(target, source=source)
@@ -929,6 +960,30 @@ def run_with_hdc_control(operation_name, operation):
     with hdc_control_lock:
         return operation()
 
+def keep_cached_hdc_target_after_probe_error(error, now):
+    global _hdc_health_checked_at, _hdc_health_connected, _hdc_tunnel_checked_at, _hdc_tunnel_status
+    if not error or not _hdc_health_target or _hdc_health_last_ok_at <= 0:
+        return ""
+    age = now - _hdc_health_last_ok_at
+    if age > HDC_STALE_TARGET_GRACE:
+        return ""
+    _hdc_health_checked_at = now
+    _hdc_health_connected = True
+    set_harmony_agent_target(_hdc_health_target)
+    remaining = max(0.0, HDC_STALE_TARGET_GRACE - age)
+    print(
+        f">> [HDC] list targets failed; keeping cached target "
+        f"{_hdc_health_target} for {remaining:.1f}s: {error}"
+    )
+    if not _hdc_tunnel_status.get("target"):
+        _hdc_tunnel_status = make_hdc_tunnel_status(
+            "warning",
+            "HDC probe failed; using cached target without refreshing tunnels",
+            target=_hdc_health_target
+        )
+    _hdc_tunnel_checked_at = now
+    return _hdc_health_target
+
 def get_active_hdc_target(force=False):
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
     now = time.monotonic()
@@ -938,6 +993,9 @@ def get_active_hdc_target(force=False):
 
     targets, error = list_hdc_targets()
     if not targets:
+        stale_target = keep_cached_hdc_target_after_probe_error(error, now)
+        if stale_target:
+            return stale_target
         if AUTO_DISCOVERY_ENABLED:
             auto_result = ensure_auto_hdc_connected(force=force, prompt_user=False,
                                                     reason="No connected HDC target; trying cached LAN discovery.")
@@ -1298,7 +1356,21 @@ def ensure_workflow_agent_ready():
 
 def run_remote_command(cmd):
     def execute():
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=HDC_COMMAND_TIMEOUT
+            )
+        except subprocess.TimeoutExpired as ex:
+            result = subprocess.CompletedProcess(
+                cmd,
+                124,
+                ex.stdout or "",
+                ex.stderr or f"command timed out after {HDC_COMMAND_TIMEOUT}s: {cmd}"
+            )
         if harmony_agent is not None and 'hdc' in cmd.lower():
             invalidate_hdc_health_cache()
         return result
@@ -1308,7 +1380,21 @@ def run_remote_command(cmd):
     return execute()
 
 def run_hdc_command(cmd):
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=HDC_COMMAND_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as ex:
+        result = subprocess.CompletedProcess(
+            cmd,
+            124,
+            ex.stdout or "",
+            ex.stderr or f"command timed out after {HDC_COMMAND_TIMEOUT}s: {cmd}"
+        )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'command failed: {cmd}')
     return result.stdout.strip()

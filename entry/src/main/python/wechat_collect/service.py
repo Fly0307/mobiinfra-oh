@@ -8,6 +8,7 @@ dump 与滑动函数，便于单元测试和后续接入不同服务入口。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -43,18 +44,21 @@ class WechatCollectRequest:
     output_dir: str
 
 
-def normalize_collect_request(payload: dict[str, Any]) -> WechatCollectRequest:
+def normalize_collect_request(payload: Any) -> WechatCollectRequest:
     """校验并规范化服务入口收到的微信采集请求。
 
     参数越界时会被夹到支持范围内；缺失或类型异常时使用默认值。当前支持
     最近联系人批量采集和指定联系人采集两种模式。
     """
 
-    mode = _stripped_string(payload.get("mode"), "recent_contacts")
+    if not isinstance(payload, dict):
+        raise ValueError("request payload must be an object")
+
+    mode = _stripped_string(payload.get("mode"), "recent_contacts", "mode")
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"unsupported mode: {mode}")
 
-    target_contact = _stripped_string(payload.get("target_contact"), "")
+    target_contact = _stripped_string(payload.get("target_contact"), "", "target_contact")
     if mode == "target_contact" and not target_contact:
         raise ValueError("target_contact is required for target_contact mode")
 
@@ -69,6 +73,7 @@ def normalize_collect_request(payload: dict[str, Any]) -> WechatCollectRequest:
             DEFAULT_HISTORY_SWIPE_RATIO,
             0.1,
             0.95,
+            "history_swipe_ratio",
         ),
         stable_swipes=_clamp_int(payload.get("stable_swipes"), DEFAULT_STABLE_SWIPES, 1, 10),
         max_history_swipes=_clamp_int(
@@ -77,9 +82,9 @@ def normalize_collect_request(payload: dict[str, Any]) -> WechatCollectRequest:
             1,
             300,
         ),
-        wait=_clamp_float(payload.get("wait"), DEFAULT_WAIT, 0.0, 10.0),
+        wait=_clamp_float(payload.get("wait"), DEFAULT_WAIT, 0.0, 10.0, "wait"),
         max_list_swipes=_clamp_int(payload.get("max_list_swipes"), DEFAULT_MAX_LIST_SWIPES, 0, 100),
-        output_dir=_stripped_string(payload.get("output_dir"), ""),
+        output_dir=_stripped_string(payload.get("output_dir"), "", "output_dir"),
     )
 
 
@@ -177,20 +182,24 @@ def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return min(max(parsed, minimum), maximum)
 
 
-def _clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+def _clamp_float(value: Any, default: float, minimum: float, maximum: float, field_name: str) -> float:
     if isinstance(value, bool):
         return default
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be finite")
     return min(max(parsed, minimum), maximum)
 
 
-def _stripped_string(value: Any, default: str) -> str:
+def _stripped_string(value: Any, default: str, field_name: str) -> str:
     if value is None:
         return default
-    text = str(value).strip()
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    text = value.strip()
     return text if text else default
 
 

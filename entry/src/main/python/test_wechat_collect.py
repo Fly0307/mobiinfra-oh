@@ -244,6 +244,37 @@ class WechatCollectServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target_contact"):
             normalize_collect_request({"mode": "target_contact", "days": 7})
 
+    def test_normalize_collect_request_rejects_non_object_payload(self):
+        for payload in [None, [], "bad"]:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "payload must be an object"):
+                    normalize_collect_request(payload)
+
+    def test_normalize_collect_request_rejects_non_finite_float_fields(self):
+        invalid_payloads = [
+            {"wait": "nan"},
+            {"wait": float("nan")},
+            {"history_swipe_ratio": "inf"},
+            {"history_swipe_ratio": float("-inf")},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    normalize_collect_request(payload)
+
+    def test_normalize_collect_request_rejects_non_string_text_fields(self):
+        invalid_payloads = [
+            {"mode": 1},
+            {"mode": "target_contact", "target_contact": []},
+            {"output_dir": {}},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    normalize_collect_request(payload)
+
     def test_collect_recent_contacts_uses_full_current_page_before_swiping(self):
         first_dump = load_fixture("home.json")
         swipes = []

@@ -1,15 +1,16 @@
 import { AppLogger } from '../utils/AppLogger';
 
 const DATA_MANAGER_LOG_MODULE: string = 'DataManager';
+const DATA_MANAGER_LOGGER = AppLogger.forModule(DATA_MANAGER_LOG_MODULE);
 
 export function dataManagerInfo(message: string): void {
-  AppLogger.info(DATA_MANAGER_LOG_MODULE, message);
+  DATA_MANAGER_LOGGER.info(message);
 }
 
 export function dataManagerWarn(message: string): void {
-  AppLogger.warn(DATA_MANAGER_LOG_MODULE, message);
+  DATA_MANAGER_LOGGER.warn(message);
 }
 
 export function dataManagerError(message: string): void {
-  AppLogger.error(DATA_MANAGER_LOG_MODULE, message);
+  DATA_MANAGER_LOGGER.error(message);
 }

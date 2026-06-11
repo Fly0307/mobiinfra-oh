@@ -6,6 +6,7 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
+import { AppLogger } from './AppLogger';
 import { AgentLoopNativeApi } from 'libentry.so';
 
 type AgentLoopMode = 'local' | 'cloud';
@@ -495,6 +496,7 @@ export class AgentLoopRunner {
   }
 
   private log(mode: AgentLoopMode, message: string): void {
+    AppLogger.info('AgentLoop.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler(message);
       return;

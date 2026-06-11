@@ -2718,7 +2718,7 @@ struct GalleryPage {
       action: 'ohos.want.action.viewData',
       uri: mapUrl
     }).catch((e: BusinessError) => {
-      AppLogger.warn('Gallery.Location', 'open external capture map failed: code=' + e.code + ', message=' + e.message);
+      AppLogger.warnCause('Gallery.Location', 'open external capture map failed', e);
       showToastSafely('无法打开地图链接', 1600);
     });
   }

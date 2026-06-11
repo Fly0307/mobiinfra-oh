@@ -122,8 +122,8 @@ export class HdcWorkflowBridge {
       return parsed;
     } catch (e) {
       let err = e as Error;
-      AppLogger.error('HdcBridge', 'request failed action=' + action + ', durationMs=' +
-        this.elapsedMs(startedAt) + ', message=' + err.message);
+      AppLogger.errorCause('HdcBridge', 'request failed action=' + action + ', durationMs=' +
+        this.elapsedMs(startedAt), err);
       return {
         status: 'error',
         message: 'HDC bridge 请求失败：' + err.message

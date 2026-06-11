@@ -910,8 +910,7 @@ struct Index {
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
-      let err = e as Error;
-      AppLogger.error('NativeRuntime', 'initLogFile failed: ' + err.message);
+      AppLogger.errorCause('NativeRuntime', 'initLogFile failed', e as Error);
     }
     this.prepareCustomOpp();
     this.initDataManager();

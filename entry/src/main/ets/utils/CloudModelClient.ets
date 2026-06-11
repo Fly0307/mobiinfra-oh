@@ -162,7 +162,7 @@ export class CloudModelClient {
       try {
         pending[i].destroy();
       } catch (e) {
-        AppLogger.warn('CloudModel', 'destroy pending request failed: ' + String(e));
+        AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
     }
   }

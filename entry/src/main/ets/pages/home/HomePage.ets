@@ -127,8 +127,7 @@ export struct HomePage {
       await this.onGenerateAvatar('text_to_image', '');
       this.avatarGenerationOpen = false;
     } catch (e) {
-      let err = e as Error;
-      AppLogger.error('Home.Avatar', 'submitAvatarGeneration failed: ' + err.message);
+      AppLogger.errorCause('Home.Avatar', 'submitAvatarGeneration failed', e as Error);
     } finally {
       this.avatarGenerating = false;
     }
@@ -165,8 +164,7 @@ export struct HomePage {
       await this.onGenerateAvatar('image_to_image', this.selectedAvatarPhotoUri);
       this.avatarGenerationOpen = false;
     } catch (e) {
-      let err = e as Error;
-      AppLogger.error('Home.Avatar', 'submitAvatarPhotoGeneration failed: ' + err.message);
+      AppLogger.errorCause('Home.Avatar', 'submitAvatarPhotoGeneration failed', e as Error);
     } finally {
       this.avatarGenerating = false;
     }

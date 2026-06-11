@@ -47,8 +47,8 @@ class WechatCollectRequest:
 def normalize_collect_request(payload: Any) -> WechatCollectRequest:
     """校验并规范化服务入口收到的微信采集请求。
 
-    参数越界时会被夹到支持范围内；缺失或类型异常时使用默认值。当前支持
-    最近联系人批量采集和指定联系人采集两种模式。
+    参数越界时会被夹到支持范围内；缺失参数使用默认值。入口 payload、
+    字符串字段类型异常或非有限浮点数会抛出 ValueError，便于 HTTP 层统一返回错误。
     """
 
     if not isinstance(payload, dict):

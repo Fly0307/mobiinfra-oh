@@ -1415,11 +1415,15 @@ struct Index {
         httpReq.destroy();
         resolve(fileSize);
       });
+      let streamHeaders: Record<string, string> = {};
+      if (startOffset > 0) {
+        streamHeaders['Range'] = 'bytes=' + startOffset.toString() + '-';
+      }
       let streamOptions: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
         connectTimeout: 30000,
         readTimeout: 7200000,
-        header: startOffset > 0 ? { 'Range': 'bytes=' + startOffset.toString() + '-' } : {}
+        header: streamHeaders
       };
       httpReq.requestInStream(url, streamOptions).then((code: number) => {
         if (self.modelScopePauseRequested) {

@@ -2,6 +2,7 @@ import {
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
+  chatMessageImagePath,
   chatMessageRenderKey
 } from './ChatSessionTypes';
 
@@ -9,11 +10,11 @@ import {
 export struct ChatMessageList {
   @Prop messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
-  @Prop debugImagePath: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onScrollContent: (yOffset: number) => void = () => {};
 
   private isUserMessage(message: ChatMessage): boolean {
     return message.role === 'user';
@@ -117,6 +118,8 @@ export struct ChatMessageList {
         .lineHeight(22)
         .width('100%')
         .margin({ top: 6 })
+
+      this.MessageImagePreview(message)
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 12 })
@@ -126,6 +129,21 @@ export struct ChatMessageList {
       width: this.isUserMessage(message) ? 0 : 1,
       color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' : '#E8ECF3'
     })
+  }
+
+  @Builder MessageImagePreview(message: ChatMessage) {
+    if (chatMessageImagePath(message).length > 0) {
+      Image(chatMessageImagePath(message))
+        .width(96)
+        .height(132)
+        .objectFit(ImageFit.Contain)
+        .backgroundColor(Color.Black)
+        .borderRadius(12)
+        .margin({ top: 12 })
+        .onClick(() => {
+          this.onPreviewDebugImage(chatMessageImagePath(message));
+        })
+    }
   }
 
   @Builder TraceBubble(message: ChatMessage) {
@@ -236,29 +254,6 @@ export struct ChatMessageList {
     .margin({ top: 14 })
   }
 
-  @Builder DebugImagePreview() {
-    if (this.debugImagePath.length > 0) {
-      Row() {
-        Text('调试截图')
-          .fontSize(12)
-          .fontColor('#6B7280')
-        Image(this.debugImagePath)
-          .width(86)
-          .height(120)
-          .objectFit(ImageFit.Contain)
-          .backgroundColor(Color.Black)
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => {
-            this.onPreviewDebugImage(this.debugImagePath);
-          })
-      }
-      .width('100%')
-      .padding({ left: 44, right: 44, top: 12 })
-      .alignItems(VerticalAlign.Center)
-    }
-  }
-
   build() {
     Scroll() {
       Column() {
@@ -294,13 +289,14 @@ export struct ChatMessageList {
           .margin({ top: 14 })
         }
 
-        this.DebugImagePreview()
-
         Blank()
           .height(150)
       }
       .width('100%')
     }
+    .onScroll((_xOffset: number, yOffset: number) => {
+      this.onScrollContent(yOffset);
+    })
     .layoutWeight(1)
     .width('100%')
   }

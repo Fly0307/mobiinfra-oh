@@ -2,6 +2,7 @@ import { inputMethod } from '@kit.IMEKit';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
+  chatModeSwitcherVisibleAfterScroll,
   chatModeLabel,
   chatModePlaceholder
 } from './ChatPageTypes';
@@ -15,6 +16,7 @@ export struct ChatPage {
   @Link cloudUserInput: string;
   @Link userInput: string;
   @State previewImagePath: string = '';
+  @State modeSwitcherVisible: boolean = true;
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
@@ -64,11 +66,7 @@ export struct ChatPage {
   }
 
   private hasConversationContent(): boolean {
-    return this.messages.length > 0 || this.isBusy() || this.activeDebugImagePath().length > 0;
-  }
-
-  private activeDebugImagePath(): string {
-    return this.isCloudMode() ? this.cloudDebugImagePath : this.localDebugImagePath;
+    return this.messages.length > 0 || this.isBusy();
   }
 
   private openDebugImagePreview(path: string): void {
@@ -89,6 +87,18 @@ export struct ChatPage {
       return '本地模型未加载';
     }
     return this.localThinking ? '本地模型正在生成...' : '';
+  }
+
+  private isModeSwitcherShown(): boolean {
+    return this.messages.length === 0 || this.modeSwitcherVisible;
+  }
+
+  private updateModeSwitcherVisibility(yOffset: number): void {
+    if (this.messages.length === 0) {
+      this.modeSwitcherVisible = true;
+      return;
+    }
+    this.modeSwitcherVisible = chatModeSwitcherVisibleAfterScroll(this.modeSwitcherVisible, yOffset);
   }
 
   @Builder ModeChip(mode: string) {
@@ -121,26 +131,6 @@ export struct ChatPage {
       .onClick(() => {
         this.setActiveInput(text);
       })
-  }
-
-  @Builder DebugImagePreview() {
-    if (this.isCloudMode() && this.cloudDebugImagePath.length > 0) {
-      Image(this.cloudDebugImagePath)
-        .width(86)
-        .height(120)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Black)
-        .borderRadius(12)
-        .onClick(() => { this.openDebugImagePreview(this.cloudDebugImagePath); })
-    } else if (!this.isCloudMode() && this.localDebugImagePath.length > 0) {
-      Image(this.localDebugImagePath)
-        .width(86)
-        .height(120)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Black)
-        .borderRadius(12)
-        .onClick(() => { this.openDebugImagePreview(this.localDebugImagePath); })
-    }
   }
 
   @Builder EmptyWelcome() {
@@ -195,11 +185,11 @@ export struct ChatPage {
       ChatMessageList({
         messages: this.messages,
         thinking: this.isBusy(),
-        debugImagePath: this.activeDebugImagePath(),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
-        onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); }
+        onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
+        onScrollContent: (yOffset: number) => { this.updateModeSwitcherVisibility(yOffset); }
       })
     } else {
       Scroll() {
@@ -242,12 +232,6 @@ export struct ChatPage {
               .fontColor('#6B7280')
               .margin({ left: 56, top: 12 })
           }
-
-          Row() {
-            this.DebugImagePreview()
-          }
-          .width('100%')
-          .margin({ left: 56, top: 12 })
 
           Blank()
             .height(150)
@@ -378,13 +362,19 @@ export struct ChatPage {
         .padding({ left: 18, right: 18, top: 22 })
 
         Column() {
-          Row() {
-            this.ModeChip(CHAT_MODE_CLOUD_AGENT)
-            this.ModeChip(CHAT_MODE_LOCAL_INFERENCE)
+          Column() {
+            Row() {
+              this.ModeChip(CHAT_MODE_CLOUD_AGENT)
+              this.ModeChip(CHAT_MODE_LOCAL_INFERENCE)
+            }
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+            .margin({ top: 24 })
           }
           .width('100%')
-          .justifyContent(FlexAlign.Center)
-          .margin({ top: 24 })
+          .height(this.isModeSwitcherShown() ? 58 : 0)
+          .opacity(this.isModeSwitcherShown() ? 1 : 0)
+          .clip(true)
 
           if (this.hasConversationContent()) {
             this.ConversationPanel()

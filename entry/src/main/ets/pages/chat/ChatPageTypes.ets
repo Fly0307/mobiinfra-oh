@@ -31,6 +31,17 @@ export function chatInputAfterAcceptedSend(currentInput: string, accepted: boole
   return accepted ? '' : currentInput;
 }
 
+export function chatModeSwitcherVisibleAfterScroll(currentVisible: boolean, yOffset: number,
+  threshold: number = 4): boolean {
+  if (yOffset > threshold) {
+    return false;
+  }
+  if (yOffset < -threshold) {
+    return true;
+  }
+  return currentVisible;
+}
+
 export function hasCloudAgentDisplayOutput(output: string): boolean {
   let text = output.trim();
   return text.length > 0 && text !== CLOUD_AGENT_DEFAULT_OUTPUT && text !== '云端智能体准备就绪';

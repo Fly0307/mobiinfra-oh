@@ -170,6 +170,8 @@ struct Index {
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudDebugImagePath: string = '';
+  private cloudTaskSessionId: string = '';
+  private localTaskSessionId: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
   @State chatSessions: ChatSessionSummary[] = [];
@@ -239,6 +241,12 @@ struct Index {
   private appendActiveTaskTraceLine(line: string, messageId: string = ''): void {
     let state = ChatSessionController.appendTaskTraceLine(this.filesDir, this.currentChatSessionViewState(),
       this.chatMode, line, messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private attachTaskResultImage(sessionId: string, imagePath: string): void {
+    let state = ChatSessionController.attachTaskResultImage(this.filesDir, this.currentChatSessionViewState(),
+      sessionId, imagePath);
     this.applyChatSessionViewState(state);
   }
 
@@ -773,7 +781,10 @@ struct Index {
         }
         let match = msg.match(/<img>(.*?)<hw>/);
         if (match && match[1]) {
-          this.debugImagePath = 'file://' + match[1];
+          let imagePath = 'file://' + match[1];
+          this.debugImagePath = imagePath;
+          this.attachTaskResultImage(this.localTaskSessionId.length > 0 ? this.localTaskSessionId :
+            this.activeChatSessionId, imagePath);
         }
       }, async (response: string) => {
       if (this.autoConfirm) { return true; }
@@ -792,7 +803,10 @@ struct Index {
       this.appendCloudLog(msg);
       let match = msg.match(/agent_snapshot_.*?\.jpg/);
       if (match && match[0]) {
-        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
+        let imagePath = 'file://' + this.filesDir + '/' + match[0];
+        this.cloudDebugImagePath = imagePath;
+        this.attachTaskResultImage(this.cloudTaskSessionId.length > 0 ? this.cloudTaskSessionId :
+          this.activeChatSessionId, imagePath);
       }
     }, async (response: string) => {
       if (this.cloudAutoConfirm) {
@@ -2119,6 +2133,7 @@ struct Index {
     this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${task}\nPC 脚本检测到任务后将自动开始。`;
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
       CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
+    this.localTaskSessionId = this.activeChatSessionId;
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
   }
 
@@ -2134,6 +2149,7 @@ struct Index {
     if (result.success) {
       this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
         CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
+      this.cloudTaskSessionId = this.activeChatSessionId;
       this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     }
     if (!result.success && result.error.length > 0) {

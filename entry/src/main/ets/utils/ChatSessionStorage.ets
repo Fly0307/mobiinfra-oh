@@ -7,6 +7,7 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   buildChatSessionSummary,
+  chatMessageImagePath,
   createEmptyChatSession,
   normalizeChatMode
 } from '../pages/chat/ChatSessionTypes';
@@ -149,7 +150,7 @@ export class ChatSessionStorage {
     try {
       let session = parseJsonCompat<ChatSessionRecord>(ChatSessionStorage.readText(ChatSessionStorage.sessionPath(filesDir, sessionId)));
       session.mode = normalizeChatMode(session.mode);
-      session.messages = session.messages === undefined ? [] : session.messages;
+      session.messages = session.messages === undefined ? [] : ChatSessionStorage.normalizeMessages(session.messages);
       return session;
     } catch (e) {
       ChatSessionStorage.removeFromIndex(filesDir, sessionId);
@@ -165,7 +166,7 @@ export class ChatSessionStorage {
       mode: normalizeChatMode(session.mode),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
-      messages: session.messages.slice()
+      messages: ChatSessionStorage.normalizeMessages(session.messages)
     };
     ChatSessionStorage.writeText(ChatSessionStorage.sessionPath(filesDir, normalized.id),
       stringifyJsonCompat(normalized as Object, 2));
@@ -212,5 +213,23 @@ export class ChatSessionStorage {
   static nextSessionAfterDelete(filesDir: string, deletedId: string): ChatSessionSummary | null {
     let sessions = ChatSessionStorage.loadIndex(filesDir).filter((item: ChatSessionSummary) => item.id !== deletedId);
     return sessions.length > 0 ? sessions[0] : null;
+  }
+
+  private static normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
+    let normalized: ChatMessage[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      normalized.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: message.content,
+        trace: message.trace === undefined ? [] : message.trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message)
+      });
+    }
+    return normalized;
   }
 }

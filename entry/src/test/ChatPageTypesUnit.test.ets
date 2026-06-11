@@ -6,6 +6,7 @@ import {
   chatInputAfterAcceptedSend,
   chatModeLabel,
   chatModePlaceholder,
+  chatModeSwitcherVisibleAfterScroll,
   cloudAgentDisplayText,
   hasCloudAgentDisplayOutput,
   isSupportedChatMode
@@ -41,6 +42,13 @@ export default function chatPageTypesUnitTest() {
     it('clearsDraftOnlyAfterAcceptedSend', 0, () => {
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', true)).assertEqual('');
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', false)).assertEqual('请问您做什么呢？');
+    });
+
+    it('updatesModeSwitcherVisibilityByScrollDirection', 0, () => {
+      expect(chatModeSwitcherVisibleAfterScroll(true, 8)).assertFalse();
+      expect(chatModeSwitcherVisibleAfterScroll(false, -8)).assertTrue();
+      expect(chatModeSwitcherVisibleAfterScroll(true, 2)).assertTrue();
+      expect(chatModeSwitcherVisibleAfterScroll(false, -2)).assertFalse();
     });
   });
 }

@@ -165,5 +165,44 @@ export default function chatSessionStorageUnitTest() {
 
       cleanupPath(root);
     });
+
+    it('attachesTaskResultImageOnlyToTargetSession', 0, () => {
+      let root = nextTestRoot('image');
+      prepareTestRoot(root);
+
+      let first = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.appendMessage(root, first.id,
+        createChatMessage('r1', 'task', CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', 1001));
+      let second = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      ChatSessionStorage.appendMessage(root, second.id,
+        createChatMessage('u1', 'user', 'chat', '新的会话', 2001));
+
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: second.id,
+        activeMessages: [createChatMessage('u1', 'user', 'chat', '新的会话', 2001)],
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: second
+      };
+      let next = ChatSessionController.attachTaskResultImage(root, state, first.id, 'file:///tmp/snapshot.jpg');
+      let reloadedFirst = ChatSessionStorage.loadSession(root, first.id);
+      let reloadedSecond = ChatSessionStorage.loadSession(root, second.id);
+
+      expect(next.activeSessionId).assertEqual(second.id);
+      expect(next.activeMessages.length).assertEqual(1);
+      expect(next.activeMessages[0].imagePath === undefined ? '' : next.activeMessages[0].imagePath).assertEqual('');
+      expect(reloadedFirst !== null).assertTrue();
+      if (reloadedFirst !== null) {
+        expect(reloadedFirst.messages[0].imagePath === undefined ? '' : reloadedFirst.messages[0].imagePath)
+          .assertEqual('file:///tmp/snapshot.jpg');
+      }
+      expect(reloadedSecond !== null).assertTrue();
+      if (reloadedSecond !== null) {
+        expect(reloadedSecond.messages[0].imagePath === undefined ? '' : reloadedSecond.messages[0].imagePath)
+          .assertEqual('');
+      }
+
+      cleanupPath(root);
+    });
   });
 }

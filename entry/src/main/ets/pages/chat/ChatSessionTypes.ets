@@ -18,6 +18,7 @@ export interface ChatMessage {
   trace: string[];
   collapsed: boolean;
   createdAt: number;
+  imagePath?: string;
 }
 
 export interface ChatSessionSummary {
@@ -64,7 +65,7 @@ export function createEmptyChatSession(id: string, mode: string, now: number): C
 }
 
 export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatMessageKind, content: string,
-  createdAt: number, trace: string[] = []): ChatMessage {
+  createdAt: number, trace: string[] = [], imagePath: string = ''): ChatMessage {
   return {
     id: id,
     role: role,
@@ -72,8 +73,13 @@ export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatM
     content: content,
     trace: trace,
     collapsed: kind === CHAT_MESSAGE_KIND_TASK_TRACE,
-    createdAt: createdAt
+    createdAt: createdAt,
+    imagePath: imagePath
   };
+}
+
+export function chatMessageImagePath(message: ChatMessage): string {
+  return message.imagePath === undefined ? '' : message.imagePath;
 }
 
 export function chatSessionPreview(messages: ChatMessage[]): string {
@@ -126,7 +132,8 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         content: message.content,
         trace: message.trace.slice(),
         collapsed: !message.collapsed,
-        createdAt: message.createdAt
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message)
       });
     } else {
       next.push(message);
@@ -137,7 +144,7 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
 
 export function chatMessageRenderKey(message: ChatMessage): string {
   return message.id + ':' + message.kind + ':' + String(message.trace.length) + ':' +
-    (message.collapsed ? '1' : '0') + ':' + String(message.content.length);
+    (message.collapsed ? '1' : '0') + ':' + String(message.content.length) + ':' + chatMessageImagePath(message);
 }
 
 export function buildCloudContextMessages(messages: ChatMessage[]): CloudChatMessage[] {

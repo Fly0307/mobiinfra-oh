@@ -1,9 +1,11 @@
 import {
+  CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
+  chatMessageImagePath,
   normalizeChatMode,
   toggleChatMessageCollapsed
 } from './ChatSessionTypes';
@@ -100,12 +102,47 @@ export class ChatSessionController {
       content: lastMessage.content,
       trace: trace,
       collapsed: lastMessage.collapsed,
-      createdAt: lastMessage.createdAt
+      createdAt: lastMessage.createdAt,
+      imagePath: chatMessageImagePath(lastMessage)
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
     return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static attachTaskResultImage(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    imagePath: string): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0 || imagePath.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let messages = session.messages.slice();
+    let resultIndex = ChatSessionController.findLatestTaskResultIndex(messages);
+    if (resultIndex < 0) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
+    let resultMessage = messages[resultIndex];
+    messages[resultIndex] = {
+      id: resultMessage.id,
+      role: resultMessage.role,
+      kind: resultMessage.kind,
+      content: resultMessage.content,
+      trace: resultMessage.trace.slice(),
+      collapsed: resultMessage.collapsed,
+      createdAt: resultMessage.createdAt,
+      imagePath: imagePath
+    };
+    session.messages = messages;
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId === sessionId) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
   }
 
   static createSession(filesDir: string, state: ChatSessionViewState, mode: string): ChatSessionViewState {
@@ -213,6 +250,16 @@ export class ChatSessionController {
     };
   }
 
+  private static stateAfterBackgroundSessionUpdate(filesDir: string, state: ChatSessionViewState): ChatSessionViewState {
+    return {
+      sessions: ChatSessionStorage.loadIndex(filesDir),
+      activeSessionId: state.activeSessionId,
+      activeMessages: state.activeMessages.slice(),
+      mode: normalizeChatMode(state.mode),
+      activeSession: state.activeSession
+    };
+  }
+
   private static findTaskTraceIndex(messages: ChatMessage[], messageId: string): number {
     if (messageId.length > 0) {
       for (let i = 0; i < messages.length; i++) {
@@ -224,6 +271,15 @@ export class ChatSessionController {
     }
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static findLatestTaskResultIndex(messages: ChatMessage[]): number {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
         return i;
       }
     }

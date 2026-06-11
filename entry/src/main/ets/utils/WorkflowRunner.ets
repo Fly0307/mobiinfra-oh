@@ -72,6 +72,7 @@ interface GuiActionPayload {
   x?: number;
   y?: number;
   text?: string;
+  target_element?: string;
   direction?: string;
   start_x?: number;
   start_y?: number;
@@ -369,7 +370,7 @@ export class WorkflowRunner {
   }
 
   private async executeSteps(steps: WorkflowStep[], actualPrefix: string,
-    runtimeValues: WorkflowJsonMap): Promise<void> {
+    runtimeValues: WorkflowJsonMap): Promise<Record<string, string>> {
     let aliases: Record<string, string> = {};
     this.aliasStack.push(aliases);
     this.pushRuntimeValues(runtimeValues);
@@ -389,6 +390,7 @@ export class WorkflowRunner {
           throw new Error('workflow stopped at step ' + actualId);
         }
       }
+      return aliases;
     } finally {
       this.popRuntimeValues(runtimeValues);
       this.aliasStack.pop();
@@ -660,6 +662,9 @@ export class WorkflowRunner {
     if (step.text !== undefined) {
       payload.text = step.text;
     }
+    if (step.target_element !== undefined) {
+      payload.target_element = step.target_element;
+    }
     if (step.direction !== undefined) {
       payload.direction = step.direction;
     }
@@ -740,7 +745,7 @@ export class WorkflowRunner {
     };
     let structuredOutput: WorkflowJsonMap | undefined = undefined;
     if (requiresStructuredOutput) {
-      structuredOutput = this.extractJsonMap(response);
+      structuredOutput = this.normalizeStructuredOutput(this.extractJsonMap(response), inputs.json_schema);
       output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
@@ -896,13 +901,15 @@ export class WorkflowRunner {
         loop: loopValue as Object
       };
       let runtime = runtimeData as Object as WorkflowJsonMap;
-      await this.executeSteps(step.steps || [], actualId + '.iter' + (i + 1), runtime);
+      let iterationAliases = await this.executeSteps(step.steps || [], actualId + '.iter' + (i + 1), runtime);
+      this.aliasStack.push(iterationAliases);
       this.pushRuntimeValues(runtime);
       let shouldBreak = false;
       try {
         shouldBreak = step.break_if ? this.evaluateCondition(step.break_if) : false;
       } finally {
         this.popRuntimeValues(runtime);
+        this.aliasStack.pop();
       }
       let iterationOutput: LoopIterationOutput = {
         iteration: i + 1,
@@ -1117,13 +1124,10 @@ export class WorkflowRunner {
   }
 
   private normalizeConditionValue(value: WorkflowJsonValue, peer: WorkflowJsonValue): WorkflowJsonValue {
-    if (typeof value === 'string' && typeof peer === 'boolean') {
-      let lowered = value.trim().toLowerCase();
-      if (lowered === 'true') {
-        return true;
-      }
-      if (lowered === 'false') {
-        return false;
+    if ((typeof value === 'string' || typeof value === 'number') && typeof peer === 'boolean') {
+      let normalizedBoolean = this.normalizeBooleanLikeValue(value);
+      if (typeof normalizedBoolean === 'boolean') {
+        return normalizedBoolean;
       }
     }
     if (typeof value === 'string' && typeof peer === 'number') {
@@ -1131,6 +1135,32 @@ export class WorkflowRunner {
       if (!isNaN(parsed)) {
         return parsed;
       }
+    }
+    return value;
+  }
+
+  private normalizeBooleanLikeValue(value: WorkflowJsonValue): WorkflowJsonValue {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      if (value === 1) {
+        return true;
+      }
+      if (value === 0) {
+        return false;
+      }
+      return value;
+    }
+    if (typeof value !== 'string') {
+      return value;
+    }
+    let lowered = value.trim().toLowerCase();
+    if (lowered === 'true' || lowered === 'yes' || lowered === 'y' || lowered === '1') {
+      return true;
+    }
+    if (lowered === 'false' || lowered === 'no' || lowered === 'n' || lowered === '0') {
+      return false;
     }
     return value;
   }
@@ -1202,6 +1232,135 @@ export class WorkflowRunner {
     }
     let summary = output['summary'];
     return typeof summary === 'string' ? summary.trim() : '';
+  }
+
+  private normalizeStructuredOutput(output: WorkflowJsonMap, schema: Object | undefined): WorkflowJsonMap {
+    if (schema === undefined || schema === null) {
+      return output;
+    }
+    let schemaMap = schema as Object as WorkflowJsonMap;
+    let schemaKeys = Object.keys(schemaMap);
+    if (schemaKeys.length === 0) {
+      return output;
+    }
+
+    let source = this.findStructuredOutputSource(output, schemaKeys);
+    let sourceKeys = Object.keys(source);
+    let normalized: WorkflowJsonMap = {};
+    let usedKeys: Record<string, string> = {};
+    for (let i = 0; i < schemaKeys.length; i++) {
+      let schemaKey = schemaKeys[i];
+      let sourceKey = this.findEquivalentKey(sourceKeys, schemaKey);
+      if (sourceKey.length === 0) {
+        continue;
+      }
+      normalized[schemaKey] = this.normalizeStructuredFieldValue(source[sourceKey], schemaMap[schemaKey]);
+      usedKeys[sourceKey] = '1';
+    }
+
+    for (let i = 0; i < sourceKeys.length; i++) {
+      let key = sourceKeys[i];
+      if (usedKeys[key] !== '1' && normalized[key] === undefined) {
+        normalized[key] = source[key];
+      }
+    }
+    return normalized;
+  }
+
+  private findStructuredOutputSource(output: WorkflowJsonMap, schemaKeys: string[]): WorkflowJsonMap {
+    if (this.hasAnyEquivalentKey(output, schemaKeys)) {
+      return output;
+    }
+    let wrapperKeys: string[] = [
+      'structured_output',
+      'structuredOutput',
+      'output',
+      'result',
+      'data',
+      'response',
+      'content',
+      'message'
+    ];
+    for (let i = 0; i < wrapperKeys.length; i++) {
+      let nested = this.valueToJsonMap(output[wrapperKeys[i]]);
+      if (nested !== null && this.hasAnyEquivalentKey(nested, schemaKeys)) {
+        return nested;
+      }
+    }
+    return output;
+  }
+
+  private valueToJsonMap(value: WorkflowJsonValue | undefined): WorkflowJsonMap | null {
+    if (value === undefined || value === null || Array.isArray(value)) {
+      return null;
+    }
+    if (typeof value === 'object') {
+      return value as WorkflowJsonMap;
+    }
+    if (typeof value === 'string') {
+      try {
+        return AgentActionParser.extractJsonMap(value, true);
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  private hasAnyEquivalentKey(map: WorkflowJsonMap, expectedKeys: string[]): boolean {
+    let keys = Object.keys(map);
+    for (let i = 0; i < expectedKeys.length; i++) {
+      if (this.findEquivalentKey(keys, expectedKeys[i]).length > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private findEquivalentKey(keys: string[], expectedKey: string): string {
+    if (keys.indexOf(expectedKey) >= 0) {
+      return expectedKey;
+    }
+    let normalizedExpected = this.normalizeFieldName(expectedKey);
+    for (let i = 0; i < keys.length; i++) {
+      if (this.normalizeFieldName(keys[i]) === normalizedExpected) {
+        return keys[i];
+      }
+    }
+    return '';
+  }
+
+  private normalizeFieldName(key: string): string {
+    return key.replace(/[\s_-]/g, '').toLowerCase();
+  }
+
+  private normalizeStructuredFieldValue(value: WorkflowJsonValue, schemaField: WorkflowJsonValue): WorkflowJsonValue {
+    let fieldType = this.schemaFieldType(schemaField);
+    if (fieldType === 'boolean') {
+      return this.normalizeBooleanLikeValue(value);
+    }
+    if (fieldType === 'number' || fieldType === 'integer') {
+      if (typeof value === 'string') {
+        let parsed = Number(value.trim());
+        if (!isNaN(parsed)) {
+          return parsed;
+        }
+      }
+    }
+    if (fieldType === 'string' && (typeof value === 'number' || typeof value === 'boolean')) {
+      return String(value);
+    }
+    return value;
+  }
+
+  private schemaFieldType(schemaField: WorkflowJsonValue): string {
+    if (schemaField === undefined || schemaField === null || Array.isArray(schemaField) ||
+      typeof schemaField !== 'object') {
+      return '';
+    }
+    let fieldMap = schemaField as WorkflowJsonMap;
+    let typeValue = fieldMap['type'];
+    return typeof typeValue === 'string' ? typeValue.trim().toLowerCase() : '';
   }
 
   private summaryFromJsonText(raw: string): string {

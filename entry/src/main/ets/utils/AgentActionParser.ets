@@ -25,6 +25,7 @@ interface ClickActionPayload {
   action: string;
   x: number;
   y: number;
+  target_element?: string;
 }
 
 interface ClickInputActionPayload {
@@ -32,11 +33,13 @@ interface ClickInputActionPayload {
   x: number;
   y: number;
   text: string;
+  target_element?: string;
 }
 
 interface InputActionPayload {
   action: string;
   text: string;
+  target_element?: string;
 }
 
 interface SwipeWithCoordsActionPayload {
@@ -45,6 +48,7 @@ interface SwipeWithCoordsActionPayload {
   start_y: number;
   end_x: number;
   end_y: number;
+  target_element?: string;
 }
 
 interface SwipeActionPayload {
@@ -52,6 +56,7 @@ interface SwipeActionPayload {
   direction: string;
   width: number;
   height: number;
+  target_element?: string;
 }
 
 interface SleepActionPayload {
@@ -140,6 +145,10 @@ export class AgentActionParser {
         x: point.x,
         y: point.y
       };
+      let targetElement = AgentActionParser.getTargetElement(parsed);
+      if (targetElement.length > 0) {
+        payload.target_element = targetElement;
+      }
       return payload as Object as WorkflowJsonMap;
     }
 
@@ -151,6 +160,10 @@ export class AgentActionParser {
         y: point.y,
         text: AgentActionParser.getMapString(params, 'text')
       };
+      let targetElement = AgentActionParser.getTargetElement(parsed);
+      if (targetElement.length > 0) {
+        payload.target_element = targetElement;
+      }
       return payload as Object as WorkflowJsonMap;
     }
 
@@ -159,6 +172,10 @@ export class AgentActionParser {
         action: 'input',
         text: AgentActionParser.getMapString(params, 'text')
       };
+      let targetElement = AgentActionParser.getTargetElement(parsed);
+      if (targetElement.length > 0) {
+        payload.target_element = targetElement;
+      }
       return payload as Object as WorkflowJsonMap;
     }
 
@@ -175,6 +192,10 @@ export class AgentActionParser {
           end_x: end.x,
           end_y: end.y
         };
+        let targetElement = AgentActionParser.getTargetElement(parsed);
+        if (targetElement.length > 0) {
+          payload.target_element = targetElement;
+        }
         return payload as Object as WorkflowJsonMap;
       }
       let payload: SwipeActionPayload = {
@@ -183,6 +204,10 @@ export class AgentActionParser {
         width: width,
         height: height
       };
+      let targetElement = AgentActionParser.getTargetElement(parsed);
+      if (targetElement.length > 0) {
+        payload.target_element = targetElement;
+      }
       return payload as Object as WorkflowJsonMap;
     }
 
@@ -249,6 +274,17 @@ export class AgentActionParser {
       return isNaN(parsed) ? fallback : parsed;
     }
     return fallback;
+  }
+
+  private static getTargetElement(parsed: ParsedAgentAction): string {
+    let targetElement = AgentActionParser.getMapString(parsed.parameters, 'target_element');
+    if (targetElement.length === 0) {
+      targetElement = AgentActionParser.getMapString(parsed.data, 'target_element');
+    }
+    if (targetElement.length === 0) {
+      targetElement = AgentActionParser.getMapString(parsed.parameters, 'targetElement');
+    }
+    return targetElement;
   }
 
   static normalizeCloudHistoryItem(response: string): string {

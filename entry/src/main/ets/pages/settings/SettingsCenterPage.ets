@@ -232,10 +232,22 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
     normalizeValue: (value: string) => number, onValueChange: (value: string) => void) {
-    this.SettingInput(label, value, placeholder, (input: string) => {
-      // 微信采集设置即时写入 PersistentStorage，写入前先按服务端允许范围归一化。
-      onValueChange(String(normalizeValue(input)));
-    })
+    this.FieldLabel(label)
+    TextInput({ placeholder: placeholder, text: value })
+      .height(42)
+      .width('100%')
+      .fontSize(13)
+      .backgroundColor('#F2F5FC')
+      .borderRadius(12)
+      .padding({ left: 12, right: 12 })
+      .onChange((input: string) => {
+        // 编辑期间保留原文，避免小数和临时空值被立即改写。
+        onValueChange(input);
+      })
+      .onBlur(() => {
+        // 失焦后再按服务端允许范围归一化，保证持久化默认值最终可用。
+        onValueChange(String(normalizeValue(value)));
+      })
   }
 
   @Builder VariantButton(label: string, variant: string) {

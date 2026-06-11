@@ -1,6 +1,10 @@
 """微信 UI dump 采集模块。"""
 
-from .collector import (
+from .device import (
+    CollectOptions,
+    HistorySnapshotOptions,
+)
+from .parser import (
     Contact,
     build_chat_payload,
     build_chat_payload_from_snapshots,
@@ -9,11 +13,15 @@ from .collector import (
     extract_chat_title,
     extract_contacts,
     parse_chat_time,
+)
+from .render import (
     render_markdown,
 )
 
 __all__ = [
+    "CollectOptions",
     "Contact",
+    "HistorySnapshotOptions",
     "build_chat_payload",
     "build_chat_payload_from_snapshots",
     "compute_history_swipe",

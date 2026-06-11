@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from wechat_collect.collector import (
+    HistorySnapshotOptions,
     build_chat_payload,
     build_chat_payload_from_snapshots,
     compute_history_swipe,
@@ -27,9 +28,10 @@ class WechatCollectParserTests(unittest.TestCase):
     def test_extracts_recent_contacts_from_home_dump(self):
         contacts = extract_contacts(load_fixture("home.json"))
 
-        self.assertGreaterEqual(len(contacts), 3)
+        self.assertEqual([contact.name for contact in contacts], ["小赵", "项目群", "文件传输助手"])
         self.assertEqual(contacts[0].name, "小赵")
         self.assertEqual(contacts[0].last_time, "上午 10:45")
+        self.assertEqual(contacts[0].preview, "需要给妹妹买一些少儿读物")
         self.assertEqual(contacts[0].tap_x, 628)
         self.assertEqual(contacts[0].tap_y, 589)
 
@@ -38,16 +40,20 @@ class WechatCollectParserTests(unittest.TestCase):
 
         self.assertEqual(extract_chat_title(root), "小赵")
         messages = extract_chat_messages(root)
-        self.assertEqual(messages[0].kind, "time")
-        self.assertEqual(messages[0].text, "星期一 下午 03:47")
-        self.assertIn(("message", "self", "我想要买一个iPhone 17Pro"),
-                      [(m.kind, m.sender, m.text) for m in messages])
+        self.assertEqual(
+            [(m.kind, m.sender, m.text) for m in messages],
+            [
+                ("time", None, "星期一 下午 03:47"),
+                ("message", "self", "我想要买一个iPhone 17Pro"),
+                ("message", "other", "需要给妹妹买一些少儿读物"),
+            ],
+        )
 
     def test_payload_uses_title_as_other_sender(self):
         payload = build_chat_payload(load_fixture("chat_xiao_zhao.json"))
 
         senders = [m["sender"] for m in payload["messages"] if m["kind"] == "message"]
-        self.assertIn("小赵", senders)
+        self.assertEqual(senders, ["self", "小赵"])
         self.assertNotIn("other", senders)
 
     def test_parses_wechat_time_labels(self):
@@ -57,6 +63,9 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertEqual(parse_chat_time("昨天下午 07:39", reference), datetime(2026, 6, 10, 19, 39))
         self.assertEqual(parse_chat_time("星期一 下午 03:47", reference), datetime(2026, 6, 8, 15, 47))
         self.assertIsNone(parse_chat_time("以上是打招呼的内容", reference))
+        for malformed in ["6月31号", "13/01 下午 01:00", "上午 25:00"]:
+            with self.subTest(malformed=malformed):
+                self.assertIsNone(parse_chat_time(malformed, reference))
 
     def test_snapshot_merge_deduplicates_boundary_overlap(self):
         payload = build_chat_payload_from_snapshots(
@@ -66,7 +75,18 @@ class WechatCollectParserTests(unittest.TestCase):
         )
         texts = [message["text"] for message in payload["messages"]]
 
-        self.assertEqual(texts.count("planner优先使用 123.60.91.241:9003"), 1)
+        self.assertEqual(
+            texts,
+            [
+                "星期一 下午 02:00",
+                "更早的一条消息",
+                "边界重复消息",
+                "星期一 下午 03:47",
+                "我想要买一个iPhone 17Pro",
+                "需要给妹妹买一些少儿读物",
+            ],
+        )
+        self.assertEqual(texts.count("边界重复消息"), 1)
 
     def test_compute_history_swipe_uses_default_ratio(self):
         self.assertEqual(compute_history_swipe(load_fixture("chat_xiao_zhao.json")), (628, 483, 628, 2277))
@@ -90,6 +110,13 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertIn("## 小赵", markdown)
         self.assertIn("- self: 我想要买一个iPhone 17Pro", markdown)
         self.assertIn("- 小赵: 需要给妹妹买一些少儿读物", markdown)
+
+    def test_history_snapshot_options_are_service_friendly(self):
+        options = HistorySnapshotOptions(days=7, hdc="custom-hdc")
+
+        self.assertEqual(options.days, 7)
+        self.assertEqual(options.hdc, "custom-hdc")
+        self.assertEqual(options.max_history_swipes, 80)
 
 
 if __name__ == "__main__":

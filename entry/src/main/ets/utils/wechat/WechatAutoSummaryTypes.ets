@@ -157,6 +157,9 @@ export function normalizeWechatAutoSummaryMode(value: string): string {
 
 // 返回空字符串表示校验通过；非空中文文案可直接展示给用户。
 export function validateWechatAutoSummaryRequest(request: WechatAutoSummaryRequest): string {
+  if (request.mode !== WECHAT_AUTO_SUMMARY_MODE_RECENT && request.mode !== WECHAT_AUTO_SUMMARY_MODE_TARGET) {
+    return '微信汇总采集模式无效';
+  }
   if (isInvalidNumber(request.days) || request.days < 1 || request.days > 90) {
     return '汇总天数需在 1 到 90 天之间';
   }
@@ -181,11 +184,10 @@ export function validateWechatAutoSummaryRequest(request: WechatAutoSummaryReque
     return '页面等待时间需在 0 到 10 秒之间';
   }
   if (request.max_list_swipes !== undefined &&
-    (isInvalidNumber(request.max_list_swipes) || request.max_list_swipes < 0 || request.max_list_swipes > 300)) {
-    return '联系人列表最大滑动次数需在 0 到 300 次之间';
+    (isInvalidNumber(request.max_list_swipes) || request.max_list_swipes < 0 || request.max_list_swipes > 100)) {
+    return '联系人列表最大滑动次数需在 0 到 100 次之间';
   }
-  if (normalizeWechatAutoSummaryMode(request.mode) === WECHAT_AUTO_SUMMARY_MODE_TARGET &&
-    request.target_contact.trim().length === 0) {
+  if (request.mode === WECHAT_AUTO_SUMMARY_MODE_TARGET && request.target_contact.trim().length === 0) {
     return '指定联系人模式需要填写联系人名称';
   }
   return '';

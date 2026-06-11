@@ -88,6 +88,7 @@ export default function wechatAutoSummaryUnitTest() {
         .assertTrue();
       expect(validateWechatAutoSummaryRequest(demoRequest(WECHAT_AUTO_SUMMARY_MODE_TARGET, '小赵'))).assertEqual('');
       expect(validateWechatAutoSummaryRequest(demoRequest(WECHAT_AUTO_SUMMARY_MODE_RECENT, ''))).assertEqual('');
+      expect(validateWechatAutoSummaryRequest(demoRequest('bad', '')).length > 0).assertTrue();
     });
 
     it('validatesCollectionParameterRanges', 0, () => {
@@ -120,7 +121,7 @@ export default function wechatAutoSummaryUnitTest() {
       expect(validateWechatAutoSummaryRequest(request).length > 0).assertTrue();
 
       request = demoRequest(WECHAT_AUTO_SUMMARY_MODE_RECENT, '');
-      request.max_list_swipes = 301;
+      request.max_list_swipes = 101;
       expect(validateWechatAutoSummaryRequest(request).length > 0).assertTrue();
     });
 

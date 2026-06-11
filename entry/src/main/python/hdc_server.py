@@ -20,10 +20,14 @@ except Exception as ex:
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
-HDC_HEALTH_CACHE_TTL = float(os.environ.get("HDC_HEALTH_CACHE_TTL", "5"))
+HDC_HEALTH_CACHE_TTL = float(os.environ.get("HDC_HEALTH_CACHE_TTL", "15"))
 HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "20"))
+HDC_ACTION_TIMEOUT = float(os.environ.get("HDC_ACTION_TIMEOUT", "6"))
 HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
 HDC_STALE_TARGET_GRACE = float(os.environ.get("HDC_STALE_TARGET_GRACE", "30"))
+HDC_WORKFLOW_USE_DRIVER_ACTIONS = os.environ.get(
+    "HDC_WORKFLOW_USE_DRIVER_ACTIONS", "0"
+).strip().lower() in ("1", "true", "yes", "on")
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
@@ -292,14 +296,22 @@ def choose_hdc_target(targets, preferred_target=""):
         return wireless_targets[0]
     return targets[0]
 
-def set_harmony_agent_target(target):
+def set_harmony_agent_target(target, mark_ok=True):
     global _hdc_health_target
-    _hdc_health_target = target
+    _hdc_health_target = target.strip() if isinstance(target, str) else ""
     if harmony_agent is not None:
         if hasattr(harmony_agent, "set_hdc_target"):
-            harmony_agent.set_hdc_target(target)
+            try:
+                checked_at = time.monotonic() if _hdc_health_target else 0.0
+                harmony_agent.set_hdc_target(
+                    _hdc_health_target,
+                    checked_at=checked_at,
+                    mark_ok=bool(_hdc_health_target and mark_ok)
+                )
+            except TypeError:
+                harmony_agent.set_hdc_target(_hdc_health_target)
         else:
-            harmony_agent.HDC_TARGET = target
+            harmony_agent.HDC_TARGET = _hdc_health_target
 
 def parse_wireless_target(target):
     text = str(target or "").strip()
@@ -769,7 +781,7 @@ def mark_active_hdc_target(target, source=""):
     _hdc_health_checked_at = checked_at
     _hdc_health_last_ok_at = checked_at
     _hdc_health_connected = True
-    if is_wireless_hdc_target(target):
+    if is_wireless_hdc_target(target) and source != "hdc-list":
         cache_wireless_hdc_target(target, source=source)
     return target
 
@@ -969,18 +981,17 @@ def keep_cached_hdc_target_after_probe_error(error, now):
         return ""
     _hdc_health_checked_at = now
     _hdc_health_connected = True
-    set_harmony_agent_target(_hdc_health_target)
+    set_harmony_agent_target(_hdc_health_target, mark_ok=False)
     remaining = max(0.0, HDC_STALE_TARGET_GRACE - age)
     print(
         f">> [HDC] list targets failed; keeping cached target "
         f"{_hdc_health_target} for {remaining:.1f}s: {error}"
     )
-    if not _hdc_tunnel_status.get("target"):
-        _hdc_tunnel_status = make_hdc_tunnel_status(
-            "warning",
-            "HDC probe failed; using cached target without refreshing tunnels",
-            target=_hdc_health_target
-        )
+    _hdc_tunnel_status = make_hdc_tunnel_status(
+        "warning",
+        "HDC probe failed; using cached target without refreshing tunnels",
+        target=_hdc_health_target
+    )
     _hdc_tunnel_checked_at = now
     return _hdc_health_target
 
@@ -1229,11 +1240,23 @@ def build_hdc_health_payload(target, tunnel):
         "loop_alive": agent_thread is not None and agent_thread.is_alive(),
     }
 
-def hdc_health_payload(force=False):
+def cached_hdc_tunnel_for_target(target):
+    if _hdc_tunnel_checked_at <= 0:
+        return None
+    cached_target = str(_hdc_tunnel_status.get("target", ""))
+    if not cached_target or cached_target != target:
+        return None
+    return dict(_hdc_tunnel_status)
+
+def hdc_health_payload(force=False, repair=False):
     target = get_active_hdc_target(force=force)
-    tunnel = ensure_hdc_tunnels(force=force) if target else make_hdc_tunnel_status(
-        "error", "HDC target is not connected"
-    )
+    if not target:
+        tunnel = make_hdc_tunnel_status("error", "HDC target is not connected")
+        return build_hdc_health_payload(target, tunnel)
+
+    tunnel = None if repair else cached_hdc_tunnel_for_target(target)
+    if tunnel is None:
+        tunnel = ensure_hdc_tunnels(force=repair)
     return build_hdc_health_payload(target, tunnel)
 
 def health_payload_after_target_selected(selected_target, message_prefix="", requested_target=""):
@@ -1379,30 +1402,31 @@ def run_remote_command(cmd):
         return harmony_agent.run_with_device_control('run_cmd', execute)
     return execute()
 
-def run_hdc_command(cmd):
+def run_hdc_command(cmd, timeout=HDC_ACTION_TIMEOUT):
     try:
         result = subprocess.run(
             cmd,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=HDC_COMMAND_TIMEOUT
+            timeout=timeout
         )
     except subprocess.TimeoutExpired as ex:
         result = subprocess.CompletedProcess(
             cmd,
             124,
             ex.stdout or "",
-            ex.stderr or f"command timed out after {HDC_COMMAND_TIMEOUT}s: {cmd}"
+            ex.stderr or f"command timed out after {timeout}s: {cmd}"
         )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'command failed: {cmd}')
     return result.stdout.strip()
 
 def hdc_prefix():
-    if harmony_agent is not None:
-        return harmony_agent.hdc_prefix()
-    return 'hdc'
+    target = get_active_hdc_target(force=False)
+    if target:
+        return "hdc -t " + target
+    return "hdc"
 
 def payload_bool(payload, key, default):
     value = payload.get(key, default)
@@ -1482,7 +1506,10 @@ def workflow_gui_action(payload):
 
 def _workflow_gui_action_impl(payload):
     action = str(payload.get('action', '')).lower()
-    driver = getattr(harmony_agent, 'd', None) if harmony_agent is not None else None
+    driver = (
+        getattr(harmony_agent, 'd', None)
+        if HDC_WORKFLOW_USE_DRIVER_ACTIONS and harmony_agent is not None else None
+    )
     log_gui_action(payload)
 
     if action == 'click':
@@ -1565,11 +1592,20 @@ def _workflow_gui_action_impl(payload):
     if action == 'keyevent':
         key = str(payload.get('key', 'BACK')).upper()
         if key == 'BACK':
-            harmony_agent.press_harmony_key('BACK', 2)
+            if driver:
+                harmony_agent.press_harmony_key('BACK', 2)
+            else:
+                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 2")
         elif key == 'HOME':
-            harmony_agent.press_harmony_key('HOME', 1)
+            if driver:
+                harmony_agent.press_harmony_key('HOME', 1)
+            else:
+                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 1")
         elif key == 'ENTER':
-            harmony_agent.press_harmony_key('ENTER', 2054)
+            if driver:
+                harmony_agent.press_harmony_key('ENTER', 2054)
+            else:
+                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 2054")
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent {key}")
         return {'status': 'ok', 'message': f'keyevent {key}'}
@@ -1610,7 +1646,10 @@ def handle_workflow_action(action, payload):
     payload = payload or {}
 
     if action == 'health':
-        return hdc_health_payload(force=True)
+        return hdc_health_payload(force=False, repair=False)
+
+    if action == 'repair_health':
+        return hdc_health_payload(force=True, repair=True)
 
     if action == 'agent_config':
         return {

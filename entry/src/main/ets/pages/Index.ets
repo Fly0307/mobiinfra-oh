@@ -1792,7 +1792,7 @@ struct Index {
 
     this.output = '未检测到已加载模型，正在自动加载大模型...';
     try {
-      let loadResult: string = mnnllm.loadModel(cfg);
+      let loadResult: string = await mnnllm.loadModel(cfg);
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
@@ -1800,8 +1800,8 @@ struct Index {
       }
       return this.modelLoaded;
     } catch (err) {
-      let e = err as Error;
-      this.output = '自动加载模型失败: ' + e.message;
+      let message = err instanceof Error ? (err as Error).message : String(err);
+      this.output = '自动加载模型失败: ' + message;
       return false;
     }
   }
@@ -2002,11 +2002,11 @@ struct Index {
               this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
               this.isThinking = true;
               try {
-                let reply: string = mnnllm.chat(msg);
+                let reply: string = await mnnllm.chat(msg);
                 this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
               } catch(err) {
-                let e = err as Error;
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${e.message}\n`);
+                let message = err instanceof Error ? (err as Error).message : String(err);
+                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
               } finally {
                 this.isThinking = false;
               }
@@ -2029,7 +2029,13 @@ struct Index {
             .onClick(async () => {
               if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
               this.output = '推理中...';
-              try { let generated: string = mnnllm.generate('你好'); this.output = generated; } catch(err) { let e = err as Error; this.output = '推理错误: ' + e.message; }
+              try {
+                let generated: string = await mnnllm.generate('你好');
+                this.output = generated;
+              } catch(err) {
+                let message = err instanceof Error ? (err as Error).message : String(err);
+                this.output = '推理错误: ' + message;
+              }
             })
             .height(42)
             .width('30%')

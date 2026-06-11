@@ -37,10 +37,11 @@ HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
 HDC_TARGET_OVERRIDE = HDC_TARGET
 HDC_TARGET_CHECKED_AT = 0.0
 HDC_TARGET_LAST_OK_AT = 0.0
-HDC_TARGET_CACHE_TTL = float(os.environ.get("HDC_TARGET_CACHE_TTL", "5"))
+HDC_TARGET_CACHE_TTL = float(os.environ.get("HDC_TARGET_CACHE_TTL", "15"))
 HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
 HDC_TARGET_STALE_GRACE = float(os.environ.get("HDC_TARGET_STALE_GRACE", "30"))
 HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "10"))
+HDC_ACTION_TIMEOUT = float(os.environ.get("HDC_ACTION_TIMEOUT", "6"))
 HDC_CLEANUP_TIMEOUT = float(os.environ.get("HDC_CLEANUP_TIMEOUT", "3"))
 LAST_TASK_COMPLETED = False
 DEVICE_CONTROL_LOCK = threading.RLock()
@@ -397,7 +398,14 @@ def bring_llm_app_to_foreground():
 def _bring_llm_app_to_foreground_impl():
     # 任务结束或异常时回到本 App，方便用户查看日志、截图和错误原因。
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
-    os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
+    try:
+        _run_timed_command(
+            "bring_llm_app_to_foreground",
+            f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}",
+            timeout=HDC_ACTION_TIMEOUT
+        )
+    except Exception as ex:
+        print(f">> [HDC warning] bring app to foreground failed: {ex}")
     time.sleep(1)
 APP_MAPPING = {
     # Planner 输出中文 App 名或包名均可；中文名先映射为 HarmonyOS bundleName。
@@ -454,7 +462,7 @@ def load_prompt(filename):
         return f.read()
 
 def run_cmd(cmd):
-    return subprocess.check_output(cmd, shell=True, text=True)
+    return subprocess.check_output(cmd, shell=True, text=True, timeout=HDC_COMMAND_TIMEOUT)
 
 def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIMEOUT):
     started = time.perf_counter()
@@ -484,6 +492,9 @@ def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIME
             output = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(output or f"{label} failed: returncode={result.returncode}")
     return result
+
+def run_hdc_action_command(label, cmd):
+    return _run_timed_command(label, cmd, timeout=HDC_ACTION_TIMEOUT)
 
 def _cleanup_device_file_async(prefix, device_path):
     def cleanup():
@@ -1156,7 +1167,10 @@ def _press_harmony_key_impl(key_name, fallback_code):
             key_code = fallback_code
         run_driver_call(f"Driver.press_key({key_name})", lambda driver: driver.press_key(key_code))
     else:
-        os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
+        run_hdc_action_command(
+            f"keyEvent({key_name})",
+            f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}"
+        )
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
     return run_with_device_control(
@@ -1199,7 +1213,10 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
         if d:
             run_driver_call("Driver.click", lambda driver: driver.click(int(x), int(y)))
         else:
-            os.system(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
+            run_hdc_action_command(
+                "decider click",
+                f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}"
+            )
         time.sleep(DEVICE_WAIT_TIME)
         
     elif action == "click_input":
@@ -1224,9 +1241,15 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             run_driver_call("Driver.input_text", lambda driver: driver.input_text(text))
             press_harmony_key("ENTER", 2054)
         else:
-            os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
+            run_hdc_action_command(
+                "decider click_input click",
+                f"{hdc_prefix()} shell uitest uiInput click {px} {py}"
+            )
             time.sleep(DEVICE_WAIT_TIME)
-            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+            run_hdc_action_command(
+                "decider click_input text",
+                f"{hdc_prefix()} shell uitest uiInput inputText '{text}'"
+            )
         
     elif action == "swipe":
         # 优先支持显式起止坐标；缺省时按方向使用屏幕比例坐标，适配不同分辨率。
@@ -1239,7 +1262,10 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             if d:
                 run_driver_call("Driver.swipe", lambda driver: driver.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000))
             else:
-                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+                run_hdc_action_command(
+                    "decider swipe coords",
+                    f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
+                )
         else:
             direction = params.get("direction", "UP")
             print(f">> Swipe direction: {direction}")
@@ -1266,7 +1292,10 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
                     sx, sy, ex, ey = SWIPE_H_START * width, 0.5 * height, SWIPE_H_END * width, 0.5 * height
                 else:
                     raise ValueError(f"Unknown swipe direction: {direction}")
-                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+                run_hdc_action_command(
+                    "decider swipe direction",
+                    f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
+                )
             
     elif action == "input":
         text = params.get("text", "")
@@ -1283,7 +1312,10 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
                 # fallback to hardcoded ENTER key event or 2054
                 run_driver_call("Driver.press_key(2054)", lambda driver: driver.press_key(2054))
         else:
-            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+            run_hdc_action_command(
+                "decider input text",
+                f"{hdc_prefix()} shell uitest uiInput inputText '{text}'"
+            )
 
     elif action == "open_app":
         app_name = params.get("app_name", "")
@@ -1386,7 +1418,11 @@ def _launch_app_impl(app_name, reset_first=True):
         else:
             cmd = f"{hdc_prefix()} shell aa start -b {bundle}"
         print(f">> 执行启动命令 (hdc fallback): {cmd}")
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=HDC_ACTION_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f">> [HDC warning] launch_app fallback timed out after {HDC_ACTION_TIMEOUT}s: {cmd}")
+            return False
         if result.returncode == 0:
             time.sleep(APP_LAUNCH_WAIT_TIME)
             return True

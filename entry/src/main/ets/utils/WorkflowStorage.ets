@@ -1133,7 +1133,7 @@ export class WorkflowStorage {
         WorkflowStorage.screenshotStep(1, 'chat_${loop.index}.jpg'),
         WorkflowStorage.weixinTodaySummaryToolStep(),
         WorkflowStorage.ifStep(3,
-          WorkflowStorage.condition('${steps.2.output.structured_output.contains_today_chat}', '==', true), [
+          WorkflowStorage.condition('${steps.2.output.structured_output.contains_today_chat}', '!=', false), [
             WorkflowStorage.swipeWithCoordsStep(1, 540, 800, 540, 2100),
             WorkflowStorage.sleepStep(2, 1.0)
           ])

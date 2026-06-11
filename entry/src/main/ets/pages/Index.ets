@@ -57,6 +57,9 @@ import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import { stringifyJsonCompat } from '../utils/JsonCompat';
+import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
+import { WechatAutoSummaryStorage } from '../utils/wechat/WechatAutoSummaryStorage';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
@@ -73,7 +76,9 @@ import {
   WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY,
   WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY,
   WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY,
-  WECHAT_AUTO_SUMMARY_WAIT_KEY
+  WECHAT_AUTO_SUMMARY_WAIT_KEY,
+  WechatAutoSummaryRequest,
+  WechatAutoSummaryResponse
 } from '../utils/wechat/WechatAutoSummaryTypes';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
@@ -223,6 +228,8 @@ struct Index {
   @StorageLink('wechatAutoSummaryMaxHistorySwipes') wechatAutoSummaryMaxHistorySwipes: string =
     DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
+  @State wechatAutoSummaryRunning: boolean = false;
+  @State wechatAutoSummaryStatus: string = '';
   @State isThinking: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
@@ -952,6 +959,67 @@ struct Index {
     } finally {
       this.dataManagerRefreshing = false;
       dataManagerInfo('refreshDataManager finished');
+    }
+  }
+
+  private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (this.wechatAutoSummaryRunning) {
+      showToastSafely('微信采集正在进行', 1200);
+      return;
+    }
+    if (this.filesDir.length === 0) {
+      this.wechatAutoSummaryStatus = '采集失败：App 沙箱目录未初始化';
+      showToastSafely('App 沙箱目录未初始化', 1600);
+      return;
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      this.wechatAutoSummaryStatus = '采集失败：请先配置 HDC Server';
+      showToastSafely('请先配置 HDC Server', 1600);
+      return;
+    }
+
+    this.wechatAutoSummaryRunning = true;
+    this.wechatAutoSummaryStatus = '正在准备 HDC 连接';
+    try {
+      if (!await this.ensureHdcServerReadyForTask(true)) {
+        this.wechatAutoSummaryStatus = '采集失败：HDC Server 未就绪';
+        showToastSafely('HDC Server 未就绪', 1800);
+        return;
+      }
+      this.wechatAutoSummaryStatus = '正在采集微信消息';
+      // 微信自动汇总由 PC 侧 bridge 执行，App 侧只负责提交参数和保存返回产物。
+      let response: WechatAutoSummaryResponse = await new WechatAutoSummaryClient(this.hdcServerIp).collect(request);
+      if (response.status !== 'ok') {
+        throw new Error(response.message !== undefined && response.message.length > 0 ? response.message : '微信采集失败');
+      }
+
+      let runId = response.run_id !== undefined && response.run_id.trim().length > 0 ?
+        response.run_id : `${this.currentLocalDateKey()}-wechat`;
+      let storage = new WechatAutoSummaryStorage(this.filesDir);
+      storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(response as Object, 2));
+      if (response.conversations !== undefined) {
+        storage.writeRawArtifact(runId, 'wechat_conversations.json',
+          stringifyJsonCompat(response.conversations as Object, 2));
+      }
+      if (response.daily_log_entries !== undefined) {
+        storage.writeDailyLog(runId, request.mode, request.days, this.currentLocalDateKey(), response.daily_log_entries);
+      }
+
+      let contactCount = 0;
+      if (response.conversations !== undefined) {
+        contactCount = response.conversations.length;
+      } else if (response.contacts_collected !== undefined) {
+        contactCount = response.contacts_collected;
+      }
+      this.wechatAutoSummaryStatus = '采集完成：' + contactCount.toString() + ' 个联系人';
+      showToastSafely('微信采集完成，可点击同步整理', 1800);
+    } catch (e) {
+      let err = e as Error;
+      this.wechatAutoSummaryStatus = '采集失败：' + err.message;
+      dataManagerError('runWechatAutoSummary failed: ' + err.message);
+      showToastSafely('微信采集失败：' + err.message, 2200);
+    } finally {
+      this.wechatAutoSummaryRunning = false;
     }
   }
 
@@ -2639,10 +2707,23 @@ struct Index {
             collectionModule: $collectionModule,
             viewModels: this.collectionViews,
             refreshing: this.dataManagerRefreshing,
+            wechatAutoSummaryEnabled: this.wechatAutoSummaryEnabled === 'true',
+            wechatAutoSummaryDefaultDays: this.wechatAutoSummaryDefaultDays,
+            wechatAutoSummaryDefaultMaxContacts: this.wechatAutoSummaryDefaultMaxContacts,
+            wechatAutoSummarySwipeSpeed: this.wechatAutoSummarySwipeSpeed,
+            wechatAutoSummaryHistorySwipeRatio: this.wechatAutoSummaryHistorySwipeRatio,
+            wechatAutoSummaryStableSwipes: this.wechatAutoSummaryStableSwipes,
+            wechatAutoSummaryMaxHistorySwipes: this.wechatAutoSummaryMaxHistorySwipes,
+            wechatAutoSummaryWait: this.wechatAutoSummaryWait,
+            wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
+            wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
             onRefresh: () => { this.refreshDataManager(); },
             onOpenDataCollectionSettings: () => {
               this.settingsSectionId = SettingsSectionId.DataCollection;
               this.currentTab = MainTabIndex.Settings;
+            },
+            onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
+              await this.runWechatAutoSummary(request);
             }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))

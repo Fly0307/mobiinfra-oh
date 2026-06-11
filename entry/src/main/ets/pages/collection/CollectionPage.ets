@@ -1,5 +1,5 @@
 import { AppHeader } from '../../components/AppHeader';
-import { router } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import {
   CollectionGroupViewModel,
   CollectionViewModel
@@ -7,6 +7,20 @@ import {
 import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import {
+  normalizeWechatAutoSummaryDays,
+  normalizeWechatAutoSummaryHistorySwipeRatio,
+  normalizeWechatAutoSummaryMaxContacts,
+  normalizeWechatAutoSummaryMaxHistorySwipes,
+  normalizeWechatAutoSummaryMode,
+  normalizeWechatAutoSummaryStableSwipes,
+  normalizeWechatAutoSummarySwipeSpeed,
+  normalizeWechatAutoSummaryWait,
+  validateWechatAutoSummaryRequest,
+  WechatAutoSummaryRequest,
+  WECHAT_AUTO_SUMMARY_MODE_RECENT,
+  WECHAT_AUTO_SUMMARY_MODE_TARGET
+} from '../../utils/wechat/WechatAutoSummaryTypes';
 
 const COLLECTION_GROUPS_PER_PAGE: number = 5;
 const COLLECTION_SECTION_GAP: number = 18;
@@ -18,9 +32,25 @@ export struct CollectionPage {
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
+  @Prop wechatAutoSummaryEnabled: boolean = false;
+  @Prop wechatAutoSummaryDefaultDays: string = '7';
+  @Prop wechatAutoSummaryDefaultMaxContacts: string = '10';
+  @Prop wechatAutoSummarySwipeSpeed: string = '2500';
+  @Prop wechatAutoSummaryHistorySwipeRatio: string = '0.65';
+  @Prop wechatAutoSummaryStableSwipes: string = '3';
+  @Prop wechatAutoSummaryMaxHistorySwipes: string = '80';
+  @Prop wechatAutoSummaryWait: string = '1.0';
+  @Prop wechatAutoSummaryRunning: boolean = false;
+  @Prop wechatAutoSummaryStatus: string = '';
   @State private groupPageIndex: number = 0;
+  @State private wechatMode: string = WECHAT_AUTO_SUMMARY_MODE_RECENT;
+  @State private wechatDaysInput: string = '';
+  @State private wechatMaxContactsInput: string = '';
+  @State private wechatTargetContactInput: string = '';
   onRefresh: () => void = () => {};
   onOpenDataCollectionSettings: () => void = () => {};
+  onRunWechatAutoSummary: (request: WechatAutoSummaryRequest) => Promise<void> =
+    async (request: WechatAutoSummaryRequest) => {};
 
   private currentView(): CollectionViewModel {
     if (this.viewModels.length > this.collectionModule) {
@@ -73,6 +103,154 @@ export struct CollectionPage {
 
   private shouldShowGroupPagination(): boolean {
     return this.groupCount() > COLLECTION_GROUPS_PER_PAGE;
+  }
+
+  private wechatInputOrDefault(input: string, fallback: string): string {
+    let text = input.trim();
+    if (text.length > 0) {
+      return text;
+    }
+    return fallback;
+  }
+
+  private wechatDaysText(): string {
+    return this.wechatInputOrDefault(this.wechatDaysInput, this.wechatAutoSummaryDefaultDays);
+  }
+
+  private wechatMaxContactsText(): string {
+    return this.wechatInputOrDefault(this.wechatMaxContactsInput, this.wechatAutoSummaryDefaultMaxContacts);
+  }
+
+  private buildWechatRequest(): WechatAutoSummaryRequest {
+    let mode = normalizeWechatAutoSummaryMode(this.wechatMode);
+    let targetContact = mode === WECHAT_AUTO_SUMMARY_MODE_TARGET ? this.wechatTargetContactInput.trim() : '';
+    return {
+      mode: mode,
+      days: normalizeWechatAutoSummaryDays(this.wechatDaysText()),
+      max_contacts: normalizeWechatAutoSummaryMaxContacts(this.wechatMaxContactsText()),
+      target_contact: targetContact,
+      swipe_speed: normalizeWechatAutoSummarySwipeSpeed(this.wechatAutoSummarySwipeSpeed),
+      history_swipe_ratio: normalizeWechatAutoSummaryHistorySwipeRatio(this.wechatAutoSummaryHistorySwipeRatio),
+      stable_swipes: normalizeWechatAutoSummaryStableSwipes(this.wechatAutoSummaryStableSwipes),
+      max_history_swipes: normalizeWechatAutoSummaryMaxHistorySwipes(this.wechatAutoSummaryMaxHistorySwipes),
+      wait: normalizeWechatAutoSummaryWait(this.wechatAutoSummaryWait)
+    };
+  }
+
+  private showWechatToast(message: string): void {
+    promptAction.showToast({ message: message, duration: 1600 });
+  }
+
+  @Builder WechatModeButton(label: string, mode: string) {
+    Button(label)
+      .height(38)
+      .layoutWeight(1)
+      .fontSize(13)
+      .fontColor(this.wechatMode === mode ? Color.White : '#4F68FF')
+      .backgroundColor(this.wechatMode === mode ? '#4F68FF' : '#EEF3FF')
+      .borderRadius(10)
+      .onClick(() => {
+        if (this.wechatAutoSummaryRunning) {
+          return;
+        }
+        this.wechatMode = mode;
+      })
+  }
+
+  @Builder WechatInput(label: string, value: string, placeholder: string, onValueChange: (value: string) => void) {
+    Column() {
+      Text(label)
+        .fontSize(12)
+        .fontColor('#6F7684')
+        .width('100%')
+        .maxLines(1)
+      TextInput({ placeholder: placeholder, text: value })
+        .height(42)
+        .width('100%')
+        .fontSize(13)
+        .fontColor('#161B28')
+        .backgroundColor('#F2F5FC')
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
+        .enabled(!this.wechatAutoSummaryRunning)
+        .margin({ top: 6 })
+        .onChange((input: string) => { onValueChange(input); })
+    }
+    .width('100%')
+    .margin({ top: 12 })
+  }
+
+  @Builder WechatAutoSummaryCard() {
+    if (this.wechatAutoSummaryEnabled) {
+      Column() {
+        Text('微信消息自动汇总')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .width('100%')
+          .maxLines(1)
+        Text('调用 PC 侧采集服务读取微信会话，保存原始产物并写入 daily-log。')
+          .fontSize(12)
+          .fontColor('#6F7684')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 6 })
+
+        Row() {
+          this.WechatModeButton('最近联系人', WECHAT_AUTO_SUMMARY_MODE_RECENT)
+          Blank().width(10)
+          this.WechatModeButton('指定联系人', WECHAT_AUTO_SUMMARY_MODE_TARGET)
+        }
+        .width('100%')
+        .margin({ top: 14 })
+
+        this.WechatInput('时间范围（天）', this.wechatDaysText(), this.wechatAutoSummaryDefaultDays,
+          (value: string) => { this.wechatDaysInput = value; })
+        this.WechatInput('最近联系人数量', this.wechatMaxContactsText(), this.wechatAutoSummaryDefaultMaxContacts,
+          (value: string) => { this.wechatMaxContactsInput = value; })
+        if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
+          this.WechatInput('指定联系人', this.wechatTargetContactInput, '请输入微信联系人名称',
+            (value: string) => { this.wechatTargetContactInput = value; })
+        }
+
+        Button(this.wechatAutoSummaryRunning ? '采集中' : '开始采集')
+          .height(44)
+          .width('100%')
+          .fontSize(15)
+          .fontColor(Color.White)
+          .backgroundColor(this.wechatAutoSummaryRunning ? '#A9B0C2' : '#4F68FF')
+          .borderRadius(12)
+          .enabled(!this.wechatAutoSummaryRunning)
+          .margin({ top: 16 })
+          .onClick(async () => {
+            // 点击时即时归一化并校验，避免设置页默认值和卡片输入不一致。
+            let request = this.buildWechatRequest();
+            let error = validateWechatAutoSummaryRequest(request);
+            if (error.length > 0) {
+              this.showWechatToast(error);
+              return;
+            }
+            await this.onRunWechatAutoSummary(request);
+          })
+
+        if (this.wechatAutoSummaryStatus.length > 0) {
+          Text(this.wechatAutoSummaryStatus)
+            .fontSize(12)
+            .fontColor(this.wechatAutoSummaryStatus.startsWith('采集失败') ? '#B42318' : '#52606D')
+            .width('100%')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 10 })
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width('86%')
+      .padding(18)
+      .backgroundColor('#F9FBFF')
+      .borderRadius(16)
+      .margin({ top: COLLECTION_SECTION_GAP })
+    }
   }
 
   @Builder CollectTab(scene: WorkflowSceneConfig) {
@@ -305,6 +483,8 @@ export struct CollectionPage {
             Text('详情').fontSize(12).fontColor('#9AA0AA')
           }.width('100%').height(46).padding({ left: 16, right: 12 }).backgroundColor('#F2EEFF').borderRadius(12)
         }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
+
+        this.WechatAutoSummaryCard()
 
         Column() {
           Text('+  新增采集源').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)

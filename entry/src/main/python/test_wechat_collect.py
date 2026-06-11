@@ -169,6 +169,31 @@ class WechatCollectParserTests(unittest.TestCase):
 
         self.assertEqual(calls, ["tap", "back"])
 
+    def test_collect_visible_chats_preserves_collection_error_when_back_fails(self):
+        calls = []
+        contact = Contact(
+            name="小赵",
+            last_time="上午 10:45",
+            preview="",
+            bounds=(0, 500, 1256, 678),
+            tap_x=628,
+            tap_y=589,
+            raw_texts=["小赵"],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("wechat_collect.device.dump_layout", return_value=Path(temp_dir) / "page.json"), \
+                    patch("wechat_collect.device.load_ui_tree", return_value={}), \
+                    patch("wechat_collect.device.extract_contacts", return_value=[contact]), \
+                    patch("wechat_collect.device.tap", side_effect=lambda *args, **kwargs: calls.append("tap")), \
+                    patch("wechat_collect.device.press_back", side_effect=RuntimeError("back failed")), \
+                    patch("wechat_collect.device.build_chat_payload", side_effect=ValueError("bad dump")):
+                with self.assertRaisesRegex(ValueError, "bad dump") as cm:
+                    collect_visible_chats(CollectOptions(dump_dir=temp_dir, wait=0))
+
+        self.assertEqual(calls, ["tap"])
+        self.assertIsInstance(cm.exception.__context__, RuntimeError)
+
     def test_collect_visible_chats_rejects_unbounded_contact_before_tapping(self):
         calls = []
         contact = Contact(

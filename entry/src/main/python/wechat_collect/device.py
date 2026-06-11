@@ -242,6 +242,7 @@ def collect_visible_chats(options: CollectOptions, on_update: CollectionUpdate |
 
     for index, contact in enumerate(contacts, start=1):
         tap(contact.tap_x, contact.tap_y, hdc=options.hdc)
+        collection_error: BaseException | None = None
         try:
             time.sleep(options.wait)
 
@@ -284,8 +285,11 @@ def collect_visible_chats(options: CollectOptions, on_update: CollectionUpdate |
             output_payload["conversations"].append(conversation)
             if on_update is not None:
                 on_update(output_payload, conversation, chat_dump)
+        except BaseException as exc:
+            collection_error = exc
+            raise
         finally:
-            press_back(hdc=options.hdc, command=options.back_command)
+            press_back_after_chat(options, original_error=collection_error)
             time.sleep(options.wait)
 
     return output_payload
@@ -297,6 +301,18 @@ def validate_contacts_are_tappable(contacts: list[Contact]) -> None:
     for contact in contacts:
         if contact.bounds is None:
             raise ValueError(f"Contact '{contact.name}' has no bounds and cannot be tapped safely")
+
+
+def press_back_after_chat(options: CollectOptions, *, original_error: BaseException | None) -> None:
+    """离开聊天页；失败时优先保留原始采集异常。"""
+
+    try:
+        press_back(hdc=options.hdc, command=options.back_command)
+    except BaseException as back_error:
+        if original_error is not None:
+            original_error.__context__ = back_error
+            return
+        raise
 
 
 def collect_history_snapshots(

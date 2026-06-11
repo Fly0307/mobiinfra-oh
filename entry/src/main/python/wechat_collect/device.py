@@ -310,6 +310,7 @@ def press_back_after_chat(options: CollectOptions, *, original_error: BaseExcept
         press_back(hdc=options.hdc, command=options.back_command)
     except BaseException as back_error:
         if original_error is not None:
+            back_error.__context__ = None
             original_error.__context__ = back_error
             return
         raise

@@ -32,8 +32,14 @@ export default function wechatAutoSummaryUnitTest() {
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS).assertEqual('10');
       expect(normalizeWechatAutoSummaryDays('0')).assertEqual(1);
       expect(normalizeWechatAutoSummaryDays('120')).assertEqual(90);
+      expect(normalizeWechatAutoSummaryDays('')).assertEqual(7);
+      expect(normalizeWechatAutoSummaryDays('bad')).assertEqual(7);
+      expect(normalizeWechatAutoSummaryDays('7.6')).assertEqual(8);
       expect(normalizeWechatAutoSummaryMaxContacts('0')).assertEqual(1);
       expect(normalizeWechatAutoSummaryMaxContacts('80')).assertEqual(50);
+      expect(normalizeWechatAutoSummaryMaxContacts('')).assertEqual(10);
+      expect(normalizeWechatAutoSummaryMaxContacts('bad')).assertEqual(10);
+      expect(normalizeWechatAutoSummaryMaxContacts('10.4')).assertEqual(10);
     });
 
     it('normalizesModes', 0, () => {

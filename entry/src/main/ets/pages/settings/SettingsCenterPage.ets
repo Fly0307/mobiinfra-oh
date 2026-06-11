@@ -231,7 +231,7 @@ export struct SettingsCenterPage {
   }
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
-    normalizeValue: (value: string) => number, onValueChange: (value: string) => void) {
+    onValueChange: (value: string) => void, onNormalize: () => void) {
     this.FieldLabel(label)
     TextInput({ placeholder: placeholder, text: value })
       .height(42)
@@ -245,8 +245,8 @@ export struct SettingsCenterPage {
         onValueChange(input);
       })
       .onBlur(() => {
-        // 失焦后再按服务端允许范围归一化，保证持久化默认值最终可用。
-        onValueChange(String(normalizeValue(value)));
+        // 失焦后由调用点读取当前字段再归一化，避免使用上一轮渲染入参。
+        onNormalize();
       })
   }
 
@@ -329,11 +329,19 @@ export struct SettingsCenterPage {
         this.isWechatAutoSummaryEnabled(), (value: boolean) => { this.setWechatAutoSummaryEnabled(value); })
       if (this.isWechatAutoSummaryEnabled()) {
         this.WechatAutoSummaryInput('默认时间范围（天）', this.wechatAutoSummaryDefaultDays,
-          DEFAULT_WECHAT_AUTO_SUMMARY_DAYS, normalizeWechatAutoSummaryDays,
-          (value: string) => { this.wechatAutoSummaryDefaultDays = value; })
+          DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
+          (value: string) => { this.wechatAutoSummaryDefaultDays = value; },
+          () => {
+            this.wechatAutoSummaryDefaultDays = String(
+              normalizeWechatAutoSummaryDays(this.wechatAutoSummaryDefaultDays));
+          })
         this.WechatAutoSummaryInput('默认最近联系人数量', this.wechatAutoSummaryDefaultMaxContacts,
-          DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS, normalizeWechatAutoSummaryMaxContacts,
-          (value: string) => { this.wechatAutoSummaryDefaultMaxContacts = value; })
+          DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS,
+          (value: string) => { this.wechatAutoSummaryDefaultMaxContacts = value; },
+          () => {
+            this.wechatAutoSummaryDefaultMaxContacts = String(
+              normalizeWechatAutoSummaryMaxContacts(this.wechatAutoSummaryDefaultMaxContacts));
+          })
         Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
           .fontSize(12)
           .fontColor('#D26B31')
@@ -356,20 +364,39 @@ export struct SettingsCenterPage {
 
         if (this.wechatAutoSummaryAdvancedOpen) {
           this.WechatAutoSummaryInput('滑动速度', this.wechatAutoSummarySwipeSpeed,
-            DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED, normalizeWechatAutoSummarySwipeSpeed,
-            (value: string) => { this.wechatAutoSummarySwipeSpeed = value; })
+            DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+            (value: string) => { this.wechatAutoSummarySwipeSpeed = value; },
+            () => {
+              this.wechatAutoSummarySwipeSpeed = String(
+                normalizeWechatAutoSummarySwipeSpeed(this.wechatAutoSummarySwipeSpeed));
+            })
           this.WechatAutoSummaryInput('历史滑动距离比例', this.wechatAutoSummaryHistorySwipeRatio,
-            DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO, normalizeWechatAutoSummaryHistorySwipeRatio,
-            (value: string) => { this.wechatAutoSummaryHistorySwipeRatio = value; })
+            DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+            (value: string) => { this.wechatAutoSummaryHistorySwipeRatio = value; },
+            () => {
+              this.wechatAutoSummaryHistorySwipeRatio = String(
+                normalizeWechatAutoSummaryHistorySwipeRatio(this.wechatAutoSummaryHistorySwipeRatio));
+            })
           this.WechatAutoSummaryInput('稳定停止次数', this.wechatAutoSummaryStableSwipes,
-            DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES, normalizeWechatAutoSummaryStableSwipes,
-            (value: string) => { this.wechatAutoSummaryStableSwipes = value; })
+            DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
+            (value: string) => { this.wechatAutoSummaryStableSwipes = value; },
+            () => {
+              this.wechatAutoSummaryStableSwipes = String(
+                normalizeWechatAutoSummaryStableSwipes(this.wechatAutoSummaryStableSwipes));
+            })
           this.WechatAutoSummaryInput('最大历史滑动次数', this.wechatAutoSummaryMaxHistorySwipes,
-            DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES, normalizeWechatAutoSummaryMaxHistorySwipes,
-            (value: string) => { this.wechatAutoSummaryMaxHistorySwipes = value; })
+            DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
+            (value: string) => { this.wechatAutoSummaryMaxHistorySwipes = value; },
+            () => {
+              this.wechatAutoSummaryMaxHistorySwipes = String(
+                normalizeWechatAutoSummaryMaxHistorySwipes(this.wechatAutoSummaryMaxHistorySwipes));
+            })
           this.WechatAutoSummaryInput('导航等待秒数', this.wechatAutoSummaryWait,
-            DEFAULT_WECHAT_AUTO_SUMMARY_WAIT, normalizeWechatAutoSummaryWait,
-            (value: string) => { this.wechatAutoSummaryWait = value; })
+            DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
+            (value: string) => { this.wechatAutoSummaryWait = value; },
+            () => {
+              this.wechatAutoSummaryWait = String(normalizeWechatAutoSummaryWait(this.wechatAutoSummaryWait));
+            })
         }
       }
     }

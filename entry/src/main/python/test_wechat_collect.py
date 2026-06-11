@@ -1,12 +1,17 @@
 import json
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from wechat_collect.collector import (
+    CollectOptions,
+    Contact,
     HistorySnapshotOptions,
     build_chat_payload,
     build_chat_payload_from_snapshots,
+    collect_visible_chats,
     compute_history_swipe,
     extract_chat_messages,
     extract_chat_title,
@@ -117,6 +122,75 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertEqual(options.days, 7)
         self.assertEqual(options.hdc, "custom-hdc")
         self.assertEqual(options.max_history_swipes, 80)
+
+    def test_collect_visible_chats_validates_before_tapping_device(self):
+        calls = []
+        contact = Contact(
+            name="小赵",
+            last_time="上午 10:45",
+            preview="",
+            bounds=(0, 500, 1256, 678),
+            tap_x=628,
+            tap_y=589,
+            raw_texts=["小赵"],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("wechat_collect.device.dump_layout", return_value=Path(temp_dir) / "home.json"), \
+                    patch("wechat_collect.device.load_ui_tree", return_value={}), \
+                    patch("wechat_collect.device.extract_contacts", return_value=[contact]), \
+                    patch("wechat_collect.device.tap", side_effect=lambda *args, **kwargs: calls.append("tap")):
+                with self.assertRaises(ValueError):
+                    collect_visible_chats(CollectOptions(dump_dir=temp_dir, days=-1, wait=0))
+
+        self.assertEqual(calls, [])
+
+    def test_collect_visible_chats_returns_from_chat_when_collection_fails(self):
+        calls = []
+        contact = Contact(
+            name="小赵",
+            last_time="上午 10:45",
+            preview="",
+            bounds=(0, 500, 1256, 678),
+            tap_x=628,
+            tap_y=589,
+            raw_texts=["小赵"],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("wechat_collect.device.dump_layout", return_value=Path(temp_dir) / "page.json"), \
+                    patch("wechat_collect.device.load_ui_tree", return_value={}), \
+                    patch("wechat_collect.device.extract_contacts", return_value=[contact]), \
+                    patch("wechat_collect.device.tap", side_effect=lambda *args, **kwargs: calls.append("tap")), \
+                    patch("wechat_collect.device.press_back", side_effect=lambda *args, **kwargs: calls.append("back")), \
+                    patch("wechat_collect.device.build_chat_payload", side_effect=RuntimeError("bad dump")):
+                with self.assertRaises(RuntimeError):
+                    collect_visible_chats(CollectOptions(dump_dir=temp_dir, wait=0))
+
+        self.assertEqual(calls, ["tap", "back"])
+
+    def test_collect_visible_chats_rejects_unbounded_contact_before_tapping(self):
+        calls = []
+        contact = Contact(
+            name="坏数据",
+            last_time="",
+            preview="",
+            bounds=None,
+            tap_x=0,
+            tap_y=0,
+            raw_texts=["坏数据"],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("wechat_collect.device.dump_layout", return_value=Path(temp_dir) / "home.json"), \
+                    patch("wechat_collect.device.load_ui_tree", return_value={}), \
+                    patch("wechat_collect.device.extract_contacts", return_value=[contact]), \
+                    patch("wechat_collect.device.tap", side_effect=lambda *args, **kwargs: calls.append("tap")), \
+                    patch("wechat_collect.device.press_back", side_effect=lambda *args, **kwargs: calls.append("back")):
+                with self.assertRaises(ValueError):
+                    collect_visible_chats(CollectOptions(dump_dir=temp_dir, wait=0))
+
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

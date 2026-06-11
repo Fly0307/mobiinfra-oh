@@ -43,6 +43,9 @@ class HistorySnapshotOptions:
     history_swipe: tuple[int, int, int, int] | None = None
     history_swipe_ratio: float = DEFAULT_HISTORY_SWIPE_RATIO
 
+    def __post_init__(self) -> None:
+        validate_history_snapshot_options(self)
+
 
 @dataclass(frozen=True)
 class CollectOptions:
@@ -64,6 +67,86 @@ class CollectOptions:
     reference_now: datetime | None = None
     start_command: str | None = None
     back_command: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_collect_options(self)
+
+
+def validate_collect_options(options: CollectOptions) -> None:
+    """在触碰设备前校验采集参数，避免错误配置造成误点击。"""
+
+    _validate_optional_non_negative_int(options.max_contacts, "max_contacts")
+    _validate_optional_non_negative_int(options.days, "days")
+    _validate_non_negative_float(options.wait, "wait")
+    _validate_history_collection_values(
+        max_history_swipes=options.max_history_swipes,
+        stable_swipes=options.stable_swipes,
+        swipe_wait=options.swipe_wait,
+        swipe_speed=options.swipe_speed,
+        history_swipe=options.history_swipe,
+        history_swipe_ratio=options.history_swipe_ratio,
+    )
+
+
+def validate_history_snapshot_options(options: HistorySnapshotOptions) -> None:
+    """校验历史快照采集参数，供 CLI 和服务层共用。"""
+
+    _validate_non_negative_int(options.days, "days")
+    _validate_history_collection_values(
+        max_history_swipes=options.max_history_swipes,
+        stable_swipes=options.stable_swipes,
+        swipe_wait=options.swipe_wait,
+        swipe_speed=options.swipe_speed,
+        history_swipe=options.history_swipe,
+        history_swipe_ratio=options.history_swipe_ratio,
+    )
+
+
+def _validate_history_collection_values(
+    *,
+    max_history_swipes: int,
+    stable_swipes: int,
+    swipe_wait: float | None,
+    swipe_speed: int | None,
+    history_swipe: tuple[int, int, int, int] | None,
+    history_swipe_ratio: float,
+) -> None:
+    _validate_non_negative_int(max_history_swipes, "max_history_swipes")
+    _validate_non_negative_int(stable_swipes, "stable_swipes")
+    _validate_optional_non_negative_float(swipe_wait, "swipe_wait")
+    normalize_swipe_speed(swipe_speed)
+    _validate_history_swipe(history_swipe)
+    if history_swipe_ratio <= 0:
+        raise ValueError("history_swipe_ratio must be greater than 0")
+
+
+def _validate_non_negative_int(value: int, name: str) -> None:
+    if value < 0:
+        raise ValueError(f"{name} must be greater than or equal to 0")
+
+
+def _validate_optional_non_negative_int(value: int | None, name: str) -> None:
+    if value is not None:
+        _validate_non_negative_int(value, name)
+
+
+def _validate_non_negative_float(value: float, name: str) -> None:
+    if value < 0:
+        raise ValueError(f"{name} must be greater than or equal to 0")
+
+
+def _validate_optional_non_negative_float(value: float | None, name: str) -> None:
+    if value is not None:
+        _validate_non_negative_float(value, name)
+
+
+def _validate_history_swipe(value: tuple[int, int, int, int] | None) -> None:
+    if value is None:
+        return
+    if len(value) != 4:
+        raise ValueError("history_swipe must contain exactly four coordinates")
+    if not all(isinstance(part, int) for part in value):
+        raise ValueError("history_swipe coordinates must be integers")
 
 
 def dump_layout(
@@ -151,6 +234,7 @@ def collect_visible_chats(options: CollectOptions, on_update: CollectionUpdate |
             raise ValueError(f"No contact matched target '{options.target}' in the current home dump.")
     if options.max_contacts is not None:
         contacts = contacts[: options.max_contacts]
+    validate_contacts_are_tappable(contacts)
 
     output_payload: dict[str, Any] = {"home_dump": str(home_dump), "conversations": []}
     if on_update is not None:
@@ -158,52 +242,61 @@ def collect_visible_chats(options: CollectOptions, on_update: CollectionUpdate |
 
     for index, contact in enumerate(contacts, start=1):
         tap(contact.tap_x, contact.tap_y, hdc=options.hdc)
-        time.sleep(options.wait)
+        try:
+            time.sleep(options.wait)
 
-        if options.days is not None:
-            history_options = HistorySnapshotOptions(
-                days=options.days,
-                hdc=options.hdc,
-                remote_path=options.remote_path,
-                max_history_swipes=options.max_history_swipes,
-                stable_swipes=options.stable_swipes,
-                swipe_wait=options.swipe_wait,
-                swipe_speed=options.swipe_speed,
-                history_swipe=options.history_swipe,
-                history_swipe_ratio=options.history_swipe_ratio,
-            )
-            snapshot_paths = collect_history_snapshots(dump_dir, index, contact, history_options, reference_now)
-            chat_payload = build_chat_payload_from_snapshots(
-                [load_ui_tree(path) for path in snapshot_paths],
-                fallback_title=contact.name,
-                days=options.days,
-                reference_now=reference_now,
-            )
-            chat_dump = snapshot_paths[0]
-        else:
-            chat_dump = dump_layout(
-                dump_dir / f"chat_{index:02d}_{safe_filename(contact.name)}.json",
-                hdc=options.hdc,
-                remote_path=options.remote_path,
-            )
-            snapshot_paths = [chat_dump]
-            chat_payload = build_chat_payload(load_ui_tree(chat_dump), fallback_title=contact.name)
+            if options.days is not None:
+                history_options = HistorySnapshotOptions(
+                    days=options.days,
+                    hdc=options.hdc,
+                    remote_path=options.remote_path,
+                    max_history_swipes=options.max_history_swipes,
+                    stable_swipes=options.stable_swipes,
+                    swipe_wait=options.swipe_wait,
+                    swipe_speed=options.swipe_speed,
+                    history_swipe=options.history_swipe,
+                    history_swipe_ratio=options.history_swipe_ratio,
+                )
+                snapshot_paths = collect_history_snapshots(dump_dir, index, contact, history_options, reference_now)
+                chat_payload = build_chat_payload_from_snapshots(
+                    [load_ui_tree(path) for path in snapshot_paths],
+                    fallback_title=contact.name,
+                    days=options.days,
+                    reference_now=reference_now,
+                )
+                chat_dump = snapshot_paths[0]
+            else:
+                chat_dump = dump_layout(
+                    dump_dir / f"chat_{index:02d}_{safe_filename(contact.name)}.json",
+                    hdc=options.hdc,
+                    remote_path=options.remote_path,
+                )
+                snapshot_paths = [chat_dump]
+                chat_payload = build_chat_payload(load_ui_tree(chat_dump), fallback_title=contact.name)
 
-        conversation = {
-            "contact": asdict(contact),
-            "title": chat_payload["title"],
-            "dump": str(chat_dump),
-            "snapshots": [str(path) for path in snapshot_paths],
-            "messages": chat_payload["messages"],
-        }
-        output_payload["conversations"].append(conversation)
-        if on_update is not None:
-            on_update(output_payload, conversation, chat_dump)
-
-        press_back(hdc=options.hdc, command=options.back_command)
-        time.sleep(options.wait)
+            conversation = {
+                "contact": asdict(contact),
+                "title": chat_payload["title"],
+                "dump": str(chat_dump),
+                "snapshots": [str(path) for path in snapshot_paths],
+                "messages": chat_payload["messages"],
+            }
+            output_payload["conversations"].append(conversation)
+            if on_update is not None:
+                on_update(output_payload, conversation, chat_dump)
+        finally:
+            press_back(hdc=options.hdc, command=options.back_command)
+            time.sleep(options.wait)
 
     return output_payload
+
+
+def validate_contacts_are_tappable(contacts: list[Contact]) -> None:
+    """确认联系人条目有可点击坐标，避免 malformed dump 触发 `(0, 0)` 点击。"""
+
+    for contact in contacts:
+        if contact.bounds is None:
+            raise ValueError(f"Contact '{contact.name}' has no bounds and cannot be tapped safely")
 
 
 def collect_history_snapshots(

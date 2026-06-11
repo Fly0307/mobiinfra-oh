@@ -16,6 +16,7 @@ const CHAT_SESSION_DIR: string = 'chat-sessions';
 const CHAT_SESSION_RECORD_DIR: string = 'sessions';
 const CHAT_SESSION_ASSET_DIR: string = 'assets';
 const CHAT_SESSION_INDEX_FILE: string = 'session-index.json';
+type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
 
 export class ChatSessionStorage {
   static rootDir(filesDir: string): string {
@@ -345,9 +346,71 @@ export class ChatSessionStorage {
     return parent + '/' + child;
   }
 
-  private static deletePathRecursive(path: string): void {
+  private static basename(path: string): string {
+    let normalized = path.replace(/\\/g, '/');
+    let index = normalized.lastIndexOf('/');
+    return index >= 0 ? normalized.substring(index + 1) : normalized;
+  }
+
+  private static normalizeListFileEntry(entry: ListFileEntry): string {
+    if (typeof entry === 'string') {
+      return ChatSessionStorage.basename(entry);
+    }
+    let record = entry as Record<string, Object | string | number | boolean | null>;
+    let keys: string[] = ['fileName', 'filename', 'name', 'path', 'uri'];
+    for (let i = 0; i < keys.length; i++) {
+      let value = record[keys[i]];
+      if (typeof value === 'string' && value.length > 0) {
+        return ChatSessionStorage.basename(value);
+      }
+    }
+    let text = String(entry);
+    if (text.length === 0 || text === '[object Object]') {
+      return '';
+    }
+    return ChatSessionStorage.basename(text);
+  }
+
+  private static listChildNames(path: string): string[] {
     try {
-      let children = fs.listFileSync(path);
+      let entries = fs.listFileSync(path) as ListFileEntry[];
+      let names: string[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        let name = ChatSessionStorage.normalizeListFileEntry(entries[i]);
+        if (name.length > 0) {
+          names.push(name);
+        }
+      }
+      return names;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  private static isDirectory(path: string): boolean {
+    try {
+      if (!ChatSessionStorage.pathExists(path)) {
+        return false;
+      }
+      return fs.statSync(path).isDirectory();
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private static deletePathRecursive(path: string): void {
+    if (!ChatSessionStorage.pathExists(path)) {
+      return;
+    }
+    if (!ChatSessionStorage.isDirectory(path)) {
+      try {
+        fs.unlinkSync(path);
+      } catch (e) {
+      }
+      return;
+    }
+    try {
+      let children = ChatSessionStorage.listChildNames(path);
       for (let i = 0; i < children.length; i++) {
         ChatSessionStorage.deletePathRecursive(ChatSessionStorage.childPath(path, children[i]));
       }

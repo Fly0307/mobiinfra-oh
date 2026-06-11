@@ -24,6 +24,10 @@ import {
   WechatAutoSummaryResponse,
   WechatAutoSummaryTimeRange
 } from '../main/ets/utils/wechat/WechatAutoSummaryTypes';
+import {
+  renderWechatAutoSummaryDailyLog,
+  wechatAutoSummaryRunDir
+} from '../main/ets/utils/wechat/WechatAutoSummaryStorage';
 
 function demoRequest(mode: string, targetContact: string): WechatAutoSummaryRequest {
   return {
@@ -160,6 +164,22 @@ export default function wechatAutoSummaryUnitTest() {
       expect(response.started_at).assertEqual('2026-06-11T06:36:00+08:00');
       expect(timeRange.mode).assertEqual('visible_page_only');
       expect(artifacts['daily_log']).assertEqual('/tmp/daily-log.md');
+    });
+
+    it('rendersWechatAutoSummaryDailyLogMetadata', 0, () => {
+      let content = renderWechatAutoSummaryDailyLog('run-1', 'recent_contacts', 7, [
+        '小赵提醒下午三点开会',
+        '小李确认周五前提交材料'
+      ]);
+
+      expect(content.indexOf('DAILY_LOG_METADATA') >= 0).assertTrue();
+      expect(content.indexOf('"task_scene_id": 3') >= 0).assertTrue();
+      expect(content.indexOf('1. 小赵提醒下午三点开会') >= 0).assertTrue();
+    });
+
+    it('buildsWechatAutoSummaryRunDir', 0, () => {
+      expect(wechatAutoSummaryRunDir('/tmp/files', 'run-1'))
+        .assertEqual('/tmp/files/workflows/wechat-collection/runs/run-1');
     });
   });
 }

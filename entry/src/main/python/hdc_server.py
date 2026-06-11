@@ -16,6 +16,12 @@ except Exception as ex:
     harmony_agent = None
     print(f">> [警告] 无法导入 harmony_agent workflow bridge 能力: {ex}")
 
+try:
+    from wechat_collect import service as wechat_collect_service
+except Exception as ex:
+    wechat_collect_service = None
+    print(f">> [警告] 无法导入微信 UI dump 采集模块: {ex}")
+
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
@@ -1296,6 +1302,23 @@ def ensure_workflow_agent_ready():
     if not is_hdc_connected():
         raise RuntimeError('HDC target is not connected')
 
+def ensure_wechat_collect_ready():
+    ensure_workflow_agent_ready()
+    if wechat_collect_service is None:
+        raise RuntimeError("wechat_collect module is unavailable")
+
+def workflow_uidump_action(payload):
+    ensure_wechat_collect_ready()
+    return wechat_collect_service.uidump_action(payload or {}, hdc_prefix())
+
+def workflow_wechat_collect_action(payload):
+    ensure_wechat_collect_ready()
+    return wechat_collect_service.collect_action(
+        payload or {},
+        hdc_prefix(),
+        gui_search=lambda contact_name: harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面"),
+    )
+
 def run_remote_command(cmd):
     def execute():
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -1618,6 +1641,12 @@ def handle_workflow_action(action, payload):
 
     if action == 'gui_action':
         return workflow_gui_action(payload)
+
+    if action == 'uidump':
+        return workflow_uidump_action(payload)
+
+    if action == 'wechat_collect':
+        return workflow_wechat_collect_action(payload)
 
     raise RuntimeError(f'Unsupported workflow action: {action}')
 

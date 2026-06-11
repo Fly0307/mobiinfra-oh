@@ -9,10 +9,15 @@ dump 与滑动函数，便于单元测试和后续接入不同服务入口。
 from __future__ import annotations
 
 import math
+import shlex
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
-from .parser import Contact, extract_contacts
+from .parser import Contact, extract_contacts, load_ui_tree
 
 
 DEFAULT_DAYS = 7
@@ -172,6 +177,84 @@ def daily_log_entries_from_conversations(conversations: list[dict[str, Any]], da
     return entries
 
 
+def _split_hdc_prefix(hdc_prefix: str) -> list[str]:
+    """把 HDC 前缀拆成 subprocess 参数，兼容 `hdc -t SERIAL`。"""
+
+    text = str(hdc_prefix or "").strip()
+    if not text:
+        return ["hdc"]
+    return shlex.split(text)
+
+
+def uidump_action(payload: dict[str, Any], hdc_prefix: str) -> dict[str, Any]:
+    """执行一次 UI dump 并把结果加载成 JSON 树返回给 workflow bridge。"""
+
+    remote_path = str(payload.get("remote_path") or "/data/local/tmp/ui_tree.json").strip()
+    if not remote_path.startswith("/data/local/tmp/"):
+        raise ValueError("remote_path must start with /data/local/tmp/")
+
+    output_dir_value = payload.get("output_dir") or tempfile.mkdtemp(prefix="wechat-uidump-")
+    output_dir = Path(str(output_dir_value)).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prefix = _split_hdc_prefix(hdc_prefix)
+    _run_hdc(prefix + ["shell", "uitest", "dumpLayout", "-p", remote_path])
+    _run_hdc(prefix + ["file", "recv", remote_path, str(output_dir)])
+
+    dump_path = output_dir / "ui_tree.json"
+    received_path = output_dir / Path(remote_path).name
+    if received_path.exists() and received_path != dump_path:
+        received_path.replace(dump_path)
+    if not dump_path.exists():
+        raise RuntimeError(f"ui dump file not found: {dump_path}")
+
+    return {
+        "status": "ok",
+        "message": "uidump ok",
+        "dump_path": str(dump_path),
+        "ui_tree": load_ui_tree(dump_path),
+    }
+
+
+def collect_action(
+    payload: dict[str, Any],
+    hdc_prefix: str,
+    gui_search: Callable[[str], Any],
+) -> dict[str, Any]:
+    """规范化微信采集请求并返回 Task 3 阶段的空采集结果骨架。"""
+
+    request = normalize_collect_request(payload)
+    output_dir_value = request.output_dir or tempfile.mkdtemp(prefix="wechat-collect-")
+    output_dir = Path(output_dir_value).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    started_at = datetime.now().replace(microsecond=0)
+    finished_at = datetime.now().replace(microsecond=0)
+    return {
+        "status": "ok",
+        "message": "wechat_collect service skeleton ready",
+        "run_id": f"{started_at.strftime('%Y%m%dT%H%M%S')}-wechat",
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "mode": request.mode,
+        "days": request.days,
+        "contacts_requested": request.max_contacts,
+        "contacts_collected": 0,
+        "conversations": [],
+        "artifacts": {
+            "output_dir": str(output_dir),
+        },
+    }
+
+
+def _run_hdc(args: list[str]) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(args)}"
+        raise RuntimeError(message)
+    return result
+
+
 def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     if isinstance(value, bool):
         return default
@@ -268,6 +351,8 @@ __all__ = [
     "DEFAULT_WAIT",
     "WechatCollectRequest",
     "collect_recent_contacts_from_dumps",
+    "collect_action",
     "daily_log_entries_from_conversations",
     "normalize_collect_request",
+    "uidump_action",
 ]

@@ -12,6 +12,8 @@ export interface SettingsSectionItem {
   subtitle: string;
 }
 
+export const SETTINGS_SECTION_NONE: number = -1;
+
 export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
   {
     id: SettingsSectionId.PersonalPrivacy,
@@ -56,4 +58,17 @@ export function settingsSectionSubtitle(id: SettingsSectionId): string {
     }
   }
   return '';
+}
+
+export function normalizeSettingsSectionId(id: number): number {
+  for (let i = 0; i < SETTINGS_SECTION_ITEMS.length; i++) {
+    if (SETTINGS_SECTION_ITEMS[i].id === id) {
+      return id;
+    }
+  }
+  return SETTINGS_SECTION_NONE;
+}
+
+export function isSettingsSectionSelected(id: number): boolean {
+  return normalizeSettingsSectionId(id) !== SETTINGS_SECTION_NONE;
 }

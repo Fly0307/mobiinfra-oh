@@ -19,6 +19,11 @@ import {
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
 import {
+  isSettingsSectionSelected,
+  normalizeSettingsSectionId,
+  SETTINGS_SECTION_ITEMS,
+  SETTINGS_SECTION_NONE,
+  SettingsSectionItem,
   SettingsSectionId,
   settingsSectionSubtitle,
   settingsSectionTitle
@@ -69,6 +74,7 @@ export struct SettingsCenterPage {
   @StorageLink('galleryEmbeddingModel') galleryEmbeddingModel: string = DEFAULT_GALLERY_EMBEDDING_MODEL;
   @StorageLink('galleryImageScale') galleryImageScale: string = DEFAULT_GALLERY_IMAGE_SCALE;
   @StorageLink('galleryAmapWebKey') galleryAmapWebKey: string = DEFAULT_GALLERY_AMAP_WEB_KEY;
+  @State selectedSectionId: number = SETTINGS_SECTION_NONE;
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
@@ -109,6 +115,49 @@ export struct SettingsCenterPage {
       return '#4F68FF';
     }
     return '#D26B31';
+  }
+
+  private openSection(id: SettingsSectionId): void {
+    this.selectedSectionId = normalizeSettingsSectionId(id);
+  }
+
+  private closeSection(): void {
+    this.selectedSectionId = SETTINGS_SECTION_NONE;
+  }
+
+  private sectionInitial(id: SettingsSectionId): string {
+    if (id === SettingsSectionId.PersonalPrivacy) {
+      return 'P';
+    }
+    if (id === SettingsSectionId.DataCollection) {
+      return 'D';
+    }
+    if (id === SettingsSectionId.ModelAgents) {
+      return 'M';
+    }
+    if (id === SettingsSectionId.TaskAutomation) {
+      return 'T';
+    }
+    return 'S';
+  }
+
+  private activeSectionTitle(): string {
+    if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
+      return settingsSectionTitle(SettingsSectionId.PersonalPrivacy);
+    }
+    if (this.selectedSectionId === SettingsSectionId.DataCollection) {
+      return settingsSectionTitle(SettingsSectionId.DataCollection);
+    }
+    if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
+      return settingsSectionTitle(SettingsSectionId.ModelAgents);
+    }
+    if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
+      return settingsSectionTitle(SettingsSectionId.TaskAutomation);
+    }
+    if (this.selectedSectionId === SettingsSectionId.StorageAbout) {
+      return settingsSectionTitle(SettingsSectionId.StorageAbout);
+    }
+    return '';
   }
 
   @Builder SectionTitle(id: SettingsSectionId) {
@@ -212,6 +261,104 @@ export struct SettingsCenterPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .margin({ top: 10 })
+  }
+
+  @Builder SettingsListItem(item: SettingsSectionItem) {
+    Row() {
+      Text(this.sectionInitial(item.id))
+        .fontSize(18)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(44)
+        .height(44)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#4F68FF')
+        .borderRadius(14)
+      Column() {
+        Text(item.title)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text(item.subtitle)
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 10 })
+      Text('›')
+        .fontSize(28)
+        .fontColor('#8A93A3')
+    }
+    .width('92%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(18)
+    .margin({ top: 12 })
+    .onClick(() => { this.openSection(item.id); })
+  }
+
+  @Builder SettingsSectionList() {
+    Column() {
+      AppHeader({ title: '设置中心', subtitle: '服务、采集、模型、任务与存储' })
+      ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
+        this.SettingsListItem(item)
+      }, (item: SettingsSectionItem) => String(item.id))
+    }
+    .width('100%')
+    .padding({ bottom: 110 })
+  }
+
+  @Builder SettingsDetailHeader() {
+    Row() {
+      Button('‹')
+        .width(42)
+        .height(42)
+        .fontSize(28)
+        .fontColor('#11182F')
+        .backgroundColor(Color.White)
+        .borderRadius(14)
+        .onClick(() => { this.closeSection(); })
+      Column() {
+        Text('设置中心')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text(this.activeSectionTitle())
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .margin({ top: 2 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+    }
+    .width('92%')
+    .margin({ top: 18, bottom: 2 })
+  }
+
+  @Builder SelectedSectionContent() {
+    Column() {
+      if (this.selectedSectionId === SettingsSectionId.PersonalPrivacy) {
+        this.PrivacySection()
+      } else if (this.selectedSectionId === SettingsSectionId.DataCollection) {
+        this.DataCollectionSection()
+      } else if (this.selectedSectionId === SettingsSectionId.ModelAgents) {
+        this.ModelAgentsSection()
+      } else if (this.selectedSectionId === SettingsSectionId.TaskAutomation) {
+        this.TaskAutomationSection()
+      } else if (this.selectedSectionId === SettingsSectionId.StorageAbout) {
+        this.StorageAboutSection()
+      }
+    }
+    .width('100%')
   }
 
   @Builder PrivacySection() {
@@ -610,16 +757,21 @@ export struct SettingsCenterPage {
   }
 
   build() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '设置中心', subtitle: '统一配置服务、采集、模型、任务与存储' })
-        this.PrivacySection()
-        this.DataCollectionSection()
-        this.ModelAgentsSection()
-        this.TaskAutomationSection()
-        this.StorageAboutSection()
+    Column() {
+      if (isSettingsSectionSelected(this.selectedSectionId)) {
+        this.SettingsDetailHeader()
+        Scroll() {
+          this.SelectedSectionContent()
+        }
+        .width('100%')
+        .layoutWeight(1)
+      } else {
+        Scroll() {
+          this.SettingsSectionList()
+        }
+        .width('100%')
+        .layoutWeight(1)
       }
-      .width('100%')
     }
     .width('100%')
     .height('100%')

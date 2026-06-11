@@ -1,6 +1,9 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
+  isSettingsSectionSelected,
+  normalizeSettingsSectionId,
   SETTINGS_SECTION_ITEMS,
+  SETTINGS_SECTION_NONE,
   SettingsSectionId,
   settingsSectionSubtitle,
   settingsSectionTitle
@@ -24,6 +27,15 @@ export default function settingsCenterConfigUnitTest() {
       expect(settingsSectionTitle(SettingsSectionId.TaskAutomation)).assertEqual('任务与自动化');
       expect(settingsSectionTitle(SettingsSectionId.StorageAbout)).assertEqual('存储与关于');
       expect(settingsSectionSubtitle(SettingsSectionId.ModelAgents)).assertEqual('云端 Planner/Decider、本地模型与 HDC');
+    });
+
+    it('normalizesSettingsSectionSelection', 0, () => {
+      expect(normalizeSettingsSectionId(SettingsSectionId.TaskAutomation)).assertEqual(SettingsSectionId.TaskAutomation);
+      expect(isSettingsSectionSelected(SettingsSectionId.TaskAutomation)).assertTrue();
+      expect(normalizeSettingsSectionId(SETTINGS_SECTION_NONE)).assertEqual(SETTINGS_SECTION_NONE);
+      expect(normalizeSettingsSectionId(99)).assertEqual(SETTINGS_SECTION_NONE);
+      expect(isSettingsSectionSelected(99)).assertFalse();
+      expect(isSettingsSectionSelected(SETTINGS_SECTION_NONE)).assertFalse();
     });
   });
 }

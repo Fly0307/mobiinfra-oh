@@ -43,13 +43,6 @@ PROFILE_DOMAIN_RULES['live'] = ['住宿', '酒店', '宾馆', '房租', '住房'
 PROFILE_DOMAIN_RULES['travel'] = ['交通', '出行', '通勤', '乘车', '网约车', '出租车', '打车', '地铁', '公交', '高铁', '火车', '航班', '机票', '旅行', '旅游', '邮轮', '潜水', '瀑布', '景区', '攻略'];
 PROFILE_DOMAIN_RULES['work'] = ['工作', '上班', '办公', '会议', '汇报', '协作', '加班', '出差', 'PR', 'GitHub', 'GitLab', '代码', '分支', 'merge', 'rebase', 'debug', 'OCR', 'embedding', '应用开发', '接口', '权限', 'Agent'];
 
-const PROFILE_EXCLUSION_RULES: StringArrayMap = createStringArrayMap();
-PROFILE_EXCLUSION_RULES['eat'] = ['基金', 'ETF', '股票', '投资', '理财', '收益', '转账', '账单汇总', '衣食住行'];
-PROFILE_EXCLUSION_RULES['wear'] = ['基金', 'ETF', '股票', '投资', '理财', '收益', '转账', '账单汇总', '衣食住行'];
-PROFILE_EXCLUSION_RULES['live'] = ['基金', 'ETF', '股票', '投资', '理财', '收益', '转账', '账单汇总', '衣食住行'];
-PROFILE_EXCLUSION_RULES['travel'] = ['基金', 'ETF', '股票', '投资', '理财', '收益', '转账', '账单汇总', '衣食住行'];
-PROFILE_EXCLUSION_RULES['work'] = ['基金', 'ETF', '股票', '投资', '理财', '收益', '转账', '账单汇总', '衣食住行'];
-
 export function nowIsoLocal(): string {
   let date = new Date();
   let year = String(date.getFullYear());
@@ -916,12 +909,6 @@ function hasProfileDomainEvidence(event: IndexedEvent, domain: string): boolean 
     return false;
   }
   let text = eventProfileText(event).toLowerCase();
-  let exclusions = PROFILE_EXCLUSION_RULES[domain] || [];
-  for (let exclusion of exclusions) {
-    if (text.indexOf(exclusion.toLowerCase()) >= 0) {
-      return false;
-    }
-  }
   for (let rule of rules) {
     if (text.indexOf(rule.toLowerCase()) >= 0) {
       return true;

@@ -325,6 +325,8 @@ struct CollectionGroupDetailPage {
                 Blank().height(8)
               }
               .width('100%')
+              .constraintSize({ minHeight: '100%' })
+              .justifyContent(FlexAlign.Start)
             }
             .width('100%')
             .layoutWeight(1)

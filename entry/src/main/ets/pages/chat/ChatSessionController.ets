@@ -75,15 +75,36 @@ export class ChatSessionController {
     return ChatSessionController.stateFromSession(filesDir, session);
   }
 
+  static appendMessageToSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    message: ChatMessage): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.appendMessage(filesDir, sessionId, message);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === sessionId) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
   static appendTaskTraceLine(filesDir: string, state: ChatSessionViewState, mode: string, line: string,
+    messageId: string): ChatSessionViewState {
+    return ChatSessionController.appendTaskTraceLineToSession(filesDir, state, state.activeSessionId, line, messageId);
+  }
+
+  static appendTaskTraceLineToSession(filesDir: string, state: ChatSessionViewState, sessionId: string, line: string,
     messageId: string): ChatSessionViewState {
     if (filesDir.length === 0) {
       return state;
     }
-    if (state.activeSessionId.length === 0) {
+    if (sessionId.length === 0) {
       return state;
     }
-    let session = ChatSessionStorage.loadSession(filesDir, state.activeSessionId);
+    // App 内 Agent loop 是异步执行的，用户切换会话后仍要把步骤写回发起任务的会话。
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
     if (session === null || session.messages.length === 0) {
       return ChatSessionController.refreshCurrent(filesDir, state);
     }
@@ -108,6 +129,9 @@ export class ChatSessionController {
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
     return ChatSessionController.stateFromSession(filesDir, session);
   }
 

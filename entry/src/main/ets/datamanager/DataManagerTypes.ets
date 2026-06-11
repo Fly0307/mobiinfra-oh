@@ -71,6 +71,7 @@ export interface ProfileModelPayload {
   short_summary: string;
   summary: string;
   claims: RawProfileClaim[];
+  generation: string;
 }
 
 export const DOMAIN_DISPLAY_NAMES: StringMap = createStringMap();
@@ -323,10 +324,12 @@ export interface HomeRecommendationViewModel {
   desc: string;
   meta: string;
   color: string;
+  imageRefs: CollectionImageViewModel[];
   thumbnailUri: string;
   sourceEventIds: string[];
   detail: string;
   agentTask: string;
+  completed: boolean;
 }
 
 export interface HomeRecommendationState {
@@ -338,6 +341,7 @@ export interface HomeRecommendationState {
   domain: string;
   source_event_ids: string[];
   source_input_hash: string;
+  completed: boolean;
 }
 
 export interface HomeRecommendationsDocument {

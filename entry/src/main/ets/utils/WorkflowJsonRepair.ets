@@ -19,9 +19,15 @@ export class WorkflowJsonRepair {
   static repairCandidates(text: string): string[] {
     let candidates: string[] = [];
     let unwrapped = WorkflowJsonRepair.unwrapDuplicateOuterBraces(text);
+    let numericArrayComma = WorkflowJsonRepair.repairNumberArrayCommas(text);
+    let closed = WorkflowJsonRepair.closeTruncatedJson(text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(unwrapped), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(closed), text);
     return candidates;
   }
 
@@ -84,6 +90,69 @@ export class WorkflowJsonRepair {
       }
     }
     return trimmed;
+  }
+
+  private static repairNumberArrayCommas(text: string): string {
+    return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static closeTruncatedJson(text: string): string {
+    let trimmed = text.trim();
+    if (trimmed.length === 0 || (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[')) {
+      return trimmed;
+    }
+
+    let stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < trimmed.length; i++) {
+      let ch = trimmed.charAt(i);
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        stack.push('}');
+      } else if (ch === '[') {
+        stack.push(']');
+      } else if (ch === '}' || ch === ']') {
+        if (stack.length === 0 || stack[stack.length - 1] !== ch) {
+          return trimmed;
+        }
+        stack.pop();
+      }
+    }
+
+    if (trimmed.endsWith(':')) {
+      return trimmed;
+    }
+    let repaired = trimmed;
+    if (repaired.endsWith(',')) {
+      repaired = repaired.substring(0, repaired.length - 1).trim();
+    }
+    if (inString) {
+      if (escaped) {
+        repaired += '\\';
+      }
+      repaired += '"';
+    }
+    while (stack.length > 0) {
+      repaired = repaired.replace(/,\s*$/, '');
+      let closer = stack.pop();
+      if (closer !== undefined) {
+        repaired += closer;
+      }
+    }
+    return repaired;
   }
 
   private static repairJsonStringContent(text: string): string {

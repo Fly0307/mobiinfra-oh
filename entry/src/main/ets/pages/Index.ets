@@ -50,6 +50,7 @@ import {
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
+import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -196,9 +197,12 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
+  private homeRecommendationViewDateKey: string = '';
+  private homeRecommendationDateTimerId: number = -1;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
+  private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
 
   private nextChatMessageId(prefix: string = 'msg'): string {
@@ -235,6 +239,12 @@ struct Index {
   private appendActiveChatMessage(message: ChatMessage): void {
     let state = ChatSessionController.appendMessage(this.filesDir, this.currentChatSessionViewState(), this.chatMode,
       message);
+    this.applyChatSessionViewState(state);
+  }
+
+  private appendChatMessageForSession(sessionId: string, message: ChatMessage): void {
+    let state = ChatSessionController.appendMessageToSession(this.filesDir, this.currentChatSessionViewState(),
+      this.taskSessionId(sessionId), message);
     this.applyChatSessionViewState(state);
   }
 
@@ -349,6 +359,64 @@ struct Index {
       lines.push('目标：' + this.compactTraceText(target, 120));
     }
     return lines.join('\n');
+  }
+
+  private toFileUri(path: string): string {
+    if (path.startsWith('file://')) {
+      return path;
+    }
+    return 'file://' + path;
+  }
+
+  private snapshotImagePathFromLog(message: string): string {
+    let taggedMatch = message.match(/<img>(.*?)<hw>/);
+    if (taggedMatch && taggedMatch[1]) {
+      return this.toFileUri(taggedMatch[1]);
+    }
+    let absoluteMatch = message.match(/(\/[^\s]+agent_snapshot_[^\s]+\.jpg)/);
+    if (absoluteMatch && absoluteMatch[1]) {
+      return this.toFileUri(absoluteMatch[1]);
+    }
+    let fileNameMatch = message.match(/agent_snapshot_.*?\.jpg/);
+    if (fileNameMatch && fileNameMatch[0]) {
+      return this.toFileUri(this.filesDir + '/' + fileNameMatch[0]);
+    }
+    return '';
+  }
+
+  private taskSessionId(fallbackId: string): string {
+    return fallbackId.length > 0 ? fallbackId : this.activeChatSessionId;
+  }
+
+  private appendTaskTraceLineForSession(sessionId: string, line: string, messageId: string = ''): void {
+    let state = ChatSessionController.appendTaskTraceLineToSession(this.filesDir, this.currentChatSessionViewState(),
+      this.taskSessionId(sessionId), line, messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private handleLocalAgentLog(message: string): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    let sessionId = this.taskSessionId(this.localTaskSessionId);
+    let traceLine = this.formatAgentTraceLog(message);
+    if (traceLine.length > 0) {
+      this.appendTaskTraceLineForSession(sessionId, traceLine);
+    }
+    let imagePath = this.snapshotImagePathFromLog(message);
+    if (imagePath.length > 0) {
+      this.debugImagePath = imagePath;
+      this.attachTaskResultImage(sessionId, imagePath);
+    }
+  }
+
+  private handleCloudAgentLog(message: string): void {
+    this.appendCloudLog(message);
+    let imagePath = this.snapshotImagePathFromLog(message);
+    if (imagePath.length > 0) {
+      let sessionId = this.taskSessionId(this.cloudTaskSessionId);
+      this.cloudDebugImagePath = imagePath;
+      this.attachTaskResultImage(sessionId, imagePath);
+    }
   }
 
   private createChatSession(mode: string): void {
@@ -488,11 +556,12 @@ struct Index {
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
     let traceLine = this.formatAgentTraceLog(message);
     if (traceLine.length > 0) {
-      this.appendActiveTaskTraceLine(traceLine);
+      this.appendTaskTraceLineForSession(this.cloudTaskSessionId, traceLine);
     }
     if (message.indexOf('Task completed') >= 0) {
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-        CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+      this.appendChatMessageForSession(this.cloudTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
     }
   }
 
@@ -501,6 +570,51 @@ struct Index {
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
+  }
+
+  private async approveLocalAgentResponse(response: string): Promise<boolean> {
+    if (this.autoConfirm) {
+      return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '大模型返回确认',
+        message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+        buttons: [
+          { text: '拒绝', color: '#ff0000' },
+          { text: '同意', color: '#00cc00' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => {
+        resolve(false);
+      });
+    });
+  }
+
+  private async approveCloudAgentResponse(response: string): Promise<boolean> {
+    if (this.cloudAutoConfirm) {
+      this.appendCloudLog('自动同意已开启，模型动作已放行给 App 内 Agent loop 执行。');
+      return true;
+    }
+    this.appendCloudLog('等待用户确认模型动作。确认后 App 会通过 PC HDC bridge 执行动作。');
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '云端模型返回确认',
+        message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+        buttons: [
+          { text: '拒绝', color: '#ff0000' },
+          { text: '同意', color: '#00cc00' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        let approved = data.index === 1;
+        this.appendCloudLog(approved ? '用户已同意，动作交给 HDC bridge 执行。' : '用户已拒绝，任务终止。');
+        resolve(approved);
+      }).catch(() => {
+        this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
+        resolve(false);
+      });
+    });
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
@@ -686,8 +800,48 @@ struct Index {
     }
     this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
+    this.homeRecommendationViewDateKey = this.currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
+  }
+
+  private padDatePart(value: number): string {
+    return value < 10 ? '0' + String(value) : String(value);
+  }
+
+  private currentLocalDateKey(): string {
+    let date = new Date();
+    return `${date.getFullYear()}-${this.padDatePart(date.getMonth() + 1)}-${this.padDatePart(date.getDate())}`;
+  }
+
+  private reloadHomeViewModelIfDateChanged(): void {
+    let today = this.currentLocalDateKey();
+    if (this.homeRecommendationViewDateKey === today) {
+      return;
+    }
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('reloadHomeViewModelIfDateChanged skipped: facade is null');
+      return;
+    }
+    this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    this.homeRecommendationViewDateKey = today;
+    dataManagerInfo(`home recommendation view date changed: today=${today}, recommendations=${this.homeProfile.recommendations.length}`);
+  }
+
+  private startHomeRecommendationDateTimer(): void {
+    if (this.homeRecommendationDateTimerId !== -1) {
+      return;
+    }
+    this.homeRecommendationDateTimerId = setInterval(() => {
+      this.reloadHomeViewModelIfDateChanged();
+    }, 60 * 1000);
+  }
+
+  private stopHomeRecommendationDateTimer(): void {
+    if (this.homeRecommendationDateTimerId !== -1) {
+      clearInterval(this.homeRecommendationDateTimerId);
+      this.homeRecommendationDateTimerId = -1;
+    }
   }
 
   private updateDataManagerProgress(progress: DataManagerProgress): void {
@@ -762,6 +916,7 @@ struct Index {
     this.prepareCustomOpp();
     this.initDataManager();
     this.initChatSessions();
+    this.startHomeRecommendationDateTimer();
     this.agentRouter.configureLocal(
       (prefix: string): Promise<string> => mnnllm.agentPrefill(prefix),
       (variablePart: string, onToken?: (token: string) => void): Promise<string> =>
@@ -770,70 +925,22 @@ struct Index {
       (userMessage: string): string => mnnllm.chat(userMessage),
       (): string => mnnllm.reset(),
       (msg: string) => {
-        this.output = msg;
-        let traceLine = this.formatAgentTraceLog(msg);
-        if (traceLine.length > 0) {
-          this.appendActiveTaskTraceLine(traceLine);
-        }
-        if (msg.indexOf('Task completed') >= 0 || msg.indexOf('done') >= 0) {
-          this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-            CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
-        }
-        let match = msg.match(/<img>(.*?)<hw>/);
-        if (match && match[1]) {
-          let imagePath = 'file://' + match[1];
-          this.debugImagePath = imagePath;
-          this.attachTaskResultImage(this.localTaskSessionId.length > 0 ? this.localTaskSessionId :
-            this.activeChatSessionId, imagePath);
-        }
+        this.handleLocalAgentLog(msg);
       }, async (response: string) => {
-      if (this.autoConfirm) { return true; }
-      return new Promise<boolean>((resolve) => {
-        promptAction.showDialog({
-          title: '大模型返回确认',
-          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-          buttons: [
-            { text: '拒绝', color: '#ff0000' },
-            { text: '同意', color: '#00cc00' }
-          ]
-        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
+        return await this.approveLocalAgentResponse(response);
       });
-    });
     this.agentRouter.configureCloud(this.cloudClient, () => this.getCloudConfig(), (msg: string) => {
-      this.appendCloudLog(msg);
-      let match = msg.match(/agent_snapshot_.*?\.jpg/);
-      if (match && match[0]) {
-        let imagePath = 'file://' + this.filesDir + '/' + match[0];
-        this.cloudDebugImagePath = imagePath;
-        this.attachTaskResultImage(this.cloudTaskSessionId.length > 0 ? this.cloudTaskSessionId :
-          this.activeChatSessionId, imagePath);
-      }
+      this.handleCloudAgentLog(msg);
     }, async (response: string) => {
-      if (this.cloudAutoConfirm) {
-        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
-        return true;
-      }
-      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
-      return new Promise<boolean>((resolve) => {
-        promptAction.showDialog({
-          title: '云端模型返回确认',
-          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
-          buttons: [
-            { text: '拒绝', color: '#ff0000' },
-            { text: '同意', color: '#00cc00' }
-          ]
-        }).then((data: promptAction.ShowDialogSuccessResponse) => {
-          let approved = data.index === 1;
-          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
-          resolve(approved);
-        }).catch(() => {
-          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
-          resolve(false);
-        });
-      });
+      return await this.approveCloudAgentResponse(response);
     });
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
+        await this.activeAgentRunner.requestCancellation();
+        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+        return;
+      }
       if (this.agentRouter.getRouteMode() !== 'local') {
         return;
       }
@@ -841,6 +948,11 @@ struct Index {
       this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
+        await this.activeAgentRunner.requestCancellation();
+        this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
+        return;
+      }
       if (this.agentRouter.getRouteMode() !== 'cloud') {
         return;
       }
@@ -850,6 +962,19 @@ struct Index {
     this.discoverHdcServer(false, false).catch(() => {
       this.hdcAutoConnecting = false;
     });
+  }
+
+  onPageShow(): void {
+    this.reloadHomeViewModelIfDateChanged();
+    this.startHomeRecommendationDateTimer();
+  }
+
+  onPageHide(): void {
+    this.stopHomeRecommendationDateTimer();
+  }
+
+  aboutToDisappear(): void {
+    this.stopHomeRecommendationDateTimer();
   }
 
   private migrateDefaultEndpointValues(): void {
@@ -2003,26 +2128,29 @@ struct Index {
     if (!await this.ensureLocalModelLoaded()) {
       return false;
     }
-
-    this.agentRouter.useLocal();
-    if (!await this.startLocalBackend()) {
+    if (!await this.ensureHdcServerReadyForTask(false)) {
       return false;
     }
-    return await this.ensurePcAgentLoopReady(false);
+    if (this.hdcServerIp.trim().length === 0) {
+      this.output = 'HDC Server 未配置，无法执行本地 Agent。';
+      return false;
+    }
+    return true;
   }
 
   private async ensureCloudAgentBackend(): Promise<boolean> {
-    // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return false;
     }
-
-    this.agentRouter.useCloud();
-    if (!await this.startCloudBackend()) {
+    if (!await this.ensureHdcServerReadyForTask(true)) {
       return false;
     }
-    return await this.ensurePcAgentLoopReady(true);
+    if (this.hdcServerIp.trim().length === 0) {
+      this.appendCloudLog('HDC Server 未配置，无法执行云端 Agent。');
+      return false;
+    }
+    return true;
   }
 
   private async runHomeRecommendationAgentTask(taskText: string): Promise<void> {
@@ -2033,6 +2161,38 @@ struct Index {
     this.currentTab = MainTabIndex.Chat;
   }
 
+  private createAgentLoopRunner(): AgentLoopRunner {
+    return new AgentLoopRunner(
+      this.filesDir,
+      this.hdcServerIp,
+      mnnllm,
+      this.cloudClient,
+      () => this.getCloudConfig(),
+      (msg: string) => {
+        this.handleLocalAgentLog(msg);
+      },
+      (msg: string) => {
+        this.handleCloudAgentLog(msg);
+      },
+      async (response: string) => {
+        return await this.approveLocalAgentResponse(response);
+      },
+      async (response: string) => {
+        return await this.approveCloudAgentResponse(response);
+      }
+    );
+  }
+
+  private setHomeRecommendationCompleted(id: string, completed: boolean): void {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('setHomeRecommendationCompleted skipped: facade is null');
+      return;
+    }
+    if (this.dataManagerFacade.setHomeRecommendationCompleted(id, completed)) {
+      this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
+    }
+  }
+
   private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
     let task = taskText.trim();
     if (task.length === 0) {
@@ -2041,12 +2201,23 @@ struct Index {
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
     }
-    this.agentRouter.submitCloudTask(task);
-    AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
-    this.resetCloudLog('任务已下发：' + task);
-    this.appendCloudLog(`等待 PC 侧 harmony_agent.py 轮询 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。`);
+    this.currentTab = MainTabIndex.Chat;
+    this.resetCloudLog('云端 Agent 开始执行：' + task);
+    this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
     this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
-    return { success: true, error: '' };
+    let runner = this.createAgentLoopRunner();
+    this.activeAgentRunner = runner;
+    try {
+      await runner.runCloudTask(task);
+      this.appendCloudLog('云端 Agent 任务完成。');
+      return { success: true, error: '' };
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('云端 Agent 执行失败：' + err.message);
+      return { success: false, error: err.message };
+    } finally {
+      this.activeAgentRunner = null;
+    }
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
@@ -2116,46 +2287,84 @@ struct Index {
   }
 
   private async submitLocalAgentTask(): Promise<void> {
-    if (this.userInput.length === 0) {
+    let task = this.userInput.trim();
+    if (task.length === 0) {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (this.isThinking) {
       return;
     }
     if (!await this.ensureLocalAgentReady()) {
       return;
     }
-    let task = this.userInput;
+    this.ensureActiveChatSession();
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       task, new Date().getTime()));
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
       CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(), []));
-    this.agentRouter.submitLocalTask(task);
-    AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
-    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${task}\nPC 脚本检测到任务后将自动开始。`;
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-      CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
+      CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 已开始执行。', new Date().getTime()));
     this.localTaskSessionId = this.activeChatSessionId;
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.isThinking = true;
+    let runner = this.createAgentLoopRunner();
+    this.activeAgentRunner = runner;
+    this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+    try {
+      await runner.runLocalTask(task);
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+      if (this.debugImagePath.length > 0) {
+        this.attachTaskResultImage(this.localTaskSessionId, this.debugImagePath);
+      }
+    } catch (e) {
+      let err = e as Error;
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行失败：' + err.message, new Date().getTime()));
+    } finally {
+      this.activeAgentRunner = null;
+      this.localTaskSessionId = '';
+      this.isThinking = false;
+    }
   }
 
   private async submitCurrentCloudTask(): Promise<void> {
     let task = this.cloudUserInput.trim();
-    if (task.length > 0) {
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
-        task, new Date().getTime()));
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
-        CHAT_MESSAGE_KIND_TASK_TRACE, '云端任务执行过程', new Date().getTime(), []));
+    if (task.length === 0 || this.cloudThinking) {
+      return;
     }
-    let result = await this.submitDirectCloudAgentTask(this.cloudUserInput);
-    if (result.success) {
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-        CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，等待 PC 侧 Agent 执行。', new Date().getTime()));
-      this.cloudTaskSessionId = this.activeChatSessionId;
-      this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
-    }
-    if (!result.success && result.error.length > 0) {
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-        CHAT_MESSAGE_KIND_TASK_RESULT, '任务下发失败：' + result.error, new Date().getTime()));
-      this.appendCloudLog(result.error);
+    this.ensureActiveChatSession();
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      task, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
+      CHAT_MESSAGE_KIND_TASK_TRACE, '云端任务执行过程', new Date().getTime(), []));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+      CHAT_MESSAGE_KIND_TASK_RESULT, '云端 Agent 已开始执行。', new Date().getTime()));
+    this.cloudTaskSessionId = this.activeChatSessionId;
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudThinking = true;
+    try {
+      let result = await this.submitDirectCloudAgentTask(task);
+      if (result.success) {
+        this.appendChatMessageForSession(this.cloudTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+        if (this.cloudDebugImagePath.length > 0) {
+          this.attachTaskResultImage(this.cloudTaskSessionId, this.cloudDebugImagePath);
+        }
+      } else {
+        let errorText = result.error.length > 0 ? result.error : '云端 Agent 后端未就绪';
+        this.appendChatMessageForSession(this.cloudTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '任务下发失败：' + errorText, new Date().getTime()));
+        this.appendCloudLog(errorText);
+      }
+    } finally {
+      this.cloudTaskSessionId = '';
+      this.cloudThinking = false;
     }
   }
 
@@ -2234,6 +2443,9 @@ struct Index {
         TabContent() {
           HomePage({
             profile: this.homeProfile,
+            onSetRecommendationCompleted: (id: string, completed: boolean) => {
+              this.setHomeRecommendationCompleted(id, completed);
+            },
             avatarVersions: this.avatarVersions,
             onExecuteAgentTask: async (taskDescription: string) => {
               await this.runHomeRecommendationAgentTask(taskDescription);

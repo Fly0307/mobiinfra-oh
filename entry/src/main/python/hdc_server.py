@@ -1251,6 +1251,23 @@ def _workflow_gui_action_impl(payload):
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
         return {'status': 'ok', 'message': f'click {x},{y}'}
 
+    if action == 'click_input':
+        x = int(payload.get('x', 0))
+        y = int(payload.get('y', 0))
+        text = str(payload.get('text', ''))
+        if driver:
+            harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
+            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
+            harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
+            harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
+            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
+            harmony_agent.press_harmony_key('ENTER', 2054)
+        else:
+            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
+            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
+            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+        return {'status': 'ok', 'message': f'click_input {x},{y}'}
+
     if action == 'input':
         text = str(payload.get('text', ''))
         if driver:
@@ -1287,7 +1304,19 @@ def _workflow_gui_action_impl(payload):
             else:
                 raise RuntimeError(f'unknown swipe direction: {direction}')
         else:
-            raise RuntimeError('direction swipe requires hmdriver2 driver')
+            width = int(payload.get('width', 1000))
+            height = int(payload.get('height', 1000))
+            if direction == 'up':
+                sx, sy, ex, ey = 0.5 * width, harmony_agent.SWIPE_V_END * height, 0.5 * width, harmony_agent.SWIPE_V_START * height
+            elif direction == 'down':
+                sx, sy, ex, ey = 0.5 * width, harmony_agent.SWIPE_V_START * height, 0.5 * width, harmony_agent.SWIPE_V_END * height
+            elif direction == 'left':
+                sx, sy, ex, ey = harmony_agent.SWIPE_H_END * width, 0.5 * height, harmony_agent.SWIPE_H_START * width, 0.5 * height
+            elif direction == 'right':
+                sx, sy, ex, ey = harmony_agent.SWIPE_H_START * width, 0.5 * height, harmony_agent.SWIPE_H_END * width, 0.5 * height
+            else:
+                raise RuntimeError(f'unknown swipe direction: {direction}')
+            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
         return {'status': 'ok', 'message': f'swipe {direction}'}
 
     if action == 'keyevent':
@@ -1308,13 +1337,18 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'sleep {seconds}'}
 
     if action == 'app_start':
+        app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        if not package_name:
-            raise RuntimeError('app_start requires package_name')
-        if not harmony_agent.launch_app(package_name, reset_first=reset_first):
-            raise RuntimeError(f'app_start failed: {package_name}')
-        return {'status': 'ok', 'message': f'app_start {package_name}', 'package_name': package_name}
+        target = app_name or package_name
+        if not target:
+            raise RuntimeError('app_start requires app_name or package_name')
+        ok = harmony_agent.launch_app(target, reset_first=reset_first)
+        if not ok and package_name and package_name != target:
+            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
+        if not ok:
+            raise RuntimeError(f'app_start failed: {target}')
+        return {'status': 'ok', 'message': f'app_start {target}', 'package_name': package_name}
 
     if action == 'app_stop':
         package_name = str(payload.get('package_name', ''))
@@ -1335,6 +1369,22 @@ def handle_workflow_action(action, payload):
     if action == 'health':
         return hdc_health_payload(force=True)
 
+    if action == 'agent_config':
+        return {
+            'status': 'ok',
+            'message': 'agent config',
+            'no_reason': bool(NO_REASON_MODE),
+            'max_steps': int(getattr(harmony_agent, 'MAX_STEPS', 15)) if harmony_agent is not None else 15
+        }
+
+    if action == 'prepare_agent_run':
+        ensure_workflow_agent_ready()
+        harmony_agent.reset_driver()
+        return {
+            'status': 'ok',
+            'message': 'agent device control prepared'
+        }
+
     if action == 'load_prompt_template':
         if harmony_agent is None:
             raise RuntimeError('harmony_agent.py is unavailable')
@@ -1353,11 +1403,24 @@ def handle_workflow_action(action, payload):
     if action == 'screenshot':
         ensure_workflow_agent_ready()
         factor = float(payload.get('factor', 0.5))
-        # Workflow App side already hides/restores the overlay around this HTTP request.
-        image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(
-            factor,
-            manage_overlay=False
-        )
+        style = str(payload.get('style', 'mobiagent')).lower()
+        manage_overlay = payload_bool(payload, 'manage_overlay', False)
+        if manage_overlay:
+            if style == 'local' or factor <= 0.25:
+                image_b64, width, height = harmony_agent.capture_screen(factor)
+            else:
+                image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(factor)
+        else:
+            if style == 'local' or factor <= 0.25:
+                image_b64, width, height = harmony_agent.run_with_device_control(
+                    'workflow capture_screen direct',
+                    lambda: harmony_agent._capture_screen_impl(factor)
+                )
+            else:
+                image_b64, width, height = harmony_agent.run_with_device_control(
+                    'workflow capture_screen_mobiagent direct',
+                    lambda: harmony_agent._capture_screen_mobiagent_style_impl(factor)
+                )
         return {
             'status': 'ok',
             'image_b64': image_b64,

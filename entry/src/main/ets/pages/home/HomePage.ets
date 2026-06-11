@@ -1,5 +1,6 @@
 import { AppHeader } from '../../components/AppHeader';
 import {
+  CollectionImageViewModel,
   HomeDomainViewModel,
   HomeProfileViewModel,
   HomeRecommendationViewModel
@@ -15,14 +16,18 @@ import { showToastSafely } from '../../utils/PromptSafe';
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
+  onSetRecommendationCompleted: (id: string, completed: boolean) => void = (id: string, completed: boolean) => {};
   @Prop avatarVersions: AvatarVersionViewModel[] = [];
   onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
   onGenerateAvatar: (mode: AvatarGenerationMode, sourceImage: string) => Promise<void> =
     async (mode: AvatarGenerationMode, sourceImage: string) => {};
-  @State recommendationBatchIndex: number = 0;
+  @State recommendationPageIndex: number = 0;
   @State selectedRecommendationId: string = '';
+  @State selectedRecommendationCompletedOverrideId: string = '';
+  @State selectedRecommendationCompletedOverrideValue: boolean = false;
   @State agentTaskDraft: string = '';
   @State agentTaskSubmitting: boolean = false;
+  @State showAllRecommendations: boolean = false;
   @State avatarGenerationOpen: boolean = false;
   @State avatarGenerating: boolean = false;
   @State avatarHistoryOpen: boolean = false;
@@ -673,12 +678,42 @@ export struct HomePage {
     }
   }
 
+  private recommendationDisplayTag(item: HomeRecommendationViewModel): string {
+    if (this.recommendationCompleted(item)) {
+      return '已完成';
+    }
+    return item.tag;
+  }
+
+  private recommendationCardTitleColor(item: HomeRecommendationViewModel): string {
+    return this.showAllRecommendations && this.recommendationCompleted(item) ? '#A0A7B5' : '#151A28';
+  }
+
+  private recommendationCompleted(item: HomeRecommendationViewModel): boolean {
+    if (this.selectedRecommendationCompletedOverrideId === item.id) {
+      return this.selectedRecommendationCompletedOverrideValue;
+    }
+    return item.completed;
+  }
+
+  private openRecommendationDetail(item: HomeRecommendationViewModel): void {
+    this.selectedRecommendationId = item.id;
+    this.selectedRecommendationCompletedOverrideId = item.id;
+    this.selectedRecommendationCompletedOverrideValue = item.completed;
+    this.agentTaskDraft = item.agentTask;
+  }
+
+  private closeRecommendationDetail(): void {
+    this.selectedRecommendationId = '';
+    this.selectedRecommendationCompletedOverrideId = '';
+  }
+
   @Builder RecommendCard(item: HomeRecommendationViewModel) {
     // 推荐卡片横滑列表，统一图片、标签、标题和元信息的布局。
     Column() {
       Stack({ alignContent: Alignment.TopStart }) {
         this.RecommendationImage(item)
-        Text(item.tag)
+        Text(this.recommendationDisplayTag(item))
           .fontSize(11)
           .fontWeight(FontWeight.Bold)
           .fontColor(Color.White)
@@ -692,7 +727,7 @@ export struct HomePage {
         Text(item.title)
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#151A28')
+          .fontColor(this.recommendationCardTitleColor(item))
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -723,14 +758,13 @@ export struct HomePage {
     .clip(true)
     .shadow({ radius: 18, color: '#16000000', offsetX: 0, offsetY: 8 })
     .onClick(() => {
-      this.selectedRecommendationId = item.id;
-      this.agentTaskDraft = item.agentTask;
+      this.openRecommendationDetail(item);
     })
   }
 
   @Builder EmptyRecommendationCard() {
     Row() {
-      Text('暂无待办事项')
+      Text(this.showAllRecommendations ? '暂无待办事项' : '暂无未完成待办')
         .fontSize(14)
         .fontColor('#7C8494')
     }
@@ -739,23 +773,47 @@ export struct HomePage {
   }
 
   private recommendationPageCount(): number {
-    return Math.max(1, Math.ceil(this.profile.recommendations.length / 4));
+    return Math.max(1, Math.ceil(this.visibleRecommendations().length / 4));
+  }
+
+  private currentRecommendationPageIndex(): number {
+    let maxPageIndex = this.recommendationPageCount() - 1;
+    if (this.recommendationPageIndex < 0) {
+      return 0;
+    }
+    if (this.recommendationPageIndex > maxPageIndex) {
+      return maxPageIndex;
+    }
+    return this.recommendationPageIndex;
+  }
+
+  private visibleRecommendations(): HomeRecommendationViewModel[] {
+    if (this.showAllRecommendations) {
+      let pending = this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
+      let completed = this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.completed);
+      return pending.concat(completed);
+    }
+    return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => !item.completed);
   }
 
   private recommendationPageItems(): HomeRecommendationViewModel[] {
-    if (this.profile.recommendations.length === 0) {
+    let items = this.visibleRecommendations();
+    if (items.length === 0) {
       return [];
     }
-    let page = this.recommendationBatchIndex % this.recommendationPageCount();
+    let page = this.currentRecommendationPageIndex();
     let start = page * 4;
-    return this.profile.recommendations.slice(start, start + 4);
+    return items.slice(start, start + 4);
   }
 
-  private nextRecommendationBatch(): void {
-    if (this.profile.recommendations.length <= 4) {
-      return;
-    }
-    this.recommendationBatchIndex = (this.recommendationBatchIndex + 1) % this.recommendationPageCount();
+  private setRecommendationPage(index: number): void {
+    let maxPageIndex = this.recommendationPageCount() - 1;
+    let nextIndex = Math.max(0, Math.min(index, maxPageIndex));
+    this.recommendationPageIndex = nextIndex;
+  }
+
+  private shouldShowRecommendationPagination(): boolean {
+    return this.visibleRecommendations().length > 0;
   }
 
   private selectedRecommendationItems(): HomeRecommendationViewModel[] {
@@ -763,6 +821,20 @@ export struct HomePage {
       return [];
     }
     return this.profile.recommendations.filter((item: HomeRecommendationViewModel): boolean => item.id === this.selectedRecommendationId).slice(0, 1);
+  }
+
+  private setRecommendationFilter(showAll: boolean): void {
+    this.showAllRecommendations = showAll;
+    this.recommendationPageIndex = 0;
+    if (!showAll) {
+      this.closeRecommendationDetail();
+    }
+  }
+
+  private setRecommendationCompleted(item: HomeRecommendationViewModel, completed: boolean): void {
+    this.selectedRecommendationCompletedOverrideId = item.id;
+    this.selectedRecommendationCompletedOverrideValue = completed;
+    this.onSetRecommendationCompleted(item.id, completed);
   }
 
   private async executeAgentTask(): Promise<void> {
@@ -777,7 +849,7 @@ export struct HomePage {
     this.agentTaskSubmitting = true;
     try {
       await this.onExecuteAgentTask(task);
-      this.selectedRecommendationId = '';
+      this.closeRecommendationDetail();
     } catch (e) {
       let err = e as Error;
       showToastSafely('任务下发失败：' + err.message, 1800);
@@ -786,24 +858,99 @@ export struct HomePage {
     }
   }
 
-  @Builder RecommendationDetailImage(item: HomeRecommendationViewModel) {
-    if (item.thumbnailUri.length > 0) {
-      Scroll() {
-        Row() {
-          Image(item.thumbnailUri)
-            .width(128)
-            .height(260)
-            .objectFit(ImageFit.Contain)
-            .borderRadius(12)
-        }
-        .alignItems(VerticalAlign.Top)
+  @Builder RecommendationFilterButton(label: string, showAll: boolean) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.showAllRecommendations === showAll ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.showAllRecommendations === showAll ? Color.White : '#6D7481')
+      .height(30)
+      .padding({ left: 12, right: 12 })
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.showAllRecommendations === showAll ? '#8066FF' : '#F1F3F8')
+      .borderRadius(15)
+      .onClick(() => {
+        this.setRecommendationFilter(showAll);
+      })
+  }
+
+  @Builder RecommendationPagination() {
+    if (this.shouldShowRecommendationPagination()) {
+      Row() {
+        Button('上一页')
+          .fontSize(12)
+          .fontColor(this.currentRecommendationPageIndex() > 0 ? '#8066FF' : '#A7ADBA')
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .backgroundColor(this.currentRecommendationPageIndex() > 0 ? '#F0ECFF' : '#EEF0F5')
+          .enabled(this.currentRecommendationPageIndex() > 0)
+          .onClick(() => {
+            this.setRecommendationPage(this.currentRecommendationPageIndex() - 1);
+          })
+        Text(`${this.currentRecommendationPageIndex() + 1}/${this.recommendationPageCount()}`)
+          .fontSize(13)
+          .fontColor('#6D7481')
+          .textAlign(TextAlign.Center)
+          .layoutWeight(1)
+          .maxLines(1)
+        Button('下一页')
+          .fontSize(12)
+          .fontColor(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#8066FF' : '#A7ADBA')
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .backgroundColor(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1 ? '#F0ECFF' : '#EEF0F5')
+          .enabled(this.currentRecommendationPageIndex() < this.recommendationPageCount() - 1)
+          .onClick(() => {
+            this.setRecommendationPage(this.currentRecommendationPageIndex() + 1);
+          })
       }
-      .width('100%')
-      .height(270)
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .margin({ top: 14 })
+      .width('92%')
+      .margin({ top: 12 })
+    }
+  }
+
+  @Builder RecommendationDetailImage(image: CollectionImageViewModel) {
+    if (image.available && image.uri.length > 0) {
+      Column() {
+        Image(image.uri)
+          .width(128)
+          .height(260)
+          .objectFit(ImageFit.Contain)
+          .borderRadius(12)
+      }
+      .width(128)
+      .height(260)
+      .margin({ right: 10 })
     } else {
+      Column() {
+        Text('图片暂不可显示')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#596273')
+          .maxLines(1)
+        Text('图片引用暂不可显示')
+          .fontSize(12)
+          .fontColor('#8A92A3')
+          .margin({ top: 5 })
+          .maxLines(1)
+        Text(image.ref)
+          .fontSize(10)
+          .fontColor('#A0A7B5')
+          .margin({ top: 6 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width(220)
+      .height(240)
+      .padding(12)
+      .backgroundColor('#F7F9FC')
+      .borderRadius(12)
+      .margin({ right: 10 })
+    }
+  }
+
+  @Builder RecommendationDetailImages(item: HomeRecommendationViewModel) {
+    if (item.imageRefs.length === 0) {
       Column() {
         Text('暂无图片')
           .fontSize(13)
@@ -816,7 +963,49 @@ export struct HomePage {
       .backgroundColor('#F7F9FC')
       .borderRadius(12)
       .margin({ top: 14 })
+    } else {
+      Scroll() {
+        Row() {
+          ForEach(item.imageRefs, (image: CollectionImageViewModel, index: number) => {
+            this.RecommendationDetailImage(image)
+          }, (image: CollectionImageViewModel, index: number) => item.id + '_image_' + index.toString())
+        }
+        .alignItems(VerticalAlign.Top)
+      }
+      .width('100%')
+      .height(270)
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .margin({ top: 14 })
     }
+  }
+
+  @Builder RecommendationCompletedCheckbox(item: HomeRecommendationViewModel) {
+    Row() {
+      Blank().layoutWeight(1)
+      Row() {
+        Checkbox({ name: 'homeRecommendationCompleted-' + item.id })
+          .select(this.recommendationCompleted(item))
+          .selectedColor(item.color)
+          .margin({ right: 6 })
+          .onChange((checked: boolean) => {
+            this.setRecommendationCompleted(item, checked);
+          })
+        Text('已完成')
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.recommendationCompleted(item) ? item.color : '#6D7481')
+          .maxLines(1)
+          .padding({ top: 6, bottom: 6 })
+          .onClick(() => {
+            this.setRecommendationCompleted(item, !this.recommendationCompleted(item));
+          })
+      }
+      .alignItems(VerticalAlign.Center)
+      .height(32)
+    }
+    .width('100%')
+    .margin({ top: 12 })
   }
 
   @Builder RecommendationDetailOverlay(item: HomeRecommendationViewModel) {
@@ -826,11 +1015,11 @@ export struct HomePage {
         .height('100%')
         .backgroundColor('#66000000')
         .onClick(() => {
-          this.selectedRecommendationId = '';
+          this.closeRecommendationDetail();
         })
       Column() {
         Row() {
-          Text(item.tag)
+          Text(this.recommendationDisplayTag(item))
             .fontSize(12)
             .fontWeight(FontWeight.Bold)
             .fontColor(Color.White)
@@ -840,9 +1029,10 @@ export struct HomePage {
           Text('关闭')
             .fontSize(13)
             .fontColor('#7C8494')
-            .margin({ left: 12 })
+            .layoutWeight(1)
+            .textAlign(TextAlign.End)
             .onClick(() => {
-              this.selectedRecommendationId = '';
+              this.closeRecommendationDetail();
             })
         }.width('100%').justifyContent(FlexAlign.SpaceBetween)
         Text(item.title)
@@ -851,12 +1041,13 @@ export struct HomePage {
           .fontColor('#151A28')
           .width('100%')
           .margin({ top: 14 })
-        this.RecommendationDetailImage(item)
+        this.RecommendationDetailImages(item)
         Text(item.desc.length > 0 ? item.desc : '暂无描述')
           .fontSize(14)
           .fontColor('#4E5668')
           .width('100%')
           .margin({ top: 14 })
+        this.RecommendationCompletedCheckbox(item)
         if (item.agentTask.length > 0) {
           Column() {
             Text('执行任务')
@@ -866,12 +1057,13 @@ export struct HomePage {
               .width('100%')
             TextArea({ placeholder: '调整要交给 GUI Agent 的任务', text: this.agentTaskDraft })
               .width('100%')
-              .height(92)
+              .height(56)
               .fontSize(14)
+              .lineHeight(20)
               .fontColor('#222B3A')
               .backgroundColor('#F5F7FB')
               .borderRadius(12)
-              .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
               .margin({ top: 10 })
               .onChange((value: string) => {
                 this.agentTaskDraft = value;
@@ -980,15 +1172,12 @@ export struct HomePage {
 
           Row() {
             Text('为你推荐').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
-            Text('换一批')
-              .fontSize(14)
-              .fontColor(this.profile.recommendations.length > 4 ? '#8066FF' : '#C0C5D0')
-              .onClick(() => {
-                this.nextRecommendationBatch();
-              })
-          }.width('92%').margin({ top: 24, bottom: 14 })
+            this.RecommendationFilterButton('未完成', false)
+            Blank().width(8)
+            this.RecommendationFilterButton('全部', true)
+          }.width('92%').margin({ top: 24 })
 
-          if (this.profile.recommendations.length === 0) {
+          if (this.visibleRecommendations().length === 0) {
             this.EmptyRecommendationCard()
           } else {
             Grid() {
@@ -996,13 +1185,15 @@ export struct HomePage {
                 GridItem() {
                   this.RecommendCard(item)
                 }
-              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title)
+              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
             }
             .columnsTemplate('1fr 1fr')
             .columnsGap(12)
             .rowsGap(12)
             .width('92%')
             .height(368)
+            .margin({ top: 14 })
+            this.RecommendationPagination()
           }
 
           Blank().height(88)

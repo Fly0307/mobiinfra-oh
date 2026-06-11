@@ -223,7 +223,7 @@ export class ChatSessionStorage {
     let targetPath = ChatSessionStorage.uniqueAssetPath(filesDir, sessionId,
       ChatSessionStorage.fileNameFromPath(sourcePath));
     try {
-      fs.copyFileSync(sourcePath, targetPath);
+      ChatSessionStorage.copyFile(sourcePath, targetPath);
       return 'file://' + targetPath;
     } catch (e) {
       return imagePath;
@@ -324,11 +324,32 @@ export class ChatSessionStorage {
     }
   }
 
+  private static copyFile(sourcePath: string, targetPath: string): void {
+    let sourceFile = fs.openSync(sourcePath, fs.OpenMode.READ_ONLY);
+    let targetFile = fs.openSync(targetPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      let stat = fs.statSync(sourcePath);
+      let buffer = new ArrayBuffer(stat.size);
+      fs.readSync(sourceFile.fd, buffer);
+      fs.writeSync(targetFile.fd, buffer);
+    } finally {
+      fs.closeSync(sourceFile);
+      fs.closeSync(targetFile);
+    }
+  }
+
+  private static childPath(parent: string, child: string): string {
+    if (child.startsWith('/')) {
+      return child;
+    }
+    return parent + '/' + child;
+  }
+
   private static deletePathRecursive(path: string): void {
     try {
       let children = fs.listFileSync(path);
       for (let i = 0; i < children.length; i++) {
-        ChatSessionStorage.deletePathRecursive(path + '/' + children[i]);
+        ChatSessionStorage.deletePathRecursive(ChatSessionStorage.childPath(path, children[i]));
       }
       fs.rmdirSync(path);
     } catch (e) {

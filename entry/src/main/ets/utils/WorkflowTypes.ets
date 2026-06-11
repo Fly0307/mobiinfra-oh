@@ -148,4 +148,6 @@ export interface HdcBridgeResponse {
   height?: number;
   action?: string;
   package_name?: string;
+  no_reason?: boolean;
+  max_steps?: number;
 }

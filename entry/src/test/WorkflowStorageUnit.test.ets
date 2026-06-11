@@ -96,13 +96,15 @@ export default function workflowStorageUnitTest() {
       let question = findWeixinChatSummaryQuestion(workflow.steps);
 
       expect(question.length > 0).assertTrue();
-      expect(question.indexOf('联系人/群聊名称') >= 0).assertTrue();
+      expect(question.indexOf('聊天对象') >= 0).assertTrue();
       expect(question.indexOf('当前聊天对象') >= 0).assertTrue();
-      expect(question.indexOf('消息时间锚点') >= 0).assertTrue();
-      expect(question.indexOf('原文相对时间') >= 0).assertTrue();
-      expect(question.indexOf('解析后的绝对时间') >= 0).assertTrue();
-      expect(question.indexOf('内容自身时间锚点') >= 0).assertTrue();
-      expect(question.indexOf('只有完全没有内容锚点时才使用任务执行日期兜底') >= 0).assertTrue();
+      expect(question.indexOf('消息发送绝对时间') >= 0).assertTrue();
+      expect(question.indexOf('聊天日期分隔符') >= 0).assertTrue();
+      expect(question.indexOf('同一时间锚点') >= 0).assertTrue();
+      expect(question.indexOf('只有截图中完全没有聊天时间锚点时') >= 0).assertTrue();
+      expect(question.indexOf('任务执行时间') >= 0).assertTrue();
+      expect(question.indexOf('事件相对时间') >= 0).assertTrue();
+      expect(question.indexOf('事件绝对时间') >= 0).assertTrue();
       let forbiddenTimeEventsKey = 'time' + '_events';
       expect(question.indexOf(forbiddenTimeEventsKey)).assertEqual(-1);
     });

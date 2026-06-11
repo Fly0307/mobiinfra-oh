@@ -24,6 +24,12 @@ export interface HomeRecommendationBuildResult {
   totalEvents: number;
   recommendationCount: number;
   reused: boolean;
+  prunedCount: number;
+}
+
+export interface HomeRecommendationPruneResult {
+  document: HomeRecommendationsDocument;
+  prunedCount: number;
 }
 
 interface HomeRecommendationPlanningContext {
@@ -34,7 +40,7 @@ interface HomeRecommendationPlanningContext {
   today: string;
 }
 
-const HOME_TODO_NO_DEADLINE_LIMIT: number = 80;
+const HOME_TODO_NO_DEADLINE_RECENT_DAYS: number = 7;
 
 export function homeRecommendationSourceInputFingerprint(events: HomeRecommendationPlannerEvent[]): string {
   let parts: string[] = ['home_recommendation_source_v1'];
@@ -73,8 +79,54 @@ export function isHomeRecommendationSourceReusable(storedHash: string, currentHa
   return true;
 }
 
-export function isFutureTodoDeadline(deadline: string, today: string): boolean {
-  return isIsoDate(deadline) && isIsoDate(today) && deadline > today;
+export function isCurrentOrFutureTodoDeadline(deadline: string, today: string): boolean {
+  return isIsoDate(deadline) && isIsoDate(today) && deadline >= today;
+}
+
+export function pruneHomeRecommendationsDocument(document: HomeRecommendationsDocument, candidateEventIds: string[]): HomeRecommendationPruneResult {
+  let candidates: Record<string, boolean> = new Object() as Record<string, boolean>;
+  (candidateEventIds || []).forEach((id: string) => {
+    let normalized = normalizeFreeText(id);
+    if (normalized.length > 0) {
+      candidates[normalized] = true;
+    }
+  });
+
+  let recommendations: HomeRecommendationState[] = [];
+  let prunedCount = 0;
+  (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+    let sourceEventIds = item.source_event_ids || [];
+    if (sourceEventIds.length === 0) {
+      prunedCount++;
+      return;
+    }
+    for (let sourceEventId of sourceEventIds) {
+      let normalized = normalizeFreeText(sourceEventId);
+      if (normalized.length === 0 || candidates[normalized] !== true) {
+        prunedCount++;
+        return;
+      }
+    }
+    recommendations.push(item);
+  });
+
+  if (prunedCount === 0) {
+    return {
+      document: document,
+      prunedCount: 0
+    };
+  }
+
+  let prunedDocument: HomeRecommendationsDocument = {
+    generated_at: normalizeFreeText(document.generated_at),
+    input_hash: normalizeFreeText(document.input_hash),
+    total_events: candidateEventIds.length,
+    recommendations: recommendations
+  };
+  return {
+    document: prunedDocument,
+    prunedCount: prunedCount
+  };
 }
 
 export function recommendationTodoDeadlineMeta(deadline: string): string {
@@ -114,16 +166,22 @@ export class HomeRecommendationService {
     let context = this.planningContext();
     let inputHash = this.inputHash(context, modelConfig);
     let previous = this.loadDocument();
+    let pruneResult = pruneHomeRecommendationsDocument(previous, context.candidateEventIds);
+    previous = pruneResult.document;
     let previousGenerated = normalizeFreeText(previous.generated_at).length > 0;
     let previousHasInputHash = normalizeFreeText(previous.input_hash).length > 0;
     let previousEmptyButMissing = (previous.recommendations || []).length === 0 && (!previousGenerated || !previousHasInputHash);
     let shouldRebuildEmpty = forceWhenEmpty && context.candidateEventIds.length > 0 && previousEmptyButMissing;
     if (previous.input_hash === inputHash && !shouldRebuildEmpty) {
-      dataManagerInfo(`Home recommendations reused: events=${context.candidateEventIds.length}, recommendations=${previous.recommendations.length}`);
+      if (pruneResult.prunedCount > 0) {
+        this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), previous as Object);
+      }
+      dataManagerInfo(`Home recommendations reused: events=${context.candidateEventIds.length}, recommendations=${previous.recommendations.length}, pruned=${pruneResult.prunedCount}`);
       return {
         totalEvents: context.candidateEventIds.length,
         recommendationCount: previous.recommendations.length,
-        reused: true
+        reused: true,
+        prunedCount: pruneResult.prunedCount
       };
     }
     if (shouldRebuildEmpty) {
@@ -141,7 +199,8 @@ export class HomeRecommendationService {
     return {
       totalEvents: context.candidateEventIds.length,
       recommendationCount: recommendations.length,
-      reused: false
+      reused: false,
+      prunedCount: pruneResult.prunedCount
     };
   }
 
@@ -149,17 +208,29 @@ export class HomeRecommendationService {
     return this.storage.readJson<HomeRecommendationsDocument>(this.paths.homeRecommendationsPath(), emptyHomeRecommendationsDocument());
   }
 
+  pruneInactiveRecommendationsForToday(): number {
+    this.paths.ensureBaseDirs();
+    let context = this.planningContext();
+    let document = this.loadDocument();
+    let result = pruneHomeRecommendationsDocument(document, context.candidateEventIds);
+    if (result.prunedCount > 0) {
+      this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), result.document as Object);
+      dataManagerInfo(`Home recommendations pruned: events=${context.candidateEventIds.length}, pruned=${result.prunedCount}, recommendations=${result.document.recommendations.length}`);
+    }
+    return result.prunedCount;
+  }
+
   private planningContext(): HomeRecommendationPlanningContext {
     let today = this.currentDateKey();
-    let todoEvents = this.indexService.loadHomeTodoCandidateEvents(today, HOME_TODO_NO_DEADLINE_LIMIT);
+    let todoEvents = this.indexService.loadHomeTodoCandidateEvents(today, HOME_TODO_NO_DEADLINE_RECENT_DAYS);
     let candidates: IndexedEvent[] = [];
     Object.keys(todoEvents).forEach((eventId: string) => {
       let event = todoEvents[eventId];
       let todoType = normalizeFreeText(event.todo.type);
       let deadline = normalizeFreeText(event.todo.deadline);
-      let hasFutureDeadline = isFutureTodoDeadline(deadline, today);
+      let hasCurrentOrFutureDeadline = isCurrentOrFutureTodoDeadline(deadline, today);
       let hasNoDeadlineAction = deadline.length === 0 && todoType.length > 0;
-      if (hasFutureDeadline || hasNoDeadlineAction) {
+      if (hasCurrentOrFutureDeadline || hasNoDeadlineAction) {
         candidates.push(event);
       }
     });
@@ -282,7 +353,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: currentHash
+        source_input_hash: currentHash,
+        completed: item.completed === true
       };
       result.push(recommendation);
       usedIds[id] = true;
@@ -330,7 +402,8 @@ export class HomeRecommendationService {
         meta: this.deadlineMeta(eventIds, context.events),
         domain: domain,
         source_event_ids: eventIds,
-        source_input_hash: this.recommendationSourceInputHash(eventIds, context)
+        source_input_hash: this.recommendationSourceInputHash(eventIds, context),
+        completed: false
       };
       result.push(recommendation);
       eventIds.forEach((eventId: string) => covered[eventId] = true);

@@ -28,6 +28,7 @@ import {
   DOMAIN_DISPLAY_NAMES,
   HomeDomainViewModel,
   HomeProfileViewModel,
+  HomeRecommendationsDocument,
   HomeRecommendationState,
   HomeRecommendationViewModel,
   IndexedEvent,
@@ -48,11 +49,12 @@ import {
   nowIsoLocal,
   parseDailyLogDocument,
   parseNumberedEntries,
-  profileShortSummaryFromText,
   sourceAppDisplayName,
   sourceDisplayName,
   sourceRef,
-  stableUnique
+  stableUnique,
+  addDays,
+  isIsoDate
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -114,6 +116,89 @@ function defaultHomeDomains(): HomeDomainViewModel[] {
 
 function defaultRecommendations(): HomeRecommendationViewModel[] {
   return [];
+}
+
+export function shouldShowHomeRecommendationInView(sourceEventIds: string[], eventMap: Record<string, IndexedEvent>, today: string): boolean {
+  if (!isIsoDate(today)) {
+    return false;
+  }
+  let eventIds = stableUnique((sourceEventIds || []).map((id: string): string => normalizeFreeText(id))).filter((id: string): boolean => id.length > 0);
+  if (eventIds.length === 0) {
+    return false;
+  }
+  let recentLowerBoundExclusive = addDays(today, -7);
+  for (let eventId of eventIds) {
+    let event = eventMap[eventId];
+    if (!event) {
+      return false;
+    }
+    let deadline = normalizeFreeText(event.todo.deadline);
+    if (isIsoDate(deadline)) {
+      if (deadline < today) {
+        return false;
+      }
+      continue;
+    }
+    let eventDate = normalizeFreeText(event.event_date);
+    if (!isIsoDate(eventDate) || eventDate <= recentLowerBoundExclusive) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function setHomeRecommendationCompletedInDocument(document: HomeRecommendationsDocument, id: string, completed: boolean): boolean {
+  let targetId = normalizeFreeText(id);
+  if (targetId.length === 0) {
+    return false;
+  }
+  let matched = false;
+  (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+    if (normalizeFreeText(item.id) !== targetId) {
+      return;
+    }
+    matched = true;
+    item.completed = completed;
+  });
+  return matched;
+}
+
+export function homeProfileDomainDescription(doc: ProfileDomainState | undefined): string {
+  if (!doc || doc.event_count === 0) {
+    return '暂无数据';
+  }
+  let shortSummary = normalizeFreeText(doc.short_summary);
+  if (shortSummary.length > 0) {
+    return shortSummary;
+  }
+  let summary = normalizeFreeText(doc.summary);
+  let claims = doc.claims || [];
+  if (summary.length > 0 || claims.length > 0) {
+    return '查看画像';
+  }
+  return '暂无数据';
+}
+
+export function homeProfileDomainFullDescription(doc: ProfileDomainState | undefined): string {
+  if (!doc || doc.event_count === 0) {
+    return '暂无数据';
+  }
+  let summary = normalizeFreeText(doc.summary);
+  if (summary.length > 0) {
+    return summary;
+  }
+  return '暂无数据';
+}
+
+export function homeProfileCompleteness(domains: HomeDomainViewModel[]): number {
+  let total = 4;
+  let count = 0;
+  domains.slice(0, total).forEach((domain: HomeDomainViewModel) => {
+    if (normalizeFreeText(domain.desc) !== '暂无数据') {
+      count++;
+    }
+  });
+  return Math.round(count * 100 / total);
 }
 
 function emptyCollectionViewModel(index: number): CollectionViewModel {
@@ -193,11 +278,21 @@ export class DataManagerFacade {
       let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
-      if (groups.updatedGroupDocs > 0 || !recommendations.reused) {
+      if (groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
+        let actions: string[] = [];
+        if (groups.updatedGroupDocs > 0) {
+          actions.push(`补充更新 ${groups.updatedGroupDocs} 个采集分组`);
+        }
+        if (!recommendations.reused) {
+          actions.push(`生成 ${recommendations.recommendationCount} 条待办推荐`);
+        }
+        if (recommendations.prunedCount > 0) {
+          actions.push(`清理 ${recommendations.prunedCount} 条过期待办推荐`);
+        }
         skipped.skipped = false;
-        skipped.message = `daily-log 无新增，补充更新 ${groups.updatedGroupDocs} 个采集分组，生成 ${recommendations.recommendationCount} 条待办推荐`;
+        skipped.message = `daily-log 无新增，${actions.join('，')}`;
       }
-      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}`);
+      dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}, prunedRecommendations=${recommendations.prunedCount}`);
       this.emitProgress(progress, '完成', 'daily-log 无新增', 100, 100, 100);
       return skipped;
     }
@@ -493,26 +588,14 @@ export class DataManagerFacade {
   }
 
   loadHomeViewModel(): HomeProfileViewModel {
+    this.homeRecommendationService.pruneInactiveRecommendationsForToday();
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
       return createEmptyHomeProfileViewModel();
     }
-    let domains = defaultHomeDomains().map((item: HomeDomainViewModel) => {
-      let doc = profile.domains[item.domain];
-      let domain: HomeDomainViewModel = {
-        domain: item.domain,
-        icon: item.icon,
-        title: item.title,
-        desc: this.domainDescription(doc),
-        fullDesc: this.domainFullDescription(doc),
-        claims: this.domainClaimStatements(doc),
-        color: item.color,
-        eventCount: doc ? doc.event_count : 0
-      };
-      return domain;
-    });
+    let domains = this.homeProfileDomains(profile);
     let recommendations = this.homeRecommendations();
-    let completeness = this.profileCompleteness(profile);
+    let completeness = homeProfileCompleteness(domains);
     let avatar = this.avatarService.homeView(profile, completeness);
     return {
       avatarUri: avatar.avatarUri,
@@ -527,6 +610,30 @@ export class DataManagerFacade {
       recommendations: recommendations,
       empty: false
     };
+  }
+
+  setHomeRecommendationCompleted(id: string, completed: boolean): boolean {
+    let targetId = normalizeFreeText(id);
+    if (targetId.length === 0) {
+      return false;
+    }
+    let document = this.homeRecommendationService.loadDocument();
+    let beforeCompleted = false;
+    (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      if (normalizeFreeText(item.id) === targetId) {
+        beforeCompleted = item.completed === true;
+      }
+    });
+    let matched = setHomeRecommendationCompletedInDocument(document, targetId, completed);
+    if (!matched) {
+      return false;
+    }
+    if (beforeCompleted === completed) {
+      return true;
+    }
+    this.storage.writeJsonAtomic(this.paths.homeRecommendationsPath(), document as Object);
+    dataManagerInfo(`Home recommendation completed updated: id=${targetId}, completed=${completed}`);
+    return true;
   }
 
   buildAvatarGenerateRequest(mode: 'text_to_image' | 'image_to_image', sourceImage: string,
@@ -777,43 +884,6 @@ export class DataManagerFacade {
     return `最近整理了 ${events.length} 条记录，最新来自 ${latest.sources.join('、') || '本地日志'}。`;
   }
 
-  private domainDescription(doc: ProfileDomainState | undefined): string {
-    if (!doc || doc.event_count === 0) {
-      return '暂无数据';
-    }
-    let shortSummary = normalizeFreeText(doc.short_summary);
-    let claims = doc.claims || [];
-    if (shortSummary.length > 0) {
-      return shortSummary;
-    }
-    if (claims.length > 0) {
-      let fromClaim = profileShortSummaryFromText(doc.domain, claims[0].statement, '');
-      if (fromClaim.length === 4) {
-        return fromClaim;
-      }
-    }
-    let fromSummary = profileShortSummaryFromText(doc.domain, doc.summary, '');
-    if (fromSummary.length === 4) {
-      return fromSummary;
-    }
-    return '暂无数据';
-  }
-
-  private domainFullDescription(doc: ProfileDomainState | undefined): string {
-    if (!doc || doc.event_count === 0) {
-      return '暂无数据';
-    }
-    let summary = normalizeFreeText(doc.summary);
-    if (summary.length > 0) {
-      return summary;
-    }
-    let claims = this.domainClaimStatements(doc);
-    if (claims.length > 0) {
-      return claims.join('；');
-    }
-    return '暂无数据';
-  }
-
   private domainClaimStatements(doc: ProfileDomainState | undefined): string[] {
     if (!doc || doc.event_count === 0) {
       return [];
@@ -857,19 +927,24 @@ export class DataManagerFacade {
   }
 
   private profileCompleteness(profile: ProfileState): number {
-    let lifestyleDomains = ['eat', 'wear', 'live', 'travel'];
-    let score = 0;
-    lifestyleDomains.forEach((domain: string) => {
-      let doc = profile.domains[domain];
-      if (!doc || doc.event_count === 0) {
-        return;
-      }
-      score += 18;
-      if (normalizeFreeText(doc.summary).length > 0 || (doc.claims || []).length > 0) {
-        score += 7;
-      }
+    return homeProfileCompleteness(this.homeProfileDomains(profile));
+  }
+
+  private homeProfileDomains(profile: ProfileState): HomeDomainViewModel[] {
+    return defaultHomeDomains().map((item: HomeDomainViewModel) => {
+      let doc = profile.domains[item.domain];
+      let domain: HomeDomainViewModel = {
+        domain: item.domain,
+        icon: item.icon,
+        title: item.title,
+        desc: homeProfileDomainDescription(doc),
+        fullDesc: homeProfileDomainFullDescription(doc),
+        claims: this.domainClaimStatements(doc),
+        color: item.color,
+        eventCount: doc ? doc.event_count : 0
+      };
+      return domain;
     });
-    return Math.min(100, score);
   }
 
   private homeRecommendations(): HomeRecommendationViewModel[] {
@@ -878,7 +953,7 @@ export class DataManagerFacade {
     colors['wear'] = '#7669FF';
     colors['live'] = '#FF963D';
     colors['travel'] = '#4B9BFF';
-    colors['work'] = '#8066FF';
+    colors['work'] = '#E35D6A';
     colors['other'] = '#8B93A4';
     let document = this.homeRecommendationService.loadDocument();
     let allEventIds: string[] = [];
@@ -886,9 +961,14 @@ export class DataManagerFacade {
       allEventIds = allEventIds.concat(item.source_event_ids || []);
     });
     let eventMap = this.indexService.loadEventsByIds(stableUnique(allEventIds));
+    let today = nowIsoLocal().substring(0, 10);
     let result: HomeRecommendationViewModel[] = [];
     (document.recommendations || []).forEach((item: HomeRecommendationState) => {
+      if (!shouldShowHomeRecommendationInView(item.source_event_ids || [], eventMap, today)) {
+        return;
+      }
       let domain = normalizeFreeText(item.domain) || 'other';
+      let imageRefs = this.recommendationImages(item, eventMap);
       let recommendation: HomeRecommendationViewModel = {
         id: normalizeFreeText(item.id),
         domain: domain,
@@ -897,10 +977,12 @@ export class DataManagerFacade {
         desc: normalizeFreeText(item.desc),
         meta: this.recommendationMeta(item.meta),
         color: colors[domain] || '#8066FF',
-        thumbnailUri: this.recommendationThumbnail(item, eventMap),
+        imageRefs: imageRefs,
+        thumbnailUri: this.recommendationThumbnail(imageRefs),
         sourceEventIds: (item.source_event_ids || []).slice(),
         detail: this.recommendationDetail(item, eventMap),
-        agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap)
+        agentTask: this.firstAgentTask(item.source_event_ids || [], eventMap),
+        completed: item.completed === true
       };
       if (recommendation.id.length > 0 && recommendation.title.length > 0) {
         result.push(recommendation);
@@ -1040,7 +1122,9 @@ export class DataManagerFacade {
     return lines.join('\n');
   }
 
-  private recommendationThumbnail(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): string {
+  private recommendationImages(item: HomeRecommendationState, eventMap: Record<string, IndexedEvent>): CollectionImageViewModel[] {
+    let result: CollectionImageViewModel[] = [];
+    let seen: StringMap = createStringMap();
     for (let eventId of item.source_event_ids || []) {
       let event = eventMap[eventId];
       if (!event) {
@@ -1048,9 +1132,21 @@ export class DataManagerFacade {
       }
       let images: CollectionImageViewModel[] = this.imageResolver.resolveAll(event.image_paths || []);
       for (let image of images) {
-        if (image.available && image.uri.length > 0) {
-          return image.uri;
+        let key = normalizeFreeText(image.ref) + '|' + normalizeFreeText(image.uri);
+        if (seen[key] === '1') {
+          continue;
         }
+        seen[key] = '1';
+        result.push(image);
+      }
+    }
+    return result;
+  }
+
+  private recommendationThumbnail(images: CollectionImageViewModel[]): string {
+    for (let image of images) {
+      if (image.available && image.uri.length > 0) {
+        return image.uri;
       }
     }
     return '';

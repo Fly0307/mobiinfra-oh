@@ -6,6 +6,8 @@ import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
+import { AgentPromptTemplates } from './AgentPromptTemplates';
+import { AgentActionParser } from './AgentActionParser';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -19,7 +21,7 @@ import {
 } from './WorkflowTypes';
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
-const MAX_GUI_STEPS = 15;
+const MAX_GUI_STEPS = 20;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 interface PlannerResult {
@@ -336,7 +338,6 @@ export class WorkflowRunner {
     let safeName = this.sanitizeFileName(task.source || task.id);
     let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
     WorkflowStorage.ensureDirectory(dir);
-    WorkflowStorage.ensureDirectory(dir + '/steps');
     return dir;
   }
 
@@ -568,7 +569,7 @@ export class WorkflowRunner {
       '\n如果不知道 package_name，可以留空，但 app_name 必须填写。' +
       '\n用户任务：' + taskDescription;
     try {
-      let template = await this.hdcBridge.loadPromptTemplate('planner_oneshot_harmony.md');
+      let template = AgentPromptTemplates.load('planner_oneshot_harmony.md');
       if (template.trim().length === 0) {
         return this.withExecutionDatePrompt(fallbackPrompt, 'Planner 用户任务');
       }
@@ -611,14 +612,16 @@ export class WorkflowRunner {
       this.log('Decider 截图完成：' + width + 'x' + height);
       let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
       this.log('Decider response:\n' + response);
-      let parsed = this.extractJsonMap(response);
-      let action = this.getMapString(parsed, 'action').toLowerCase();
+      let parsedAction = AgentActionParser.parse(response);
+      let parsed = parsedAction.data;
+      let action = parsedAction.action;
       AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
         stopReason = 'TASK_COMPLETED_' + action;
         break;
       }
-      await this.hdcBridge.executeModelAction(response, width * 2, height * 2);
+      let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
+      await this.hdcBridge.guiAction(hdcPayload);
       history.push(ArkJSON.stringify(parsed));
     }
     return stopReason;
@@ -635,7 +638,7 @@ export class WorkflowRunner {
       let shot = await this.hdcBridge.screenshot();
       let imageBase64 = shot.image_b64 || '';
       let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
-      let imagePath = this.stepDir(actualId) + '/' + imageFileName;
+      let imagePath = this.runArtifactPath(actualId, imageFileName);
       WorkflowStorage.writeBase64Image(imagePath, imageBase64);
       output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
       output.image_b64 = imageBase64;
@@ -1254,27 +1257,11 @@ export class WorkflowRunner {
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {
-    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
-      return ArkJSON.parse(text) as WorkflowJsonMap;
+      return AgentActionParser.extractJsonMap(raw, true);
     } catch (e) {
       let err = e as Error;
-      let candidates = WorkflowJsonRepair.repairCandidates(text);
-      let repairMessage = '';
-      for (let i = 0; i < candidates.length; i++) {
-        try {
-          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
-          this.log('JSON parse repaired after model returned non-strict JSON');
-          return parsed;
-        } catch (repairError) {
-          let repairErr = repairError as Error;
-          repairMessage = repairErr.message || String(repairError);
-        }
-      }
       let message = 'JSON parse failed, raw response preserved: ' + (err.message || String(e));
-      if (repairMessage.length > 0) {
-        message += '; repair failed: ' + repairMessage;
-      }
       this.log(message);
       if (failOnParseError) {
         throw new Error('Planner JSON 解析失败，终止执行，不再进入 Decider：' + (err.message || String(e)));
@@ -1326,9 +1313,11 @@ export class WorkflowRunner {
   }
 
   private stepDir(actualId: string): string {
-    let dir = this.runDir + '/steps/' + actualId;
-    WorkflowStorage.ensureDirectory(dir);
-    return dir;
+    return this.runDir + '/steps/' + actualId;
+  }
+
+  private runArtifactPath(actualId: string, fileName: string): string {
+    return this.runDir + '/' + this.sanitizeFileName('step-' + actualId + '-' + fileName);
   }
 
   private screenshotFileName(value: string): string {

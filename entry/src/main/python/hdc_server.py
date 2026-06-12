@@ -1535,7 +1535,7 @@ def _workflow_gui_action_impl(payload):
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
             time.sleep(harmony_agent.DEVICE_WAIT_TIME)
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText {json.dumps(text, ensure_ascii=False)}")
         return {'status': 'ok', 'message': f'click_input {x},{y}'}
 
     if action == 'input':

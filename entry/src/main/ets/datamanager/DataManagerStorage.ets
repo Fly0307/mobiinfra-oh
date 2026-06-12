@@ -1,7 +1,7 @@
+import { util } from '@kit.ArkTS';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from '../utils/JsonCompat';
-import { decodeUtf8Compat, encodeUtf8Compat } from '../utils/TextEncodingCompat';
 
 const EMPTY_SHA256: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
@@ -93,7 +93,7 @@ export class DataManagerStorage {
         let stat = fs.statSync(path);
         let buf = new ArrayBuffer(stat.size);
         fs.readSync(file.fd, buf);
-        return decodeUtf8Compat(new Uint8Array(buf));
+        return this.decodeText(new Uint8Array(buf));
       } finally {
         fs.closeSync(file);
       }
@@ -108,7 +108,7 @@ export class DataManagerStorage {
       if (parent.length > 0) {
         this.ensureDir(parent);
       }
-      let encoded = encodeUtf8Compat(content);
+      let encoded = this.encodeText(content);
       let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
       try {
         fs.writeSync(file.fd, encoded.buffer);
@@ -280,7 +280,7 @@ export class DataManagerStorage {
     if (value.length === 0) {
       return EMPTY_SHA256;
     }
-    let bytes = encodeUtf8Compat(value);
+    let bytes = this.encodeText(value);
     try {
       let md = cryptoFramework.createMd('SHA256');
       let blob: cryptoFramework.DataBlob = { data: bytes };
@@ -322,12 +322,23 @@ export class DataManagerStorage {
   }
 
   private exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+      return bytes.buffer as ArrayBuffer;
+    }
     let output = new ArrayBuffer(bytes.byteLength);
     let view = new Uint8Array(output);
     for (let index = 0; index < bytes.byteLength; index++) {
       view[index] = bytes[index];
     }
     return output;
+  }
+
+  private decodeText(bytes: Uint8Array): string {
+    return util.TextDecoder.create('utf-8').decodeWithStream(bytes);
+  }
+
+  private encodeText(value: string): Uint8Array {
+    return util.TextEncoder.create('utf-8').encodeInto(value);
   }
 
   private stableFallbackHash(bytes: Uint8Array): string {

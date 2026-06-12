@@ -1,6 +1,6 @@
 // Agent Loop 所需的 native API 子集，供 AgentLoopRunner 等工具类按接口引用。
 export interface AgentLoopNativeApi {
-  chat(userMessage: string): string;
+  chat(userMessage: string): Promise<string>;
   reset(): string;
   agentPrefill(prefix: string): Promise<string>;
   agentStep(variablePart: string, onToken?: (token: string) => void): Promise<string>;
@@ -9,8 +9,8 @@ export interface AgentLoopNativeApi {
 
 // ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
 export interface LibEntryNative extends AgentLoopNativeApi {
-  loadModel: (configPath: string) => string;
-  generate: (prompt: string) => string;
+  loadModel: (configPath: string) => Promise<string>;
+  generate: (prompt: string) => Promise<string>;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
@@ -31,9 +31,9 @@ export interface LibEntryNative extends AgentLoopNativeApi {
 declare const native: LibEntryNative;
 export default native;
 
-export const loadModel: (configPath: string) => string;
-export const generate: (prompt: string) => string;
-export const chat: (userMessage: string) => string;
+export const loadModel: (configPath: string) => Promise<string>;
+export const generate: (prompt: string) => Promise<string>;
+export const chat: (userMessage: string) => Promise<string>;
 export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
 export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
+import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
@@ -20,12 +21,15 @@ import {
   WECHAT_AUTO_SUMMARY_MODE_TARGET,
   WechatAutoSummaryConversation,
   WechatAutoSummaryJsonMap,
+  WechatAutoSummaryMessage,
   WechatAutoSummaryRequest,
   WechatAutoSummaryResponse,
   WechatAutoSummaryTimeRange
 } from '../main/ets/utils/wechat/WechatAutoSummaryTypes';
 import {
+  renderWechatAutoSummaryMarkdown,
   renderWechatAutoSummaryDailyLog,
+  wechatAutoSummaryDailyEntries,
   wechatAutoSummaryRunDir
 } from '../main/ets/utils/wechat/WechatAutoSummaryStorage';
 
@@ -131,20 +135,23 @@ export default function wechatAutoSummaryUnitTest() {
 
     it('acceptsPythonServiceResponseShape', 0, () => {
       let timeRange: WechatAutoSummaryTimeRange = { mode: 'visible_page_only' };
-      let conversations: WechatAutoSummaryConversation[] = [
-        {
-          title: '小赵',
-          contact: { title: '小赵' },
-          dump: '<chat></chat>',
-          snapshots: ['page-1'],
-          messages: [
-            { kind: 'text', sender: '小赵', text: '今天开会时间调整到下午三点' }
-          ],
-          time_range: timeRange,
-          history_mode: 'visible_page_only'
-        }
-      ];
-      let artifacts: WechatAutoSummaryJsonMap = { daily_log: '/tmp/daily-log.md' };
+      let contact: WechatAutoSummaryJsonMap = new Object() as WechatAutoSummaryJsonMap;
+      contact['title'] = '小赵';
+      let messages: WechatAutoSummaryMessage[] = [];
+      messages.push({ kind: 'text', sender: '小赵', text: '今天开会时间调整到下午三点' });
+      let conversation: WechatAutoSummaryConversation = {
+        title: '小赵',
+        contact: contact,
+        dump: '<chat></chat>',
+        snapshots: ['page-1'],
+        messages: messages,
+        time_range: timeRange,
+        history_mode: 'visible_page_only'
+      };
+      let conversations: WechatAutoSummaryConversation[] = [];
+      conversations.push(conversation);
+      let artifacts: WechatAutoSummaryJsonMap = new Object() as WechatAutoSummaryJsonMap;
+      artifacts['daily_log'] = '/tmp/daily-log.md';
       let response: WechatAutoSummaryResponse = {
         status: 'ok',
         run_id: 'wechat-20260611-063600',
@@ -176,7 +183,61 @@ export default function wechatAutoSummaryUnitTest() {
       expect(content.indexOf('"workflow_metadata"') >= 0).assertTrue();
       expect(content.indexOf('"task_scene_id": 3') >= 0).assertTrue();
       expect(content.indexOf('"latest_entry_index": 2') >= 0).assertTrue();
-      expect(content.indexOf('1. 小赵提醒下午三点开会') >= 0).assertTrue();
+      expect(content.indexOf('## 小赵提醒下午三点开会') >= 0).assertTrue();
+      expect(content.indexOf('1. 小赵提醒下午三点开会') < 0).assertTrue();
+    });
+
+    it('buildsDailyEntriesFromConversationsWhenServiceEntriesAreEmpty', 0, () => {
+      let messages: WechatAutoSummaryMessage[] = [];
+      messages.push({ kind: 'time', text: '星期一 下午 03:47' });
+      messages.push({ kind: 'message', sender: '小赵', text: '今天开会时间调整到下午三点' });
+      let conversation: WechatAutoSummaryConversation = {
+        title: '小赵',
+        messages: messages,
+        history_mode: 'history_scrolled'
+      };
+      let conversations: WechatAutoSummaryConversation[] = [];
+      conversations.push(conversation);
+      let emptyEntries: string[] = [];
+      let response: WechatAutoSummaryResponse = {
+        status: 'ok',
+        run_id: 'wechat-20260612T094205',
+        mode: WECHAT_AUTO_SUMMARY_MODE_RECENT,
+        days: 7,
+        contacts_collected: 1,
+        conversations: conversations,
+        daily_log_entries: emptyEntries
+      };
+
+      let entries = wechatAutoSummaryDailyEntries(response);
+      let markdown = renderWechatAutoSummaryMarkdown(response);
+
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].indexOf('## 微信联系人「小赵」最近 7 天消息采集')).assertEqual(0);
+      expect(entries[0].indexOf('### 完整消息摘录') >= 0).assertTrue();
+      expect(entries[0].indexOf('小赵: 今天开会时间调整到下午三点') >= 0).assertTrue();
+      expect(markdown.indexOf('# 微信消息采集') >= 0).assertTrue();
+      expect(markdown.indexOf('## 小赵') >= 0).assertTrue();
+    });
+
+    it('rendersServiceNullMessageFieldsWithoutCrashing', 0, () => {
+      let response = parseJsonCompat<WechatAutoSummaryResponse>(
+        '{"status":"ok","run_id":"wechat-20260612T095718","mode":"recent_contacts","days":7,' +
+          '"contacts_collected":1,"conversations":[{"title":"复旦大学附属上海市第五人民医院",' +
+          '"messages":[{"kind":"time","text":"6/5 下午 04:32","sender":null},' +
+          '{"kind":"message","text":"[图片]","sender":null},' +
+          '{"kind":"message","text":null,"sender":"小赵"}],"history_mode":"history_scrolled"}],' +
+          '"daily_log_entries":[]}'
+      );
+
+      let entries = wechatAutoSummaryDailyEntries(response);
+      let markdown = renderWechatAutoSummaryMarkdown(response);
+
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].indexOf('[6/5 下午 04:32]') >= 0).assertTrue();
+      expect(entries[0].indexOf('复旦大学附属上海市第五人民医院: [图片]') >= 0).assertTrue();
+      expect(entries[0].indexOf('### 完整消息摘录') >= 0).assertTrue();
+      expect(markdown.indexOf('## 复旦大学附属上海市第五人民医院') >= 0).assertTrue();
     });
 
     it('buildsWechatAutoSummaryRunDir', 0, () => {

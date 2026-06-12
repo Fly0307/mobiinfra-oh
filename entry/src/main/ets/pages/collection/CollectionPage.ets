@@ -8,6 +8,14 @@ import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFa
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 import {
+  DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
   normalizeWechatAutoSummaryDays,
   normalizeWechatAutoSummaryHistorySwipeRatio,
   normalizeWechatAutoSummaryMaxContacts,
@@ -32,14 +40,20 @@ export struct CollectionPage {
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
-  @Prop wechatAutoSummaryEnabled: boolean = false;
-  @Prop wechatAutoSummaryDefaultDays: string = '7';
-  @Prop wechatAutoSummaryDefaultMaxContacts: string = '10';
-  @Prop wechatAutoSummarySwipeSpeed: string = '2500';
-  @Prop wechatAutoSummaryHistorySwipeRatio: string = '0.65';
-  @Prop wechatAutoSummaryStableSwipes: string = '3';
-  @Prop wechatAutoSummaryMaxHistorySwipes: string = '80';
-  @Prop wechatAutoSummaryWait: string = '1.0';
+  @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
+  @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
+  @StorageLink('wechatAutoSummaryDefaultMaxContacts') wechatAutoSummaryDefaultMaxContacts: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS;
+  @StorageLink('wechatAutoSummarySwipeSpeed') wechatAutoSummarySwipeSpeed: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED;
+  @StorageLink('wechatAutoSummaryHistorySwipeRatio') wechatAutoSummaryHistorySwipeRatio: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO;
+  @StorageLink('wechatAutoSummaryStableSwipes') wechatAutoSummaryStableSwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES;
+  @StorageLink('wechatAutoSummaryMaxHistorySwipes') wechatAutoSummaryMaxHistorySwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
+  @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @Prop wechatAutoSummaryRunning: boolean = false;
   @Prop wechatAutoSummaryStatus: string = '';
   @State private groupPageIndex: number = 0;
@@ -181,7 +195,7 @@ export struct CollectionPage {
   }
 
   @Builder WechatAutoSummaryCard() {
-    if (this.wechatAutoSummaryEnabled) {
+    if (this.wechatAutoSummaryEnabled === 'true') {
       Column() {
         Text('微信消息自动汇总')
           .fontSize(18)
@@ -194,6 +208,14 @@ export struct CollectionPage {
           .fontColor('#6F7684')
           .width('100%')
           .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 6 })
+        Text('当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，最近 ' +
+          this.wechatAutoSummaryDefaultMaxContacts + ' 个联系人')
+          .fontSize(12)
+          .fontColor('#4F68FF')
+          .width('100%')
+          .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 6 })
 

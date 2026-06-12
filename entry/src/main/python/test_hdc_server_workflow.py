@@ -7,6 +7,7 @@ class FakeHarmonyAgent:
     def __init__(self):
         self.factor = None
         self.manage_overlay = None
+        self.brought_back = False
 
     def run_with_device_control(self, label, fn):
         return fn()
@@ -25,6 +26,15 @@ class FakeHarmonyAgent:
     def run_gui_task(self, task):
         return {"status": "ok", "task": task}
 
+    def ensure_driver_available(self):
+        return True
+
+    def run_driver_call(self, label, operation):
+        return operation(object())
+
+    def bring_llm_app_to_foreground(self):
+        self.brought_back = True
+
 
 class FakeWechatCollectService:
     def __init__(self):
@@ -32,6 +42,7 @@ class FakeWechatCollectService:
         self.collect_payload = None
         self.uidump_hdc_prefix = None
         self.collect_hdc_prefix = None
+        self.collect_driver_call = None
 
     def uidump_action(self, payload, hdc_prefix):
         self.uidump_payload = payload
@@ -43,9 +54,10 @@ class FakeWechatCollectService:
             "ui_tree": {},
         }
 
-    def collect_action(self, payload, hdc_prefix, gui_search):
+    def collect_action(self, payload, hdc_prefix, gui_search, driver_call=None):
         self.collect_payload = payload
         self.collect_hdc_prefix = hdc_prefix
+        self.collect_driver_call = driver_call
         return {
             "status": "ok",
             "message": "wechat_collect service skeleton ready",
@@ -177,7 +189,26 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
             hdc_server.wechat_collect_service = original_service
             hdc_server.is_hdc_connected = original_is_connected
 
-    def test_wechat_collect_requires_harmony_agent_for_gui_search(self):
+    def test_wechat_collect_recent_contacts_allows_missing_harmony_agent(self):
+        original_agent = hdc_server.harmony_agent
+        original_service = hdc_server.wechat_collect_service
+        original_is_connected = hdc_server.is_hdc_connected
+        fake_service = FakeWechatCollectService()
+        try:
+            hdc_server.harmony_agent = None
+            hdc_server.wechat_collect_service = fake_service
+            hdc_server.is_hdc_connected = lambda force=False: True
+
+            result = hdc_server.handle_workflow_action("wechat_collect", {"mode": "recent_contacts"})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(fake_service.collect_payload["mode"], "recent_contacts")
+        finally:
+            hdc_server.harmony_agent = original_agent
+            hdc_server.wechat_collect_service = original_service
+            hdc_server.is_hdc_connected = original_is_connected
+
+    def test_wechat_collect_target_contact_requires_harmony_agent_for_gui_search(self):
         original_agent = hdc_server.harmony_agent
         original_service = hdc_server.wechat_collect_service
         original_is_connected = hdc_server.is_hdc_connected
@@ -187,7 +218,10 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
             hdc_server.is_hdc_connected = lambda force=False: True
 
             with self.assertRaisesRegex(RuntimeError, "harmony_agent.py is unavailable"):
-                hdc_server.handle_workflow_action("wechat_collect", {"mode": "recent_contacts"})
+                hdc_server.handle_workflow_action("wechat_collect", {
+                    "mode": "target_contact",
+                    "target_contact": "小赵",
+                })
         finally:
             hdc_server.harmony_agent = original_agent
             hdc_server.wechat_collect_service = original_service
@@ -212,6 +246,8 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["run_id"], "20260611T120000-wechat")
             self.assertEqual(fake_service.collect_payload["max_contacts"], 10)
+            self.assertIsNotNone(fake_service.collect_driver_call)
+            self.assertTrue(hdc_server.harmony_agent.brought_back)
         finally:
             hdc_server.harmony_agent = original_agent
             hdc_server.wechat_collect_service = original_service

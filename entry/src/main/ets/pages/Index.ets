@@ -59,7 +59,11 @@ import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
-import { WechatAutoSummaryStorage } from '../utils/wechat/WechatAutoSummaryStorage';
+import {
+  renderWechatAutoSummaryMarkdown,
+  WechatAutoSummaryStorage,
+  wechatAutoSummaryDailyEntries
+} from '../utils/wechat/WechatAutoSummaryStorage';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
@@ -996,16 +1000,17 @@ struct Index {
       let runId = response.run_id !== undefined && response.run_id.trim().length > 0 ?
         response.run_id : `${this.currentLocalDateKey()}-wechat`;
       let storage = new WechatAutoSummaryStorage(this.filesDir);
+      storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(response as Object, 2));
+      storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(response));
       storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(response as Object, 2));
       if (response.conversations !== undefined) {
         storage.writeRawArtifact(runId, 'wechat_conversations.json',
           stringifyJsonCompat(response.conversations as Object, 2));
       }
-      if (response.daily_log_entries !== undefined) {
-        let dailyLogMode = response.mode !== undefined && response.mode.length > 0 ? response.mode : request.mode;
-        let dailyLogDays = response.days !== undefined ? response.days : request.days;
-        storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, this.currentLocalDateKey(), response.daily_log_entries);
-      }
+      let dailyLogEntries = wechatAutoSummaryDailyEntries(response);
+      let dailyLogMode = response.mode !== undefined && response.mode.length > 0 ? response.mode : request.mode;
+      let dailyLogDays = response.days !== undefined ? response.days : request.days;
+      storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, this.currentLocalDateKey(), dailyLogEntries);
 
       let contactCount = 0;
       if (response.conversations !== undefined) {
@@ -2709,14 +2714,6 @@ struct Index {
             collectionModule: $collectionModule,
             viewModels: this.collectionViews,
             refreshing: this.dataManagerRefreshing,
-            wechatAutoSummaryEnabled: this.wechatAutoSummaryEnabled === 'true',
-            wechatAutoSummaryDefaultDays: this.wechatAutoSummaryDefaultDays,
-            wechatAutoSummaryDefaultMaxContacts: this.wechatAutoSummaryDefaultMaxContacts,
-            wechatAutoSummarySwipeSpeed: this.wechatAutoSummarySwipeSpeed,
-            wechatAutoSummaryHistorySwipeRatio: this.wechatAutoSummaryHistorySwipeRatio,
-            wechatAutoSummaryStableSwipes: this.wechatAutoSummaryStableSwipes,
-            wechatAutoSummaryMaxHistorySwipes: this.wechatAutoSummaryMaxHistorySwipes,
-            wechatAutoSummaryWait: this.wechatAutoSummaryWait,
             wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
             wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
             onRefresh: () => { this.refreshDataManager(); },

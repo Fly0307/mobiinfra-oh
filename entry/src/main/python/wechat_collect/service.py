@@ -14,6 +14,7 @@ import posixpath
 import shlex
 import subprocess
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +22,12 @@ from typing import Any, Callable
 
 from .parser import (
     Contact,
+    build_chat_payload_from_snapshots,
     build_chat_payload,
+    compute_history_swipe,
+    cutoff_for_days,
     extract_contacts,
+    extract_chat_messages,
     load_ui_tree,
     parse_chat_time,
     safe_filename,
@@ -32,15 +37,21 @@ from .render import markdown_path_for_json, print_json_and_markdown
 
 DEFAULT_DAYS = 7
 DEFAULT_MAX_CONTACTS = 10
-DEFAULT_SWIPE_SPEED = 2500
-DEFAULT_HISTORY_SWIPE_RATIO = 0.65
+DEFAULT_SWIPE_SPEED = 2000
+DEFAULT_HISTORY_SWIPE_RATIO = 0.5
 DEFAULT_STABLE_SWIPES = 3
 DEFAULT_MAX_HISTORY_SWIPES = 80
 DEFAULT_WAIT = 1.0
 DEFAULT_MAX_LIST_SWIPES = 20
 DEFAULT_HDC_TIMEOUT = 20
+WECHAT_BUNDLES = ("com.tencent.wechat", "com.tencent.mm")
+WECHAT_ABILITY_CANDIDATES = {
+    "com.tencent.wechat": ("EntryAbility", "MainAbility", "WechatAbility", "WeChatMainAbility"),
+    "com.tencent.mm": ("com.tencent.mm.ui.LauncherUI", ".ui.LauncherUI", "LauncherUI", "EntryAbility"),
+}
 
 SUPPORTED_MODES = {"recent_contacts", "target_contact"}
+DriverCall = Callable[[str, Callable[[Any], Any]], Any]
 
 
 @dataclass(frozen=True)
@@ -174,21 +185,23 @@ def daily_log_entries_from_conversations(conversations: list[dict[str, Any]], da
 
         if visible_page_only:
             lines = [
-                f"微信联系人「{contact_name}」当前可见页面消息采集",
-                f"采集范围：请求最近 {days} 天，未展开历史",
-                f"联系人：{contact_name}",
-                f"会话标题：{title}",
+                f"## 微信联系人「{contact_name}」当前可见页面消息采集",
+                "",
+                f"- 采集范围：请求最近 {days} 天，未展开历史",
+                f"- 联系人：{contact_name}",
+                f"- 会话标题：{title}",
             ]
         else:
             lines = [
-                f"微信联系人「{contact_name}」最近 {days} 天消息采集",
-                f"联系人：{contact_name}",
-                f"会话标题：{title}",
+                f"## 微信联系人「{contact_name}」最近 {days} 天消息采集",
+                "",
+                f"- 联系人：{contact_name}",
+                f"- 会话标题：{title}",
             ]
         time_range = _format_time_range(conversation.get("time_range"))
         if time_range:
-            lines.append(f"时间范围：{time_range}")
-        lines.extend([f"消息数：{message_count}", "", "完整消息摘录："])
+            lines.append(f"- 时间范围：{time_range}")
+        lines.extend([f"- 消息数：{message_count}", "", "### 完整消息摘录", ""])
 
         excerpt_lines = [_format_message_line(message, contact_name) for message in messages]
         lines.extend(excerpt_lines or ["（无消息）"])
@@ -235,15 +248,26 @@ def collect_action(
     payload: dict[str, Any],
     hdc_prefix: str,
     gui_search: Callable[[str], Any],
+    driver_call: DriverCall | None = None,
 ) -> dict[str, Any]:
     """通过 HDC 适配器执行微信采集服务编排。"""
 
     prefix = _split_hdc_prefix(hdc_prefix)
     remote_path = "/data/local/tmp/ui_tree.json"
+    request = normalize_collect_request(payload)
+
+    # 最近联系人模式优先通过 hmdriver2 操作设备，并保留 HDC/UI dump 兜底能力。
+    _open_wechat_app(prefix, request.wait, driver_call=driver_call)
 
     def dump_provider(path: Path) -> dict[str, Any]:
         path.parent.mkdir(parents=True, exist_ok=True)
-        _run_hdc(prefix + ["shell", "uitest", "dumpLayout", "-p", remote_path])
+        print(f">> [WeChatCollect] 执行 UI dump: {path}")
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.shell(dumpLayout)",
+            lambda driver: driver.shell(f"uitest dumpLayout -p {remote_path}"),
+        ):
+            _run_hdc(prefix + ["shell", "uitest", "dumpLayout", "-p", remote_path])
         _run_hdc(prefix + ["file", "recv", remote_path, str(path.parent)])
 
         received_path = path.parent / Path(remote_path).name
@@ -251,13 +275,26 @@ def collect_action(
             received_path.replace(path)
         if not path.exists():
             raise RuntimeError(f"ui dump file not found: {path}")
+        print(f">> [WeChatCollect] UI dump 已保存: {path}")
         return load_ui_tree(path)
 
     def tap_contact(contact: Contact) -> None:
-        _run_hdc(prefix + ["shell", "uiInput", "click", str(contact.tap_x), str(contact.tap_y)])
+        print(f">> [WeChatCollect] 点击联系人: {contact.name} ({contact.tap_x},{contact.tap_y})")
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.click",
+            lambda driver: driver.click(contact.tap_x, contact.tap_y),
+        ):
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "click", str(contact.tap_x), str(contact.tap_y)])
 
     def press_back() -> None:
-        _run_hdc(prefix + ["shell", "uiInput", "keyEvent", "Back"])
+        print(">> [WeChatCollect] 返回微信会话列表")
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.press_key(BACK)",
+            lambda driver: driver.press_key(2),
+        ):
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "keyEvent", "Back"])
 
     def swipe_contacts(root: dict[str, Any], request: WechatCollectRequest) -> None:
         command = [
@@ -273,16 +310,39 @@ def collect_action(
         ]
         if request.swipe_speed > 0:
             command.append(str(request.swipe_speed))
-        _run_hdc(command)
+        print(f">> [WeChatCollect] 滑动微信会话列表: speed={request.swipe_speed}")
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.swipe(contact_list)",
+            lambda driver: driver.swipe(628, 2200, 628, 700, speed=max(1, request.swipe_speed)),
+        ):
+            _run_hdc(command)
+
+    def swipe_chat_history(root: dict[str, Any], request: WechatCollectRequest) -> None:
+        x1, y1, x2, y2 = compute_history_swipe(root, request.history_swipe_ratio)
+        command = [*prefix, "shell", "uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2)]
+        if request.swipe_speed > 0:
+            command.append(str(request.swipe_speed))
+        print(
+            f">> [WeChatCollect] 滑动聊天历史: ({x1},{y1})->({x2},{y2}), "
+            f"speed={request.swipe_speed}"
+        )
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.swipe(chat_history)",
+            lambda driver: driver.swipe(x1, y1, x2, y2, speed=max(1, request.swipe_speed)),
+        ):
+            _run_hdc(command)
 
     return collect_action_with_device(
-        payload,
+        asdict(request),
         dump_provider=dump_provider,
         tap_contact=tap_contact,
         press_back=press_back,
-        swipe_history=lambda chat_root, request: None,
+        swipe_history=swipe_chat_history,
         gui_search=gui_search,
         swipe_contacts=swipe_contacts,
+        collect_history=True,
     )
 
 
@@ -294,6 +354,7 @@ def collect_action_with_device(
     swipe_history: Callable[[dict[str, Any], WechatCollectRequest], Any],
     gui_search: Callable[[str], Any],
     swipe_contacts: Callable[[dict[str, Any], WechatCollectRequest], Any] | None = None,
+    collect_history: bool = False,
 ) -> dict[str, Any]:
     """使用注入的设备操作执行可测试的微信采集编排。
 
@@ -302,10 +363,15 @@ def collect_action_with_device(
     """
 
     request = normalize_collect_request(payload)
-    output_dir = _resolve_output_dir(request.output_dir, "wechat-collect-")
-
     started_at = datetime.now().replace(microsecond=0)
-    run_id = output_dir.name or f"{started_at.strftime('%Y%m%dT%H%M%S')}-wechat"
+    default_run_id = f"wechat-{started_at.strftime('%Y%m%dT%H%M%S')}"
+    output_dir = _resolve_output_dir(request.output_dir, default_run_id + "-")
+    run_id = output_dir.name if request.output_dir else default_run_id
+    print(
+        f">> [WeChatCollect] 开始采集: mode={request.mode}, days={request.days}, "
+        f"max_contacts={request.max_contacts}, output_dir={output_dir}"
+    )
+
     contacts_requested = 1 if request.mode == "target_contact" else request.max_contacts
     conversations: list[dict[str, Any]] = []
     home_dump = ""
@@ -333,6 +399,11 @@ def collect_action_with_device(
             max_list_swipes=request.max_list_swipes,
         )
         home_dump = home_dump_paths[0] if home_dump_paths else ""
+        print(f">> [WeChatCollect] 最近联系人候选数: {len(contacts)}")
+        if contacts:
+            print(">> [WeChatCollect] 最近联系人: " + ", ".join(contact.name for contact in contacts))
+        else:
+            raise RuntimeError(f"未识别到微信最近联系人，请确认微信已进入聊天首页；dump 输出目录：{output_dir}")
 
         for index, contact in enumerate(contacts, start=1):
             tap_contact(contact)
@@ -340,10 +411,26 @@ def collect_action_with_device(
             try:
                 chat_path = output_dir / f"chat_{index:02d}_{safe_filename(contact.name)}.json"
                 chat_root = dump_provider(chat_path)
-                updated_root = swipe_history(chat_root, request)
-                if isinstance(updated_root, dict):
-                    chat_root = updated_root
-                conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+                if collect_history:
+                    conversations.append(_conversation_from_history_snapshots(
+                        contact,
+                        *_collect_history_snapshots(
+                            output_dir,
+                            index,
+                            contact,
+                            chat_root,
+                            chat_path,
+                            request,
+                            dump_provider,
+                            swipe_history,
+                        ),
+                        days=request.days,
+                    ))
+                else:
+                    updated_root = swipe_history(chat_root, request)
+                    if isinstance(updated_root, dict):
+                        chat_root = updated_root
+                    conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
             except BaseException as exc:
                 collection_error = exc
                 raise
@@ -367,10 +454,26 @@ def collect_action_with_device(
         collection_error: BaseException | None = None
         try:
             chat_root = dump_provider(chat_path)
-            updated_root = swipe_history(chat_root, request)
-            if isinstance(updated_root, dict):
-                chat_root = updated_root
-            conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
+            if collect_history:
+                conversations.append(_conversation_from_history_snapshots(
+                    contact,
+                    *_collect_history_snapshots(
+                        output_dir,
+                        1,
+                        contact,
+                        chat_root,
+                        chat_path,
+                        request,
+                        dump_provider,
+                        swipe_history,
+                    ),
+                    days=request.days,
+                ))
+            else:
+                updated_root = swipe_history(chat_root, request)
+                if isinstance(updated_root, dict):
+                    chat_root = updated_root
+                conversations.append(_conversation_from_chat_root(contact, chat_root, str(chat_path)))
         except BaseException as exc:
             collection_error = exc
             raise
@@ -429,6 +532,101 @@ def _conversation_from_chat_root(contact: Contact, root: dict[str, Any], dump_pa
         "history_mode": "visible_page_only",
         "time_range": _messages_time_range(messages),
     }
+
+
+def _collect_history_snapshots(
+    output_dir: Path,
+    index: int,
+    contact: Contact,
+    initial_root: dict[str, Any],
+    initial_path: Path,
+    request: WechatCollectRequest,
+    dump_provider: Callable[[Path], dict[str, Any]],
+    swipe_history: Callable[[dict[str, Any], WechatCollectRequest], Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """在聊天页内向历史方向滑动，保存并返回多页 dump。
+
+    初始页总是保留；后续页面按 `max_history_swipes` 控制。到达请求时间范围
+    或连续稳定页数达到阈值后停止，避免无意义长时间滑动。
+    """
+
+    roots = [initial_root]
+    paths = [str(initial_path)]
+    if request.max_history_swipes <= 0:
+        return roots, paths
+
+    reference_now = datetime.now()
+    cutoff = cutoff_for_days(request.days, reference_now)
+    stable_count = 0
+    current_root = initial_root
+    last_fingerprint = _page_fingerprint(current_root)
+    if _snapshot_reaches_cutoff(current_root, cutoff, reference_now):
+        return roots, paths
+
+    safe_name = safe_filename(contact.name)
+    for swipe_index in range(1, request.max_history_swipes + 1):
+        swipe_result = swipe_history(current_root, request)
+        if request.wait > 0:
+            time.sleep(request.wait)
+        if isinstance(swipe_result, dict):
+            current_root = swipe_result
+        next_path = output_dir / f"chat_{index:02d}_{safe_name}_history_{swipe_index:03d}.json"
+        current_root = dump_provider(next_path)
+        roots.append(current_root)
+        paths.append(str(next_path))
+
+        fingerprint = _page_fingerprint(current_root)
+        stable_count = stable_count + 1 if fingerprint == last_fingerprint else 0
+        last_fingerprint = fingerprint
+        print(
+            f">> [WeChatCollect] 历史快照 {swipe_index}: stable={stable_count}/"
+            f"{request.stable_swipes}, snapshots={len(paths)}"
+        )
+        if _snapshot_reaches_cutoff(current_root, cutoff, reference_now) or stable_count >= request.stable_swipes:
+            break
+    return roots, paths
+
+
+def _conversation_from_history_snapshots(
+    contact: Contact,
+    roots: list[dict[str, Any]],
+    paths: list[str],
+    days: int,
+) -> dict[str, Any]:
+    """把多页历史 dump 合并成统一会话记录。"""
+
+    chat_payload = build_chat_payload_from_snapshots(roots, fallback_title=contact.name, days=days)
+    messages = chat_payload["messages"]
+    time_range = _messages_time_range(messages)
+    history_mode = "history_scrolled" if len(paths) > 1 else "visible_page_only"
+    time_range["mode"] = history_mode
+    return {
+        "contact": _serialize_contact(contact),
+        "title": chat_payload["title"],
+        "dump": paths[0] if paths else "",
+        "snapshots": paths,
+        "messages": messages,
+        "history_mode": history_mode,
+        "time_range": time_range,
+    }
+
+
+def _snapshot_reaches_cutoff(root: dict[str, Any], cutoff: datetime, reference_now: datetime) -> bool:
+    parsed_times = [
+        parsed
+        for entry in extract_chat_messages(root)
+        if entry.kind == "time"
+        for parsed in [parse_chat_time(entry.text, reference_now)]
+        if parsed is not None
+    ]
+    return bool(parsed_times and min(parsed_times) < cutoff)
+
+
+def _page_fingerprint(root: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (entry.kind, entry.sender, entry.text, entry.bounds, entry.text_bounds)
+        for entry in extract_chat_messages(root)
+    )
 
 
 def _serialize_contact(contact: Contact) -> dict[str, Any]:
@@ -538,6 +736,141 @@ def _run_hdc(args: list[str], timeout: int = DEFAULT_HDC_TIMEOUT) -> subprocess.
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(args)}"
         raise RuntimeError(message)
+    return result
+
+
+def _open_wechat_app(prefix: list[str], wait: float, driver_call: DriverCall | None = None) -> None:
+    """采集前将微信拉到前台；优先 hmdriver2，失败时用 HDC 显式 Ability 兜底。"""
+
+    if _open_wechat_app_with_driver(driver_call, wait):
+        return
+
+    last_error: Exception | None = None
+    for bundle in WECHAT_BUNDLES:
+        for ability in _wechat_ability_candidates(prefix, bundle):
+            try:
+                print(f">> [WeChatCollect] 尝试启动微信: bundle={bundle}, ability={ability}")
+                _run_hdc(prefix + ["shell", "aa", "start", "-a", ability, "-b", bundle])
+                if wait > 0:
+                    time.sleep(wait)
+                print(f">> [WeChatCollect] 微信启动命令完成: bundle={bundle}, ability={ability}")
+                return
+            except Exception as ex:
+                last_error = ex
+    if last_error is not None:
+        raise RuntimeError(f"failed to launch WeChat: {last_error}") from last_error
+    raise RuntimeError("failed to launch WeChat")
+
+
+def _open_wechat_app_with_driver(driver_call: DriverCall | None, wait: float) -> bool:
+    if driver_call is None:
+        return False
+
+    for bundle in WECHAT_BUNDLES:
+        try:
+            print(f">> [WeChatCollect] hmdriver2 启动微信: bundle={bundle}")
+            result = driver_call(
+                f"Driver.force_start_app({bundle})",
+                lambda driver: driver.force_start_app(bundle),
+            )
+            if result is False:
+                raise RuntimeError("driver returned False")
+            if wait > 0:
+                time.sleep(wait)
+            print(f">> [WeChatCollect] hmdriver2 启动命令完成: bundle={bundle}")
+            return True
+        except Exception as ex:
+            print(f">> [WeChatCollect] hmdriver2 启动失败，尝试下一入口: bundle={bundle}, error={ex}")
+    return False
+
+
+def _run_driver_preferred(
+    driver_call: DriverCall | None,
+    label: str,
+    operation: Callable[[Any], Any],
+) -> bool:
+    if driver_call is None:
+        return False
+    try:
+        result = driver_call(label, operation)
+        if result is False:
+            raise RuntimeError("driver returned False")
+        return True
+    except Exception as ex:
+        print(f">> [WeChatCollect] hmdriver2 操作失败，回退 HDC: {label}: {ex}")
+        return False
+
+
+def _wechat_ability_candidates(prefix: list[str], bundle: str) -> list[str]:
+    """按优先级返回微信入口 Ability：先用 bm dump 发现，再使用内置候选兜底。"""
+
+    abilities: list[str] = []
+    discovered = _discover_main_ability(prefix, bundle)
+    if discovered:
+        abilities.append(discovered)
+    abilities.extend(WECHAT_ABILITY_CANDIDATES.get(bundle, ()))
+    return _dedupe_texts(abilities)
+
+
+def _discover_main_ability(prefix: list[str], bundle: str) -> str:
+    """通过 bundle manager dump 读取入口 Ability；失败时返回空串，由静态候选继续兜底。"""
+
+    try:
+        result = _run_hdc(prefix + ["shell", "bm", "dump", "-n", bundle])
+    except Exception:
+        return ""
+    return _extract_main_ability(result.stdout + "\n" + result.stderr)
+
+
+def _extract_main_ability(text: str) -> str:
+    """从 bm dump 文本中提取入口 Ability，兼容不同系统版本的字段名。"""
+
+    field_names = (
+        "mainAbility",
+        "mainAbilityName",
+        "mainElementName",
+        "mainElement",
+        "launchAbility",
+        "launcherAbility",
+    )
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip(",")
+        for field in field_names:
+            if field not in line:
+                continue
+            value = _ability_value_after_separator(line)
+            if value:
+                return value
+    return ""
+
+
+def _ability_value_after_separator(line: str) -> str:
+    for separator in (":", "="):
+        if separator not in line:
+            continue
+        value = line.split(separator, 1)[1].strip().strip('",\'')
+        if value:
+            candidate = value.split()[0].strip().strip('",\'')
+            if _looks_like_ability_name(candidate):
+                return candidate
+    return ""
+
+
+def _looks_like_ability_name(value: str) -> bool:
+    if not value or not any(char.isalpha() for char in value):
+        return False
+    return all(char.isalnum() or char in "._$" for char in value)
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = value.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
     return result
 
 

@@ -1319,6 +1319,39 @@ def ensure_wechat_collect_ready(require_agent=False):
         if not hasattr(harmony_agent, 'run_gui_task'):
             raise RuntimeError('harmony_agent.run_gui_task is unavailable')
 
+def wechat_collect_requires_gui_search(payload):
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("mode", "recent_contacts")).strip() == "target_contact"
+
+def run_wechat_gui_search(contact_name):
+    if harmony_agent is None:
+        raise RuntimeError('harmony_agent.py is unavailable')
+    if not hasattr(harmony_agent, 'run_gui_task'):
+        raise RuntimeError('harmony_agent.run_gui_task is unavailable')
+    return harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面")
+
+def wechat_collect_driver_call():
+    if harmony_agent is None or not hasattr(harmony_agent, 'run_driver_call'):
+        return None
+    ensure_driver = getattr(harmony_agent, 'ensure_driver_available', None)
+    if callable(ensure_driver):
+        try:
+            if not ensure_driver():
+                return None
+        except Exception as ex:
+            print(f">> [WeChatCollect] hmdriver2 初始化失败，将回退 HDC: {ex}")
+            return None
+    return harmony_agent.run_driver_call
+
+def bring_llm_app_back_after_wechat_collect():
+    if harmony_agent is None or not hasattr(harmony_agent, 'bring_llm_app_to_foreground'):
+        return
+    try:
+        harmony_agent.bring_llm_app_to_foreground()
+    except Exception as ex:
+        print(f">> [WeChatCollect] 回到 MNN LLM Chat 失败: {ex}")
+
 def workflow_uidump_action(payload):
     ensure_wechat_collect_ready()
     return run_with_hdc_control(
@@ -1327,14 +1360,22 @@ def workflow_uidump_action(payload):
     )
 
 def workflow_wechat_collect_action(payload):
-    ensure_wechat_collect_ready(require_agent=True)
+    request_payload = payload or {}
+    ensure_wechat_collect_ready(require_agent=wechat_collect_requires_gui_search(request_payload))
+    def collect_and_return_app():
+        try:
+            return wechat_collect_service.collect_action(
+                request_payload,
+                hdc_prefix(),
+                gui_search=run_wechat_gui_search,
+                driver_call=wechat_collect_driver_call(),
+            )
+        finally:
+            bring_llm_app_back_after_wechat_collect()
+
     return run_with_hdc_control(
         "workflow_wechat_collect",
-        lambda: wechat_collect_service.collect_action(
-            payload or {},
-            hdc_prefix(),
-            gui_search=lambda contact_name: harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面"),
-        )
+        collect_and_return_app
     )
 
 def run_remote_command(cmd):

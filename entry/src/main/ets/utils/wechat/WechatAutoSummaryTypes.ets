@@ -40,8 +40,8 @@ export interface WechatAutoSummaryRequest {
 // 单条聊天消息的结构，sender 仅在服务端能识别发言人时返回。
 export interface WechatAutoSummaryMessage {
   kind: string;
-  text: string;
-  sender?: string;
+  text: string | null;
+  sender?: string | null;
 }
 
 // 服务端会标注采集覆盖的时间语义；visible_page_only 表示只汇总本次可见页采集结果。
@@ -52,7 +52,7 @@ export interface WechatAutoSummaryTimeRange {
 }
 
 export interface WechatAutoSummaryConversation {
-  title: string;
+  title: string | null;
   contact?: WechatAutoSummaryJsonMap;
   dump?: string;
   snapshots?: string[];

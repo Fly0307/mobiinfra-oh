@@ -1314,7 +1314,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
         else:
             run_hdc_action_command(
                 "decider input text",
-                f"{hdc_prefix()} shell uitest uiInput inputText '{text}'"
+                f"{hdc_prefix()} shell uitest uiInput inputText {json.dumps(text, ensure_ascii=False)}"
             )
 
     elif action == "open_app":

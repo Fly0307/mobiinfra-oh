@@ -1,0 +1,85 @@
+{
+    "metadata":  {
+                     "name":  "basic-gui-task",
+                     "description":  "收集指定微信用户近3页的聊天记录"
+                 },
+    "defaults":  {
+                     "device":  "Harmony",
+                     "use_qwen3":  true,
+                     "use_e2e":  true,
+                     "use_experience":  false,
+                     "accept_planner_changes":  false
+                 },
+    "steps":  [
+                  {
+                      "id":  1,
+                      "type":  "gui_task",
+                      "task_description":  "打开微信",
+                      "on_error":  "stop",
+                      "name":  ""
+                  },
+                  {
+                      "id":  2,
+                      "type":  "gui_task",
+                      "task_description":  "搜索${context.contact_name}，进入聊天界面",
+                      "on_error":  "stop"
+                  },
+                  {
+                      "id":  3,
+                      "type":  "loop",
+                      "times":  5,
+                      "steps":  [
+                                    {
+                                        "id":  1,
+                                        "type":  "gui_action",
+                                        "action":  "screenshot",
+                                        "file_name":  "chat_${loop.index}.jpg"
+                                    },
+                                    {
+                                        "id":  2,
+                                        "type":  "tool",
+                                        "tool_name":  "vlm_qa",
+                                        "inputs":  {
+                                                       "mode":  "summary",
+                                                       "image":  "${steps.1.output.image_b64}",
+                                                       "question":  "请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n输出格式：\n聊天对象：xxx\n- 发送人｜消息发送绝对时间：消息原文（如含相对时间，在原文对应位置补充[事件绝对时间]）\n规则：\n1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部联系人名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充；原文无事件时间则不补充。\n7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n示例：\n任务执行时间：2026年06月09日 星期二 04:42\n截图时间锚点：昨天 下午 09:15\n消息：明天下午两点前修复新的 bug\n最终输出：\n- 我｜2026年06月08日 21:15：明天下午两点[2026年06月09日14:00]前修复新的 bug"
+                                                   }
+                                    },
+                                    {
+                                        "id":  3,
+                                        "type":  "if",
+                                        "condition":  {
+                                                          "left":  "${loop.last}",
+                                                          "operator":  "==",
+                                                          "right":  false
+                                                      },
+                                        "then_steps":  [
+                                                           {
+                                                               "id":  1,
+                                                               "type":  "gui_action",
+                                                               "action":  "swipe_with_coords",
+                                                               "start_x":  540,
+                                                               "start_y":  800,
+                                                               "end_x":  540,
+                                                               "end_y":  2100
+                                                           },
+                                                           {
+                                                               "id":  2,
+                                                               "type":  "gui_action",
+                                                               "action":  "sleep",
+                                                               "seconds":  1
+                                                           }
+                                                       ],
+                                        "else_steps":  [
+
+                                                       ]
+                                    }
+                                ],
+                      "name":  "",
+                      "on_error":  "stop"
+                  }
+              ],
+    "context":  {
+                    "contact_name":  "小赵"
+                }
+}

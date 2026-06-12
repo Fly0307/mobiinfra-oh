@@ -919,6 +919,11 @@ struct Index {
     }
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    try {
+      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, ctx.resourceManager);
+    } catch (e) {
+      AppLogger.errorCause('WorkflowStorage', 'install default workflow resources failed', e as Error);
+    }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
     try {

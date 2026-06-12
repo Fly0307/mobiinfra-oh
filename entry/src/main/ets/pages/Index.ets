@@ -488,7 +488,6 @@ struct Index {
     let imagePath = this.snapshotImagePathFromLog(message);
     if (imagePath.length > 0) {
       this.debugImagePath = imagePath;
-      this.attachTaskResultImage(sessionId, imagePath);
     }
   }
 
@@ -496,9 +495,7 @@ struct Index {
     this.appendCloudLog(message);
     let imagePath = this.snapshotImagePathFromLog(message);
     if (imagePath.length > 0) {
-      let sessionId = this.taskSessionId(this.cloudTaskSessionId);
       this.cloudDebugImagePath = imagePath;
-      this.attachTaskResultImage(sessionId, imagePath);
     }
   }
 
@@ -614,7 +611,7 @@ struct Index {
       for (let i = 0; i < session.messages.length; i++) {
         let message = session.messages[i];
         if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
-          mnnllm.chat(message.content);
+          await mnnllm.chat(message.content);
         }
       }
     } catch (e) {
@@ -1069,7 +1066,7 @@ struct Index {
       (variablePart: string, onToken?: (token: string) => void): Promise<string> =>
         mnnllm.agentStep(variablePart, onToken),
       (): Promise<string> => mnnllm.agentReset(),
-      (userMessage: string): string => mnnllm.chat(userMessage),
+      (userMessage: string): Promise<string> => mnnllm.chat(userMessage),
       (): string => mnnllm.reset(),
       (msg: string) => {
         this.handleLocalAgentLog(msg);
@@ -2402,16 +2399,16 @@ struct Index {
 
     this.output = '未检测到已加载模型，正在自动加载大模型...';
     try {
-      let loadResult: string = mnnllm.loadModel(cfg);
+      let loadResult: string = await mnnllm.loadModel(cfg);
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
         this.output = `自动加载模型失败: ${this.output}`;
       }
       return this.modelLoaded;
-    } catch (e) {
-      let err = e as Error;
-      this.output = '自动加载模型失败: ' + err.message;
+    } catch (err) {
+      let message = err instanceof Error ? (err as Error).message : String(err);
+      this.output = '自动加载模型失败: ' + message;
       return false;
     }
   }
@@ -2574,11 +2571,11 @@ struct Index {
       this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
         CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
-    } catch (e) {
-      let err = e as Error;
+    } catch (err) {
+      let message = err instanceof Error ? (err as Error).message : String(err);
       this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime()));
-      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${err.message}\n`);
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
       this.isThinking = false;
     }
@@ -2604,6 +2601,7 @@ struct Index {
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
       CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 已开始执行。', new Date().getTime()));
     this.localTaskSessionId = this.activeChatSessionId;
+    this.debugImagePath = '';
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.isThinking = true;
     let runner = this.createAgentLoopRunner();
@@ -2642,6 +2640,7 @@ struct Index {
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
       CHAT_MESSAGE_KIND_TASK_RESULT, '云端 Agent 已开始执行。', new Date().getTime()));
     this.cloudTaskSessionId = this.activeChatSessionId;
+    this.cloudDebugImagePath = '';
     this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
     try {

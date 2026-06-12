@@ -39,8 +39,8 @@ function demoRequest(mode: string, targetContact: string): WechatAutoSummaryRequ
     days: 7,
     max_contacts: 10,
     target_contact: targetContact,
-    swipe_speed: 2500,
-    history_swipe_ratio: 0.65,
+    swipe_speed: 2000,
+    history_swipe_ratio: 0.4,
     stable_swipes: 3,
     max_history_swipes: 80,
     wait: 1.0
@@ -52,8 +52,8 @@ export default function wechatAutoSummaryUnitTest() {
     it('normalizesDefaultsAndRanges', 0, () => {
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_DAYS).assertEqual('7');
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS).assertEqual('10');
-      expect(DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED).assertEqual('2500');
-      expect(DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO).assertEqual('0.65');
+      expect(DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED).assertEqual('2000');
+      expect(DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO).assertEqual('0.4');
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES).assertEqual('3');
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES).assertEqual('80');
       expect(DEFAULT_WECHAT_AUTO_SUMMARY_WAIT).assertEqual('1.0');
@@ -78,10 +78,10 @@ export default function wechatAutoSummaryUnitTest() {
     it('normalizesCollectionParameters', 0, () => {
       expect(normalizeWechatAutoSummarySwipeSpeed('-1')).assertEqual(0);
       expect(normalizeWechatAutoSummarySwipeSpeed('25001')).assertEqual(20000);
-      expect(normalizeWechatAutoSummarySwipeSpeed('bad')).assertEqual(2500);
+      expect(normalizeWechatAutoSummarySwipeSpeed('bad')).assertEqual(2000);
       expect(normalizeWechatAutoSummaryHistorySwipeRatio('0')).assertEqual(0.1);
       expect(normalizeWechatAutoSummaryHistorySwipeRatio('2')).assertEqual(0.95);
-      expect(normalizeWechatAutoSummaryHistorySwipeRatio('bad')).assertEqual(0.65);
+      expect(normalizeWechatAutoSummaryHistorySwipeRatio('bad')).assertEqual(0.4);
       expect(normalizeWechatAutoSummaryStableSwipes('0')).assertEqual(1);
       expect(normalizeWechatAutoSummaryStableSwipes('11')).assertEqual(10);
       expect(normalizeWechatAutoSummaryMaxHistorySwipes('0')).assertEqual(1);

@@ -57,10 +57,10 @@ export struct CollectionPage {
   @Prop wechatAutoSummaryRunning: boolean = false;
   @Prop wechatAutoSummaryStatus: string = '';
   @State private groupPageIndex: number = 0;
-  @State private wechatMode: string = WECHAT_AUTO_SUMMARY_MODE_RECENT;
-  @State private wechatDaysInput: string = '';
-  @State private wechatMaxContactsInput: string = '';
-  @State private wechatTargetContactInput: string = '';
+  @StorageLink('wechatAutoSummaryCollectionMode') wechatMode: string = WECHAT_AUTO_SUMMARY_MODE_RECENT;
+  @StorageLink('wechatAutoSummaryCollectionDaysInput') wechatDaysInput: string = '';
+  @StorageLink('wechatAutoSummaryCollectionMaxContactsInput') wechatMaxContactsInput: string = '';
+  @StorageLink('wechatAutoSummaryCollectionTargetContactInput') wechatTargetContactInput: string = '';
   onRefresh: () => void = () => {};
   onOpenDataCollectionSettings: () => void = () => {};
   onRunWechatAutoSummary: (request: WechatAutoSummaryRequest) => Promise<void> =
@@ -133,6 +133,14 @@ export struct CollectionPage {
 
   private wechatMaxContactsText(): string {
     return this.wechatInputOrDefault(this.wechatMaxContactsInput, this.wechatAutoSummaryDefaultMaxContacts);
+  }
+
+  private wechatDefaultSummaryText(): string {
+    if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
+      return '当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，指定联系人模式';
+    }
+    return '当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，最近 ' +
+      this.wechatAutoSummaryDefaultMaxContacts + ' 个联系人';
   }
 
   private buildWechatRequest(): WechatAutoSummaryRequest {
@@ -210,8 +218,7 @@ export struct CollectionPage {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 6 })
-        Text('当前默认：近 ' + this.wechatAutoSummaryDefaultDays + ' 天，最近 ' +
-          this.wechatAutoSummaryDefaultMaxContacts + ' 个联系人')
+        Text(this.wechatDefaultSummaryText())
           .fontSize(12)
           .fontColor('#4F68FF')
           .width('100%')
@@ -229,9 +236,11 @@ export struct CollectionPage {
 
         this.WechatInput('时间范围（天）', this.wechatDaysInput, '默认 ' + this.wechatAutoSummaryDefaultDays,
           (value: string) => { this.wechatDaysInput = value; })
-        this.WechatInput('最近联系人数量', this.wechatMaxContactsInput, '默认 ' + this.wechatAutoSummaryDefaultMaxContacts,
-          (value: string) => { this.wechatMaxContactsInput = value; })
-        if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_TARGET) {
+        if (this.wechatMode === WECHAT_AUTO_SUMMARY_MODE_RECENT) {
+          this.WechatInput('最近联系人数量', this.wechatMaxContactsInput,
+            '默认 ' + this.wechatAutoSummaryDefaultMaxContacts,
+            (value: string) => { this.wechatMaxContactsInput = value; })
+        } else {
           this.WechatInput('指定联系人', this.wechatTargetContactInput, '请输入微信联系人名称',
             (value: string) => { this.wechatTargetContactInput = value; })
         }

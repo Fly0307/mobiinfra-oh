@@ -9,6 +9,8 @@ from unittest.mock import patch
 from wechat_collect.collector import (
     CollectOptions,
     Contact,
+    DEFAULT_HISTORY_SWIPE_RATIO,
+    DEFAULT_SWIPE_SPEED,
     HistorySnapshotOptions,
     build_chat_payload,
     build_chat_payload_from_snapshots,
@@ -34,6 +36,38 @@ ROOT = Path(__file__).resolve().parent / "wechat_collect" / "fixtures"
 def load_fixture(name):
     with (ROOT / name).open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def ui_node(node_type, text="", bounds="[0,0][100,100]", children=None):
+    attrs = {
+        "type": node_type,
+        "bounds": bounds,
+        "origBounds": bounds,
+    }
+    if text:
+        attrs["text"] = text
+    return {
+        "attributes": attrs,
+        "children": children or [],
+    }
+
+
+def search_home_root():
+    return ui_node("Root", bounds="[0,0][1256,2760]", children=[
+        ui_node("Text", text="搜索", bounds="[180,130][1060,220]"),
+    ])
+
+
+def search_results_root():
+    return ui_node("Root", bounds="[0,0][1256,2760]", children=[
+        ui_node("List", bounds="[0,260][1256,2600]", children=[
+            ui_node("ListItem", bounds="[0,300][1256,520]", children=[
+                ui_node("Text", text="最常使用", bounds="[70,305][280,345]"),
+                ui_node("Text", text="小赵", bounds="[210,330][520,390]"),
+                ui_node("Text", text="微信号: xiao-zhao", bounds="[210,400][720,460]"),
+            ]),
+        ]),
+    ])
 
 
 class WechatCollectParserTests(unittest.TestCase):
@@ -101,7 +135,7 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertEqual(texts.count("边界重复消息"), 1)
 
     def test_compute_history_swipe_uses_default_ratio(self):
-        self.assertEqual(compute_history_swipe(load_fixture("chat_xiao_zhao.json")), (628, 483, 628, 2277))
+        self.assertEqual(compute_history_swipe(load_fixture("chat_xiao_zhao.json")), (628, 828, 628, 1932))
 
     def test_render_markdown_includes_messages(self):
         chat_payload = build_chat_payload(load_fixture("chat_xiao_zhao.json"))
@@ -226,6 +260,43 @@ class WechatCollectParserTests(unittest.TestCase):
 
 
 class WechatCollectServiceTests(unittest.TestCase):
+    def test_wechat_collect_defaults_are_declared_in_single_config_module(self):
+        from wechat_collect import config as collect_config
+        from wechat_collect import collector as collect_compat
+
+        expected_defaults = {
+            "DEFAULT_DAYS": 7,
+            "DEFAULT_MAX_CONTACTS": 10,
+            "DEFAULT_SWIPE_SPEED": 2000,
+            "DEFAULT_HISTORY_SWIPE_RATIO": 0.4,
+            "DEFAULT_STABLE_SWIPES": 3,
+            "DEFAULT_MAX_HISTORY_SWIPES": 80,
+            "DEFAULT_WAIT": 1.0,
+            "DEFAULT_MAX_LIST_SWIPES": 20,
+            "DEFAULT_HDC_TIMEOUT": 20,
+        }
+
+        for name, expected in expected_defaults.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(collect_config, name), expected)
+                self.assertEqual(getattr(wechat_collect_service, name), getattr(collect_config, name))
+
+        self.assertEqual(collect_compat.DEFAULT_SWIPE_SPEED, collect_config.DEFAULT_SWIPE_SPEED)
+        self.assertEqual(collect_compat.DEFAULT_HISTORY_SWIPE_RATIO, collect_config.DEFAULT_HISTORY_SWIPE_RATIO)
+        self.assertEqual(collect_compat.BOUNDARY_OVERLAP_RATIO, collect_config.BOUNDARY_OVERLAP_RATIO)
+        self.assertEqual(wechat_collect_service.WECHAT_BUNDLES, collect_config.WECHAT_BUNDLES)
+        self.assertEqual(wechat_collect_service.SUPPORTED_MODES, collect_config.SUPPORTED_MODES)
+
+    def test_wechat_collect_defaults_match_runtime_swipe_parameters(self):
+        request = normalize_collect_request({})
+
+        self.assertEqual(request.swipe_speed, 2000)
+        self.assertEqual(request.history_swipe_ratio, 0.4)
+        self.assertEqual(DEFAULT_SWIPE_SPEED, 2000)
+        self.assertEqual(DEFAULT_HISTORY_SWIPE_RATIO, 0.4)
+        self.assertEqual(wechat_collect_service.DEFAULT_SWIPE_SPEED, 2000)
+        self.assertEqual(wechat_collect_service.DEFAULT_HISTORY_SWIPE_RATIO, 0.4)
+
     def test_normalize_collect_request_clamps_supported_ranges(self):
         request = normalize_collect_request({
             "days": 120,
@@ -811,6 +882,84 @@ class WechatCollectServiceTests(unittest.TestCase):
         self.assertIn(("driver_call", "Driver.swipe(chat_history)"), driver_calls)
         self.assertTrue(any(call[0] == "swipe" for call in driver_calls))
         self.assertNotIn("当前可见页面消息采集", result["daily_log_entries"][0])
+
+    def test_collect_action_target_contact_uses_hmdriver_search_without_gui_agent(self):
+        commands = []
+        driver_calls = []
+
+        class FakeDriver:
+            def force_start_app(self, bundle):
+                driver_calls.append(("force_start_app", bundle))
+
+            def shell(self, command):
+                driver_calls.append(("shell", command))
+
+            def click(self, x, y):
+                driver_calls.append(("click", x, y))
+
+            def input_text(self, text):
+                driver_calls.append(("input_text", text))
+
+            def swipe(self, x1, y1, x2, y2, speed=1000):
+                driver_calls.append(("swipe", x1, y1, x2, y2, speed))
+
+            def press_key(self, key):
+                driver_calls.append(("press_key", key))
+
+        fake_driver = FakeDriver()
+
+        def fake_driver_call(label, operation):
+            driver_calls.append(("driver_call", label))
+            return operation(fake_driver)
+
+        def fake_run_hdc(args):
+            commands.append(args)
+            if args[:5] == ["hdc", "-t", "SERIAL", "file", "recv"]:
+                output_dir = Path(args[-1])
+                (output_dir / "ui_tree.json").write_text("{}", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def forbidden_gui_search(name):
+            raise AssertionError("GUI agent search should not be required")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(wechat_collect_service, "_run_hdc", side_effect=fake_run_hdc), \
+                    patch.object(
+                        wechat_collect_service,
+                        "load_ui_tree",
+                        side_effect=[
+                            search_home_root(),
+                            search_results_root(),
+                            load_fixture("chat_xiao_zhao.json"),
+                            load_fixture("history_009.json"),
+                        ],
+                    ):
+                result = wechat_collect_service.collect_action(
+                    {
+                        "mode": "target_contact",
+                        "target_contact": "小赵",
+                        "days": 7,
+                        "max_history_swipes": 0,
+                        "output_dir": temp_dir,
+                        "wait": 0,
+                    },
+                    "hdc -t SERIAL",
+                    gui_search=forbidden_gui_search,
+                    driver_call=fake_driver_call,
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["target_contact"], "小赵")
+        self.assertEqual(result["contacts_collected"], 1)
+        self.assertEqual(result["conversations"][0]["contact"]["name"], "小赵")
+        self.assertTrue(result["daily_log_entries"][0].startswith("## 微信联系人「小赵」"))
+        self.assertIn(("input_text", "小赵"), driver_calls)
+        self.assertIn(("click", 620, 175), driver_calls)
+        self.assertIn(("click", 628, 410), driver_calls)
+        self.assertEqual(
+            [command for command in commands if command[:4] == ["hdc", "-t", "SERIAL", "shell"]],
+            [],
+        )
 
     def test_collect_action_target_contact_uses_single_requested_contact(self):
         commands = []

@@ -135,7 +135,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--swipe-speed",
         type=int,
         default=DEFAULT_SWIPE_SPEED,
-        help="Speed argument appended to hdc uiInput swipe; larger values swipe faster. Use 0 to omit it. Default: 2500.",
+        help=(
+            "Speed argument appended to hdc uiInput swipe; larger values swipe faster. "
+            f"Use 0 to omit it. Default: {DEFAULT_SWIPE_SPEED}."
+        ),
     )
     collect_parser.add_argument(
         "--history-swipe",
@@ -145,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--history-swipe-ratio",
         type=float,
         default=DEFAULT_HISTORY_SWIPE_RATIO,
-        help="Total history swipe distance as a ratio of page height. Default: 0.65.",
+        help=f"Total history swipe distance as a ratio of page height. Default: {DEFAULT_HISTORY_SWIPE_RATIO}.",
     )
     collect_parser.add_argument(
         "--now",

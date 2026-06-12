@@ -1326,9 +1326,11 @@ def wechat_collect_requires_gui_search(payload):
 
 def run_wechat_gui_search(contact_name):
     if harmony_agent is None:
-        raise RuntimeError('harmony_agent.py is unavailable')
+        print(">> [WeChatCollect] harmony_agent 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.py is unavailable"}
     if not hasattr(harmony_agent, 'run_gui_task'):
-        raise RuntimeError('harmony_agent.run_gui_task is unavailable')
+        print(">> [WeChatCollect] harmony_agent.run_gui_task 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.run_gui_task is unavailable"}
     return harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面")
 
 def wechat_collect_driver_call():
@@ -1361,7 +1363,7 @@ def workflow_uidump_action(payload):
 
 def workflow_wechat_collect_action(payload):
     request_payload = payload or {}
-    ensure_wechat_collect_ready(require_agent=wechat_collect_requires_gui_search(request_payload))
+    ensure_wechat_collect_ready()
     def collect_and_return_app():
         try:
             return wechat_collect_service.collect_action(

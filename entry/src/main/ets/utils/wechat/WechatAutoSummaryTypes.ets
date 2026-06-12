@@ -6,12 +6,18 @@ export const WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY: string = 'wechatAutoSu
 export const WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY: string = 'wechatAutoSummaryStableSwipes';
 export const WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY: string = 'wechatAutoSummaryMaxHistorySwipes';
 export const WECHAT_AUTO_SUMMARY_WAIT_KEY: string = 'wechatAutoSummaryWait';
+export const WECHAT_AUTO_SUMMARY_COLLECTION_MODE_KEY: string = 'wechatAutoSummaryCollectionMode';
+export const WECHAT_AUTO_SUMMARY_COLLECTION_DAYS_INPUT_KEY: string = 'wechatAutoSummaryCollectionDaysInput';
+export const WECHAT_AUTO_SUMMARY_COLLECTION_MAX_CONTACTS_INPUT_KEY: string =
+  'wechatAutoSummaryCollectionMaxContactsInput';
+export const WECHAT_AUTO_SUMMARY_COLLECTION_TARGET_CONTACT_INPUT_KEY: string =
+  'wechatAutoSummaryCollectionTargetContactInput';
 
 export const DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED: string = 'false';
 export const DEFAULT_WECHAT_AUTO_SUMMARY_DAYS: string = '7';
 export const DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS: string = '10';
-export const DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED: string = '2500';
-export const DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO: string = '0.65';
+export const DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED: string = '2000';
+export const DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO: string = '0.4';
 export const DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES: string = '3';
 export const DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES: string = '80';
 export const DEFAULT_WECHAT_AUTO_SUMMARY_WAIT: string = '1.0';
@@ -129,11 +135,11 @@ export function normalizeWechatAutoSummaryMaxContacts(value: string): number {
 }
 
 export function normalizeWechatAutoSummarySwipeSpeed(value: string): number {
-  return clampIntegerSetting(value, 2500, 0, 20000);
+  return clampIntegerSetting(value, 2000, 0, 20000);
 }
 
 export function normalizeWechatAutoSummaryHistorySwipeRatio(value: string): number {
-  return clampFloatSetting(value, 0.65, 0.1, 0.95);
+  return clampFloatSetting(value, 0.4, 0.1, 0.95);
 }
 
 export function normalizeWechatAutoSummaryStableSwipes(value: string): number {

@@ -30,3 +30,4 @@ build-profile.json5*
 /hvigor-workspace-review-fix-*/
 /.codex
 /docs/superpowers/
+/.superpowers/brainstorm/

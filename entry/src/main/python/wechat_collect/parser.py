@@ -10,6 +10,8 @@ from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from .config import BOUNDARY_OVERLAP_RATIO, DEFAULT_HISTORY_SWIPE_RATIO, DEFAULT_SWIPE_SPEED
+
 
 Bounds = tuple[int, int, int, int]
 
@@ -18,9 +20,6 @@ TIME_OF_DAY_RE = re.compile(r"(上午|下午|晚上|凌晨|中午)?\s*(\d{1,2}):
 MONTH_DAY_RE = re.compile(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})(?:日|号)?")
 SLASH_DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})")
 WEEKDAY_RE = re.compile(r"星期([一二三四五六日天])")
-DEFAULT_HISTORY_SWIPE_RATIO = 0.65
-DEFAULT_SWIPE_SPEED = 2500
-BOUNDARY_OVERLAP_RATIO = 0.2
 
 
 @dataclass(frozen=True)
@@ -701,7 +700,7 @@ def compute_history_swipe(root: dict[str, Any], ratio: float = DEFAULT_HISTORY_S
 
     参数：
         root: 最近一次聊天页 UI 树，用其根节点 bounds 获取屏幕尺寸。
-        ratio: 滑动距离占页面高度的比例；默认 0.65。
+        ratio: 滑动距离占页面高度的比例；默认 DEFAULT_HISTORY_SWIPE_RATIO。
     """
 
     if ratio <= 0:

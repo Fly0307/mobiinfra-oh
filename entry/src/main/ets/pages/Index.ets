@@ -73,11 +73,16 @@ import {
   DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
   DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
   DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
+  WECHAT_AUTO_SUMMARY_COLLECTION_DAYS_INPUT_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_MAX_CONTACTS_INPUT_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_MODE_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_TARGET_CONTACT_INPUT_KEY,
   WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY,
   WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY,
   WECHAT_AUTO_SUMMARY_ENABLED_KEY,
   WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY,
   WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY,
+  WECHAT_AUTO_SUMMARY_MODE_RECENT,
   WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY,
   WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY,
   WECHAT_AUTO_SUMMARY_WAIT_KEY,
@@ -144,6 +149,9 @@ interface CloudAgentTaskSubmitResult {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
+const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
+const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
+
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
@@ -178,6 +186,12 @@ PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY, DEFAU
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_WAIT_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_WAIT);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_MODE_KEY, WECHAT_AUTO_SUMMARY_MODE_RECENT);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_DAYS_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_MAX_CONTACTS_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_TARGET_CONTACT_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY, '');
 
 @Entry
 @Component
@@ -1033,6 +1047,7 @@ struct Index {
   aboutToAppear() {
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
+    this.migrateWechatAutoSummaryDefaultValues();
     if (this.manualHdcServerIp.trim().length === 0 && !this.isAutoHdcUrl(this.hdcServerIp)) {
       this.manualHdcServerIp = this.hdcServerIp;
     }
@@ -1125,6 +1140,35 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
     this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
+  }
+
+  private migrateWechatAutoSummaryDefaultValues(): void {
+    // 仅迁移旧版本写入的默认采集参数；迁移后用户手动设置同样数值不会被再次覆盖。
+    this.wechatAutoSummarySwipeSpeed = this.migrateOneShotDefaultSetting(
+      this.wechatAutoSummarySwipeSpeed,
+      DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+      ['2500'],
+      WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY
+    );
+    this.wechatAutoSummaryHistorySwipeRatio = this.migrateOneShotDefaultSetting(
+      this.wechatAutoSummaryHistorySwipeRatio,
+      DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+      ['0.65'],
+      WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY
+    );
+  }
+
+  private migrateOneShotDefaultSetting(currentValue: string, configuredDefault: string, legacyDefaults: string[],
+    snapshotKey: string): string {
+    let lastAppliedDefault = AppStorage.get(snapshotKey) as string;
+    let shouldUseConfiguredDefault = false;
+    if (lastAppliedDefault === undefined || lastAppliedDefault.length === 0) {
+      shouldUseConfiguredDefault = legacyDefaults.includes(currentValue);
+    } else {
+      shouldUseConfiguredDefault = currentValue === lastAppliedDefault;
+    }
+    AppStorage.setOrCreate(snapshotKey, configuredDefault);
+    return shouldUseConfiguredDefault ? configuredDefault : currentValue;
   }
 
   private migrateEndpointValue(currentValue: string, configuredDefault: string, legacyDefaults: string[],

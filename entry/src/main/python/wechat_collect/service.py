@@ -20,37 +20,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import (
+    DEFAULT_DAYS,
+    DEFAULT_HDC_TIMEOUT,
+    DEFAULT_HISTORY_SWIPE_RATIO,
+    DEFAULT_MAX_CONTACTS,
+    DEFAULT_MAX_HISTORY_SWIPES,
+    DEFAULT_MAX_LIST_SWIPES,
+    DEFAULT_STABLE_SWIPES,
+    DEFAULT_SWIPE_SPEED,
+    DEFAULT_WAIT,
+    SUPPORTED_MODES,
+    WECHAT_ABILITY_CANDIDATES,
+    WECHAT_BUNDLES,
+)
 from .parser import (
     Contact,
+    attrs,
     build_chat_payload_from_snapshots,
     build_chat_payload,
+    bounds_center,
     compute_history_swipe,
     cutoff_for_days,
+    collect_text_nodes,
+    direct_list_items,
     extract_contacts,
     extract_chat_messages,
+    find_best_list,
+    iter_nodes,
     load_ui_tree,
+    node_bounds,
+    node_type,
     parse_chat_time,
     safe_filename,
 )
 from .render import markdown_path_for_json, print_json_and_markdown
 
 
-DEFAULT_DAYS = 7
-DEFAULT_MAX_CONTACTS = 10
-DEFAULT_SWIPE_SPEED = 2000
-DEFAULT_HISTORY_SWIPE_RATIO = 0.5
-DEFAULT_STABLE_SWIPES = 3
-DEFAULT_MAX_HISTORY_SWIPES = 80
-DEFAULT_WAIT = 1.0
-DEFAULT_MAX_LIST_SWIPES = 20
-DEFAULT_HDC_TIMEOUT = 20
-WECHAT_BUNDLES = ("com.tencent.wechat", "com.tencent.mm")
-WECHAT_ABILITY_CANDIDATES = {
-    "com.tencent.wechat": ("EntryAbility", "MainAbility", "WechatAbility", "WeChatMainAbility"),
-    "com.tencent.mm": ("com.tencent.mm.ui.LauncherUI", ".ui.LauncherUI", "LauncherUI", "EntryAbility"),
-}
-
-SUPPORTED_MODES = {"recent_contacts", "target_contact"}
 DriverCall = Callable[[str, Callable[[Any], Any]], Any]
 
 
@@ -287,6 +293,26 @@ def collect_action(
         ):
             _run_hdc(prefix + ["shell", "uitest", "uiInput", "click", str(contact.tap_x), str(contact.tap_y)])
 
+    def click_point(x: int, y: int, label: str) -> None:
+        print(f">> [WeChatCollect] 点击{label}: ({x},{y})")
+        if not _run_driver_preferred(
+            driver_call,
+            f"Driver.click({label})",
+            lambda driver: driver.click(x, y),
+        ):
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "click", str(x), str(y)])
+
+    def input_text(text: str) -> None:
+        print(f">> [WeChatCollect] 输入搜索关键词: {text}")
+        if not _run_driver_preferred(
+            driver_call,
+            "Driver.input_text(search)",
+            lambda driver: _driver_clear_and_input_text(driver, text),
+        ):
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "keyEvent", "2072", "2017"])
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "keyEvent", "2071"])
+            _run_hdc(prefix + ["shell", "uitest", "uiInput", "inputText", text])
+
     def press_back() -> None:
         print(">> [WeChatCollect] 返回微信会话列表")
         if not _run_driver_preferred(
@@ -334,6 +360,22 @@ def collect_action(
         ):
             _run_hdc(command)
 
+    def search_target_contact(contact_name: str, search_request: WechatCollectRequest, output_dir: Path) -> Any:
+        result = _search_target_contact_with_ui_dump(
+            contact_name,
+            search_request,
+            output_dir,
+            dump_provider,
+            click_point,
+            input_text,
+        )
+        if _gui_search_succeeded(result):
+            return result
+        fallback_result = gui_search(contact_name)
+        if _gui_search_succeeded(fallback_result):
+            return fallback_result
+        return result
+
     return collect_action_with_device(
         asdict(request),
         dump_provider=dump_provider,
@@ -343,6 +385,7 @@ def collect_action(
         gui_search=gui_search,
         swipe_contacts=swipe_contacts,
         collect_history=True,
+        target_search=search_target_contact,
     )
 
 
@@ -355,6 +398,7 @@ def collect_action_with_device(
     gui_search: Callable[[str], Any],
     swipe_contacts: Callable[[dict[str, Any], WechatCollectRequest], Any] | None = None,
     collect_history: bool = False,
+    target_search: Callable[[str, WechatCollectRequest, Path], Any] | None = None,
 ) -> dict[str, Any]:
     """使用注入的设备操作执行可测试的微信采集编排。
 
@@ -437,19 +481,14 @@ def collect_action_with_device(
             finally:
                 _press_back_after_tap(press_back, collection_error)
     else:
-        search_result = gui_search(request.target_contact)
+        if target_search is not None:
+            search_result = target_search(request.target_contact, request, output_dir)
+        else:
+            search_result = gui_search(request.target_contact)
         if not _gui_search_succeeded(search_result):
             raise RuntimeError("指定联系人搜索失败")
 
-        contact = Contact(
-            name=request.target_contact,
-            last_time="",
-            preview="",
-            bounds=None,
-            tap_x=0,
-            tap_y=0,
-            raw_texts=[request.target_contact],
-        )
+        contact = _contact_from_search_result(search_result, request.target_contact)
         chat_path = output_dir / f"chat_01_{safe_filename(request.target_contact)}.json"
         collection_error: BaseException | None = None
         try:
@@ -503,6 +542,212 @@ def collect_action_with_device(
     }
     result["artifacts"].update(_write_payloads(output_dir, result))
     return result
+
+
+def _search_target_contact_with_ui_dump(
+    contact_name: str,
+    request: WechatCollectRequest,
+    output_dir: Path,
+    dump_provider: Callable[[Path], dict[str, Any]],
+    click_point: Callable[[int, int, str], None],
+    input_text: Callable[[str], None],
+) -> dict[str, Any]:
+    """使用微信自身搜索框进入指定联系人聊天页。
+
+    该路径不依赖视觉 GUI Agent：先从当前微信页面 dump 中定位“搜索”入口，
+    再输入联系人名并从搜索结果 dump 中选择匹配联系人。
+    """
+
+    print(f">> [WeChatCollect] 通过 UI dump 搜索指定联系人: {contact_name}")
+    search_home_path = output_dir / "target_search_home.json"
+    search_home = dump_provider(search_home_path)
+    search_point = _find_search_entry_point(search_home)
+    if search_point is None:
+        return {
+            "status": "error",
+            "message": "未找到微信搜索入口",
+            "search_home_dump": str(search_home_path),
+        }
+
+    click_point(search_point[0], search_point[1], "微信搜索入口")
+    if request.wait > 0:
+        time.sleep(request.wait)
+    input_text(contact_name)
+    if request.wait > 0:
+        time.sleep(request.wait)
+
+    search_results_path = output_dir / "target_search_results.json"
+    search_results = dump_provider(search_results_path)
+    contact = _find_target_contact_in_search_results(search_results, contact_name)
+    if contact is None:
+        return {
+            "status": "error",
+            "message": f"未在微信搜索结果中找到联系人：{contact_name}",
+            "search_home_dump": str(search_home_path),
+            "search_results_dump": str(search_results_path),
+        }
+
+    click_point(contact.tap_x, contact.tap_y, f"搜索结果联系人 {contact.name}")
+    if request.wait > 0:
+        time.sleep(request.wait)
+    return {
+        "status": "ok",
+        "contact": _serialize_contact(contact),
+        "search_home_dump": str(search_home_path),
+        "search_results_dump": str(search_results_path),
+    }
+
+
+def _driver_clear_and_input_text(driver: Any, text: str) -> None:
+    driver.shell("uitest uiInput keyEvent 2072 2017")
+    driver.press_key(2071)
+    driver.input_text(text)
+
+
+def _find_search_entry_point(root: dict[str, Any]) -> tuple[int, int] | None:
+    candidates: list[tuple[int, tuple[int, int]]] = []
+    for node in iter_nodes(root):
+        if node_type(node) != "Text":
+            continue
+        text = str(attrs(node).get("text") or "").strip()
+        if text != "搜索":
+            continue
+        bounds = node_bounds(node)
+        if bounds is None:
+            continue
+        candidates.append((bounds[1], bounds_center(bounds)))
+    if candidates:
+        return min(candidates, key=lambda item: item[0])[1]
+
+    root_bounds = node_bounds(root)
+    if root_bounds is None:
+        return None
+    x1, y1, x2, y2 = root_bounds
+    return (x1 + x2) // 2, y1 + max(160, int((y2 - y1) * 0.065))
+
+
+def _find_target_contact_in_search_results(root: dict[str, Any], target_name: str) -> Contact | None:
+    list_node = find_best_list(root, prefer_scrollable=False)
+    candidates: list[tuple[int, int, Contact]] = []
+    if list_node is not None:
+        for item in direct_list_items(list_node):
+            text_nodes = collect_text_nodes(item)
+            texts = [text_node.text for text_node in text_nodes]
+            score, matched_name = _target_contact_match(texts, target_name)
+            if score <= 0:
+                continue
+            item_bounds = node_bounds(item)
+            tap_x, tap_y = bounds_center(item_bounds)
+            contact_name = matched_name or target_name
+            candidates.append((
+                score,
+                -(item_bounds[1] if item_bounds is not None else 0),
+                Contact(
+                    name=contact_name,
+                    last_time="",
+                    preview=" ".join(texts[1:]) if len(texts) > 1 else "",
+                    bounds=item_bounds,
+                    tap_x=tap_x,
+                    tap_y=tap_y,
+                    raw_texts=texts or [target_name],
+                ),
+            ))
+    if candidates:
+        return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+    for node in iter_nodes(root):
+        if node_type(node) != "Text":
+            continue
+        text = str(attrs(node).get("text") or "").strip()
+        score, matched_name = _target_contact_match([text], target_name)
+        if score <= 0:
+            continue
+        bounds = node_bounds(node)
+        tap_x, tap_y = bounds_center(bounds)
+        return Contact(
+            name=matched_name or target_name,
+            last_time="",
+            preview="",
+            bounds=bounds,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            raw_texts=[text or target_name],
+        )
+    return None
+
+
+def _target_contact_match_score(texts: list[str], target_name: str) -> int:
+    score, _ = _target_contact_match(texts, target_name)
+    return score
+
+
+def _target_contact_match(texts: list[str], target_name: str) -> tuple[int, str]:
+    target = target_name.strip()
+    if not target:
+        return 0, ""
+    normalized_target = target.casefold()
+    normalized_pairs = [
+        (text.strip(), text.strip().casefold())
+        for text in texts
+        if text and text.strip()
+    ]
+    if not normalized_pairs:
+        return 0, ""
+    first_text, first = normalized_pairs[0]
+    if first == normalized_target:
+        return 100, first_text
+    if normalized_target in first or first in normalized_target:
+        return 80, first_text
+    for text, normalized_text in normalized_pairs:
+        if normalized_text == normalized_target:
+            return 70, text
+        if normalized_target in normalized_text or normalized_text in normalized_target:
+            return 50, text
+    return 0, ""
+
+
+def _contact_from_search_result(result: Any, fallback_name: str) -> Contact:
+    if isinstance(result, dict) and isinstance(result.get("contact"), dict):
+        item = result["contact"]
+        name = str(item.get("name") or fallback_name).strip() or fallback_name
+        bounds = _bounds_from_json_value(item.get("bounds"))
+        tap_x = _int_or_default(item.get("tap_x"), bounds_center(bounds)[0])
+        tap_y = _int_or_default(item.get("tap_y"), bounds_center(bounds)[1])
+        raw_texts = item.get("raw_texts")
+        return Contact(
+            name=name,
+            last_time=str(item.get("last_time") or ""),
+            preview=str(item.get("preview") or ""),
+            bounds=bounds,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            raw_texts=[str(value) for value in raw_texts] if isinstance(raw_texts, list) else [name],
+        )
+    return Contact(
+        name=fallback_name,
+        last_time="",
+        preview="",
+        bounds=None,
+        tap_x=0,
+        tap_y=0,
+        raw_texts=[fallback_name],
+    )
+
+
+def _bounds_from_json_value(value: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return tuple(int(part) for part in value)  # type: ignore[return-value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _write_payloads(output_dir: Path, payload: dict[str, Any]) -> dict[str, str]:

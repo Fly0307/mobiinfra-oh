@@ -208,20 +208,24 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
             hdc_server.wechat_collect_service = original_service
             hdc_server.is_hdc_connected = original_is_connected
 
-    def test_wechat_collect_target_contact_requires_harmony_agent_for_gui_search(self):
+    def test_wechat_collect_target_contact_allows_missing_gui_agent(self):
         original_agent = hdc_server.harmony_agent
         original_service = hdc_server.wechat_collect_service
         original_is_connected = hdc_server.is_hdc_connected
+        fake_service = FakeWechatCollectService()
         try:
             hdc_server.harmony_agent = None
-            hdc_server.wechat_collect_service = FakeWechatCollectService()
+            hdc_server.wechat_collect_service = fake_service
             hdc_server.is_hdc_connected = lambda force=False: True
 
-            with self.assertRaisesRegex(RuntimeError, "harmony_agent.py is unavailable"):
-                hdc_server.handle_workflow_action("wechat_collect", {
-                    "mode": "target_contact",
-                    "target_contact": "小赵",
-                })
+            result = hdc_server.handle_workflow_action("wechat_collect", {
+                "mode": "target_contact",
+                "target_contact": "小赵",
+            })
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(fake_service.collect_payload["mode"], "target_contact")
+            self.assertEqual(fake_service.collect_payload["target_contact"], "小赵")
         finally:
             hdc_server.harmony_agent = original_agent
             hdc_server.wechat_collect_service = original_service

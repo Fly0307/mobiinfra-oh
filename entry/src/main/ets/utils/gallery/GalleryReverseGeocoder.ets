@@ -73,6 +73,9 @@ export class GalleryReverseGeocoder {
         throw new Error('HTTP ' + response.responseCode.toString() + ': ' + String(response.result));
       }
       return ArkJSON.parse(String(response.result)) as AmapJson;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       httpReq.destroy();
     }

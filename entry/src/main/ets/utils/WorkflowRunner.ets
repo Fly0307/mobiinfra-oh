@@ -2,6 +2,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { AppLogger } from './AppLogger';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
@@ -195,6 +196,7 @@ export class WorkflowRunner {
   private runDate: string = '';
   private workflowFile: string = '';
   private runningTask: WorkflowTask | null = null;
+  private traceId: string = '';
   private currentAppName: string = '';
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
@@ -230,6 +232,7 @@ export class WorkflowRunner {
     this.runtimeStack = [];
     this.currentAppName = '';
     this.currentPackageName = '';
+    this.traceId = '';
     this.latestDailyLogPath = '';
     this.pendingSummaryJobs = [];
     this.clearWorkflowScreenshotCache();
@@ -237,10 +240,13 @@ export class WorkflowRunner {
     this.dateContext = new WorkflowDateContext(this.runStartedAt);
     this.runDate = this.dateContext.runDate();
     this.runDir = this.createRunDir(task);
+    this.traceId = this.traceIdFromRunDir(this.runDir);
 
     this.log('====== Workflow started ======');
     this.log('任务：' + task.title);
     this.log('run 目录已创建：' + this.runDir);
+    this.debug('run initialized taskId=' + task.id + ', workflowFile=' + this.workflowFile +
+      ', rawSteps=' + this.workflow.steps.length + ', contextKeys=' + this.contextKeysText());
     AgentExecutionController.beginExecution('Workflow 启动：' + task.title);
     this.writeRunSummary('running');
 
@@ -249,6 +255,7 @@ export class WorkflowRunner {
     let returnedToApp = false;
     try {
       let steps = this.normalizeSteps(this.workflow.steps);
+      this.debug('run normalized steps=' + steps.length);
       await this.executeSteps(steps, '', {});
       if (AgentExecutionController.isCancelRequested()) {
         status = 'cancelled';
@@ -296,6 +303,8 @@ export class WorkflowRunner {
     } else {
       AgentExecutionController.finishExecution('Workflow ' + status);
     }
+    this.debug('run finished status=' + status + ', returnedToApp=' + String(returnedToApp) +
+      ', durationMs=' + this.elapsedMs(this.runStartedAt.getTime()));
     this.log('====== Workflow finished: ' + status + ' ======');
     return {
       status: status,
@@ -402,8 +411,11 @@ export class WorkflowRunner {
 
   private async executeOneStep(step: WorkflowStep, actualId: string, aliases: Record<string, string>): Promise<boolean> {
     let started = new Date().getTime() / 1000;
+    let startedMs = new Date().getTime();
     let localId = String(step.id);
     this.log('Step ' + actualId + ' started: ' + step.type);
+    this.debugStep('step started stepId=' + actualId + ', type=' + step.type +
+      ', on_error=' + (step.on_error || 'stop'));
     AgentExecutionController.updateFloatText(this.buildStepFloatText(step, actualId));
     await AgentExecutionController.waitIfPaused();
     if (AgentExecutionController.isCancelRequested()) {
@@ -416,6 +428,8 @@ export class WorkflowRunner {
       this.stepResults[actualId] = result;
       aliases[localId] = actualId;
       this.log('Step ' + actualId + ' success');
+      this.debugStep('step finished stepId=' + actualId + ', type=' + step.type +
+        ', on_error=' + (step.on_error || 'stop') + ', status=success, durationMs=' + this.elapsedMs(startedMs));
       return false;
     } catch (e) {
       let err = e as Error;
@@ -423,6 +437,9 @@ export class WorkflowRunner {
       this.stepResults[actualId] = result;
       aliases[localId] = actualId;
       this.log('Step ' + actualId + ' failed: ' + result.error);
+      this.debugStep('step finished stepId=' + actualId + ', type=' + step.type +
+        ', on_error=' + (step.on_error || 'stop') + ', status=failed, durationMs=' + this.elapsedMs(startedMs) +
+        ', error=' + result.error);
       return step.on_error !== 'continue';
     }
   }
@@ -475,7 +492,19 @@ export class WorkflowRunner {
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
       this.clearWorkflowScreenshotCache();
-      await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
+      let startAppStartedAt = new Date().getTime();
+      this.debug('hdcBridge.startApp begin appName=' + planner.appName + ', packageName=' + planner.packageName +
+        ', resetFirst=true');
+      try {
+        await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
+        this.debug('hdcBridge.startApp success appName=' + planner.appName + ', packageName=' + planner.packageName +
+          ', durationMs=' + this.elapsedMs(startAppStartedAt));
+      } catch (e) {
+        let err = e as Error;
+        this.debug('hdcBridge.startApp failed appName=' + planner.appName + ', packageName=' + planner.packageName +
+          ', durationMs=' + this.elapsedMs(startAppStartedAt) + ', message=' + (err.message || String(e)));
+        throw err;
+      }
       this.clearWorkflowScreenshotCache();
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
@@ -507,7 +536,22 @@ export class WorkflowRunner {
 
   private async runPlanner(taskDescription: string): Promise<PlannerResult> {
     let prompt = await this.buildPlannerPrompt(taskDescription);
-    let response = await this.cloudClient.chatPlanner(prompt, this.cloudConfigProvider());
+    let config = this.cloudConfigProvider();
+    let plannerStartedAt = new Date().getTime();
+    this.debug('Planner request start promptLength=' + prompt.length +
+      ', plannerBaseUrlEmpty=' + String(config.plannerBaseUrl.trim().length === 0) +
+      ', modelEmpty=' + String(config.deciderModel.trim().length === 0));
+    let response = '';
+    try {
+      response = await this.cloudClient.chatPlanner(prompt, config);
+      this.debug('Planner response received responseLength=' + response.length +
+        ', durationMs=' + this.elapsedMs(plannerStartedAt));
+    } catch (e) {
+      let err = e as Error;
+      this.debug('Planner request failed durationMs=' + this.elapsedMs(plannerStartedAt) +
+        ', message=' + (err.message || String(e)));
+      throw err;
+    }
     this.log('Planner response:\n' + response);
     let data = this.extractJsonMap(response, true);
     let appName = this.getMapString(data, 'app_name');
@@ -526,6 +570,8 @@ export class WorkflowRunner {
     if (finalTask.length === 0) {
       finalTask = taskDescription;
     }
+    this.debug('Planner parsed app_name=' + appName + ', package_name=' + packageName +
+      ', final_task_description.length=' + finalTask.length);
     return {
       appName: appName,
       packageName: packageName,
@@ -1513,7 +1559,38 @@ export class WorkflowRunner {
     return y + m + d + '-' + h + mi + s;
   }
 
+  private traceIdFromRunDir(path: string): string {
+    let idx = path.lastIndexOf('/');
+    if (idx >= 0 && idx + 1 < path.length) {
+      return path.substring(idx + 1);
+    }
+    return path.length > 0 ? path : 'pending';
+  }
+
+  private tracePrefix(): string {
+    let id = this.traceId.length > 0 ? this.traceId : 'pending';
+    return 'traceId=' + id + ' ';
+  }
+
+  private contextKeysText(): string {
+    let keys = Object.keys(this.contextValues);
+    return keys.length > 0 ? keys.join('|') : '(empty)';
+  }
+
+  private elapsedMs(startedAtMs: number): number {
+    return new Date().getTime() - startedAtMs;
+  }
+
+  private debug(message: string): void {
+    AppLogger.debug('Workflow', this.tracePrefix() + message);
+  }
+
+  private debugStep(message: string): void {
+    AppLogger.debug('Workflow.Step', this.tracePrefix() + message);
+  }
+
   private log(message: string): void {
+    AppLogger.info('Workflow', message);
     this.logHandler('[Workflow] ' + message);
   }
 }

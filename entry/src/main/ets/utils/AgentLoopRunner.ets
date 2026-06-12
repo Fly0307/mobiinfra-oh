@@ -6,8 +6,9 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
+import { AppLogger } from './AppLogger';
+import { AgentLoopNativeApi } from 'libentry.so';
 
-type NativeApi = Record<string, Function>;
 type AgentLoopMode = 'local' | 'cloud';
 type LogHandler = (message: string) => void;
 type ApprovalHandler = (response: string) => Promise<boolean>;
@@ -18,23 +19,12 @@ interface PlannerTarget {
   packageName: string;
 }
 
-export interface AgentLoopRunnerOptions {
-  filesDir: string;
-  hdcServerIp: string;
-  localApi: NativeApi;
-  cloudClient: CloudModelClient;
-  cloudConfigProvider: CloudConfigProvider;
-  localLogHandler: LogHandler;
-  cloudLogHandler: LogHandler;
-  localApprovalHandler: ApprovalHandler;
-  cloudApprovalHandler: ApprovalHandler;
-}
-
 const MAX_AGENT_STEPS: number = 15;
+const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
-  private localApi: NativeApi;
+  private localApi: AgentLoopNativeApi;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: CloudConfigProvider;
   private hdcBridge: HdcWorkflowBridge;
@@ -48,16 +38,27 @@ export class AgentLoopRunner {
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
 
-  constructor(options: AgentLoopRunnerOptions) {
-    this.filesDir = options.filesDir;
-    this.localApi = options.localApi;
-    this.cloudClient = options.cloudClient;
-    this.cloudConfigProvider = options.cloudConfigProvider;
-    this.hdcBridge = new HdcWorkflowBridge(options.hdcServerIp, options.cloudLogHandler);
-    this.localLogHandler = options.localLogHandler;
-    this.cloudLogHandler = options.cloudLogHandler;
-    this.localApprovalHandler = options.localApprovalHandler;
-    this.cloudApprovalHandler = options.cloudApprovalHandler;
+  // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
+  constructor(
+    filesDir: string,
+    hdcServerIp: string,
+    localApi: AgentLoopNativeApi,
+    cloudClient: CloudModelClient,
+    cloudConfigProvider: CloudConfigProvider,
+    localLogHandler: LogHandler,
+    cloudLogHandler: LogHandler,
+    localApprovalHandler: ApprovalHandler,
+    cloudApprovalHandler: ApprovalHandler
+  ) {
+    this.filesDir = filesDir;
+    this.localApi = localApi;
+    this.cloudClient = cloudClient;
+    this.cloudConfigProvider = cloudConfigProvider;
+    this.hdcBridge = new HdcWorkflowBridge(hdcServerIp, cloudLogHandler);
+    this.localLogHandler = localLogHandler;
+    this.cloudLogHandler = cloudLogHandler;
+    this.localApprovalHandler = localApprovalHandler;
+    this.cloudApprovalHandler = cloudApprovalHandler;
   }
 
   getMode(): AgentLoopMode {
@@ -85,11 +86,11 @@ export class AgentLoopRunner {
       await this.launchTargetApp(plannerTarget);
       await this.resetLocalContext();
       await this.runAgentSteps(task, 'local');
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('local');
       AgentExecutionController.finishExecution('本地 Agent 已完成');
     } catch (e) {
       let err = e as Error;
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('local');
       AgentExecutionController.finishExecution('本地 Agent 结束');
       throw err;
     } finally {
@@ -110,12 +111,12 @@ export class AgentLoopRunner {
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
       await this.runAgentSteps(task, 'cloud');
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('cloud');
       AgentExecutionController.finishExecution('云端 Agent 已完成');
     } catch (e) {
       let err = e as Error;
       this.cloudClient.cancelActiveRequests();
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('cloud');
       AgentExecutionController.finishExecution('云端 Agent 结束');
       throw err;
     } finally {
@@ -194,6 +195,24 @@ export class AgentLoopRunner {
     this.log(this.mode, '>> [Planner] launching target app: ' + target.appName + ' ' + target.packageName);
     await this.hdcBridge.startApp(target.appName, target.packageName, true);
     await this.sleep(300);
+  }
+
+  private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
+    try {
+      await this.hdcBridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      this.log(mode, '>> [Agent] returned to host app via HDC bridge.');
+      return true;
+    } catch (e) {
+      let err = e as Error;
+      this.log(mode, '>> [Agent] HDC return to host app failed: ' + (err.message || String(e)));
+    }
+
+    if (AgentExecutionController.returnToApp()) {
+      this.log(mode, '>> [Agent] return-to-app handler invoked.');
+      return true;
+    }
+    this.log(mode, '>> [Agent] return-to-app handler is unavailable.');
+    return false;
   }
 
   private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
@@ -437,23 +456,14 @@ export class AgentLoopRunner {
 
   private async resetLocalContext(): Promise<void> {
     try {
-      let agentReset = this.localApi['agentReset'];
-      let reset = this.localApi['reset'];
-      if (typeof agentReset === 'function') {
-        await agentReset();
-      } else if (typeof reset === 'function') {
-        reset();
-      }
+      await this.localApi.agentReset();
     } catch (e) {
     }
   }
 
   private async localAgentReset(): Promise<void> {
     try {
-      let agentReset = this.localApi['agentReset'];
-      if (typeof agentReset === 'function') {
-        await agentReset();
-      }
+      await this.localApi.agentReset();
       this.log('local', '>> [Agent Reset] Local Agent context reset.');
     } catch (e) {
     }
@@ -517,6 +527,7 @@ export class AgentLoopRunner {
   }
 
   private log(mode: AgentLoopMode, message: string): void {
+    AppLogger.info('AgentLoop.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler(message);
       return;

@@ -32,12 +32,35 @@ class FakeHarmonyAgent:
     def __init__(self):
         self.d = FakeDriver()
         self.enter_pressed = False
+        self.factor = None
+        self.device_control_operations = []
 
     def run_driver_call(self, operation_name, operation):
         return operation(self.d)
 
+    def run_with_device_control(self, operation_name, operation):
+        self.device_control_operations.append(operation_name)
+        return operation()
+
+    def _capture_screen_mobiagent_style_impl(self, factor):
+        self.factor = factor
+        return "image-data", 540, 1170
+
     def press_harmony_key(self, name, fallback_code):
         self.enter_pressed = (name, fallback_code)
+
+
+class WorkflowScreenshotTest(unittest.TestCase):
+    def test_workflow_screenshot_does_not_manage_overlay_from_pc_socket(self):
+        fake_agent = FakeHarmonyAgent()
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "is_hdc_connected", lambda force=False: True):
+            result = hdc_server.handle_workflow_action("screenshot", {"factor": 0.5})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(fake_agent.factor, 0.5)
+        self.assertEqual(["workflow capture_screen_mobiagent direct"], fake_agent.device_control_operations)
 
 
 class HdcServerWorkflowInputTest(unittest.TestCase):

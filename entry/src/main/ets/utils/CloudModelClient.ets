@@ -5,6 +5,7 @@ import {
   CLOUD_DECIDER_SYSTEM_PROMPT,
   CLOUD_DECIDER_USER_PROMPT
 } from './CloudDeciderPrompt';
+import { AppLogger } from './AppLogger';
 
 // OpenAI-compatible 云端模型客户端。Planner 和 Decider 可以指向不同 base URL，
 // 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
@@ -161,7 +162,7 @@ export class CloudModelClient {
       try {
         pending[i].destroy();
       } catch (e) {
-        console.warn('[CloudModelClient] destroy pending request failed: ' + String(e));
+        AppLogger.warnCause('CloudModel', 'destroy pending request failed', e as Error);
       }
     }
   }
@@ -290,6 +291,9 @@ export class CloudModelClient {
         throw new Error('Cloud response has no choices');
       }
       return parsed.choices[0].message.content;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
@@ -528,6 +532,12 @@ export class CloudModelClient {
     return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
   }
 
+  async chatPlannerMessages(messages: CloudChatMessage[], config: CloudModelConfig): Promise<string> {
+    return this.chatMessages(config.plannerBaseUrl, messages, config.apiKey, undefined, undefined, undefined, {
+      chat_template_kwargs: { enable_thinking: false }
+    });
+  }
+
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
     // 通用图文 Decider：完整 prompt 与当前截图作为同一条 user 消息发送。
     let imageUrl: CloudImageUrl = {
@@ -620,6 +630,9 @@ export class CloudModelClient {
         throw new Error('Embedding response has no vectors');
       }
       return parsed.data[0].embedding;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();

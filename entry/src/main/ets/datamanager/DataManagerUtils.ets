@@ -1,4 +1,3 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import {
   AggregatedRecord,
   BooleanMap,
@@ -15,6 +14,7 @@ import {
   SourceEntry,
   createStringArrayMap
 } from './DataManagerTypes';
+import { parseJsonCompat } from '../utils/JsonCompat';
 
 export const DAILY_LOG_METADATA_PATTERN: RegExp = /^<!-- DAILY_LOG_METADATA\n([\s\S]*?)\n-->\n*/;
 export const STATE_FILE_SUFFIX: string = '.state.json';
@@ -253,7 +253,7 @@ export function parseDailyLogDocument(content: string): DailyLogParseResult {
     return result;
   }
   try {
-    let parsed = ArkJSON.parse(match[1]) as JsonMap;
+    let parsed = parseJsonCompat<JsonMap>(match[1]);
     if (parsed && typeof parsed === 'object') {
       if (parsed['workflow_metadata'] && typeof parsed['workflow_metadata'] === 'object') {
         result.workflow_metadata = parsed['workflow_metadata'] as JsonMap;
@@ -1068,4 +1068,3 @@ export async function runLimitedTasks<T>(tasks: DataManagerAsyncTask<T>[], concu
   await Promise.all(workers);
   return results;
 }
-

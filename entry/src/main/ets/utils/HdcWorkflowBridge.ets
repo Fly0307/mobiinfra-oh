@@ -1,6 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { AgentExecutionController } from './AgentExecutionController';
+import { AppLogger } from './AppLogger';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 
 interface HdcBridgeRequest {
@@ -20,6 +21,7 @@ interface StartAppPayload {
 interface ScreenshotPayload {
   factor: number;
   style?: string;
+  manage_overlay?: boolean;
 }
 
 interface ExecuteDeciderPayload {
@@ -55,6 +57,32 @@ export class HdcWorkflowBridge {
     });
   }
 
+  private elapsedMs(startedAtMs: number): number {
+    return new Date().getTime() - startedAtMs;
+  }
+
+  private payloadKeysText(payload: WorkflowJsonMap): string {
+    let keys = Object.keys(payload);
+    return keys.length > 0 ? keys.join('|') : '(empty)';
+  }
+
+  private compactText(value: string, maxChars: number): string {
+    let text = value.replace(/\s+/g, ' ').trim();
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return text.substring(0, maxChars) + '...';
+  }
+
+  private responseSummary(requestAction: string, response: HdcBridgeResponse): string {
+    let message = response.message && response.message.length > 0 ? this.compactText(response.message, 160) : '(empty)';
+    let responseAction = response.action && response.action.length > 0 ? response.action : requestAction;
+    let width = response.width === undefined ? '(empty)' : String(response.width);
+    let height = response.height === undefined ? '(empty)' : String(response.height);
+    return 'status=' + response.status + ', message=' + message + ', action=' + responseAction +
+      ', width=' + width + ', height=' + height;
+  }
+
   async request(action: string, payload?: WorkflowJsonMap): Promise<HdcBridgeResponse> {
     let emptyPayload: EmptyBridgePayload = {};
     let requestPayload = payload === undefined ? emptyPayload as Object as WorkflowJsonMap : payload;
@@ -63,7 +91,10 @@ export class HdcWorkflowBridge {
       payload: requestPayload
     };
     let httpReq = http.createHttp();
+    let startedAt = new Date().getTime();
     try {
+      AppLogger.info('HdcBridge', 'request action=' + action + ', payloadKeys=' +
+        this.payloadKeysText(requestPayload));
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json' },
@@ -78,20 +109,25 @@ export class HdcWorkflowBridge {
           status: 'error',
           message: 'HDC bridge HTTP ' + resp.responseCode + ': ' + String(resp.result)
         };
+        AppLogger.info('HdcBridge', 'response http=' + resp.responseCode + ', durationMs=' +
+          this.elapsedMs(startedAt) + ', ' + this.responseSummary(action, errorResponse));
         return errorResponse;
       }
       let parsed = ArkJSON.parse(resp.result as string) as HdcBridgeResponse;
+      AppLogger.info('HdcBridge', 'response http=' + resp.responseCode + ', durationMs=' +
+        this.elapsedMs(startedAt) + ', ' + this.responseSummary(action, parsed));
       if (parsed.status !== 'ok') {
         this.logHandler('HDC bridge 返回失败：' + (parsed.message || parsed.status));
       }
       return parsed;
     } catch (e) {
       let err = e as Error;
-      let errorResponse: HdcBridgeResponse = {
+      AppLogger.errorCause('HdcBridge', 'request failed action=' + action + ', durationMs=' +
+        this.elapsedMs(startedAt), err);
+      return {
         status: 'error',
         message: 'HDC bridge 请求失败：' + err.message
       };
-      return errorResponse;
     } finally {
       httpReq.destroy();
     }
@@ -126,7 +162,8 @@ export class HdcWorkflowBridge {
       }
       let payload: ScreenshotPayload = {
         factor: factor,
-        style: factor <= 0.25 ? 'local' : 'mobiagent'
+        style: factor <= 0.25 ? 'local' : 'mobiagent',
+        manage_overlay: false
       };
       let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
       if (response.status !== 'ok' || !response.image_b64) {

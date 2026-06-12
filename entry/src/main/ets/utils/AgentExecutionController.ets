@@ -1,3 +1,5 @@
+import { AppLogger } from './AppLogger';
+
 type CancelHandler = () => Promise<void> | void;
 type VoidHandler = () => void;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
@@ -32,8 +34,8 @@ export class AgentExecutionController {
   private static pendingStreamStatusText: string = '';
   private static streamStatusTimerId: number = -1;
 
-  private static warn(message: string, err: Object): void {
-    console.warn(`[AgentExecutionController] ${message}: ${String(err)}`);
+  private static warn(message: string, err: Error): void {
+    AppLogger.warnCause('AgentExecution', message, err);
   }
 
   static initialize(): void {
@@ -127,19 +129,19 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.localCancelHandler?.();
     } catch (e) {
-      AgentExecutionController.warn('local cancel handler failed', e as Object);
+      AgentExecutionController.warn('local cancel handler failed', e as Error);
     }
 
     try {
       AgentExecutionController.cloudCancelHandler?.();
     } catch (e) {
-      AgentExecutionController.warn('cloud cancel handler failed', e as Object);
+      AgentExecutionController.warn('cloud cancel handler failed', e as Error);
     }
 
     try {
       AgentExecutionController.returnToAppHandler?.();
     } catch (e) {
-      AgentExecutionController.warn('return-to-app handler failed', e as Object);
+      AgentExecutionController.warn('return-to-app handler failed', e as Error);
     }
   }
 
@@ -227,7 +229,7 @@ export class AgentExecutionController {
       AgentExecutionController.captureOverlayHidden = hidden;
       return hidden;
     } catch (e) {
-      AgentExecutionController.warn('capture overlay hide failed', e as Object);
+      AgentExecutionController.warn('capture overlay hide failed', e as Error);
       return false;
     }
   }
@@ -250,7 +252,7 @@ export class AgentExecutionController {
     try {
       await AgentExecutionController.captureOverlayHandler(false);
     } catch (e) {
-      AgentExecutionController.warn('capture overlay restore failed', e as Object);
+      AgentExecutionController.warn('capture overlay restore failed', e as Error);
     }
   }
 
@@ -262,7 +264,7 @@ export class AgentExecutionController {
       AgentExecutionController.returnToAppHandler();
       return true;
     } catch (e) {
-      AgentExecutionController.warn('return-to-app handler failed', e as Object);
+      AgentExecutionController.warn('return-to-app handler failed', e as Error);
       return false;
     }
   }
@@ -271,7 +273,7 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.floatWindowSyncHandler?.();
     } catch (e) {
-      AgentExecutionController.warn('float window sync handler failed', e as Object);
+      AgentExecutionController.warn('float window sync handler failed', e as Error);
     }
   }
 
@@ -279,7 +281,7 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.floatPanelLayoutHandler?.(AgentExecutionController.floatPanelExpanded);
     } catch (e) {
-      AgentExecutionController.warn('float panel layout handler failed', e as Object);
+      AgentExecutionController.warn('float panel layout handler failed', e as Error);
     }
   }
 
@@ -287,7 +289,7 @@ export class AgentExecutionController {
     try {
       AgentExecutionController.floatPanelMoveHandler?.(phase);
     } catch (e) {
-      AgentExecutionController.warn('float panel move handler failed', e as Object);
+      AgentExecutionController.warn('float panel move handler failed', e as Error);
     }
   }
 

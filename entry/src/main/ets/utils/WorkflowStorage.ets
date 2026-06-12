@@ -1,5 +1,7 @@
-import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
+import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
+import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
   WorkflowCondition,
   WorkflowDefaults,
@@ -88,25 +90,34 @@ export class WorkflowStorage {
   }
 
   static readText(path: string): string {
-    let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
     try {
-      let stat = fs.statSync(path);
-      let buf = new ArrayBuffer(stat.size);
-      fs.readSync(file.fd, buf);
-      let textDecoder = util.TextDecoder.create('utf-8');
-      return textDecoder.decodeWithStream(new Uint8Array(buf));
-    } finally {
-      fs.closeSync(file);
+      let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        let stat = fs.statSync(path);
+        let buf = new ArrayBuffer(stat.size);
+        fs.readSync(file.fd, buf);
+        return decodeUtf8Compat(new Uint8Array(buf));
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
   static writeText(path: string, content: string): void {
-    let byteStr = util.TextEncoder.create('utf-8').encodeInto(content);
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, byteStr.buffer);
-    } finally {
-      fs.closeSync(file);
+      let byteStr = encodeUtf8Compat(content);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, byteStr.buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
@@ -119,23 +130,33 @@ export class WorkflowStorage {
   }
 
   static readBytes(path: string): ArrayBuffer {
-    let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
     try {
-      let stat = fs.statSync(path);
-      let buf = new ArrayBuffer(stat.size);
-      fs.readSync(file.fd, buf);
-      return buf;
-    } finally {
-      fs.closeSync(file);
+      let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        let stat = fs.statSync(path);
+        let buf = new ArrayBuffer(stat.size);
+        fs.readSync(file.fd, buf);
+        return buf;
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
   static writeBytes(path: string, data: ArrayBuffer): void {
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, data);
-    } finally {
-      fs.closeSync(file);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, data);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
@@ -245,7 +266,7 @@ export class WorkflowStorage {
   }
 
   static validateWorkflowJson(rawJson: string, requireSteps: boolean = true): WorkflowDefinition {
-    let parsed = ArkJSON.parse(rawJson) as WorkflowDefinition;
+    let parsed = parseJsonCompat<WorkflowDefinition>(rawJson);
     if (!parsed.steps) {
       throw new Error('workflow.steps 不能为空');
     }
@@ -293,7 +314,7 @@ export class WorkflowStorage {
         WorkflowStorage.saveTasks(filesDir, defaults);
         return defaults;
       }
-      let parsed = ArkJSON.parse(WorkflowStorage.readText(path)) as WorkflowTaskIndex;
+      let parsed = parseJsonCompat<WorkflowTaskIndex>(WorkflowStorage.readText(path));
       let tasks = parsed.tasks || [];
       let syncedTasks = WorkflowStorage.syncTasksFromConfigFiles(filesDir,
         WorkflowStorage.syncCodeDefinedDefaultTasks(filesDir, tasks));
@@ -446,7 +467,7 @@ export class WorkflowStorage {
   private static readDeletedDefaultTaskSet(filesDir: string): Record<string, boolean> {
     let deleted: Record<string, boolean> = {};
     try {
-      let parsed = ArkJSON.parse(WorkflowStorage.readText(WorkflowStorage.deletedDefaultsPath(filesDir))) as DeletedDefaultTaskIndex;
+      let parsed = parseJsonCompat<DeletedDefaultTaskIndex>(WorkflowStorage.readText(WorkflowStorage.deletedDefaultsPath(filesDir)));
       let ids = parsed.ids || [];
       for (let i = 0; i < ids.length; i++) {
         deleted[ids[i]] = true;
@@ -461,7 +482,7 @@ export class WorkflowStorage {
     let index: DeletedDefaultTaskIndex = {
       ids: ids
     };
-    WorkflowStorage.writeText(WorkflowStorage.deletedDefaultsPath(filesDir), ArkJSON.stringify(index, null, 2));
+    WorkflowStorage.writeText(WorkflowStorage.deletedDefaultsPath(filesDir), stringifyJsonCompat(index as Object, 2));
   }
 
   private static markDefaultTaskDeleted(filesDir: string, taskId: string): void {
@@ -534,7 +555,7 @@ export class WorkflowStorage {
   }
 
   private static areTaskListsEqual(left: WorkflowTask[], right: WorkflowTask[]): boolean {
-    return ArkJSON.stringify(left) === ArkJSON.stringify(right);
+    return stringifyJsonCompat(left as Object) === stringifyJsonCompat(right as Object);
   }
 
   private static isCodeDefinedDefaultTaskId(taskId: string): boolean {
@@ -557,7 +578,7 @@ export class WorkflowStorage {
       version: 1,
       tasks: tasks
     };
-    WorkflowStorage.writeText(WorkflowStorage.indexPath(filesDir), ArkJSON.stringify(index, null, 2));
+    WorkflowStorage.writeText(WorkflowStorage.indexPath(filesDir), stringifyJsonCompat(index, 2));
   }
 
   static writeConfig(filesDir: string, task: WorkflowTask): void {
@@ -711,7 +732,7 @@ export class WorkflowStorage {
       workflow.metadata = {};
     }
     workflow.metadata.description = title;
-    return ArkJSON.stringify(workflow, null, 2);
+    return stringifyJsonCompat(workflow as Object, 2);
   }
 
   static duplicateTask(filesDir: string, taskId: string): WorkflowTask {
@@ -870,7 +891,7 @@ export class WorkflowStorage {
     if (context) {
       workflow.context = context;
     }
-    return ArkJSON.stringify(workflow, null, 2);
+    return stringifyJsonCompat(workflow as Object, 2);
   }
 
   private static openAppStep(appName: string): WorkflowStep {
@@ -1101,15 +1122,15 @@ export class WorkflowStorage {
           '请分析当前微信聊天界面，这是第${loop.index}次截图。忽略手机状态栏/页面顶部系统时间，不要将其作为聊天消息时间。\n' +
             '请总结当前截图中可见聊天内容，并尽量识别：聊天对象、消息发送人、消息发送绝对时间、消息原文，以及原文中相对时间对应的事件绝对时间。\n' +
             '输出格式：\n' +
-            '聊天对象：xxx\n' +
-            '- 发送人｜消息发送绝对时间：消息原文（如含相对时间，在原文对应位置补充[事件绝对时间]）\n' +
+            '聊天对象（联系人/群聊名称）：xxx\n' +
+            '- 发送人｜消息发送绝对时间：消息原文（如含事件相对时间，在原文对应位置补充[事件绝对时间]）\n' +
             '规则：\n' +
-            '1. 聊天对象能识别则输出名称；无法识别用“当前聊天对象”，不要编造。\n' +
+            '1. 聊天对象能识别则输出联系人/群聊名称；无法识别用“当前聊天对象”，不要编造。\n' +
             '2. 右侧绿色气泡通常为“我”；左侧白色气泡通常为“对方”。若顶部联系人名可识别，左侧消息发送人用该名称；不确定用“未知发送人”。\n' +
-            '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
+            '3. 消息发送绝对时间优先依据截图中的聊天日期分隔符和消息时间解析，如“昨天 下午 09:15”“上午 00:00”；这些消息时间锚点是内容自身时间锚点，需要结合【任务执行时间】解析“昨天/今天/周几”等日期。\n' +
             '4. 同一时间锚点下方、下一个时间锚点之前的消息，默认继承最近的上方时间锚点。\n' +
-            '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
-            '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充；原文无事件时间则不补充。\n' +
+            '5. 只有截图中完全没有聊天时间锚点时，才使用【任务执行时间】兜底；只有完全没有内容锚点时才使用任务执行日期兜底，并标注“不确定时间”，不要强行编造具体时分。\n' +
+            '6. 原文中的“明天、后天、今晚、明早、下午两点、下周一”等事件相对时间，必须以该消息的发送绝对时间为基准解析，并用[]补充事件绝对时间；原文无事件时间则不补充。\n' +
             '7. 不输出复杂 JSON；不编造不可见消息；看不清内容用“[无法识别]”。\n' +
             '示例：\n' +
             '任务执行时间：2026年06月09日 星期二 04:42\n' +

@@ -29,3 +29,4 @@ build-profile.json5*
 /.codex-tmp/
 /hvigor-workspace-review-fix-*/
 /.codex
+/docs/superpowers/

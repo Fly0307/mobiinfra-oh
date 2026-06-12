@@ -7,9 +7,24 @@ import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
-import { AppHeader } from '../components/AppHeader';
 import { CollectionPage } from './collection/CollectionPage';
+import { ChatPage } from './chat/ChatPage';
+import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_MESSAGE_KIND_CHAT,
+  CHAT_MESSAGE_KIND_TASK_RESULT,
+  CHAT_MESSAGE_KIND_TASK_TRACE,
+  CHAT_MODE_LOCAL_INFERENCE,
+  ChatMessage,
+  ChatSessionRecord,
+  ChatSessionSummary,
+  buildCloudContextMessages,
+  createChatMessage
+} from './chat/ChatSessionTypes';
+import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
+import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -34,10 +49,12 @@ import {
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
+import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
@@ -143,9 +160,9 @@ struct Index {
   @State backendTypeInput: string = 'cpu';
   @State mllmBackendTypeInput: string = 'cpu';
   @State currentTab: number = 0;
+  @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
-  @State assistantSettingsOpen: boolean = false;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -169,8 +186,15 @@ struct Index {
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudDebugImagePath: string = '';
+  private cloudTaskSessionId: string = '';
+  private localTaskSessionId: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State chatSessions: ChatSessionSummary[] = [];
+  @State activeChatSessionId: string = '';
+  @State activeChatMessages: ChatMessage[] = [];
+  @State chatSessionDrawerOpen: boolean = false;
+  @State restoringLocalSession: boolean = false;
   @State hdcConnected: boolean = false;
   @State hdcUsingReverseTunnel: boolean = false;
   @State hdcAutoConnected: boolean = false;
@@ -192,14 +216,350 @@ struct Index {
   private dataManagerFacade: DataManagerFacade | null = null;
   private homeRecommendationViewDateKey: string = '';
   private homeRecommendationDateTimerId: number = -1;
-  
+
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
 
+  private nextChatMessageId(prefix: string = 'msg'): string {
+    return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
+  }
+
+  private currentChatSessionViewState(): ChatSessionViewState {
+    return {
+      sessions: this.chatSessions,
+      activeSessionId: this.activeChatSessionId,
+      activeMessages: this.activeChatMessages,
+      mode: this.chatMode,
+      activeSession: null
+    };
+  }
+
+  private applyChatSessionViewState(state: ChatSessionViewState): void {
+    this.chatSessions = state.sessions;
+    this.activeChatSessionId = state.activeSessionId;
+    this.activeChatMessages = state.activeMessages;
+    this.chatMode = state.mode;
+  }
+
+  private initChatSessions(): void {
+    this.applyChatSessionViewState(ChatSessionController.init(this.filesDir, this.chatMode));
+  }
+
+  private ensureActiveChatSession(): ChatSessionRecord | null {
+    let state = ChatSessionController.ensureActive(this.filesDir, this.currentChatSessionViewState(), this.chatMode);
+    this.applyChatSessionViewState(state);
+    return state.activeSession;
+  }
+
+  private appendActiveChatMessage(message: ChatMessage): void {
+    let state = ChatSessionController.appendMessage(this.filesDir, this.currentChatSessionViewState(), this.chatMode,
+      message);
+    this.applyChatSessionViewState(state);
+  }
+
+  private appendChatMessageForSession(sessionId: string, message: ChatMessage): void {
+    let state = ChatSessionController.appendMessageToSession(this.filesDir, this.currentChatSessionViewState(),
+      this.taskSessionId(sessionId), message);
+    this.applyChatSessionViewState(state);
+  }
+
+  private appendActiveTaskTraceLine(line: string, messageId: string = ''): void {
+    let state = ChatSessionController.appendTaskTraceLine(this.filesDir, this.currentChatSessionViewState(),
+      this.chatMode, line, messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private attachTaskResultImage(sessionId: string, imagePath: string): void {
+    let state = ChatSessionController.attachTaskResultImage(this.filesDir, this.currentChatSessionViewState(),
+      sessionId, imagePath);
+    this.applyChatSessionViewState(state);
+  }
+
+  private compactTraceText(text: string, maxLength: number = 180): string {
+    let compact = text.trim().replace(/\s+/g, ' ');
+    if (compact.length <= maxLength) {
+      return compact;
+    }
+    return compact.substring(0, maxLength) + '...';
+  }
+
+  private extractJsonObjectText(text: string): string {
+    let start = text.indexOf('{');
+    let end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) {
+      return '';
+    }
+    return text.substring(start, end + 1);
+  }
+
+  private parseAgentResponsePayload(message: string): JsonMap | null {
+    if (message.indexOf('model response') < 0) {
+      return null;
+    }
+    let jsonText = this.extractJsonObjectText(message);
+    if (jsonText.length === 0) {
+      return null;
+    }
+    try {
+      return ArkJSON.parse(jsonText) as JsonMap;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private jsonStringValue(map: JsonMap, key: string): string {
+    let value = map[key];
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return '';
+  }
+
+  private jsonMapValue(map: JsonMap, key: string): JsonMap | null {
+    let value = map[key];
+    if (value !== null && typeof value === 'object') {
+      return value as JsonMap;
+    }
+    return null;
+  }
+
+  private agentActionTarget(payload: JsonMap): string {
+    let params = this.jsonMapValue(payload, 'parameters');
+    if (params === null) {
+      return '';
+    }
+    let target = this.jsonStringValue(params, 'target_element');
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'app_name');
+    }
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'package_name');
+    }
+    if (target.length === 0) {
+      target = this.jsonStringValue(params, 'target');
+    }
+    let text = this.jsonStringValue(params, 'text');
+    if (target.length > 0 && text.length > 0) {
+      return target + '，输入：' + text;
+    }
+    if (target.length === 0 && text.length > 0) {
+      return text;
+    }
+    return target;
+  }
+
+  private formatAgentTraceLog(message: string): string {
+    let payload = this.parseAgentResponsePayload(message);
+    if (payload === null) {
+      return '';
+    }
+    let action = this.jsonStringValue(payload, 'action');
+    if (action.length === 0) {
+      return '';
+    }
+    let reasoning = this.jsonStringValue(payload, 'reasoning');
+    if (reasoning.length === 0) {
+      reasoning = this.jsonStringValue(payload, 'reason');
+    }
+    let target = this.agentActionTarget(payload);
+    let lines: string[] = [];
+    if (reasoning.length > 0) {
+      lines.push('Reasoning：' + this.compactTraceText(reasoning));
+    }
+    lines.push('动作：' + action);
+    if (target.length > 0) {
+      lines.push('目标：' + this.compactTraceText(target, 120));
+    }
+    return lines.join('\n');
+  }
+
+  private toFileUri(path: string): string {
+    if (path.startsWith('file://')) {
+      return path;
+    }
+    return 'file://' + path;
+  }
+
+  private snapshotImagePathFromLog(message: string): string {
+    let taggedMatch = message.match(/<img>(.*?)<hw>/);
+    if (taggedMatch && taggedMatch[1]) {
+      return this.toFileUri(taggedMatch[1]);
+    }
+    let absoluteMatch = message.match(/(\/[^\s]+agent_snapshot_[^\s]+\.jpg)/);
+    if (absoluteMatch && absoluteMatch[1]) {
+      return this.toFileUri(absoluteMatch[1]);
+    }
+    let fileNameMatch = message.match(/agent_snapshot_.*?\.jpg/);
+    if (fileNameMatch && fileNameMatch[0]) {
+      return this.toFileUri(this.filesDir + '/' + fileNameMatch[0]);
+    }
+    return '';
+  }
+
+  private taskSessionId(fallbackId: string): string {
+    return fallbackId.length > 0 ? fallbackId : this.activeChatSessionId;
+  }
+
+  private appendTaskTraceLineForSession(sessionId: string, line: string, messageId: string = ''): void {
+    let state = ChatSessionController.appendTaskTraceLineToSession(this.filesDir, this.currentChatSessionViewState(),
+      this.taskSessionId(sessionId), line, messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private handleLocalAgentLog(message: string): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    let sessionId = this.taskSessionId(this.localTaskSessionId);
+    let traceLine = this.formatAgentTraceLog(message);
+    if (traceLine.length > 0) {
+      this.appendTaskTraceLineForSession(sessionId, traceLine);
+    }
+    let imagePath = this.snapshotImagePathFromLog(message);
+    if (imagePath.length > 0) {
+      this.debugImagePath = imagePath;
+    }
+  }
+
+  private handleCloudAgentLog(message: string): void {
+    this.appendCloudLog(message);
+    let imagePath = this.snapshotImagePathFromLog(message);
+    if (imagePath.length > 0) {
+      this.cloudDebugImagePath = imagePath;
+    }
+  }
+
+  private createChatSession(mode: string): void {
+    let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), mode);
+    this.applyChatSessionViewState(state);
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE && this.modelLoaded) {
+      try {
+        mnnllm.reset();
+      } catch (e) {
+        let err = e as Error;
+        this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('system'), 'system',
+          CHAT_MESSAGE_KIND_CHAT, '本地上下文清理失败：' + err.message, new Date().getTime()));
+      }
+    }
+  }
+
+  private async selectChatSession(sessionId: string): Promise<void> {
+    if (this.cloudThinking || this.isThinking || this.restoringLocalSession) {
+      showToastSafely('当前会话处理中，稍后再切换', 1500);
+      return;
+    }
+    let state = ChatSessionController.selectSession(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (state.activeSession === null || state.activeSession.id !== sessionId) {
+      showToastSafely('会话文件不存在，已从列表移除', 1500);
+      return;
+    }
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+  }
+
+  private async switchChatMode(mode: string): Promise<void> {
+    if (this.chatMode === mode && this.activeChatSessionId.length > 0) {
+      return;
+    }
+    let state = ChatSessionController.switchMode(this.filesDir, this.currentChatSessionViewState(), mode);
+    this.applyChatSessionViewState(state);
+    this.chatSessionDrawerOpen = false;
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+  }
+
+  private async confirmDeleteChatSession(session: ChatSessionSummary): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '删除会话',
+        message: '将删除“' + session.title + '”及其对应文件，此操作不可恢复。',
+        buttons: [
+          { text: '取消', color: '#666666' },
+          { text: '删除', color: '#FF4D4F' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => {
+        resolve(false);
+      });
+    });
+  }
+
+  private chatSessionExistsInState(state: ChatSessionViewState, sessionId: string): boolean {
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async deleteChatSession(sessionId: string): Promise<void> {
+    let target: ChatSessionSummary | null = null;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        target = this.chatSessions[i];
+        break;
+      }
+    }
+    if (target !== null) {
+      let confirmed = await this.confirmDeleteChatSession(target);
+      if (!confirmed) {
+        return;
+      }
+    }
+    let state = ChatSessionController.deleteSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      this.chatMode);
+    this.applyChatSessionViewState(state);
+    if (this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('删除会话失败', 1500);
+      return;
+    }
+    if (state.activeSession !== null && state.activeSession.mode === CHAT_MODE_LOCAL_INFERENCE) {
+      await this.restoreLocalChatContext(state.activeSession);
+    }
+    showToastSafely('会话已删除', 1500);
+  }
+
+  private toggleActiveTaskTrace(messageId: string): void {
+    let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private async restoreLocalChatContext(session: ChatSessionRecord): Promise<void> {
+    if (!this.modelLoaded) {
+      return;
+    }
+    this.restoringLocalSession = true;
+    try {
+      mnnllm.reset();
+      for (let i = 0; i < session.messages.length; i++) {
+        let message = session.messages[i];
+        if (message.role === 'user' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+          await mnnllm.chat(message.content);
+        }
+      }
+    } catch (e) {
+      let err = e as Error;
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('system'), 'system', CHAT_MESSAGE_KIND_CHAT,
+        '本地上下文恢复失败：' + err.message, new Date().getTime()));
+    } finally {
+      this.restoringLocalSession = false;
+    }
+  }
+
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLog(message: string): void {
+    AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
     let nextLogs = this.cloudOutput.length > 0 ? this.cloudOutput + '\n' + line : line;
@@ -208,9 +568,19 @@ struct Index {
     }
     this.cloudOutput = nextLogs;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
+    let traceLine = this.formatAgentTraceLog(message);
+    if (traceLine.length > 0) {
+      this.appendTaskTraceLineForSession(this.cloudTaskSessionId, traceLine);
+    }
+    if (message.indexOf('Task completed') >= 0) {
+      this.appendChatMessageForSession(this.cloudTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+    }
   }
 
   private resetCloudLog(message: string): void {
+    AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
@@ -355,6 +725,9 @@ struct Index {
       });
       let helper = new util.Base64Helper();
       return 'data:image/jpeg;base64,' + helper.encodeToStringSync(new Uint8Array(data));
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     } finally {
       if (packer !== null) {
         try {
@@ -386,7 +759,7 @@ struct Index {
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
     if (this.dataManagerFacade === null) {
       dataManagerWarn('generateHomeAvatar skipped: facade is null');
-      promptAction.showToast({ message: '数据管理服务未就绪', duration: 1500 });
+      showToastSafely('数据管理服务未就绪', 1500);
       throw new Error('数据管理服务未就绪');
     }
     if (this.dataManagerFacade.isAvatarProfileSnapshotUnchanged()) {
@@ -399,7 +772,7 @@ struct Index {
     let config = this.getAvatarProviderConfig();
     if (config.apiKey.trim().length === 0) {
       dataManagerWarn('generateHomeAvatar skipped: missing avatar api key');
-      promptAction.showToast({ message: '请先配置数字分身图片 API Key', duration: 1800 });
+      showToastSafely('请先配置数字分身图片 API Key', 1800);
       throw new Error('缺少数字分身图片 API Key');
     }
     dataManagerInfo(`generateHomeAvatar start: mode=${mode}, baseUrl=${config.imageBaseUrl}, model=${config.textToImageModel}`);
@@ -410,14 +783,14 @@ struct Index {
       let avatar = await this.dataManagerFacade.generateAvatar(config, request);
       this.mergeHomeAvatarView(avatar);
       this.reloadDataManagerViewModels();
-      promptAction.showToast({ message: '数字分身已生成', duration: 1500 });
+      showToastSafely('数字分身已生成', 1500);
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
       let err = e as Error;
       this.reloadDataManagerViewModels();
       dataManagerError('generateHomeAvatar failed: ' + err.message);
       this.appendCloudLog('Avatar generation failed: ' + err.message);
-      promptAction.showToast({ message: '数字分身生成失败：' + err.message, duration: 2200 });
+      showToastSafely('数字分身生成失败：' + err.message, 2200);
       throw err;
     }
   }
@@ -503,7 +876,7 @@ struct Index {
     }
     if (!this.dataManagerFacade.hasDailyLogData()) {
       dataManagerInfo('refreshDataManager skipped: no daily-log data');
-      promptAction.showToast({ message: '暂无数据', duration: 1500 });
+      showToastSafely('暂无数据', 1500);
       return;
     }
     this.dataManagerRefreshing = true;
@@ -522,7 +895,7 @@ struct Index {
       this.dataManagerProgressMessage = summary.message;
       this.dataManagerProgressPercent = 100;
       if (summary.skipped) {
-        promptAction.showToast({ message: '已是最新数据', duration: 1500 });
+        showToastSafely('已是最新数据', 1500);
       }
       dataManagerInfo('refreshDataManager success: ' + summary.message);
     } catch (e) {
@@ -551,27 +924,26 @@ struct Index {
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
-      let err = e as Error;
-      console.error('initLogFile failed: ' + err.message);
+      AppLogger.errorCause('NativeRuntime', 'initLogFile failed', e as Error);
     }
     this.prepareCustomOpp();
     this.initDataManager();
+    this.initChatSessions();
     this.startHomeRecommendationDateTimer();
-    this.agentRouter.configureLocal(mnnllm as Record<string, Function>, (msg: string) => {
-      this.output = msg;
-      let match = msg.match(/<img>(.*?)<hw>/);
-      if (match && match[1]) {
-        this.debugImagePath = 'file://' + match[1];
-      }
-    }, async (response: string) => {
-      return await this.approveLocalAgentResponse(response);
-    });
+    this.agentRouter.configureLocal(
+      (prefix: string): Promise<string> => mnnllm.agentPrefill(prefix),
+      (variablePart: string, onToken?: (token: string) => void): Promise<string> =>
+        mnnllm.agentStep(variablePart, onToken),
+      (): Promise<string> => mnnllm.agentReset(),
+      (userMessage: string): Promise<string> => mnnllm.chat(userMessage),
+      (): string => mnnllm.reset(),
+      (msg: string) => {
+        this.handleLocalAgentLog(msg);
+      }, async (response: string) => {
+        return await this.approveLocalAgentResponse(response);
+      });
     this.agentRouter.configureCloud(this.cloudClient, () => this.getCloudConfig(), (msg: string) => {
-      this.appendCloudLog(msg);
-      let match = msg.match(/agent_snapshot_.*?\.jpg/);
-      if (match && match[0]) {
-        this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
-      }
+      this.handleCloudAgentLog(msg);
     }, async (response: string) => {
       return await this.approveCloudAgentResponse(response);
     });
@@ -775,8 +1147,13 @@ struct Index {
       fs.rmdirSync(path);
       return deleted + 1;
     } catch {
-      fs.unlinkSync(path);
-      return 1;
+      try {
+        fs.unlinkSync(path);
+        return 1;
+      } catch (e) {
+        let err = e as Error;
+        throw err;
+      }
     }
   }
 
@@ -933,24 +1310,24 @@ struct Index {
       this.output = '请输入有效的线程数（正整数）';
       return;
     }
-    
+
     let cfgPath = this.modelDir + '/config.json';
     try {
       if (!fs.accessSync(cfgPath)) {
         this.output = `文件不存在: ${cfgPath}`;
         return;
       }
-      
+
       // 读取文件。
       let fileRead = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
       let stat = fs.statSync(cfgPath);
       let buf = new ArrayBuffer(stat.size);
       fs.readSync(fileRead.fd, buf);
       fs.closeSync(fileRead);
-      
+
       let textDecoder = util.TextDecoder.create('utf-8');
       let content = textDecoder.decodeWithStream(new Uint8Array(buf));
-      
+
       // 修改 JSON。
       let configObj = ArkJSON.parse(content) as JsonMap;
       configObj['thread_num'] = num;
@@ -958,14 +1335,14 @@ struct Index {
         let mllmObj = configObj['mllm'] as JsonMap;
         mllmObj['thread_num'] = num;
       }
-      
+
       // 写入文件。
       let newStr = ArkJSON.stringify(configObj, null, 4);
       let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
       let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
       fs.writeSync(fileWrite.fd, byteStr.buffer);
       fs.closeSync(fileWrite);
-      
+
       this.output = `更新线程数成功: ${num}\n====== 新配置 ======\n${newStr}`;
     } catch (e) {
       this.output = `更新 config.json 失败: ${e}`;
@@ -1078,9 +1455,9 @@ struct Index {
       listing += '点击“下载全部”开始下载';
       this.output = listing;
       this.connected = true;
-    } catch (err) {
-      let e = err as BusinessError;
-      this.output = `连接失败: code=${e.code} ${e.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
+    } catch (e) {
+      let err = e as BusinessError;
+      this.output = `连接失败: code=${err.code} ${err.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
       this.connected = false;
     } finally {
       httpReq.destroy();
@@ -1231,7 +1608,7 @@ struct Index {
     }
 
     if (failed.length === 0) {
-      this.output = `全部下载完成!\n模型总大小: ${this.formatSize(completedBytes)}\n\n点击“加载大模型”开始使用`;
+      this.output = `全部下载完成!\n模型总大小: ${this.formatSize(completedBytes)}\n\n切换到聊天页的本地推理模式后会自动加载模型`;
     } else {
       this.output = `${failed.length} 个失败: ${failed.join(', ')}\n已下载: ${this.formatSize(completedBytes)}\n再次点击可继续，已有文件会跳过。`;
     }
@@ -1264,9 +1641,9 @@ struct Index {
     try {
       let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
-    } catch (err) {
-      let e = err as Error;
-      this.appendCloudLog('Planner 连接失败：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('Planner 连接失败：' + err.message);
     } finally {
       this.cloudThinking = false;
     }
@@ -1280,14 +1657,30 @@ struct Index {
     if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
       return;
     }
+    let task = this.cloudUserInput.trim();
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
-    this.appendCloudLog(`手动调用 Planner，任务：${this.cloudUserInput}`);
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      this.appendCloudLog('会话初始化失败，无法调用 Planner。');
+      this.cloudThinking = false;
+      return;
+    }
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime());
+    let contextMessages = buildCloudContextMessages(activeSession.messages.concat([userMessage]));
+    this.appendActiveChatMessage(userMessage);
+    this.appendCloudLog(`手动调用 Planner，任务：${task}`);
     try {
-      let response = await this.cloudClient.chatPlanner(this.cloudUserInput, this.getCloudConfig());
+      let response = await this.cloudClient.chatPlannerMessages(contextMessages, this.getCloudConfig());
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime()));
       this.appendCloudLog(`Planner 手动返回：\n${response}`);
-    } catch (err) {
-      let e = err as Error;
-      this.appendCloudLog('云端 Planner 推理失败：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime()));
+      this.appendCloudLog('云端 Planner 推理失败：' + err.message);
     } finally {
       this.cloudThinking = false;
     }
@@ -1481,6 +1874,7 @@ struct Index {
     readTimeout: number = 5000): Promise<HdcHealthResponse | null> {
     let httpReq = http.createHttp();
     try {
+      AppLogger.debug('HDC', 'health request url=' + this.hdcApiUrl(baseUrl, '/api/health'));
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
         connectTimeout: connectTimeout,
@@ -1489,10 +1883,19 @@ struct Index {
       };
       let resp = await httpReq.request(this.hdcApiUrl(baseUrl, '/api/health'), options);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        AppLogger.debug('HDC', 'health non-2xx baseUrl=' + baseUrl + ' http=' + resp.responseCode);
         return null;
       }
-      return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
+      try {
+        return ArkJSON.parse(String(resp.result)) as HdcHealthResponse;
+      } catch (e) {
+        let err = e as Error;
+        AppLogger.debug('HDC', 'health parse failed baseUrl=' + baseUrl + ' message=' + err.message);
+        return null;
+      }
     } catch (e) {
+      let err = e as Error;
+      AppLogger.debug('HDC', 'health request failed baseUrl=' + baseUrl + ' message=' + err.message);
       return null;
     } finally {
       httpReq.destroy();
@@ -1539,9 +1942,24 @@ struct Index {
     return fallback;
   }
 
+  private hdcHealthDebugText(health: HdcHealthResponse): string {
+    let target = health.target && health.target.length > 0 ? health.target : '(empty)';
+    let appServer = health.app_server_url && health.app_server_url.length > 0 ? health.app_server_url : '(empty)';
+    return 'status=' + health.status +
+      ', hdc_connected=' + String(health.hdc_connected === true) +
+      ', tunnel_ready=' + String(health.tunnel_ready === true) +
+      ', fport_ready=' + String(health.fport_ready === true) +
+      ', rport_ready=' + String(health.rport_ready === true) +
+      ', rport_listening=' + String(health.rport_listening === true) +
+      ', loop_alive=' + String(health.loop_alive === true) +
+      ', target=' + target +
+      ', app_server_url=' + appServer;
+  }
+
   private async requestManualHdcConnect(serverUrl: string, target: string): Promise<HdcConnectAttempt> {
     let httpReq = http.createHttp();
     try {
+      AppLogger.debug('HDC', 'manual connect request server=' + serverUrl + ', target=' + target);
       let connectPayload: HdcConnectRequest = {
         target: target,
         kill_others: true,
@@ -1557,6 +1975,8 @@ struct Index {
       };
       let resp = await httpReq.request(this.hdcApiUrl(serverUrl, '/api/hdc/connect'), options);
       let body = String(resp.result);
+      AppLogger.debug('HDC', 'manual connect response server=' + serverUrl + ', http=' + resp.responseCode +
+        ', bodyLength=' + body.length);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
         return {
           ok: false,
@@ -1584,22 +2004,25 @@ struct Index {
           message: parsed.message || body,
           health: parsed
         };
-      } catch (parseErr) {
-        let e = parseErr as Error;
+      } catch (e) {
+        let err = e as Error;
+        AppLogger.debug('HDC', 'manual connect parse failed server=' + serverUrl + ', message=' + err.message);
         return {
           ok: false,
           responseCode: resp.responseCode,
           body: body,
-          message: 'Invalid HDC connect response: ' + e.message
+          message: 'Invalid HDC connect response: ' + err.message
         };
       }
-    } catch (err) {
-      let e = err as Error;
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.debug('HDC', 'manual connect request failed server=' + serverUrl + ', target=' + target +
+        ', message=' + err.message);
       return {
         ok: false,
         responseCode: 0,
         body: '',
-        message: e.message
+        message: err.message
       };
     } finally {
       httpReq.destroy();
@@ -1626,11 +2049,15 @@ struct Index {
   private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
     let serverUrl = this.manualHdcServerUrl();
     let target = this.wirelessIp.trim();
+    AppLogger.debug('HDC', 'manual fallback start server=' + (serverUrl.length > 0 ? serverUrl : '(empty)') +
+      ', target=' + (target.length > 0 ? target : '(empty)') + ', useCloudLog=' + String(useCloudLog));
     if (serverUrl.length === 0) {
+      AppLogger.debug('HDC', 'manual fallback skipped reason=missing-server');
       this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.', useCloudLog);
       return false;
     }
     if (target.length === 0) {
+      AppLogger.debug('HDC', 'manual fallback skipped reason=missing-target server=' + serverUrl);
       this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.', useCloudLog);
       return false;
     }
@@ -1638,13 +2065,19 @@ struct Index {
     this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
     this.markHdcDisconnected(true, 'Manual HDC fallback is running...');
     let attempt = await this.requestManualHdcConnect(serverUrl, target);
+    AppLogger.debug('HDC', 'manual fallback attempt ok=' + String(attempt.ok) +
+      ', http=' + attempt.responseCode + ', message=' + attempt.message);
     if (!attempt.ok || !attempt.health) {
       this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
+      AppLogger.debug('HDC', 'manual fallback failed selected=' + this.hdcServerIp +
+        ', reason=' + attempt.message);
       this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
       return false;
     }
 
     this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC fallback succeeded');
+    AppLogger.debug('HDC', 'manual fallback success selected=' + this.hdcServerIp +
+      ', health=' + this.hdcHealthDebugText(attempt.health));
     this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
     return true;
   }
@@ -1662,6 +2095,8 @@ struct Index {
 
   private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
     if (this.hdcAutoConnecting && !force) {
+      AppLogger.debug('HDC', 'discover skipped: already connecting, connected=' + String(this.hdcConnected) +
+        ', current=' + this.hdcServerIp);
       return this.hdcConnected;
     }
 
@@ -1670,23 +2105,28 @@ struct Index {
     let candidates = this.hdcDiscoveryCandidates();
     let lastMessage = '';
     let attemptMessages: string[] = [];
+    AppLogger.debug('HDC', 'discover start force=' + String(force) + ', candidates=' + candidates.join(', '));
     try {
       let index = 0;
       while (index < candidates.length) {
         let candidate = candidates[index];
         index += 1;
+        AppLogger.debug('HDC', 'discover candidate[' + (index - 1) + ']=' + candidate);
         let attempt = await this.requestHdcHealthWithRetry(candidate);
         let health = attempt.health;
         if (health === null) {
           lastMessage = attempt.message;
           attemptMessages.push(lastMessage);
+          AppLogger.debug('HDC', 'discover candidate no response message=' + lastMessage);
           continue;
         }
+        AppLogger.debug('HDC', 'discover candidate health ' + this.hdcHealthDebugText(health));
         this.addHdcCandidatesFromHealth(candidates, health);
         this.rememberHdcFallbackFromHealth(health, this.isAutoHdcUrl(candidate));
         if (this.hdcHealthReady(candidate, health)) {
           let statusPrefix = this.isAutoHdcUrl(candidate) ? 'Auto HDC connected' : 'HDC Server fallback connected';
           this.markHdcConnected(candidate, health, statusPrefix);
+          AppLogger.debug('HDC', 'discover success selected=' + this.hdcServerIp);
           this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
           return true;
         }
@@ -1695,23 +2135,30 @@ struct Index {
       }
       let detail = attemptMessages.length > 0 ? attemptMessages.join('; ') : lastMessage;
       this.markHdcDisconnected(false, 'Auto HDC discovery failed. Use manual pairing if needed. ' + detail);
+      AppLogger.debug('HDC', 'discover failed detail=' + detail);
       this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
       return false;
     } finally {
+      AppLogger.debug('HDC', 'discover end connected=' + String(this.hdcConnected) +
+        ', selected=' + this.hdcServerIp);
       this.hdcAutoConnecting = false;
     }
   }
 
   private async ensureHdcServerReadyForTask(useCloudLog: boolean): Promise<boolean> {
+    AppLogger.debug('HDC', 'ensure start useCloudLog=' + String(useCloudLog) + ', current=' + this.hdcServerIp);
     if (await this.discoverHdcServer(useCloudLog, true)) {
+      AppLogger.debug('HDC', 'ensure success via=auto selected=' + this.hdcServerIp);
       return true;
     }
 
     if (await this.connectManualHdcTarget(useCloudLog)) {
+      AppLogger.debug('HDC', 'ensure success via=manual selected=' + this.hdcServerIp);
       return true;
     }
 
     this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.', useCloudLog);
+    AppLogger.debug('HDC', 'ensure failed selected=' + this.hdcServerIp);
     return false;
   }
 
@@ -1759,9 +2206,9 @@ struct Index {
       }
       this.logAgentLoopReady('PC Agent loop 恢复失败：HTTP ' + resp.responseCode + ' ' + message, useCloudLog);
       return false;
-    } catch (err) {
-      let e = err as BusinessError;
-      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + e.message, useCloudLog);
+    } catch (e) {
+      let err = e as BusinessError;
+      this.logAgentLoopReady('PC Agent loop 恢复请求失败：' + err.message, useCloudLog);
       return false;
     } finally {
       httpReq.destroy();
@@ -1846,37 +2293,29 @@ struct Index {
     if (!result.success) {
       throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
     }
-    this.currentTab = 3;
+    this.currentTab = MainTabIndex.Chat;
   }
 
   private createAgentLoopRunner(): AgentLoopRunner {
-    return new AgentLoopRunner({
-      filesDir: this.filesDir,
-      hdcServerIp: this.hdcServerIp,
-      localApi: mnnllm as Record<string, Function>,
-      cloudClient: this.cloudClient,
-      cloudConfigProvider: () => this.getCloudConfig(),
-      localLogHandler: (msg: string) => {
-        this.output = msg;
-        let match = msg.match(/<img>(.*?)<hw>/);
-        if (match && match[1]) {
-          this.debugImagePath = 'file://' + match[1];
-        }
+    return new AgentLoopRunner(
+      this.filesDir,
+      this.hdcServerIp,
+      mnnllm,
+      this.cloudClient,
+      () => this.getCloudConfig(),
+      (msg: string) => {
+        this.handleLocalAgentLog(msg);
       },
-      cloudLogHandler: (msg: string) => {
-        this.appendCloudLog(msg);
-        let match = msg.match(/agent_snapshot_.*?\.jpg/);
-        if (match && match[0]) {
-          this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
-        }
+      (msg: string) => {
+        this.handleCloudAgentLog(msg);
       },
-      localApprovalHandler: async (response: string) => {
+      async (response: string) => {
         return await this.approveLocalAgentResponse(response);
       },
-      cloudApprovalHandler: async (response: string) => {
+      async (response: string) => {
         return await this.approveCloudAgentResponse(response);
       }
-    });
+    );
   }
 
   private setHomeRecommendationCompleted(id: string, completed: boolean): void {
@@ -1897,7 +2336,7 @@ struct Index {
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
     }
-    this.currentTab = 3;
+    this.currentTab = MainTabIndex.Chat;
     this.resetCloudLog('云端 Agent 开始执行：' + task);
     this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
     this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
@@ -1932,7 +2371,7 @@ struct Index {
       return;
     }
 
-    this.currentTab = 3;
+    this.currentTab = MainTabIndex.Chat;
     this.resetCloudLog('准备执行 Workflow：' + task.title);
     this.appendCloudLog('Workflow 编排将在 App 沙箱内执行；PC 端仅负责 HDC 截图和动作桥接。');
     this.appendCloudLog('HDC Server=' + this.hdcServerIp);
@@ -1946,769 +2385,132 @@ struct Index {
       }
       WorkflowStorage.updateTaskRun(this.filesDir, task.id, result.status, message);
       this.appendCloudLog('Workflow 运行摘要：' + result.runDir);
-    } catch (err) {
-      let e = err as Error;
-      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', e.message);
-      this.appendCloudLog('Workflow 执行异常：' + e.message);
+    } catch (e) {
+      let err = e as Error;
+      WorkflowStorage.updateTaskRun(this.filesDir, task.id, 'failed', err.message);
+      this.appendCloudLog('Workflow 执行异常：' + err.message);
       AgentExecutionController.finishExecution('Workflow failed');
     }
   }
 
-  @Builder AssistantPage() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '本地推理', subtitle: this.assistantSettingsOpen ? '模型与网络设置' : '端侧模型控制台' })
-        if (this.assistantSettingsOpen) {
-          this.NetworkSettingsPage()
-        } else {
-        Scroll() {
-          Text(this.output).fontSize(13).fontFamily('monospace').fontColor('#333333').width('100%').padding(16)
-        }.constraintSize({ minHeight: 110, maxHeight: 190 }).width('92%').backgroundColor('#EEF4FF').borderRadius(18).margin({ top: 16 }).border({ width: 1, color: '#D9E5FF' })
-
-        if (this.debugImagePath !== '') {
-          Row() {
-            Text('Debug 截图预览').fontSize(14).fontColor('#555555').layoutWeight(1)
-            Image(this.debugImagePath).width(100).height(150).objectFit(ImageFit.Contain).backgroundColor(Color.Black).borderRadius(12).onClick(() => { this.debugImagePath = ''; })
-          }.width('92%').padding(14).backgroundColor(Color.White).borderRadius(18).margin({ top: 14 })
-        }
-
-        Scroll() {
-          Text(this.chatHistory.length > 0 ? this.chatHistory : '模型对话内容会显示在这里。')
-            .fontSize(15)
-            .fontColor(this.chatHistory.length > 0 ? '#232936' : '#9AA0AA')
-            .width('100%')
-            .padding(18)
-            .lineHeight(22)
-        }.constraintSize({ minHeight: 190, maxHeight: 320 }).width('92%').backgroundColor(Color.White).borderRadius(20).margin({ top: 16 }).shadow({ radius: 16, color: '#12000000', offsetX: 0, offsetY: 8 })
-
-        Row() {
-          TextInput({ placeholder: '输入消息或 Agent 任务...', text: this.userInput })
-            .onChange((val: string) => { this.userInput = val; })
-            .layoutWeight(1)
-            .height(48)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(24)
-            .padding({ left: 18, right: 18 })
-          Button('发送')
-            .height(48)
-            .width(86)
-            .backgroundColor(this.isThinking ? '#A9B7E9' : '#5B68FF')
-            .borderRadius(24)
-            .margin({ left: 10 })
-            .onClick(async () => {
-              if (!this.modelLoaded || this.userInput.length === 0 || this.isThinking) return;
-              let msg = this.userInput;
-              this.userInput = '';
-              this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
-              this.isThinking = true;
-              try {
-                let reply: string = await mnnllm.chat(msg);
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
-              } catch(err) {
-                let message = err instanceof Error ? (err as Error).message : String(err);
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
-              } finally {
-                this.isThinking = false;
-              }
-            })
-        }.width('92%').margin({ top: 16 })
-
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          Button('加载大模型')
-            .onClick(async () => {
-              this.output = '加载中，请稍候...';
-              await this.ensureLocalModelLoaded();
-            })
-            .enabled(!this.downloading)
-            .height(42)
-            .width('30%')
-            .backgroundColor(this.modelLoaded ? '#E2E6EF' : '#38BE8B')
-            .fontColor(this.modelLoaded ? '#8B93A2' : '#FFFFFF')
-            .borderRadius(12)
-          Button('单轮推理')
-            .onClick(async () => {
-              if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
-              this.output = '推理中...';
-              try {
-                let generated: string = await mnnllm.generate('你好');
-                this.output = generated;
-              } catch(err) {
-                let message = err instanceof Error ? (err as Error).message : String(err);
-                this.output = '推理错误: ' + message;
-              }
-            })
-            .height(42)
-            .width('30%')
-            .backgroundColor('#4B8BFF')
-            .borderRadius(12)
-          Button('重置会话')
-            .onClick(() => { let resetResult: string = mnnllm.reset(); this.output = resetResult; this.chatHistory = ''; })
-            .height(42)
-            .width('30%')
-            .backgroundColor('#FF7043')
-            .borderRadius(12)
-        }.width('92%').margin({ top: 16 })
-
-        Button('开始智能体执行（输入框为任务）')
-          .width('92%')
-          .height(52)
-          .backgroundColor('#765BFF')
-          .borderRadius(16)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .margin({ top: 16 })
-          .onClick(async () => {
-            if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
-            if (!await this.ensureLocalAgentReady()) { return; }
-            let runner = this.createAgentLoopRunner();
-            this.activeAgentRunner = runner;
-            this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${this.userInput}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
-            try {
-              await runner.runLocalTask(this.userInput);
-              this.output = this.output + '\n\n====== 本地 Agent 任务完成 ======';
-            } catch (e) {
-              let err = e as Error;
-              this.output = this.output + '\n\n本地 Agent 执行失败: ' + err.message;
-            } finally {
-              this.activeAgentRunner = null;
-            }
-          })
-
-        Row() {
-          Button('启动 PC 控制后端 (HDC)')
-            .height(48)
-            .backgroundColor('#607D8B')
-            .borderRadius(14)
-            .layoutWeight(1)
-            .onClick(async () => {
-              if (!await this.ensureLocalModelLoaded()) { return; }
-              await this.startLocalBackend();
-            })
-          Row() {
-            Checkbox({ name: 'autoConfirm', group: 'settings' })
-              .select(this.autoConfirm)
-              .selectedColor('#5B68FF')
-              .onChange((value: boolean) => { this.autoConfirm = value; })
-            Text('自动同意').fontSize(14).fontColor('#333333')
-          }.height(48).padding({ left: 12, right: 12 }).backgroundColor(Color.White).borderRadius(14).margin({ left: 10 })
-        }.width('92%').margin({ top: 14 })
-
-        Button('网络设置')
-          .width('92%')
-          .height(46)
-          .backgroundColor(Color.White)
-          .fontColor('#4F68FF')
-          .borderRadius(14)
-          .margin({ top: 14 })
-          .border({ width: 1, color: '#DDE5FF' })
-          .onClick(() => { this.assistantSettingsOpen = true; })
-        Blank().height(110)
-        }
-      }.width('100%')
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+  private async sendLocalChatMessage(): Promise<void> {
+    if (this.userInput.length === 0 || this.isThinking) {
+      return;
+    }
+    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
+      return;
+    }
+    let msg = this.userInput;
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      msg, new Date().getTime()));
+    this.isThinking = true;
+    try {
+      let reply: string = await mnnllm.chat(msg);
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
+    } catch (err) {
+      let message = err instanceof Error ? (err as Error).message : String(err);
+      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+    } finally {
+      this.isThinking = false;
+    }
   }
 
-  @Builder NetworkSettingsPage() {
-    Column() {
-      Row() {
-        Text('<')
-          .fontSize(18)
-          .fontColor('#4F68FF')
-          .width(34)
-          .height(34)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#EEF3FF')
-          .borderRadius(17)
-        Column() {
-          Text('网络与设置')
-            .fontSize(22)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-          Text('配置模型下载、运行参数和调试入口')
-            .fontSize(13)
-            .fontColor('#7B8290')
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .margin({ left: 10 })
-        .layoutWeight(1)
+  private async submitLocalAgentTask(): Promise<void> {
+    let task = this.userInput.trim();
+    if (task.length === 0) {
+      this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (this.isThinking) {
+      return;
+    }
+    if (!await this.ensureLocalAgentReady()) {
+      return;
+    }
+    this.ensureActiveChatSession();
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      task, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
+      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(), []));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+      CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 已开始执行。', new Date().getTime()));
+    this.localTaskSessionId = this.activeChatSessionId;
+    this.debugImagePath = '';
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.isThinking = true;
+    let runner = this.createAgentLoopRunner();
+    this.activeAgentRunner = runner;
+    this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+    try {
+      await runner.runLocalTask(task);
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+      if (this.debugImagePath.length > 0) {
+        this.attachTaskResultImage(this.localTaskSessionId, this.debugImagePath);
       }
-      .width('92%')
-      .margin({ top: 16 })
-      .onClick(() => { this.assistantSettingsOpen = false; })
-
-      Scroll() {
-        Text(this.output)
-          .fontSize(13)
-          .fontFamily('monospace')
-          .fontColor('#333333')
-          .width('100%')
-          .padding(16)
-      }
-      .constraintSize({ minHeight: 100, maxHeight: 170 })
-      .width('92%')
-      .backgroundColor('#EEF4FF')
-      .borderRadius(18)
-      .margin({ top: 14 })
-      .border({ width: 1, color: '#D9E5FF' })
-
-      Column() {
-        Text('服务地址')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Text('模型下载服务')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl, text: this.serverIp })
-          .height(42)
-          .width('100%')
-          .fontSize(13)
-          .backgroundColor('#F2F5FC')
-          .borderRadius(12)
-          .padding({ left: 12, right: 12 })
-          .margin({ top: 6, bottom: 12 })
-          .onChange((val: string) => {
-            this.serverIp = val;
-            this.connected = false;
-          })
-        Text('HDC Server')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
-          .height(42)
-          .width('100%')
-          .fontSize(13)
-          .fontColor(this.hdcInputTextColor())
-          .backgroundColor(this.hdcInputBackgroundColor())
-          .borderRadius(12)
-          .padding({ left: 12, right: 12 })
-          .margin({ top: 6, bottom: 8 })
-          .enabled(this.hdcInputEditable())
-          .onChange((val: string) => {
-            this.hdcServerIp = val;
-            this.manualHdcServerIp = val;
-            this.markHdcManualEditing();
-          })
-        Text(this.hdcAutoStatus)
-          .fontSize(12)
-          .fontColor(this.hdcStatusColor())
-          .width('100%')
-          .maxLines(2)
-          .margin({ bottom: 8 })
-        Row() {
-          Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
-            .height(38)
-            .layoutWeight(1)
-            .fontSize(12)
-            .backgroundColor('#4F68FF')
-            .borderRadius(12)
-            .enabled(!this.hdcAutoConnecting)
-            .onClick(async () => {
-              this.hdcManualPairing = false;
-              await this.discoverHdcServer(false, true);
-            })
-          Button('手动配对')
-            .height(38)
-            .layoutWeight(1)
-            .fontSize(12)
-            .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .onClick(() => { this.setHdcManualPairing(); })
-        }
-        .width('100%')
-        .margin({ bottom: 12 })
-        Text('无线 HDC 目标')
-          .fontSize(13)
-          .fontColor('#6F7684')
-          .width('100%')
-        Row() {
-          TextInput({ placeholder: '手机无线调试地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
-            .height(42)
-            .layoutWeight(1)
-            .fontSize(13)
-            .fontColor(this.hdcInputTextColor())
-            .backgroundColor(this.hdcInputBackgroundColor())
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .enabled(this.hdcInputEditable())
-            .onChange((val: string) => {
-              this.wirelessIp = val;
-              this.markHdcManualEditing();
-            })
-          Button('连接测试')
-            .height(42)
-            .width(92)
-            .fontSize(13)
-            .backgroundColor('#765BFF')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .enabled(this.hdcInputEditable())
-            .onClick(() => { this.testAndConnectHdc(); })
-        }
-        .width('100%')
-        .margin({ top: 6 })
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 16 })
-
-      Column() {
-        Text('模型文件')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Row() {
-          Button('检查连接')
-            .onClick(() => { this.checkServer(); })
-            .enabled(!this.downloading)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#38BE8B')
-            .borderRadius(12)
-          Button('下载全部')
-            .onClick(() => { this.downloadAll(); })
-            .enabled(!this.downloading && this.connected)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#FF7043')
-            .borderRadius(12)
-            .margin({ left: 10 })
-          Button('删除模型')
-            .onClick(() => { this.deleteModelFiles(); })
-            .enabled(!this.downloading)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#F44336')
-            .borderRadius(12)
-            .margin({ left: 10 })
-        }.width('100%')
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 16 })
-
-      Column() {
-        Text('运行参数')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-          .margin({ bottom: 12 })
-        Row() {
-          Text('线程数')
-            .fontSize(14)
-            .fontColor('#666666')
-            .width(58)
-          TextInput({ text: this.threadNumInput })
-            .type(InputType.Number)
-            .width(76)
-            .height(40)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .onChange((val: string) => { this.threadNumInput = val; })
-          Button('修改 Config')
-            .onClick(() => { this.updateConfigThreadNum(); })
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#4B8BFF')
-            .borderRadius(12)
-            .margin({ left: 10 })
-          Button('查看 Config')
-            .onClick(() => { this.showConfigJson(); })
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor('#607D8B')
-            .borderRadius(12)
-            .margin({ left: 10 })
-        }.width('100%')
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 14 })
-
-      Row() {
-        Button('Op Precision Test')
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor('#FF9800')
-          .borderRadius(12)
-          .onClick(() => { router.pushUrl({ url: 'pages/OpTest' }) })
-        Button('Runtime Logs')
-          .height(42)
-          .layoutWeight(1)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
-      }
-      .width('92%')
-      .padding(18)
-      .backgroundColor(Color.White)
-      .borderRadius(20)
-      .margin({ top: 14 })
-
-      Button('返回助手')
-        .width('92%')
-        .height(46)
-        .fontColor('#4F68FF')
-        .backgroundColor('#EEF3FF')
-        .borderRadius(14)
-        .margin({ top: 14 })
-        .onClick(() => { this.assistantSettingsOpen = false; })
-      Blank().height(110)
-    }.width('100%')
+    } catch (e) {
+      let err = e as Error;
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行失败：' + err.message, new Date().getTime()));
+    } finally {
+      this.activeAgentRunner = null;
+      this.localTaskSessionId = '';
+      this.isThinking = false;
+    }
   }
 
-  @Builder CloudAssistantPage() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '云助手', subtitle: 'vLLM 云端推理控制台' })
-
-        Scroll() {
-          Text(this.cloudOutput)
-            .fontSize(13)
-            .fontFamily('monospace')
-            .fontColor('#333333')
-            .width('100%')
-            .padding(16)
+  private async submitCurrentCloudTask(): Promise<void> {
+    let task = this.cloudUserInput.trim();
+    if (task.length === 0 || this.cloudThinking) {
+      return;
+    }
+    this.ensureActiveChatSession();
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
+      task, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
+      CHAT_MESSAGE_KIND_TASK_TRACE, '云端任务执行过程', new Date().getTime(), []));
+    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
+      CHAT_MESSAGE_KIND_TASK_RESULT, '云端 Agent 已开始执行。', new Date().getTime()));
+    this.cloudTaskSessionId = this.activeChatSessionId;
+    this.cloudDebugImagePath = '';
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudThinking = true;
+    try {
+      let result = await this.submitDirectCloudAgentTask(task);
+      if (result.success) {
+        this.appendChatMessageForSession(this.cloudTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+        if (this.cloudDebugImagePath.length > 0) {
+          this.attachTaskResultImage(this.cloudTaskSessionId, this.cloudDebugImagePath);
         }
-        .constraintSize({ minHeight: 110, maxHeight: 190 })
-        .width('92%')
-        .backgroundColor('#EEF4FF')
-        .borderRadius(18)
-        .margin({ top: 16 })
-        .border({ width: 1, color: '#D9E5FF' })
+      } else {
+        let errorText = result.error.length > 0 ? result.error : '云端 Agent 后端未就绪';
+        this.appendChatMessageForSession(this.cloudTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '任务下发失败：' + errorText, new Date().getTime()));
+        this.appendCloudLog(errorText);
+      }
+    } finally {
+      this.cloudTaskSessionId = '';
+      this.cloudThinking = false;
+    }
+  }
 
-        if (this.cloudDebugImagePath !== '') {
-          Row() {
-            Text('Debug 截图预览')
-              .fontSize(14)
-              .fontColor('#555555')
-              .layoutWeight(1)
-            Image(this.cloudDebugImagePath)
-              .width(100)
-              .height(150)
-              .objectFit(ImageFit.Contain)
-              .backgroundColor(Color.Black)
-              .borderRadius(12)
-              .onClick(() => { this.cloudDebugImagePath = ''; })
-          }
-          .width('92%')
-          .padding(14)
-          .backgroundColor(Color.White)
-          .borderRadius(18)
-          .margin({ top: 14 })
-        }
+  private clearCloudDebugImage(): void {
+    this.cloudDebugImagePath = '';
+  }
 
-        Column() {
-          Text('云端模型')
-            .fontSize(17)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-            .width('100%')
-            .margin({ bottom: 12 })
-          Text('Planner 服务')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-          TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, text: this.cloudPlannerBaseUrl })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6, bottom: 10 })
-            .onChange((val: string) => { this.cloudPlannerBaseUrl = val; })
-          Text('Decider 服务')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-          TextInput({ placeholder: 'http://服务器IP:端口，默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl, text: this.cloudDeciderBaseUrl })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6, bottom: 10 })
-            .onChange((val: string) => { this.cloudDeciderBaseUrl = val; })
-          TextInput({ placeholder: 'API Key', text: this.cloudApiKey })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .onChange((val: string) => { this.cloudApiKey = val; })
-          Text('Decider Model')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-            .margin({ top: 10 })
-          TextInput({ placeholder: '留空则不传 model', text: this.cloudDeciderModel })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6 })
-            .onChange((val: string) => { this.cloudDeciderModel = val; })
-        }
-        .width('92%')
-        .padding(18)
-        .backgroundColor(Color.White)
-        .borderRadius(20)
-        .margin({ top: 16 })
-
-        Column() {
-          Text('数字分身图片')
-            .fontSize(17)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-            .width('100%')
-            .margin({ bottom: 12 })
-          Text('图片服务')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-          TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, text: this.avatarImageBaseUrl })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6, bottom: 10 })
-            .onChange((val: string) => { this.avatarImageBaseUrl = val; })
-          TextInput({ placeholder: '图片 API Key', text: this.avatarImageApiKey })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .onChange((val: string) => { this.avatarImageApiKey = val; })
-          Text('图片模型')
-            .fontSize(13)
-            .fontColor('#6F7684')
-            .width('100%')
-            .margin({ top: 10 })
-          TextInput({ placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel, text: this.avatarTextToImageModel })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ top: 6, bottom: 10 })
-            .onChange((val: string) => {
-              this.avatarTextToImageModel = val;
-              this.avatarImageToImageModel = val;
-            })
-          TextInput({ placeholder: '尺寸，默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize, text: this.avatarImageSize })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .onChange((val: string) => { this.avatarImageSize = val; })
-        }
-        .width('92%')
-        .padding(18)
-        .backgroundColor(Color.White)
-        .borderRadius(20)
-        .margin({ top: 16 })
-
-        Column() {
-          Text('HDC 控制')
-            .fontSize(17)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
-            .width('100%')
-            .margin({ bottom: 12 })
-          TextInput({ placeholder: 'HDC Server，默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
-            .height(42)
-            .width('100%')
-            .fontSize(13)
-            .fontColor(this.hdcInputTextColor())
-            .backgroundColor(this.hdcInputBackgroundColor())
-            .borderRadius(12)
-            .padding({ left: 12, right: 12 })
-            .margin({ bottom: 8 })
-            .enabled(this.hdcInputEditable())
-            .onChange((val: string) => {
-              this.hdcServerIp = val;
-              this.manualHdcServerIp = val;
-              this.markHdcManualEditing();
-            })
-          Text(this.hdcAutoStatus)
-            .fontSize(12)
-            .fontColor(this.hdcStatusColor())
-            .width('100%')
-            .maxLines(2)
-            .margin({ bottom: 8 })
-          Row() {
-            Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
-              .height(38)
-              .layoutWeight(1)
-              .fontSize(12)
-              .backgroundColor('#4F68FF')
-              .borderRadius(12)
-              .enabled(!this.hdcAutoConnecting)
-              .onClick(async () => {
-                this.hdcManualPairing = false;
-                await this.discoverHdcServer(true, true);
-              })
-            Button('手动配对')
-              .height(38)
-              .layoutWeight(1)
-              .fontSize(12)
-              .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
-              .borderRadius(12)
-              .margin({ left: 10 })
-              .onClick(() => { this.setHdcManualPairing(); })
-          }
-          .width('100%')
-          .margin({ bottom: 10 })
-          Row() {
-            TextInput({ placeholder: '无线 HDC 地址，默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
-              .height(42)
-              .layoutWeight(1)
-              .fontSize(13)
-              .fontColor(this.hdcInputTextColor())
-              .backgroundColor(this.hdcInputBackgroundColor())
-              .borderRadius(12)
-              .padding({ left: 12, right: 12 })
-              .enabled(this.hdcInputEditable())
-              .onChange((val: string) => {
-                this.wirelessIp = val;
-                this.markHdcManualEditing();
-              })
-            Button('连接测试')
-              .height(42)
-              .width(92)
-              .fontSize(13)
-              .backgroundColor('#765BFF')
-              .borderRadius(12)
-              .margin({ left: 10 })
-              .enabled(this.hdcInputEditable())
-              .onClick(async () => {
-                this.appendCloudLog(`请求 HDC 连接测试：server=${this.hdcServerIp}, target=${this.wirelessIp}`);
-                await this.testAndConnectHdc();
-                this.appendCloudLog(this.output);
-              })
-          }.width('100%')
-        }
-        .width('92%')
-        .padding(18)
-        .backgroundColor(Color.White)
-        .borderRadius(20)
-        .margin({ top: 14 })
-
-        Row() {
-          TextInput({ placeholder: '输入云端 Agent 任务...', text: this.cloudUserInput })
-            .onChange((val: string) => { this.cloudUserInput = val; })
-            .layoutWeight(1)
-            .height(48)
-            .backgroundColor('#F2F5FC')
-            .borderRadius(24)
-            .padding({ left: 18, right: 18 })
-          Button('Planner')
-            .height(48)
-            .width(92)
-            .fontSize(13)
-            .backgroundColor(this.cloudThinking ? '#A9B7E9' : '#5B68FF')
-            .borderRadius(24)
-            .margin({ left: 10 })
-            .onClick(() => { this.runCloudPlannerOnce(); })
-        }.width('92%').margin({ top: 16 })
-
-        Button('开始云端智能体执行（输入框为任务）')
-          .width('92%')
-          .height(52)
-          .backgroundColor('#765BFF')
-          .borderRadius(16)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .margin({ top: 16 })
-          .onClick(async () => {
-            let result = await this.submitDirectCloudAgentTask(this.cloudUserInput);
-            if (!result.success && result.error.length > 0) {
-              this.appendCloudLog(result.error);
-            }
-          })
-
-        Row() {
-          Button('启动云端 PC 控制后端')
-            .height(48)
-            .layoutWeight(1)
-            .backgroundColor('#607D8B')
-            .borderRadius(14)
-            .onClick(async () => { await this.startCloudBackend(); })
-          Row() {
-            Checkbox({ name: 'cloudAutoConfirm', group: 'cloudSettings' })
-              .select(this.cloudAutoConfirm)
-              .selectedColor('#5B68FF')
-              .onChange((value: boolean) => { this.cloudAutoConfirm = value; })
-            Text('自动同意')
-              .fontSize(14)
-              .fontColor('#333333')
-          }
-          .height(48)
-          .padding({ left: 12, right: 12 })
-          .backgroundColor(Color.White)
-          .borderRadius(14)
-          .margin({ left: 10 })
-        }.width('92%').margin({ top: 14 })
-
-        Row() {
-          Button('测试 Planner')
-            .height(42)
-            .layoutWeight(1)
-            .fontSize(11)
-            .backgroundColor('#38BE8B')
-            .borderRadius(12)
-            .onClick(() => { this.testCloudPlanner(); })
-          Button('Runtime Logs')
-            .height(42)
-            .layoutWeight(1)
-            .fontSize(11)
-            .backgroundColor('#607D8B')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .onClick(() => { router.pushUrl({ url: 'pages/LogView' }) })
-          Button('删除截图')
-            .height(42)
-            .layoutWeight(1)
-            .fontSize(11)
-            .backgroundColor('#FF6B4A')
-            .borderRadius(12)
-            .margin({ left: 10 })
-            .onClick(() => { this.clearScreenshots(); })
-        }
-        .width('92%')
-        .margin({ top: 14 })
-
-        Blank().height(110)
-      }.width('100%')
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+  private clearLocalDebugImage(): void {
+    this.debugImagePath = '';
   }
 
   @Builder TabItem(icon: string, label: string, index: number) {
@@ -2789,7 +2591,7 @@ struct Index {
               await this.generateHomeAvatar(mode, sourceImage);
             }
           })
-        }.tabBar(this.TabItem('H', '首页', 0))
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Home), mainTabLabel(MainTabIndex.Home), MainTabIndex.Home))
         TabContent() {
           CollectionPage({
             collectionModule: $collectionModule,
@@ -2797,15 +2599,87 @@ struct Index {
             refreshing: this.dataManagerRefreshing,
             onRefresh: () => { this.refreshDataManager(); }
           })
-        }.tabBar(this.TabItem('C', '采集', 1))
-        TabContent() { this.AssistantPage() }.tabBar(this.TabItem('A', '助手', 2))
-        TabContent() { this.CloudAssistantPage() }.tabBar(this.TabItem('V', '云端', 3))
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))
+        TabContent() {
+          ChatPage({
+            chatMode: $chatMode,
+            cloudUserInput: $cloudUserInput,
+            userInput: $userInput,
+            cloudOutput: this.cloudOutput,
+            cloudDebugImagePath: this.cloudDebugImagePath,
+            cloudThinking: this.cloudThinking,
+            localOutput: this.output,
+            localDebugImagePath: this.debugImagePath,
+            chatHistory: this.chatHistory,
+            localThinking: this.isThinking,
+            modelLoaded: this.modelLoaded,
+            sessions: this.chatSessions,
+            activeSessionId: this.activeChatSessionId,
+            messages: this.activeChatMessages,
+            sessionDrawerOpen: this.chatSessionDrawerOpen,
+            restoringLocalSession: this.restoringLocalSession,
+            onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
+            onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
+            onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
+            onCreateSession: (mode: string) => { this.createChatSession(mode); },
+            onSelectSession: async (id: string) => { await this.selectChatSession(id); },
+            onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
+            onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+            onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
+            onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
+            onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
+            onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
+            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }
+          })
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))
         TabContent() {
           TaskPage({
             taskScene: $taskScene,
             onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
           })
-        }.tabBar(this.TabItem('T', '任务', 4))
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Task), mainTabLabel(MainTabIndex.Task), MainTabIndex.Task))
+        TabContent() {
+          SettingsCenterPage({
+            autoConfirm: $autoConfirm,
+            cloudAutoConfirm: $cloudAutoConfirm,
+            threadNumInput: $threadNumInput,
+            backendTypeInput: $backendTypeInput,
+            mllmBackendTypeInput: $mllmBackendTypeInput,
+            output: this.output,
+            cloudOutput: this.cloudOutput,
+            downloading: this.downloading,
+            connected: this.connected,
+            hdcAutoStatus: this.hdcAutoStatus,
+            hdcAutoConnected: this.hdcAutoConnected,
+            hdcAutoConnecting: this.hdcAutoConnecting,
+            hdcManualPairing: this.hdcManualPairing,
+            selectedModelVariant: this.selectedModelVariant,
+            onCheckServer: () => { this.checkServer(); },
+            onDownloadAll: () => { this.downloadAll(); },
+            onDeleteModelFiles: () => { this.deleteModelFiles(); },
+            onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
+            onShowConfigJson: () => { this.showConfigJson(); },
+            onDiscoverHdc: async () => {
+              this.hdcManualPairing = false;
+              await this.discoverHdcServer(true, true);
+            },
+            onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
+            onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
+            onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
+            onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
+            onStartCloudBackend: async () => { await this.startCloudBackend(); },
+            onClearScreenshots: () => { this.clearScreenshots(); },
+            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
+            onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
+            onListScreenshots: () => { this.listScreenshots(); },
+            onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
+            onListModelFilesTree: () => { this.listModelFilesTree(); },
+            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+            onUpdateConfigBackendType: (target: string) => { this.updateConfigBackendType(target); }
+          })
+        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }
       .onChange((index: number) => { this.currentTab = index; })
       .width('100%')

@@ -3,14 +3,36 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
+import { AppLogger } from './AppLogger';
 
-type NativeApi = Record<string, Function>;
 type RequestValue = Object | string | number | boolean | null;
-type RequestMap = Record<string, RequestValue>;
 type AgentRouteMode = 'local' | 'cloud';
 type LogHandler = (msg: string) => void;
 type ApprovalHandler = (response: string) => Promise<boolean>;
 type CloudConfigProvider = () => CloudModelConfig;
+type AgentPrefillHandler = (prefix: string) => Promise<string>;
+type AgentStepHandler = (variablePart: string, onToken?: (token: string) => void) => Promise<string>;
+type AgentResetHandler = () => Promise<string>;
+type AgentChatHandler = (userMessage: string) => Promise<string>;
+type NativeResetHandler = () => string;
+
+type RequestKey =
+  'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |
+    'image_b64' | 'width' | 'height' | 'response' | 'prompt';
+
+interface RequestMap {
+  type?: RequestValue;
+  preserve_execution?: RequestValue;
+  message?: RequestValue;
+  hidden?: RequestValue;
+  prefix?: RequestValue;
+  variable?: RequestValue;
+  image_b64?: RequestValue;
+  width?: RequestValue;
+  height?: RequestValue;
+  response?: RequestValue;
+  prompt?: RequestValue;
+}
 
 interface TaskResponse {
   task: string;
@@ -50,7 +72,11 @@ export class AgentRouterServer {
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
   private cancellationRequested: boolean = false;
-  private localApi: NativeApi | null = null;
+  private localAgentPrefill: AgentPrefillHandler | null = null;
+  private localAgentStep: AgentStepHandler | null = null;
+  private localAgentReset: AgentResetHandler | null = null;
+  private localChat: AgentChatHandler | null = null;
+  private localReset: NativeResetHandler | null = null;
   private localLogHandler: LogHandler | null = null;
   private localApprovalHandler: ApprovalHandler | null = null;
   private cloudClientRef: CloudModelClient | null = null;
@@ -71,8 +97,14 @@ export class AgentRouterServer {
     return this.routeMode;
   }
 
-  public configureLocal(mnnllm: NativeApi, onLog: LogHandler, onRequireApproval?: ApprovalHandler): void {
-    this.localApi = mnnllm;
+  public configureLocal(agentPrefill: AgentPrefillHandler, agentStep: AgentStepHandler,
+    agentReset: AgentResetHandler, chat: AgentChatHandler, reset: NativeResetHandler,
+    onLog: LogHandler, onRequireApproval?: ApprovalHandler): void {
+    this.localAgentPrefill = agentPrefill;
+    this.localAgentStep = agentStep;
+    this.localAgentReset = agentReset;
+    this.localChat = chat;
+    this.localReset = reset;
     this.localLogHandler = onLog;
     this.localApprovalHandler = onRequireApproval ?? null;
   }
@@ -138,23 +170,17 @@ export class AgentRouterServer {
       return;
     }
 
-    if (!this.localApi) {
+    if (!this.localAgentReset || !this.localReset) {
       return;
     }
 
     try {
-      let agentReset = this.localApi['agentReset'];
-      if (typeof agentReset === 'function') {
-        await agentReset();
-      }
+      await this.localAgentReset();
     } catch (e) {
     }
 
     try {
-      let reset = this.localApi['reset'];
-      if (typeof reset === 'function') {
-        reset();
-      }
+      this.localReset();
     } catch (e) {
     }
   }
@@ -256,7 +282,7 @@ export class AgentRouterServer {
     }
 
     if (reqType === 'clear') {
-      await this.handleClear(client, req['preserve_execution'] === true);
+      await this.handleClear(client, this.getBoolean(req, 'preserve_execution'));
       return;
     }
 
@@ -320,16 +346,13 @@ export class AgentRouterServer {
       return;
     }
 
-    if (this.localApi) {
-      let agentReset = this.localApi['agentReset'];
-      let reset = this.localApi['reset'];
-      if (typeof agentReset === 'function') {
-        try {
-          await agentReset();
-        } catch (e) {
+    if (this.localAgentReset) {
+      try {
+        await this.localAgentReset();
+      } catch (e) {
+        if (this.localReset) {
+          this.localReset();
         }
-      } else if (typeof reset === 'function') {
-        reset();
       }
     }
 
@@ -341,21 +364,18 @@ export class AgentRouterServer {
   }
 
   private async handleLocalRequest(client: socket.TCPSocketConnection, req: RequestMap, reqType: string): Promise<void> {
-    if (!this.localApi) {
+    if (!this.localAgentPrefill || !this.localAgentStep || !this.localAgentReset || !this.localChat) {
       this.log('local', '[ERROR] Local backend is not configured.');
       this.sendError(client, 'Local backend unavailable');
       return;
     }
-
-    let mnnllm = this.localApi;
 
     if (reqType === 'agent_prefill') {
       let prefix = this.getString(req, 'prefix');
       this.log('local', '>> [Agent Prefill] prompt chars=' + prefix.length + '\n' + prefix);
       AgentExecutionController.updateFloatText('Prefill...');
       try {
-        let agentPrefill = mnnllm['agentPrefill'];
-        let result = await agentPrefill(prefix) as string;
+        let result = await this.localAgentPrefill(prefix);
         if (this.isCancellationRequested()) {
           this.log('local', '>> [Agent Prefill] cancelled by user.');
           this.sendStatus(client, 'cancelled', '', 'Task cancelled by user');
@@ -382,8 +402,8 @@ export class AgentRouterServer {
       let imageBase64 = this.getString(req, 'image_b64');
       if (imageBase64.length > 0) {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
-        let w = req['width'];
-        let h = req['height'];
+        let w = this.getScalarText(req, 'width');
+        let h = this.getScalarText(req, 'height');
         let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
         this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
         if (variable.indexOf('<image_placeholder>') !== -1) {
@@ -397,8 +417,7 @@ export class AgentRouterServer {
       AgentExecutionController.updateFloatText('Thinking...');
       let streamedText = '';
       try {
-        let agentStep = mnnllm['agentStep'];
-        let response = await agentStep(variable, (token: string) => {
+        let response = await this.localAgentStep(variable, (token: string) => {
           if (this.isCancellationRequested()) {
             throw new Error('__agent_cancelled__');
           }
@@ -450,10 +469,7 @@ export class AgentRouterServer {
 
     if (reqType === 'agent_reset') {
       try {
-        let agentReset = mnnllm['agentReset'];
-        if (typeof agentReset === 'function') {
-          await agentReset();
-        }
+        await this.localAgentReset();
       } catch (e) {
       }
       this.currentTask = '';
@@ -468,8 +484,8 @@ export class AgentRouterServer {
       let imageBase64 = this.getString(req, 'image_b64');
       if (imageBase64.length > 0) {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
-        let w = req['width'];
-        let h = req['height'];
+        let w = this.getScalarText(req, 'width');
+        let h = this.getScalarText(req, 'height');
         let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
         this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
         if (prompt.indexOf('<image_placeholder>') !== -1) {
@@ -481,7 +497,12 @@ export class AgentRouterServer {
 
       this.log('local', '>> [Action] full prompt:\n' + prompt);
       AgentExecutionController.updateFloatText('Inferencing...');
-      let chat = mnnllm['chat'];
+      let chat = this.localChat;
+      if (!chat) {
+        this.log('local', '[ERROR] Local chat API is unavailable.');
+        this.sendError(client, 'Local chat API is unavailable');
+        return;
+      }
       let response = await chat(prompt) as string;
       if (this.isCancellationRequested()) {
         this.log('local', '>> [Action] cancelled after inferencing.');
@@ -694,6 +715,7 @@ export class AgentRouterServer {
   }
 
   private log(mode: AgentRouteMode, message: string): void {
+    AppLogger.info('AgentRouter.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler?.(message);
       return;
@@ -733,27 +755,75 @@ export class AgentRouterServer {
     let imgPath = filesDir + '/agent_snapshot_' + ts + '.jpg';
     let base64Helper = new util.Base64Helper();
     let imgBuffer = base64Helper.decodeSync(imageBase64);
-    let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-    fs.writeSync(file.fd, imgBuffer.buffer);
-    fs.closeSync(file);
-    return imgPath;
+    try {
+      let file = fs.openSync(imgPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, imgBuffer.buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+      return imgPath;
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    }
   }
 
-  private getString(req: RequestMap, key: string): string {
-    let value = req[key];
+  private getRequestValue(req: RequestMap, key: RequestKey): RequestValue | undefined {
+    switch (key) {
+      case 'type':
+        return req.type;
+      case 'preserve_execution':
+        return req.preserve_execution;
+      case 'message':
+        return req.message;
+      case 'hidden':
+        return req.hidden;
+      case 'prefix':
+        return req.prefix;
+      case 'variable':
+        return req.variable;
+      case 'image_b64':
+        return req.image_b64;
+      case 'width':
+        return req.width;
+      case 'height':
+        return req.height;
+      case 'response':
+        return req.response;
+      case 'prompt':
+        return req.prompt;
+    }
+  }
+
+  private getString(req: RequestMap, key: RequestKey): string {
+    let value = this.getRequestValue(req, key);
     return typeof value === 'string' ? value : '';
   }
 
-  private getBoolean(req: RequestMap, key: string): boolean {
-    let value = req[key];
+  private getBoolean(req: RequestMap, key: RequestKey): boolean {
+    let value = this.getRequestValue(req, key);
     return value === true || value === 'true';
+  }
+
+  private getScalarText(req: RequestMap, key: RequestKey): string {
+    let value = this.getRequestValue(req, key);
+    if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return '';
   }
 
   private sendJson(client: socket.TCPSocketConnection, payload: string): void {
     let sendOptions: socket.TCPSendOptions = {
       data: payload + '<<EOF>>'
     };
-    client.send(sendOptions);
+    try {
+      client.send(sendOptions);
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    }
   }
 
   private sendStatus(client: socket.TCPSocketConnection, status: string, result?: string, message?: string): void {

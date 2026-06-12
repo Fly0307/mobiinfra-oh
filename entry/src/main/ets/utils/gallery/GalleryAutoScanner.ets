@@ -27,36 +27,41 @@ export class GalleryAutoScanner {
       fetchColumns: fetchColumns,
       predicates: predicates
     };
-    let fetchResult = await helper.getAssets(fetchOptions);
     try {
-      let total = fetchResult.getCount();
-      let count = limit > 0 ? Math.min(limit, total) : total;
-      let inputs: GalleryPhotoInput[] = [];
-      for (let i = 0; i < count; i++) {
-        let asset = await fetchResult.getObjectByPosition(i);
-        if (asset.photoType !== photoAccessHelper.PhotoType.IMAGE) {
-          continue;
-        }
-        let uri = asset.uri;
-        if (!uri || uri.length === 0) {
-          continue;
-        }
-        let dateMs = this.readAssetDateMs(asset);
-        let location = this.readAssetLocation(asset);
-        inputs.push({
-          uri: uri,
-          id: this.stableId(uri),
-          date: GalleryStorage.formatDate(dateMs),
-          latitude: location?.latitude,
-          longitude: location?.longitude
-        });
-      }
-      return inputs;
-    } finally {
+      let fetchResult = await helper.getAssets(fetchOptions);
       try {
-        fetchResult.close();
-      } catch (e) {
+        let total = fetchResult.getCount();
+        let count = limit > 0 ? Math.min(limit, total) : total;
+        let inputs: GalleryPhotoInput[] = [];
+        for (let i = 0; i < count; i++) {
+          let asset = await fetchResult.getObjectByPosition(i);
+          if (asset.photoType !== photoAccessHelper.PhotoType.IMAGE) {
+            continue;
+          }
+          let uri = asset.uri;
+          if (!uri || uri.length === 0) {
+            continue;
+          }
+          let dateMs = this.readAssetDateMs(asset);
+          let location = this.readAssetLocation(asset);
+          inputs.push({
+            uri: uri,
+            id: this.stableId(uri),
+            date: GalleryStorage.formatDate(dateMs),
+            latitude: location?.latitude,
+            longitude: location?.longitude
+          });
+        }
+        return inputs;
+      } finally {
+        try {
+          fetchResult.close();
+        } catch (e) {
+        }
       }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
@@ -87,11 +92,11 @@ export class GalleryAutoScanner {
   }
 
   private readAssetDateMs(asset: photoAccessHelper.PhotoAsset): number {
-    let dateAdded = this.toTimestampMs(String(asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED)));
+    let dateAdded = this.toTimestampMs(String(this.safeAssetGet(asset, photoAccessHelper.PhotoKeys.DATE_ADDED)));
     if (dateAdded > 0) {
       return dateAdded;
     }
-    let dateModified = this.toTimestampMs(String(asset.get(photoAccessHelper.PhotoKeys.DATE_MODIFIED)));
+    let dateModified = this.toTimestampMs(String(this.safeAssetGet(asset, photoAccessHelper.PhotoKeys.DATE_MODIFIED)));
     if (dateModified > 0) {
       return dateModified;
     }

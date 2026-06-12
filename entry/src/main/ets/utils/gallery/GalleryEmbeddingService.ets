@@ -53,20 +53,25 @@ export class GalleryEmbeddingService {
   }
 
   private async embedTextOnDevice(text: string, filesDir: string): Promise<number[]> {
-    let model = await intelligence.getTextEmbeddingModel({
-      version: intelligence.ModelVersion.BASIC_MODEL,
-      isNpuAvailable: false,
-      cachePath: filesDir + '/gallery_embedding_cache'
-    });
     try {
-      await model.loadModel();
-      let clipped = text.length > 512 ? text.substring(0, 512) : text;
-      return await model.getEmbedding(clipped);
-    } finally {
+      let model = await intelligence.getTextEmbeddingModel({
+        version: intelligence.ModelVersion.BASIC_MODEL,
+        isNpuAvailable: false,
+        cachePath: filesDir + '/gallery_embedding_cache'
+      });
       try {
-        await model.releaseModel();
-      } catch (e) {
+        await model.loadModel();
+        let clipped = text.length > 512 ? text.substring(0, 512) : text;
+        return await model.getEmbedding(clipped);
+      } finally {
+        try {
+          await model.releaseModel();
+        } catch (e) {
+        }
       }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 

@@ -600,8 +600,8 @@ def _capture_screen_impl(factor=0.25):
     local_path = os.path.join(os.path.dirname(__file__), "screen.jpeg")
     return _capture_screen_file(local_path, factor, "screenshot")
 
-def capture_screen_mobiagent_style(factor=0.5):
-    hidden = _capture_overlay_hide_best_effort()
+def capture_screen_mobiagent_style(factor=0.5, manage_overlay=True):
+    hidden = _capture_overlay_hide_best_effort() if manage_overlay else False
     try:
         if hidden:
             # 云端 Agent 截图同样经过系统截图命令，需要给浮窗隐藏留出一帧以上的缓冲。
@@ -611,7 +611,8 @@ def capture_screen_mobiagent_style(factor=0.5):
             lambda: _capture_screen_mobiagent_style_impl(factor)
         )
     finally:
-        _capture_overlay_restore_best_effort(hidden)
+        if manage_overlay:
+            _capture_overlay_restore_best_effort(hidden)
 
 def _capture_screen_mobiagent_style_impl(factor=0.5):
     """Cloud Agent only: match mobiagent HarmonyDevice.screenshot + PIL resize path."""

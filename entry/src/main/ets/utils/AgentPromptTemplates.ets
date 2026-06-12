@@ -160,7 +160,7 @@ const PLANNER_PROMPT: string = `## 角色定义
 `;
 
 const E2E_AGENT_PREFIX_PROMPT: string = `<|im_start|>user You are a phone-use AI agent.
-  
+
 ### Action Space
 Your action space includes:
 - Name: click, Parameters: target_element (a high-level description of the UI element to click), bbox (an bounding box of the target element,[x1, y1, x2, y2]).
@@ -169,11 +169,11 @@ Your action space includes:
 - Name: input, Parameters: text (the text to input).
 - Name: wait, Parameters: (no parameters, will wait for 1 second).
 - Name: done, Parameters: status (the completion status of the current task, one of \`success\`, \`suspended\` and \`failed\`).
-  
+
 ### Response Format
 Your output should be a JSON object with the following format:
 {"reasoning": "Your reasoning here", "action": "The next action (one of click, click_input, input, swipe, wait, done)", "parameters": {"param1": "value1","param2": "value2", ...}}
-  
+
 ### Current Task
 {task}
 
@@ -184,7 +184,7 @@ Your output should be a JSON object with the following format:
 `;
 
 const E2E_AGENT_PREFIX_NOREASON_PROMPT: string = `<|im_start|>user You are a phone-use AI agent.
-  
+
 ### Action Space
 Your action space includes:
 - Name: click, Parameters: target_element (a high-level description of the UI element to click), bbox (an bounding box of the target element,[x1, y1, x2, y2]).
@@ -193,7 +193,7 @@ Your action space includes:
 - Name: input, Parameters: text (the text to input).
 - Name: wait, Parameters: (no parameters, will wait for 1 second).
 - Name: done, Parameters: status (the completion status of the current task, one of \`success\`, \`suspended\` and \`failed\`).
-  
+
 ### Response Format
 Your output should be a JSON object with the following format:
 {"action": "The next action (one of click, click_input, input, swipe, wait, done)", "parameters": {"param1": "value1","param2": "value2", ...}}
@@ -201,7 +201,7 @@ Your output should be a JSON object with the following format:
 ### Constraints
 - If the screen has not changed after your last action, do not repeat the exact same action. Try a different method or slightly adjust coordinates.
 - If the task is completed, verify the result before outputting 'done'.
-  
+
 ### Current Task
 {task}
 
@@ -212,7 +212,7 @@ The sequence of actions you have already taken:
 {history}
 
 <image_placeholder>
-  
+
 Please provide the next action based on the screenshot and your action history. You should do careful reasoning before providing the action.'
 <|im_end|><|im_start|>assistant`;
 
@@ -221,14 +221,14 @@ The sequence of actions you have already taken:
 {history}
 
 <image_placeholder>
-  
+
 
 Please provide the next action based on the screenshot and your action history. You should do careful reasoning before providing the action.'
 
 <|im_end|><|im_start|>assistant`;
 
 const E2E_PROMPT: string = `You are a phone-use AI agent.
-  
+
 ### Action Space
 Your action space includes:
 - Name: click, Parameters: target_element (a high-level description of the UI element to click), bbox (an bounding box of the target element,[x1, y1, x2, y2]).
@@ -237,20 +237,20 @@ Your action space includes:
 - Name: input, Parameters: text (the text to input).
 - Name: wait, Parameters: (no parameters, will wait for 1 second).
 - Name: done, Parameters: status (the completion status of the current task, one of \`success\`, \`suspended\` and \`failed\`).
-  
+
 ### Response Format
 Your output should be a JSON object with the following format:
 {"reasoning": "Your reasoning here", "action": "The next action (one of click, click_input, input, swipe, wait, done)", "parameters": {"param1": "value1","param2": "value2", ...}}
-  
+
 ### Current Task
 {task}
-  
+
 ### Action History
 The sequence of actions you have already taken:
 {history}
 
 <image_placeholder>
-  
+
 ### Constraints
 - If the screen has not changed after your last action, do not repeat the exact same action. Try a different method or slightly adjust coordinates.
 - If the task is completed, verify the result before outputting 'done'.

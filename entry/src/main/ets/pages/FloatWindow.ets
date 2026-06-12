@@ -6,38 +6,16 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 @Entry
 @Component
 struct FloatWindow {
-  @StorageLink('floatText') @Watch('onFloatTextChanged') floatText: string = 'AI Agent 运行中...'
+  @StorageLink('floatText') floatText: string = 'AI Agent 运行中...'
   @StorageLink('agentPauseRequested') pauseRequested: boolean = false
   @StorageLink('agentFloatPanelExpanded') panelExpanded: boolean = false
-  private textScroller: Scroller = new Scroller()
-  private autoScrollText: boolean = true
-  private lastToggleAt: number = 0
 
   private statusLabel(): string {
     return this.pauseRequested ? '暂停' : '执行';
   }
 
   private togglePanel(): void {
-    let now = Date.now();
-    if (now - this.lastToggleAt < 180) {
-      return;
-    }
-    this.lastToggleAt = now;
-    this.autoScrollText = true;
     AgentExecutionController.toggleFloatPanelExpanded();
-    this.scrollTextToLatest();
-  }
-
-  private onFloatTextChanged(): void {
-    if (this.panelExpanded && this.autoScrollText) {
-      this.scrollTextToLatest();
-    }
-  }
-
-  private scrollTextToLatest(): void {
-    setTimeout(() => {
-      this.textScroller.scrollEdge(Edge.Bottom);
-    }, 0);
   }
 
   private handleMoveTouch(event: TouchEvent): void {
@@ -65,27 +43,13 @@ struct FloatWindow {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
 
-            Scroll(this.textScroller) {
-              Text(this.floatText)
-                .width('100%')
-                .fontSize(10)
-                .fontWeight(FontWeight.Bold)
-                .fontColor('#F0F8FAFC')
-                .textAlign(TextAlign.Start)
-            }
-            .width('100%')
-            .height(30)
-            .scrollable(ScrollDirection.Vertical)
-            .scrollBar(BarState.Auto)
-            .onClick(() => {
-              this.togglePanel();
-            })
-            .onTouch((event: TouchEvent) => {
-              if (event.type === TouchType.Down) {
-                this.autoScrollText = false;
-              }
-              this.handleMoveTouch(event);
-            })
+            Text(this.floatText)
+              .width('100%')
+              .fontSize(10)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#F0F8FAFC')
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
           .layoutWeight(1)
           .height(46)
@@ -201,3 +165,4 @@ struct FloatWindow {
     .backgroundColor('#00000000')
   }
 }
+

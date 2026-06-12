@@ -63,7 +63,6 @@
 - 百度:com.baidu.baiduapp
 - 手机管家:com.huawei.hmos.systemmanagerform
 - 腾讯视频: com.tencent.videohm
-- 交我办: edu.sjtu.jwb
 
 ## 任务要求
 1.  **选择应用**：根据用户任务描述，从“可用应用列表”中选择最合适的应用。

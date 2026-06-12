@@ -8,9 +8,6 @@ interface HdcBridgeRequest {
   payload: WorkflowJsonMap;
 }
 
-interface EmptyBridgePayload {
-}
-
 interface StartAppPayload {
   app_name: string;
   package_name: string;
@@ -19,7 +16,6 @@ interface StartAppPayload {
 
 interface ScreenshotPayload {
   factor: number;
-  style?: string;
 }
 
 interface ExecuteDeciderPayload {
@@ -55,12 +51,10 @@ export class HdcWorkflowBridge {
     });
   }
 
-  async request(action: string, payload?: WorkflowJsonMap): Promise<HdcBridgeResponse> {
-    let emptyPayload: EmptyBridgePayload = {};
-    let requestPayload = payload === undefined ? emptyPayload as Object as WorkflowJsonMap : payload;
+  async request(action: string, payload: WorkflowJsonMap = {}): Promise<HdcBridgeResponse> {
     let body: HdcBridgeRequest = {
       action: action,
-      payload: requestPayload
+      payload: payload
     };
     let httpReq = http.createHttp();
     try {
@@ -74,11 +68,10 @@ export class HdcWorkflowBridge {
       };
       let resp = await httpReq.request(this.workflowUrl(), options);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
-        let errorResponse: HdcBridgeResponse = {
+        return {
           status: 'error',
           message: 'HDC bridge HTTP ' + resp.responseCode + ': ' + String(resp.result)
         };
-        return errorResponse;
       }
       let parsed = ArkJSON.parse(resp.result as string) as HdcBridgeResponse;
       if (parsed.status !== 'ok') {
@@ -87,11 +80,10 @@ export class HdcWorkflowBridge {
       return parsed;
     } catch (e) {
       let err = e as Error;
-      let errorResponse: HdcBridgeResponse = {
+      return {
         status: 'error',
         message: 'HDC bridge 请求失败：' + err.message
       };
-      return errorResponse;
     } finally {
       httpReq.destroy();
     }
@@ -115,18 +107,13 @@ export class HdcWorkflowBridge {
   }
 
   async screenshot(): Promise<HdcBridgeResponse> {
-    return await this.screenshotWithFactor(0.5);
-  }
-
-  async screenshotWithFactor(factor: number): Promise<HdcBridgeResponse> {
     let restoreToken = await AgentExecutionController.hideCaptureOverlay();
     try {
       if (restoreToken) {
         await this.sleep(120);
       }
       let payload: ScreenshotPayload = {
-        factor: factor,
-        style: factor <= 0.25 ? 'local' : 'mobiagent'
+        factor: 0.5
       };
       let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
       if (response.status !== 'ok' || !response.image_b64) {
@@ -160,21 +147,6 @@ export class HdcWorkflowBridge {
       throw new Error(response.message || 'load_prompt_template failed');
     }
     return response.result || '';
-  }
-
-  async agentConfig(): Promise<HdcBridgeResponse> {
-    let response = await this.request('agent_config');
-    if (response.status !== 'ok') {
-      throw new Error(response.message || 'agent_config failed');
-    }
-    return response;
-  }
-
-  async prepareAgentRun(): Promise<void> {
-    let response = await this.request('prepare_agent_run');
-    if (response.status !== 'ok') {
-      throw new Error(response.message || 'prepare_agent_run failed');
-    }
   }
 
   async guiAction(payload: WorkflowJsonMap): Promise<HdcBridgeResponse> {

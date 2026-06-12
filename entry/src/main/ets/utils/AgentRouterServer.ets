@@ -352,7 +352,7 @@ export class AgentRouterServer {
     if (reqType === 'agent_prefill') {
       let prefix = this.getString(req, 'prefix');
       this.log('local', '>> [Agent Prefill] prompt chars=' + prefix.length + '\n' + prefix);
-      AgentExecutionController.updateFloatText('Prefill...');
+      AppStorage.set('floatText', 'Prefill...');
       try {
         let agentPrefill = mnnllm['agentPrefill'];
         let result = await agentPrefill(prefix) as string;
@@ -361,7 +361,7 @@ export class AgentRouterServer {
           this.sendStatus(client, 'cancelled', '', 'Task cancelled by user');
           return;
         }
-        AgentExecutionController.updateFloatText('AI Agent running...');
+        AppStorage.set('floatText', 'AI Agent running...');
         this.log('local', '>> [Agent Prefill Done] ' + result);
         this.sendStatus(client, 'ok', result);
       } catch (e) {
@@ -394,7 +394,7 @@ export class AgentRouterServer {
       }
 
       this.log('local', '>> [Agent Step] variable prompt:\n' + variable);
-      AgentExecutionController.updateFloatText('Thinking...');
+      AppStorage.set('floatText', 'Thinking...');
       let streamedText = '';
       try {
         let agentStep = mnnllm['agentStep'];
@@ -403,14 +403,14 @@ export class AgentRouterServer {
             throw new Error('__agent_cancelled__');
           }
           streamedText += token;
-          AgentExecutionController.replaceFloatText(streamedText);
+          AppStorage.set('floatText', streamedText);
         }) as string;
         if (this.isCancellationRequested()) {
           this.log('local', '>> [Agent Step] cancelled after inferencing.');
           this.sendTerminate(client, 'Task cancelled by user');
           return;
         }
-        AgentExecutionController.updateFloatText('AI Agent running...');
+        AppStorage.set('floatText', 'AI Agent running...');
         this.log('local', '>> [Agent Step] model response:\n' + response);
 
         if (this.localApprovalHandler) {
@@ -457,7 +457,7 @@ export class AgentRouterServer {
       } catch (e) {
       }
       this.currentTask = '';
-      AgentExecutionController.updateFloatText('AI Agent running...');
+      AppStorage.set('floatText', 'AI Agent running...');
       this.log('local', '>> [Agent Reset] Local Agent context reset.');
       this.sendStatus(client, 'ok');
       return;
@@ -480,7 +480,7 @@ export class AgentRouterServer {
       }
 
       this.log('local', '>> [Action] full prompt:\n' + prompt);
-      AgentExecutionController.updateFloatText('Inferencing...');
+      AppStorage.set('floatText', 'Inferencing...');
       let chat = mnnllm['chat'];
       let response = await chat(prompt) as string;
       if (this.isCancellationRequested()) {
@@ -488,7 +488,7 @@ export class AgentRouterServer {
         this.sendTerminate(client, 'Task cancelled by user');
         return;
       }
-      AgentExecutionController.updateFloatText('AI Agent running...');
+      AppStorage.set('floatText', 'AI Agent running...');
       this.log('local', '>> [Action] model response:\n' + response);
 
       if (this.localApprovalHandler) {
@@ -563,7 +563,7 @@ export class AgentRouterServer {
         this.log('cloud', '>> [Cloud Agent Step] image saved: ' + imgPath);
       }
 
-      AgentExecutionController.updateFloatText('Cloud thinking...');
+      AppStorage.set('floatText', 'Cloud thinking...');
       if (imageBase64.length > 0) {
         this.log('cloud', '>> [Cloud Decider] sending Qwen messages, history=' + this.cloudActionHistory.length);
       } else {
@@ -584,7 +584,7 @@ export class AgentRouterServer {
         this.sendTerminate(client, 'Task cancelled by user');
         return;
       }
-      AgentExecutionController.updateFloatText('AI Agent running...');
+      AppStorage.set('floatText', 'AI Agent running...');
       this.log('cloud', '>> [Cloud Agent Step] model response:\n' + response);
 
       if (this.cloudApprovalHandler) {
@@ -619,7 +619,7 @@ export class AgentRouterServer {
       this.currentTask = '';
       this.cloudActionHistory = [];
       this.cloudTask = '';
-      AgentExecutionController.updateFloatText('AI Agent running...');
+      AppStorage.set('floatText', 'AI Agent running...');
       this.log('cloud', '>> [Cloud Agent Reset] Cloud Agent context reset.');
       this.sendStatus(client, 'ok');
       return;
@@ -633,7 +633,7 @@ export class AgentRouterServer {
         this.log('cloud', '>> [Cloud Action] image saved: ' + imgPath);
       }
 
-      AgentExecutionController.updateFloatText('Cloud inferencing...');
+      AppStorage.set('floatText', 'Cloud inferencing...');
       if (imageBase64.length > 0) {
         this.log('cloud', '>> [Cloud Decider] sending action with screenshot...');
       } else {
@@ -647,7 +647,7 @@ export class AgentRouterServer {
         this.sendTerminate(client, 'Task cancelled by user');
         return;
       }
-      AgentExecutionController.updateFloatText('AI Agent running...');
+      AppStorage.set('floatText', 'AI Agent running...');
       this.log('cloud', '>> [Cloud Action] model response:\n' + response);
 
       if (this.cloudApprovalHandler) {

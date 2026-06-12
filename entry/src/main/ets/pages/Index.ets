@@ -34,7 +34,6 @@ import {
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
-import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -44,12 +43,6 @@ import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/Defau
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
 // 下沉到 home/collection/task，避免 Index.ets 继续膨胀。
 const AUTO_HDC_SERVER_URL: string = 'http://127.0.0.1:19124';
-const AUTO_HDC_REVERSE_HEALTH_RETRIES: number = 2;
-const HDC_HEALTH_RETRY_DELAY_MS: number = 350;
-const HDC_REVERSE_CONNECT_TIMEOUT_MS: number = 1500;
-const HDC_REVERSE_READ_TIMEOUT_MS: number = 3000;
-const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
-const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
 
 interface ServerFile {
   name: string;
@@ -70,17 +63,8 @@ interface HdcHealthResponse {
   tunnel_ready?: boolean;
   fport_ready?: boolean;
   rport_ready?: boolean;
-  rport_listening?: boolean;
-  rport_listen_check_supported?: boolean;
   app_server_url?: string;
-  app_server_urls?: string[];
-  pc_server_urls?: string[];
   loop_alive?: boolean;
-}
-
-interface HdcHealthAttempt {
-  health: HdcHealthResponse | null;
-  message: string;
 }
 
 interface HdcConnectAttempt {
@@ -171,8 +155,6 @@ struct Index {
   @State cloudDebugImagePath: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
-  @State hdcConnected: boolean = false;
-  @State hdcUsingReverseTunnel: boolean = false;
   @State hdcAutoConnected: boolean = false;
   @State hdcAutoConnecting: boolean = false;
   @State hdcManualPairing: boolean = false;
@@ -195,7 +177,6 @@ struct Index {
   
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
-  private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
@@ -214,51 +195,6 @@ struct Index {
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
-  }
-
-  private async approveLocalAgentResponse(response: string): Promise<boolean> {
-    if (this.autoConfirm) {
-      return true;
-    }
-    return new Promise<boolean>((resolve) => {
-      promptAction.showDialog({
-        title: '大模型返回确认',
-        message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
-        buttons: [
-          { text: '拒绝', color: '#ff0000' },
-          { text: '同意', color: '#00cc00' }
-        ]
-      }).then((data: promptAction.ShowDialogSuccessResponse) => {
-        resolve(data.index === 1);
-      }).catch(() => {
-        resolve(false);
-      });
-    });
-  }
-
-  private async approveCloudAgentResponse(response: string): Promise<boolean> {
-    if (this.cloudAutoConfirm) {
-      this.appendCloudLog('自动同意已开启，模型动作已放行给 App 内 Agent loop 执行。');
-      return true;
-    }
-    this.appendCloudLog('等待用户确认模型动作。确认后 App 会通过 PC HDC bridge 执行动作。');
-    return new Promise<boolean>((resolve) => {
-      promptAction.showDialog({
-        title: '云端模型返回确认',
-        message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
-        buttons: [
-          { text: '拒绝', color: '#ff0000' },
-          { text: '同意', color: '#00cc00' }
-        ]
-      }).then((data: promptAction.ShowDialogSuccessResponse) => {
-        let approved = data.index === 1;
-        this.appendCloudLog(approved ? '用户已同意，动作交给 HDC bridge 执行。' : '用户已拒绝，任务终止。');
-        resolve(approved);
-      }).catch(() => {
-        this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
-        resolve(false);
-      });
-    });
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
@@ -564,7 +500,17 @@ struct Index {
         this.debugImagePath = 'file://' + match[1];
       }
     }, async (response: string) => {
-      return await this.approveLocalAgentResponse(response);
+      if (this.autoConfirm) { return true; }
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '大模型返回确认',
+          message: '模型推理结果：\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => { resolve(data.index === 1); }).catch(() => { resolve(false); });
+      });
     });
     this.agentRouter.configureCloud(this.cloudClient, () => this.getCloudConfig(), (msg: string) => {
       this.appendCloudLog(msg);
@@ -573,15 +519,31 @@ struct Index {
         this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
       }
     }, async (response: string) => {
-      return await this.approveCloudAgentResponse(response);
+      if (this.cloudAutoConfirm) {
+        this.appendCloudLog('自动同意已开启，模型动作已放行给 PC 执行。');
+        return true;
+      }
+      this.appendCloudLog('等待用户确认模型动作。PC 会停在 Sending step request，直到点击同意。');
+      return new Promise<boolean>((resolve) => {
+        promptAction.showDialog({
+          title: '云端模型返回确认',
+          message: '模型推理结果:\n' + response + '\n\n是否同意执行？',
+          buttons: [
+            { text: '拒绝', color: '#ff0000' },
+            { text: '同意', color: '#00cc00' }
+          ]
+        }).then((data: promptAction.ShowDialogSuccessResponse) => {
+          let approved = data.index === 1;
+          this.appendCloudLog(approved ? '用户已同意，动作返回 PC。' : '用户已拒绝，任务终止。');
+          resolve(approved);
+        }).catch(() => {
+          this.appendCloudLog('确认弹窗关闭或失败，动作按拒绝处理。');
+          resolve(false);
+        });
+      });
     });
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
-      if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
-        await this.activeAgentRunner.requestCancellation();
-        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
-        return;
-      }
       if (this.agentRouter.getRouteMode() !== 'local') {
         return;
       }
@@ -589,11 +551,6 @@ struct Index {
       this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
-      if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
-        await this.activeAgentRunner.requestCancellation();
-        this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
-        return;
-      }
       if (this.agentRouter.getRouteMode() !== 'cloud') {
         return;
       }
@@ -652,7 +609,7 @@ struct Index {
   private prepareCustomOpp(): boolean {
     let ctx = getContext(this) as common.UIAbilityContext;
     try {
-      let res: string = mnnllm.prepareCustomOpp(ctx.resourceManager, this.filesDir + '/custom_opp');
+      let res = mnnllm.prepareCustomOpp(ctx.resourceManager, this.filesDir + '/custom_opp');
       this.customOppReady = (res === 'ok');
       if (!this.customOppReady) {
         this.output = '自定义算子准备失败: ' + res;
@@ -1033,7 +990,9 @@ struct Index {
     }
     this.hdcServerIp = serverUrl;
     this.manualHdcServerIp = serverUrl;
-    this.markHdcDisconnected(true, 'Manual HDC pairing is running...');
+    this.hdcManualPairing = true;
+    this.hdcAutoConnected = false;
+    this.hdcAutoStatus = 'Manual HDC pairing is running...';
     this.output = `正在请求远程服务执行 HDC 连接测试: ${this.wirelessIp}...`;
     let attempt = await this.requestManualHdcConnect(serverUrl, this.wirelessIp.trim());
     if (attempt.ok && attempt.health) {
@@ -1317,7 +1276,7 @@ struct Index {
   }
 
   private hdcInputEditable(): boolean {
-    return this.hdcManualPairing || !this.hdcConnected;
+    return this.hdcManualPairing || !this.hdcAutoConnected;
   }
 
   private hdcInputBackgroundColor(): string {
@@ -1329,7 +1288,7 @@ struct Index {
   }
 
   private hdcStatusColor(): string {
-    if (this.hdcConnected) {
+    if (this.hdcAutoConnected) {
       return '#2D9B73';
     }
     if (this.hdcAutoConnecting) {
@@ -1349,9 +1308,6 @@ struct Index {
     let candidates: string[] = [];
     this.addHdcCandidate(candidates, AUTO_HDC_SERVER_URL);
     this.addHdcCandidate(candidates, 'http://localhost:19124');
-    this.addHdcCandidate(candidates, this.hdcServerIp);
-    this.addHdcCandidate(candidates, this.manualHdcServerIp);
-    this.addHdcCandidate(candidates, DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
     return candidates;
   }
 
@@ -1359,21 +1315,6 @@ struct Index {
     let normalized = this.normalizeHdcUrl(value);
     return normalized === this.normalizeHdcUrl(AUTO_HDC_SERVER_URL) ||
       normalized === this.normalizeHdcUrl('http://localhost:19124');
-  }
-
-  private hdcHealthRetryCount(baseUrl: string): number {
-    if (this.normalizeHdcUrl(baseUrl) === this.normalizeHdcUrl(AUTO_HDC_SERVER_URL)) {
-      return AUTO_HDC_REVERSE_HEALTH_RETRIES;
-    }
-    return 1;
-  }
-
-  private hdcHealthConnectTimeout(baseUrl: string): number {
-    return this.isAutoHdcUrl(baseUrl) ? HDC_REVERSE_CONNECT_TIMEOUT_MS : HDC_SERVER_CONNECT_TIMEOUT_MS;
-  }
-
-  private hdcHealthReadTimeout(baseUrl: string): number {
-    return this.isAutoHdcUrl(baseUrl) ? HDC_REVERSE_READ_TIMEOUT_MS : HDC_SERVER_READ_TIMEOUT_MS;
   }
 
   private manualHdcServerUrl(): string {
@@ -1394,97 +1335,13 @@ struct Index {
     return '';
   }
 
-  private addHdcCandidatesFromList(candidates: string[], values: string[] | undefined): void {
-    if (values === undefined) {
-      return;
-    }
-    for (let value of values) {
-      this.addHdcCandidate(candidates, value);
-    }
-  }
-
-  private addHdcCandidatesFromHealth(candidates: string[], health: HdcHealthResponse): void {
-    if (health.app_server_url !== undefined && health.app_server_url.length > 0) {
-      this.addHdcCandidate(candidates, health.app_server_url);
-    }
-    this.addHdcCandidatesFromList(candidates, health.app_server_urls);
-    this.addHdcCandidatesFromList(candidates, health.pc_server_urls);
-  }
-
-  private firstNonAutoHdcUrl(values: string[]): string {
-    for (let value of values) {
-      let normalized = this.normalizeHdcUrl(value);
-      if (normalized.length > 0 && !this.isAutoHdcUrl(normalized)) {
-        return normalized;
-      }
-    }
-    return '';
-  }
-
-  private firstNonAutoHealthUrl(health: HdcHealthResponse): string {
-    let values: string[] = [];
-    if (health.pc_server_urls !== undefined) {
-      for (let value of health.pc_server_urls) {
-        values.push(value);
-      }
-    }
-    if (health.app_server_urls !== undefined) {
-      for (let value of health.app_server_urls) {
-        values.push(value);
-      }
-    }
-    if (health.app_server_url !== undefined && health.app_server_url.length > 0) {
-      values.push(health.app_server_url);
-    }
-    return this.firstNonAutoHdcUrl(values);
-  }
-
-  private rememberHdcFallbackFromHealth(health: HdcHealthResponse, overwrite: boolean = false): void {
-    let fallback = this.firstNonAutoHealthUrl(health);
-    let current = this.normalizeHdcUrl(this.manualHdcServerIp);
-    if (fallback.length > 0 && (overwrite || current.length === 0 || this.isAutoHdcUrl(current))) {
-      this.manualHdcServerIp = fallback;
-    }
-  }
-
-  private hdcTargetText(health: HdcHealthResponse): string {
-    return health.target !== undefined && health.target.length > 0 ? ', target=' + health.target : '';
-  }
-
-  private markHdcDisconnected(manualPairing: boolean, statusText: string): void {
-    this.hdcConnected = false;
-    this.hdcUsingReverseTunnel = false;
-    this.hdcAutoConnected = false;
-    this.hdcManualPairing = manualPairing;
-    this.hdcAutoStatus = statusText;
-  }
-
-  private markHdcConnected(serverUrl: string, health: HdcHealthResponse, statusPrefix: string): void {
-    let normalized = this.normalizeHdcUrl(serverUrl);
-    this.rememberHdcFallbackFromHealth(health, this.isAutoHdcUrl(normalized));
-    this.hdcServerIp = normalized;
-    this.hdcConnected = true;
-    this.hdcUsingReverseTunnel = this.isAutoHdcUrl(normalized);
-    this.hdcAutoConnected = this.hdcUsingReverseTunnel;
-    this.hdcManualPairing = !this.hdcUsingReverseTunnel;
-    let routeText = this.hdcUsingReverseTunnel ? 'reverse tunnel URL' : 'PC Server URL';
-    this.hdcAutoStatus = statusPrefix + ': ' + routeText + '=' + normalized + this.hdcTargetText(health);
-  }
-
-  private async sleep(ms: number): Promise<void> {
-    return new Promise<void>((resolve: () => void) => {
-      setTimeout(resolve, ms);
-    });
-  }
-
-  private async requestHdcHealth(baseUrl: string, connectTimeout: number = 2500,
-    readTimeout: number = 5000): Promise<HdcHealthResponse | null> {
+  private async requestHdcHealth(baseUrl: string): Promise<HdcHealthResponse | null> {
     let httpReq = http.createHttp();
     try {
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
-        connectTimeout: connectTimeout,
-        readTimeout: readTimeout,
+        connectTimeout: 2500,
+        readTimeout: 5000,
         expectDataType: http.HttpDataType.STRING
       };
       let resp = await httpReq.request(this.hdcApiUrl(baseUrl, '/api/health'), options);
@@ -1499,37 +1356,8 @@ struct Index {
     }
   }
 
-  private async requestHdcHealthWithRetry(baseUrl: string): Promise<HdcHealthAttempt> {
-    let retries = this.hdcHealthRetryCount(baseUrl);
-    let lastMessage = 'No response from ' + baseUrl;
-    for (let i = 0; i < retries; i++) {
-      let health = await this.requestHdcHealth(baseUrl, this.hdcHealthConnectTimeout(baseUrl),
-        this.hdcHealthReadTimeout(baseUrl));
-      if (health) {
-        return {
-          health: health,
-          message: this.hdcHealthMessage(health, 'HDC target is not connected')
-        };
-      }
-      lastMessage = 'No response from ' + baseUrl + ' (attempt ' + (i + 1) + '/' + retries + ')';
-      if (i + 1 < retries) {
-        await this.sleep(HDC_HEALTH_RETRY_DELAY_MS);
-      }
-    }
-    return {
-      health: null,
-      message: lastMessage
-    };
-  }
-
-  private hdcHealthReady(baseUrl: string, health: HdcHealthResponse): boolean {
-    if (health.status !== 'ok' || health.hdc_connected !== true) {
-      return false;
-    }
-    if (this.isAutoHdcUrl(baseUrl)) {
-      return health.rport_ready !== false;
-    }
-    return health.tunnel_ready !== false || health.fport_ready === true || health.rport_ready === true;
+  private hdcHealthReady(health: HdcHealthResponse): boolean {
+    return health.status === 'ok' && health.hdc_connected === true && health.tunnel_ready !== false;
   }
 
   private hdcHealthMessage(health: HdcHealthResponse, fallback: string): string {
@@ -1607,20 +1435,28 @@ struct Index {
   }
 
   private applyManualHdcSuccess(serverUrl: string, health: HdcHealthResponse, statusPrefix: string): void {
-    let normalized = this.normalizeHdcUrl(serverUrl);
-    if (!this.isAutoHdcUrl(normalized)) {
-      this.manualHdcServerIp = normalized;
+    this.manualHdcServerIp = serverUrl;
+    if (health.tunnel_ready === true && health.app_server_url && health.app_server_url.length > 0) {
+      this.hdcServerIp = health.app_server_url;
+      this.hdcAutoConnected = true;
+      this.hdcManualPairing = false;
+      let targetText = health.target && health.target.length > 0 ? ', target=' + health.target : '';
+      this.hdcAutoStatus = statusPrefix + ' and auto tunnel is ready: ' + this.hdcServerIp + targetText;
+      return;
     }
-    this.markHdcConnected(normalized, health, statusPrefix);
+
+    this.hdcServerIp = serverUrl;
+    this.hdcAutoConnected = false;
+    this.hdcManualPairing = true;
+    this.hdcAutoStatus = statusPrefix + '; using PC Server URL.';
   }
 
   private applyManualHdcFailure(serverUrl: string, message: string, statusPrefix: string): void {
-    let normalized = this.normalizeHdcUrl(serverUrl);
-    this.hdcServerIp = normalized;
-    if (!this.isAutoHdcUrl(normalized)) {
-      this.manualHdcServerIp = normalized;
-    }
-    this.markHdcDisconnected(true, statusPrefix + ': ' + message);
+    this.hdcServerIp = serverUrl;
+    this.manualHdcServerIp = serverUrl;
+    this.hdcAutoConnected = false;
+    this.hdcManualPairing = true;
+    this.hdcAutoStatus = statusPrefix + ': ' + message;
   }
 
   private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
@@ -1636,7 +1472,7 @@ struct Index {
     }
 
     this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
-    this.markHdcDisconnected(true, 'Manual HDC fallback is running...');
+    this.hdcAutoStatus = 'Manual HDC fallback is running...';
     let attempt = await this.requestManualHdcConnect(serverUrl, target);
     if (!attempt.ok || !attempt.health) {
       this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
@@ -1650,51 +1486,52 @@ struct Index {
   }
 
   private setHdcManualPairing(): void {
-    this.markHdcDisconnected(true, 'Manual HDC pairing enabled. Enter PC HDC Server and phone wireless HDC target.');
-    if (this.isAutoHdcUrl(this.hdcServerIp)) {
+    this.hdcManualPairing = true;
+    this.hdcAutoConnected = false;
+    if (this.normalizeHdcUrl(this.hdcServerIp) === this.normalizeHdcUrl(AUTO_HDC_SERVER_URL)) {
       this.hdcServerIp = this.manualHdcServerUrl();
     }
+    this.hdcAutoStatus = 'Manual HDC pairing enabled. Enter PC HDC Server and phone wireless HDC target.';
   }
 
   private markHdcManualEditing(): void {
-    this.markHdcDisconnected(true, 'Manual HDC pairing is being edited.');
+    if (!this.hdcManualPairing) {
+      this.hdcManualPairing = true;
+    }
+    this.hdcAutoConnected = false;
+    this.hdcAutoStatus = 'Manual HDC pairing is being edited.';
   }
 
   private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
     if (this.hdcAutoConnecting && !force) {
-      return this.hdcConnected;
+      return this.hdcAutoConnected;
     }
 
     this.hdcAutoConnecting = true;
     this.hdcAutoStatus = 'Auto-discovering HDC Server...';
     let candidates = this.hdcDiscoveryCandidates();
     let lastMessage = '';
-    let attemptMessages: string[] = [];
     try {
-      let index = 0;
-      while (index < candidates.length) {
-        let candidate = candidates[index];
-        index += 1;
-        let attempt = await this.requestHdcHealthWithRetry(candidate);
-        let health = attempt.health;
-        if (health === null) {
-          lastMessage = attempt.message;
-          attemptMessages.push(lastMessage);
+      for (let i = 0; i < candidates.length; i++) {
+        let candidate = candidates[i];
+        let health = await this.requestHdcHealth(candidate);
+        if (!health) {
+          lastMessage = 'No response from ' + candidate;
           continue;
         }
-        this.addHdcCandidatesFromHealth(candidates, health);
-        this.rememberHdcFallbackFromHealth(health, this.isAutoHdcUrl(candidate));
-        if (this.hdcHealthReady(candidate, health)) {
-          let statusPrefix = this.isAutoHdcUrl(candidate) ? 'Auto HDC connected' : 'HDC Server fallback connected';
-          this.markHdcConnected(candidate, health, statusPrefix);
+        if (this.hdcHealthReady(health)) {
+          this.hdcServerIp = candidate;
+          this.hdcAutoConnected = true;
+          this.hdcManualPairing = false;
+          let targetText = health.target && health.target.length > 0 ? ', target=' + health.target : '';
+          this.hdcAutoStatus = 'Auto HDC connected: ' + candidate + targetText;
           this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
           return true;
         }
-        lastMessage = candidate + ': ' + attempt.message;
-        attemptMessages.push(lastMessage);
+        lastMessage = this.hdcHealthMessage(health, 'HDC target is not connected');
       }
-      let detail = attemptMessages.length > 0 ? attemptMessages.join('; ') : lastMessage;
-      this.markHdcDisconnected(false, 'Auto HDC discovery failed. Use manual pairing if needed. ' + detail);
+      this.hdcAutoConnected = false;
+      this.hdcAutoStatus = 'Auto HDC discovery failed. Use manual pairing if needed. ' + lastMessage;
       this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
       return false;
     } finally {
@@ -1792,16 +1629,15 @@ struct Index {
 
     this.output = '未检测到已加载模型，正在自动加载大模型...';
     try {
-      let loadResult: string = await mnnllm.loadModel(cfg);
-      this.output = loadResult;
+      this.output = await mnnllm.loadModel(cfg);
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
         this.output = `自动加载模型失败: ${this.output}`;
       }
       return this.modelLoaded;
     } catch (err) {
-      let message = err instanceof Error ? (err as Error).message : String(err);
-      this.output = '自动加载模型失败: ' + message;
+      let e = err as Error;
+      this.output = '自动加载模型失败: ' + e.message;
       return false;
     }
   }
@@ -1816,29 +1652,26 @@ struct Index {
     if (!await this.ensureLocalModelLoaded()) {
       return false;
     }
-    if (!await this.ensureHdcServerReadyForTask(false)) {
+
+    this.agentRouter.useLocal();
+    if (!await this.startLocalBackend()) {
       return false;
     }
-    if (this.hdcServerIp.trim().length === 0) {
-      this.output = 'HDC Server 未配置，无法执行本地 Agent。';
-      return false;
-    }
-    return true;
+    return await this.ensurePcAgentLoopReady(false);
   }
 
   private async ensureCloudAgentBackend(): Promise<boolean> {
+    // 云端任务下发前确保路由已切换到 cloud 且 9126 正在监听。
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return false;
     }
-    if (!await this.ensureHdcServerReadyForTask(true)) {
+
+    this.agentRouter.useCloud();
+    if (!await this.startCloudBackend()) {
       return false;
     }
-    if (this.hdcServerIp.trim().length === 0) {
-      this.appendCloudLog('HDC Server 未配置，无法执行云端 Agent。');
-      return false;
-    }
-    return true;
+    return await this.ensurePcAgentLoopReady(true);
   }
 
   private async runHomeRecommendationAgentTask(taskText: string): Promise<void> {
@@ -1847,36 +1680,6 @@ struct Index {
       throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
     }
     this.currentTab = 3;
-  }
-
-  private createAgentLoopRunner(): AgentLoopRunner {
-    return new AgentLoopRunner({
-      filesDir: this.filesDir,
-      hdcServerIp: this.hdcServerIp,
-      localApi: mnnllm as Record<string, Function>,
-      cloudClient: this.cloudClient,
-      cloudConfigProvider: () => this.getCloudConfig(),
-      localLogHandler: (msg: string) => {
-        this.output = msg;
-        let match = msg.match(/<img>(.*?)<hw>/);
-        if (match && match[1]) {
-          this.debugImagePath = 'file://' + match[1];
-        }
-      },
-      cloudLogHandler: (msg: string) => {
-        this.appendCloudLog(msg);
-        let match = msg.match(/agent_snapshot_.*?\.jpg/);
-        if (match && match[0]) {
-          this.cloudDebugImagePath = 'file://' + this.filesDir + '/' + match[0];
-        }
-      },
-      localApprovalHandler: async (response: string) => {
-        return await this.approveLocalAgentResponse(response);
-      },
-      cloudApprovalHandler: async (response: string) => {
-        return await this.approveCloudAgentResponse(response);
-      }
-    });
   }
 
   private setHomeRecommendationCompleted(id: string, completed: boolean): void {
@@ -1897,23 +1700,12 @@ struct Index {
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
     }
-    this.currentTab = 3;
-    this.resetCloudLog('云端 Agent 开始执行：' + task);
-    this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
+    this.agentRouter.submitCloudTask(task);
+    AgentExecutionController.beginExecution('等待 PC 控制云端任务...');
+    this.resetCloudLog('任务已下发：' + task);
+    this.appendCloudLog(`等待 PC 侧 harmony_agent.py 轮询 ${DEFAULT_ENDPOINT_CONFIG.agentRouterPort}。若没有后续 [Cloud Poll]，说明 PC 没连到 App 后端。`);
     this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
-    let runner = this.createAgentLoopRunner();
-    this.activeAgentRunner = runner;
-    try {
-      await runner.runCloudTask(task);
-      this.appendCloudLog('云端 Agent 任务完成。');
-      return { success: true, error: '' };
-    } catch (e) {
-      let err = e as Error;
-      this.appendCloudLog('云端 Agent 执行失败：' + err.message);
-      return { success: false, error: err.message };
-    } finally {
-      this.activeAgentRunner = null;
-    }
+    return { success: true, error: '' };
   }
 
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
@@ -2002,11 +1794,11 @@ struct Index {
               this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
               this.isThinking = true;
               try {
-                let reply: string = await mnnllm.chat(msg);
+                let reply = await mnnllm.chat(msg);
                 this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
               } catch(err) {
-                let message = err instanceof Error ? (err as Error).message : String(err);
-                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
+                let e = err as Error;
+                this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${e.message}\n`);
               } finally {
                 this.isThinking = false;
               }
@@ -2029,20 +1821,14 @@ struct Index {
             .onClick(async () => {
               if (!this.modelLoaded) { this.output = '请先加载模型'; return; }
               this.output = '推理中...';
-              try {
-                let generated: string = await mnnllm.generate('你好');
-                this.output = generated;
-              } catch(err) {
-                let message = err instanceof Error ? (err as Error).message : String(err);
-                this.output = '推理错误: ' + message;
-              }
+              try { this.output = await mnnllm.generate('你好'); } catch(err) { let e = err as Error; this.output = '推理错误: ' + e.message; }
             })
             .height(42)
             .width('30%')
             .backgroundColor('#4B8BFF')
             .borderRadius(12)
           Button('重置会话')
-            .onClick(() => { let resetResult: string = mnnllm.reset(); this.output = resetResult; this.chatHistory = ''; })
+            .onClick(() => { this.output = mnnllm.reset(); this.chatHistory = ''; })
             .height(42)
             .width('30%')
             .backgroundColor('#FF7043')
@@ -2060,18 +1846,9 @@ struct Index {
           .onClick(async () => {
             if (this.userInput.length === 0) { this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机'; return; }
             if (!await this.ensureLocalAgentReady()) { return; }
-            let runner = this.createAgentLoopRunner();
-            this.activeAgentRunner = runner;
-            this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${this.userInput}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
-            try {
-              await runner.runLocalTask(this.userInput);
-              this.output = this.output + '\n\n====== 本地 Agent 任务完成 ======';
-            } catch (e) {
-              let err = e as Error;
-              this.output = this.output + '\n\n本地 Agent 执行失败: ' + err.message;
-            } finally {
-              this.activeAgentRunner = null;
-            }
+            this.agentRouter.submitLocalTask(this.userInput);
+            AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
+            this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${this.userInput}\nPC 脚本检测到任务后将自动开始。`;
           })
 
         Row() {

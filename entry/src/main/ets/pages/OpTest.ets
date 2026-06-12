@@ -31,7 +31,7 @@ struct OpTest {
     let ctx = getContext(this) as common.UIAbilityContext
     this.modelDir = ctx.filesDir + '/model'
     try {
-      const res: string = native.prepareCustomOpp(ctx.resourceManager, ctx.filesDir + '/custom_opp')
+      const res = native.prepareCustomOpp(ctx.resourceManager, ctx.filesDir + '/custom_opp')
       if (res !== 'ok') {
         this.testResult = 'prepare custom opp failed: ' + res
       }
@@ -483,3 +483,4 @@ struct OpTest {
     .backgroundColor('#F7F9FC')
   }
 }
+

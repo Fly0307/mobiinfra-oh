@@ -1,15 +1,13 @@
 import json
 import subprocess
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
 import argparse
-import errno
 import time
 import threading
 import socket
 import sys
 import re
-import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -21,23 +19,12 @@ except Exception as ex:
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
-HDC_HEALTH_CACHE_TTL = float(os.environ.get("HDC_HEALTH_CACHE_TTL", "15"))
-HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "20"))
-HDC_ACTION_TIMEOUT = float(os.environ.get("HDC_ACTION_TIMEOUT", "6"))
-HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
-HDC_STALE_TARGET_GRACE = float(os.environ.get("HDC_STALE_TARGET_GRACE", "30"))
-HDC_WORKFLOW_USE_DRIVER_ACTIONS = os.environ.get(
-    "HDC_WORKFLOW_USE_DRIVER_ACTIONS", "0"
-).strip().lower() in ("1", "true", "yes", "on")
-HDC_WORKFLOW_USE_DRIVER_INPUT = os.environ.get(
-    "HDC_WORKFLOW_USE_DRIVER_INPUT", "1"
-).strip().lower() in ("1", "true", "yes", "on")
+HDC_HEALTH_CACHE_TTL = 2.0
+HDC_COMMAND_TIMEOUT = 20
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
 APP_REVERSE_HDC_URL = f"http://127.0.0.1:{APP_REVERSE_HDC_PORT}"
-HDC_REVERSE_LISTEN_CHECK_TIMEOUT = 3.0
-HDC_REVERSE_LISTEN_CHECK_INTERVAL = 0.3
 HDC_TARGET_OVERRIDE = os.environ.get("HDC_TARGET", "").strip()
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 AUTO_DISCOVERY_CACHE_FILE = os.environ.get(
@@ -55,47 +42,21 @@ AUTO_DISCOVERY_EXTRA_PORTS = os.environ.get("HDC_AUTO_PORTS", "")
 AUTO_DISCOVERY_EXTRA_TARGETS = os.environ.get("HDC_AUTO_TARGETS", "")
 AUTO_DISCOVERY_DEFAULT_PORTS = (8710, 10178, 5555)
 
-def make_hdc_tunnel_status(status, message, target="", tunnel_ready=False, fport_ready=False,
-                           rport_ready=False, rport_listening=None,
-                           rport_listen_check_supported=False):
-    return {
-        "status": status,
-        "message": message,
-        "target": target,
-        "tunnel_ready": tunnel_ready,
-        "fport_ready": fport_ready,
-        "rport_ready": rport_ready,
-        "rport_listening": rport_listening,
-        "rport_listen_check_supported": rport_listen_check_supported,
-    }
-
 _hdc_health_checked_at = 0.0
-_hdc_health_last_ok_at = 0.0
 _hdc_health_connected = False
 _hdc_health_target = ""
 _hdc_tunnel_checked_at = 0.0
-_hdc_tunnel_status = make_hdc_tunnel_status("unknown", "HDC tunnel has not been checked")
+_hdc_tunnel_status = {
+    "status": "unknown",
+    "message": "HDC tunnel has not been checked",
+    "target": "",
+    "tunnel_ready": False,
+    "fport_ready": False,
+    "rport_ready": False,
+}
 _auto_discovery_last_attempt = 0.0
 _auto_discovery_running = False
 auto_discovery_lock = threading.RLock()
-
-CLIENT_DISCONNECT_ERRNOS = {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}
-CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
-
-def is_client_disconnect_error(exc):
-    if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
-        return True
-    if isinstance(exc, OSError):
-        err_no = getattr(exc, "errno", None)
-        win_error = getattr(exc, "winerror", None)
-        return err_no in CLIENT_DISCONNECT_ERRNOS or win_error in CLIENT_DISCONNECT_WINERRORS
-    return False
-
-def log_client_disconnect(handler, status_code):
-    print(
-        f">> [HTTP] client disconnected before {status_code} response: "
-        f"{handler.command} {handler.path} from {handler.client_address}"
-    )
 
 # PC 侧 HTTP 控制服务：手机 App 通过 /api/run_cmd 触发 HDC 命令，
 # workflow bridge 直接通过 /api/workflow 执行动作；9126 轮询 Agent 默认启动，
@@ -154,18 +115,11 @@ class HDCServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not Found")
 
     def write_json(self, status_code, payload):
-        try:
-            self.send_response(status_code)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
-            return True
-        except Exception as exc:
-            if is_client_disconnect_error(exc):
-                log_client_disconnect(self, status_code)
-                return False
-            raise
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
 
     def handle_workflow_request(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -194,10 +148,6 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 'message': str(e),
                 'hdc_connected': False,
                 'tunnel_ready': False,
-                'fport_ready': False,
-                'rport_ready': False,
-                'rport_listening': None,
-                'rport_listen_check_supported': False,
                 'app_server_url': APP_REVERSE_HDC_URL
             })
 
@@ -219,10 +169,6 @@ class HDCServerHandler(BaseHTTPRequestHandler):
                 'message': str(e),
                 'hdc_connected': False,
                 'tunnel_ready': False,
-                'fport_ready': False,
-                'rport_ready': False,
-                'rport_listening': None,
-                'rport_listen_check_supported': False,
                 'app_server_url': APP_REVERSE_HDC_URL
             })
 
@@ -277,7 +223,7 @@ def parse_hdc_targets(output):
     return targets
 
 def list_hdc_targets():
-    result = run_process(["hdc", "list", "targets"], timeout=HDC_LIST_TARGETS_TIMEOUT)
+    result = run_process(["hdc", "list", "targets"])
     if result.returncode != 0:
         return [], result.stderr.strip() or result.stdout.strip()
     return parse_hdc_targets(result.stdout), ""
@@ -300,22 +246,14 @@ def choose_hdc_target(targets, preferred_target=""):
         return wireless_targets[0]
     return targets[0]
 
-def set_harmony_agent_target(target, mark_ok=True):
+def set_harmony_agent_target(target):
     global _hdc_health_target
-    _hdc_health_target = target.strip() if isinstance(target, str) else ""
+    _hdc_health_target = target
     if harmony_agent is not None:
         if hasattr(harmony_agent, "set_hdc_target"):
-            try:
-                checked_at = time.monotonic() if _hdc_health_target else 0.0
-                harmony_agent.set_hdc_target(
-                    _hdc_health_target,
-                    checked_at=checked_at,
-                    mark_ok=bool(_hdc_health_target and mark_ok)
-                )
-            except TypeError:
-                harmony_agent.set_hdc_target(_hdc_health_target)
+            harmony_agent.set_hdc_target(target)
         else:
-            harmony_agent.HDC_TARGET = _hdc_health_target
+            harmony_agent.HDC_TARGET = target
 
 def parse_wireless_target(target):
     text = str(target or "").strip()
@@ -530,12 +468,6 @@ def get_local_ipv4_addresses():
                 sock.close()
     private_addresses = [address for address in addresses if is_private_lan_ipv4(address)]
     return private_addresses or addresses
-
-def get_pc_hdc_server_urls():
-    urls = []
-    for address in get_local_ipv4_addresses():
-        add_unique_value(urls, f"http://{address}:{SERVER_PORT}")
-    return urls
 
 def is_private_lan_ipv4(address):
     parsed = parse_wireless_target(f"{address}:1")
@@ -777,15 +709,13 @@ def select_hdc_candidate(candidates, prompt_user):
         print("输入无效，请输入列表中的序号或完整 target。")
 
 def mark_active_hdc_target(target, source=""):
-    global _hdc_health_checked_at, _hdc_health_last_ok_at, _hdc_health_connected
+    global _hdc_health_checked_at, _hdc_health_connected
     if not target:
         return ""
     set_harmony_agent_target(target)
-    checked_at = time.monotonic()
-    _hdc_health_checked_at = checked_at
-    _hdc_health_last_ok_at = checked_at
+    _hdc_health_checked_at = time.monotonic()
     _hdc_health_connected = True
-    if is_wireless_hdc_target(target) and source != "hdc-list":
+    if is_wireless_hdc_target(target):
         cache_wireless_hdc_target(target, source=source)
     return target
 
@@ -976,29 +906,6 @@ def run_with_hdc_control(operation_name, operation):
     with hdc_control_lock:
         return operation()
 
-def keep_cached_hdc_target_after_probe_error(error, now):
-    global _hdc_health_checked_at, _hdc_health_connected, _hdc_tunnel_checked_at, _hdc_tunnel_status
-    if not error or not _hdc_health_target or _hdc_health_last_ok_at <= 0:
-        return ""
-    age = now - _hdc_health_last_ok_at
-    if age > HDC_STALE_TARGET_GRACE:
-        return ""
-    _hdc_health_checked_at = now
-    _hdc_health_connected = True
-    set_harmony_agent_target(_hdc_health_target, mark_ok=False)
-    remaining = max(0.0, HDC_STALE_TARGET_GRACE - age)
-    print(
-        f">> [HDC] list targets failed; keeping cached target "
-        f"{_hdc_health_target} for {remaining:.1f}s: {error}"
-    )
-    _hdc_tunnel_status = make_hdc_tunnel_status(
-        "warning",
-        "HDC probe failed; using cached target without refreshing tunnels",
-        target=_hdc_health_target
-    )
-    _hdc_tunnel_checked_at = now
-    return _hdc_health_target
-
 def get_active_hdc_target(force=False):
     global _hdc_health_checked_at, _hdc_health_connected, _hdc_health_target
     now = time.monotonic()
@@ -1008,9 +915,6 @@ def get_active_hdc_target(force=False):
 
     targets, error = list_hdc_targets()
     if not targets:
-        stale_target = keep_cached_hdc_target_after_probe_error(error, now)
-        if stale_target:
-            return stale_target
         if AUTO_DISCOVERY_ENABLED:
             auto_result = ensure_auto_hdc_connected(force=force, prompt_user=False,
                                                     reason="No connected HDC target; trying cached LAN discovery.")
@@ -1035,46 +939,18 @@ def get_active_hdc_target(force=False):
 def reset_hdc_tunnel_cache():
     global _hdc_tunnel_checked_at, _hdc_tunnel_status
     _hdc_tunnel_checked_at = 0.0
-    _hdc_tunnel_status = make_hdc_tunnel_status("unknown", "HDC tunnel has not been checked")
+    _hdc_tunnel_status = {
+        "status": "unknown",
+        "message": "HDC tunnel has not been checked",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
 
 def hdc_port_error_is_existing_mapping(message):
     lower = message.lower()
     return "exist" in lower or "already" in lower or "duplicate" in lower or "存在" in message
-
-def device_tcp_port_listen_status(target, port):
-    commands = [
-        f"netstat -an | grep {port}",
-        f"toybox netstat -an | grep {port}",
-    ]
-    unsupported_markers = (
-        "inaccessible or not found",
-        "unknown command",
-        "not found",
-        "not recognized",
-    )
-    saw_supported_command = False
-    for command in commands:
-        result = run_process(hdc_args(target) + ["shell", command], timeout=5)
-        text = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-        lower = text.lower()
-        if any(marker in lower for marker in unsupported_markers):
-            continue
-        saw_supported_command = True
-        if f":{port}" in text and "LISTEN" in text.upper():
-            return True
-    return False if saw_supported_command else None
-
-def wait_for_device_tcp_port(target, port):
-    deadline = time.monotonic() + HDC_REVERSE_LISTEN_CHECK_TIMEOUT
-    last_status = None
-    while time.monotonic() <= deadline:
-        status = device_tcp_port_listen_status(target, port)
-        if status is True:
-            return True
-        if status is False:
-            last_status = False
-        time.sleep(HDC_REVERSE_LISTEN_CHECK_INTERVAL)
-    return last_status
 
 def ensure_hdc_tunnels(force=False, reset_reverse=False):
     return run_with_hdc_control(
@@ -1103,64 +979,29 @@ def run_hdc_tunnel_commands(target, reset_reverse=False):
             else:
                 fport_errors.append(message)
 
-    rport_listening = None
-    rport_listen_check_supported = False
-    if not rport_errors:
-        listen_status = wait_for_device_tcp_port(target, APP_REVERSE_HDC_PORT)
-        rport_listening = listen_status
-        rport_listen_check_supported = listen_status is not None
-        if listen_status is False:
-            run_process(
-                hdc_args(target) + ["rport", "rm", f"tcp:{APP_REVERSE_HDC_PORT}", f"tcp:{SERVER_PORT}"],
-                timeout=5
-            )
-            retry = run_process(
-                hdc_args(target) + ["rport", f"tcp:{APP_REVERSE_HDC_PORT}", f"tcp:{SERVER_PORT}"],
-                timeout=5
-            )
-            if retry.returncode != 0:
-                retry_message = retry.stderr.strip() or retry.stdout.strip() or "HDC rport retry failed"
-                if not hdc_port_error_is_existing_mapping(retry_message):
-                    rport_errors.append(retry_message)
-            retry_listen_status = wait_for_device_tcp_port(target, APP_REVERSE_HDC_PORT)
-            rport_listening = retry_listen_status
-            rport_listen_check_supported = retry_listen_status is not None
-            if retry_listen_status is False:
-                rport_errors.append(
-                    f"HDC rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT} was created, "
-                    "but the device-side port is not listening"
-                )
-
     errors = fport_errors + rport_errors
     fport_ready = len(fport_errors) == 0
-    rport_ready = len(rport_errors) == 0 and rport_listening is not False
+    rport_ready = len(rport_errors) == 0
     if errors:
-        return make_hdc_tunnel_status(
-            "error", "; ".join(errors), target=target,
-            tunnel_ready=fport_ready and rport_ready,
-            fport_ready=fport_ready, rport_ready=rport_ready,
-            rport_listening=rport_listening,
-            rport_listen_check_supported=rport_listen_check_supported
-        )
-    if rport_listening is True:
-        rport_message = f"device tcp:{APP_REVERSE_HDC_PORT} is listening"
-    elif rport_listening is None:
-        rport_message = "device reverse port listen check is unavailable"
-    else:
-        rport_message = f"device tcp:{APP_REVERSE_HDC_PORT} is not listening"
-    return make_hdc_tunnel_status(
-        "ok",
-        (
+        return {
+            "status": "error",
+            "message": "; ".join(errors),
+            "target": target,
+            "tunnel_ready": fport_ready and rport_ready,
+            "fport_ready": fport_ready,
+            "rport_ready": rport_ready,
+        }
+    return {
+        "status": "ok",
+        "message": (
             f"HDC tunnel ready: fport tcp:{APP_AGENT_PORT}->tcp:{APP_AGENT_PORT}, "
-            f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}; {rport_message}"
+            f"rport tcp:{APP_REVERSE_HDC_PORT}->tcp:{SERVER_PORT}"
         ),
-        target=target,
-        tunnel_ready=fport_ready and rport_ready,
-        fport_ready=fport_ready,
-        rport_ready=rport_ready,
-        rport_listening=rport_listening,
-        rport_listen_check_supported=rport_listen_check_supported
-    )
+        "target": target,
+        "tunnel_ready": True,
+        "fport_ready": True,
+        "rport_ready": True,
+    }
 
 def choose_fallback_hdc_target(failed_target):
     targets, _ = list_hdc_targets()
@@ -1181,9 +1022,14 @@ def refresh_hdc_tunnels_for_target(target, reset_reverse=False, allow_fallback=T
 
 def _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=False, allow_fallback=True):
     if not target:
-        return store_hdc_tunnel_status(
-            make_hdc_tunnel_status("error", "HDC target is not connected")
-        )
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
 
     set_harmony_agent_target(target)
     status = run_hdc_tunnel_commands(target, reset_reverse=reset_reverse)
@@ -1204,9 +1050,14 @@ def _ensure_hdc_tunnels_impl(force=False, reset_reverse=False):
 
     target = get_active_hdc_target(force=force)
     if not target:
-        return store_hdc_tunnel_status(
-            make_hdc_tunnel_status("error", "HDC target is not connected")
-        )
+        return store_hdc_tunnel_status({
+            "status": "error",
+            "message": "HDC target is not connected",
+            "target": "",
+            "tunnel_ready": False,
+            "fport_ready": False,
+            "rport_ready": False,
+        })
 
     return _refresh_hdc_tunnels_for_target_impl(target, reset_reverse=reset_reverse, allow_fallback=True)
 
@@ -1216,27 +1067,15 @@ def build_hdc_health_payload(target, tunnel):
     tunnel_ready = bool(tunnel.get("tunnel_ready"))
     fport_ready = bool(tunnel.get("fport_ready"))
     rport_ready = bool(tunnel.get("rport_ready"))
-    rport_listening = tunnel.get("rport_listening")
-    rport_listen_check_supported = bool(tunnel.get("rport_listen_check_supported"))
-    pc_server_urls = get_pc_hdc_server_urls()
-    app_server_urls = [APP_REVERSE_HDC_URL]
-    for url in pc_server_urls:
-        if url not in app_server_urls:
-            app_server_urls.append(url)
-    control_ready = hdc_connected and (fport_ready or rport_ready)
     return {
-        "status": "ok" if control_ready else "error",
+        "status": "ok" if hdc_connected and tunnel_ready else "error",
         "message": tunnel.get("message", ""),
         "hdc_connected": hdc_connected,
         "target": active_target,
         "tunnel_ready": tunnel_ready,
         "fport_ready": fport_ready,
         "rport_ready": rport_ready,
-        "rport_listening": rport_listening,
-        "rport_listen_check_supported": rport_listen_check_supported,
         "app_server_url": APP_REVERSE_HDC_URL,
-        "app_server_urls": app_server_urls,
-        "pc_server_urls": pc_server_urls,
         "server_port": SERVER_PORT,
         "agent_router_port": APP_AGENT_PORT,
         "reverse_server_port": APP_REVERSE_HDC_PORT,
@@ -1244,23 +1083,16 @@ def build_hdc_health_payload(target, tunnel):
         "loop_alive": agent_thread is not None and agent_thread.is_alive(),
     }
 
-def cached_hdc_tunnel_for_target(target):
-    if _hdc_tunnel_checked_at <= 0:
-        return None
-    cached_target = str(_hdc_tunnel_status.get("target", ""))
-    if not cached_target or cached_target != target:
-        return None
-    return dict(_hdc_tunnel_status)
-
-def hdc_health_payload(force=False, repair=False):
+def hdc_health_payload(force=False):
     target = get_active_hdc_target(force=force)
-    if not target:
-        tunnel = make_hdc_tunnel_status("error", "HDC target is not connected")
-        return build_hdc_health_payload(target, tunnel)
-
-    tunnel = None if repair else cached_hdc_tunnel_for_target(target)
-    if tunnel is None:
-        tunnel = ensure_hdc_tunnels(force=repair)
+    tunnel = ensure_hdc_tunnels(force=force) if target else {
+        "status": "error",
+        "message": "HDC target is not connected",
+        "target": "",
+        "tunnel_ready": False,
+        "fport_ready": False,
+        "rport_ready": False,
+    }
     return build_hdc_health_payload(target, tunnel)
 
 def health_payload_after_target_selected(selected_target, message_prefix="", requested_target=""):
@@ -1311,10 +1143,6 @@ def connect_hdc_target(target, kill_others=True, prefer_wired=True):
                 "target": "",
                 "candidates": auto_result.get("candidates", []),
                 "tunnel_ready": False,
-                "fport_ready": False,
-                "rport_ready": False,
-                "rport_listening": None,
-                "rport_listen_check_supported": False,
                 "app_server_url": APP_REVERSE_HDC_URL,
             }
         return {
@@ -1322,10 +1150,6 @@ def connect_hdc_target(target, kill_others=True, prefer_wired=True):
             "message": "target is required, for example 192.168.x.x:port",
             "hdc_connected": False,
             "tunnel_ready": False,
-            "fport_ready": False,
-            "rport_ready": False,
-            "rport_listening": None,
-            "rport_listen_check_supported": False,
             "app_server_url": APP_REVERSE_HDC_URL,
         }
 
@@ -1362,10 +1186,6 @@ def connect_hdc_target(target, kill_others=True, prefer_wired=True):
             "hdc_connected": False,
             "target": target,
             "tunnel_ready": False,
-            "fport_ready": False,
-            "rport_ready": False,
-            "rport_listening": None,
-            "rport_listen_check_supported": False,
             "app_server_url": APP_REVERSE_HDC_URL,
         }
 
@@ -1383,21 +1203,7 @@ def ensure_workflow_agent_ready():
 
 def run_remote_command(cmd):
     def execute():
-        try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=HDC_COMMAND_TIMEOUT
-            )
-        except subprocess.TimeoutExpired as ex:
-            result = subprocess.CompletedProcess(
-                cmd,
-                124,
-                ex.stdout or "",
-                ex.stderr or f"command timed out after {HDC_COMMAND_TIMEOUT}s: {cmd}"
-            )
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if harmony_agent is not None and 'hdc' in cmd.lower():
             invalidate_hdc_health_cache()
         return result
@@ -1406,55 +1212,16 @@ def run_remote_command(cmd):
         return harmony_agent.run_with_device_control('run_cmd', execute)
     return execute()
 
-def run_hdc_command(cmd, timeout=HDC_ACTION_TIMEOUT):
-    try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-    except subprocess.TimeoutExpired as ex:
-        result = subprocess.CompletedProcess(
-            cmd,
-            124,
-            ex.stdout or "",
-            ex.stderr or f"command timed out after {timeout}s: {cmd}"
-        )
+def run_hdc_command(cmd):
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'command failed: {cmd}')
     return result.stdout.strip()
 
 def hdc_prefix():
-    target = get_active_hdc_target(force=False)
-    if target:
-        return "hdc -t " + target
-    return "hdc"
-
-def hdc_input_text_command(text):
-    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
-
-def workflow_driver_for_action(action):
-    if harmony_agent is None:
-        return None
-    should_use_driver = HDC_WORKFLOW_USE_DRIVER_ACTIONS or (
-        HDC_WORKFLOW_USE_DRIVER_INPUT and action in ('click_input', 'input')
-    )
-    if not should_use_driver:
-        return None
-    driver = getattr(harmony_agent, 'd', None)
-    if driver is not None:
-        return driver
-    ensure_driver = getattr(harmony_agent, 'ensure_driver_available', None)
-    if not callable(ensure_driver):
-        return None
-    try:
-        if ensure_driver():
-            return getattr(harmony_agent, 'd', None)
-    except Exception as ex:
-        print(f">> [Workflow输入警告] Driver 初始化失败，回退到 HDC inputText: {ex}")
-    return None
+    if harmony_agent is not None:
+        return harmony_agent.hdc_prefix()
+    return 'hdc'
 
 def payload_bool(payload, key, default):
     value = payload.get(key, default)
@@ -1463,67 +1230,6 @@ def payload_bool(payload, key, default):
     if isinstance(value, str):
         return value.strip().lower() not in ('false', '0', 'no', 'off')
     return bool(value)
-
-def _compact_action_text(value, limit=80):
-    text = str(value or '')
-    text = text.replace('\r', '\\r').replace('\n', '\\n')
-    if len(text) > limit:
-        return text[:limit] + '...'
-    return text
-
-def _payload_target_element(payload):
-    return _compact_action_text(
-        payload.get('target_element') or payload.get('targetElement') or '',
-        120
-    )
-
-def _format_gui_action(action_name, payload, detail=''):
-    target_element = _payload_target_element(payload)
-    parts = [action_name]
-    if target_element:
-        parts.append(f"target_element={target_element}")
-    if detail:
-        parts.append(detail)
-    return ' '.join(parts)
-
-def describe_gui_action(payload):
-    action = str(payload.get('action', '')).lower()
-    try:
-        if action == 'click':
-            x = int(payload.get('x', 0))
-            y = int(payload.get('y', 0))
-            return _format_gui_action('点击', payload, f"坐标={x},{y}")
-        if action == 'click_input':
-            x = int(payload.get('x', 0))
-            y = int(payload.get('y', 0))
-            text = _compact_action_text(payload.get('text', ''))
-            return _format_gui_action('点击并输入', payload, f"坐标={x},{y} text={text}")
-        if action == 'input':
-            text = _compact_action_text(payload.get('text', ''))
-            return _format_gui_action('输入', payload, f"text={text}")
-        if action == 'swipe_with_coords':
-            sx = int(payload.get('start_x', 0))
-            sy = int(payload.get('start_y', 0))
-            ex = int(payload.get('end_x', 0))
-            ey = int(payload.get('end_y', 0))
-            return _format_gui_action('滑动', payload, f"坐标={sx},{sy}->{ex},{ey}")
-        if action == 'swipe':
-            return _format_gui_action('滑动', payload, f"direction={str(payload.get('direction', 'up')).lower()}")
-        if action == 'keyevent':
-            return _format_gui_action('按键', payload, f"key={str(payload.get('key', 'BACK')).upper()}")
-        if action == 'sleep':
-            return _format_gui_action('等待', payload, f"seconds={float(payload.get('seconds', 1.0))}")
-        if action == 'app_start':
-            target = str(payload.get('app_name') or payload.get('package_name') or '')
-            return _format_gui_action('启动应用', payload, f"target={target}")
-        if action == 'app_stop':
-            return _format_gui_action('停止应用', payload, f"package={str(payload.get('package_name', ''))}")
-    except Exception:
-        pass
-    return f"{action or 'unknown'}: {payload}"
-
-def log_gui_action(payload):
-    print(f">> [HDC操作] {describe_gui_action(payload)}", flush=True)
 
 def workflow_gui_action(payload):
     ensure_workflow_agent_ready()
@@ -1534,8 +1240,7 @@ def workflow_gui_action(payload):
 
 def _workflow_gui_action_impl(payload):
     action = str(payload.get('action', '')).lower()
-    driver = workflow_driver_for_action(action)
-    log_gui_action(payload)
+    driver = getattr(harmony_agent, 'd', None) if harmony_agent is not None else None
 
     if action == 'click':
         x = int(payload.get('x', 0))
@@ -1546,23 +1251,6 @@ def _workflow_gui_action_impl(payload):
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
         return {'status': 'ok', 'message': f'click {x},{y}'}
 
-    if action == 'click_input':
-        x = int(payload.get('x', 0))
-        y = int(payload.get('y', 0))
-        text = str(payload.get('text', ''))
-        if driver:
-            harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
-            harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
-            harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
-            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
-            harmony_agent.press_harmony_key('ENTER', 2054)
-        else:
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
-            run_hdc_command(hdc_input_text_command(text))
-        return {'status': 'ok', 'message': f'click_input {x},{y}'}
-
     if action == 'input':
         text = str(payload.get('text', ''))
         if driver:
@@ -1571,7 +1259,7 @@ def _workflow_gui_action_impl(payload):
             harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
-            run_hdc_command(hdc_input_text_command(text))
+            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
         return {'status': 'ok', 'message': 'input'}
 
     if action == 'swipe_with_coords':
@@ -1599,38 +1287,17 @@ def _workflow_gui_action_impl(payload):
             else:
                 raise RuntimeError(f'unknown swipe direction: {direction}')
         else:
-            width = int(payload.get('width', 1000))
-            height = int(payload.get('height', 1000))
-            if direction == 'up':
-                sx, sy, ex, ey = 0.5 * width, harmony_agent.SWIPE_V_END * height, 0.5 * width, harmony_agent.SWIPE_V_START * height
-            elif direction == 'down':
-                sx, sy, ex, ey = 0.5 * width, harmony_agent.SWIPE_V_START * height, 0.5 * width, harmony_agent.SWIPE_V_END * height
-            elif direction == 'left':
-                sx, sy, ex, ey = harmony_agent.SWIPE_H_END * width, 0.5 * height, harmony_agent.SWIPE_H_START * width, 0.5 * height
-            elif direction == 'right':
-                sx, sy, ex, ey = harmony_agent.SWIPE_H_START * width, 0.5 * height, harmony_agent.SWIPE_H_END * width, 0.5 * height
-            else:
-                raise RuntimeError(f'unknown swipe direction: {direction}')
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
+            raise RuntimeError('direction swipe requires hmdriver2 driver')
         return {'status': 'ok', 'message': f'swipe {direction}'}
 
     if action == 'keyevent':
         key = str(payload.get('key', 'BACK')).upper()
         if key == 'BACK':
-            if driver:
-                harmony_agent.press_harmony_key('BACK', 2)
-            else:
-                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 2")
+            harmony_agent.press_harmony_key('BACK', 2)
         elif key == 'HOME':
-            if driver:
-                harmony_agent.press_harmony_key('HOME', 1)
-            else:
-                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 1")
+            harmony_agent.press_harmony_key('HOME', 1)
         elif key == 'ENTER':
-            if driver:
-                harmony_agent.press_harmony_key('ENTER', 2054)
-            else:
-                run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent 2054")
+            harmony_agent.press_harmony_key('ENTER', 2054)
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput keyEvent {key}")
         return {'status': 'ok', 'message': f'keyevent {key}'}
@@ -1641,18 +1308,13 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'sleep {seconds}'}
 
     if action == 'app_start':
-        app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        target = app_name or package_name
-        if not target:
-            raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target, reset_first=reset_first)
-        if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
-        if not ok:
-            raise RuntimeError(f'app_start failed: {target}')
-        return {'status': 'ok', 'message': f'app_start {target}', 'package_name': package_name}
+        if not package_name:
+            raise RuntimeError('app_start requires package_name')
+        if not harmony_agent.launch_app(package_name, reset_first=reset_first):
+            raise RuntimeError(f'app_start failed: {package_name}')
+        return {'status': 'ok', 'message': f'app_start {package_name}', 'package_name': package_name}
 
     if action == 'app_stop':
         package_name = str(payload.get('package_name', ''))
@@ -1671,26 +1333,7 @@ def handle_workflow_action(action, payload):
     payload = payload or {}
 
     if action == 'health':
-        return hdc_health_payload(force=False, repair=False)
-
-    if action == 'repair_health':
-        return hdc_health_payload(force=True, repair=True)
-
-    if action == 'agent_config':
-        return {
-            'status': 'ok',
-            'message': 'agent config',
-            'no_reason': bool(NO_REASON_MODE),
-            'max_steps': int(getattr(harmony_agent, 'MAX_STEPS', 15)) if harmony_agent is not None else 15
-        }
-
-    if action == 'prepare_agent_run':
-        ensure_workflow_agent_ready()
-        harmony_agent.reset_driver()
-        return {
-            'status': 'ok',
-            'message': 'agent device control prepared'
-        }
+        return hdc_health_payload(force=True)
 
     if action == 'load_prompt_template':
         if harmony_agent is None:
@@ -1710,24 +1353,7 @@ def handle_workflow_action(action, payload):
     if action == 'screenshot':
         ensure_workflow_agent_ready()
         factor = float(payload.get('factor', 0.5))
-        style = str(payload.get('style', 'mobiagent')).lower()
-        manage_overlay = payload_bool(payload, 'manage_overlay', False)
-        if manage_overlay:
-            if style == 'local' or factor <= 0.25:
-                image_b64, width, height = harmony_agent.capture_screen(factor)
-            else:
-                image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(factor)
-        else:
-            if style == 'local' or factor <= 0.25:
-                image_b64, width, height = harmony_agent.run_with_device_control(
-                    'workflow capture_screen direct',
-                    lambda: harmony_agent._capture_screen_impl(factor)
-                )
-            else:
-                image_b64, width, height = harmony_agent.run_with_device_control(
-                    'workflow capture_screen_mobiagent direct',
-                    lambda: harmony_agent._capture_screen_mobiagent_style_impl(factor)
-                )
+        image_b64, width, height = harmony_agent.capture_screen_mobiagent_style(factor)
         return {
             'status': 'ok',
             'image_b64': image_b64,
@@ -1827,28 +1453,37 @@ def ensure_agent_loop_ready():
             'message': 'HDC target is not connected',
             'hdc_connected': False,
             'tunnel_ready': False,
-            'fport_ready': False,
-            'rport_ready': False,
-            'rport_listening': None,
-            'rport_listen_check_supported': False,
             'app_server_url': APP_REVERSE_HDC_URL
         }
 
     tunnel = ensure_hdc_tunnels(force=True)
-    payload = build_hdc_health_payload(str(tunnel.get("target", "")), tunnel)
     if not tunnel.get("fport_ready"):
-        payload['status'] = 'error'
-        payload['message'] = tunnel.get("message", "HDC fport refresh failed")
-        return payload
+        return {
+            'status': 'error',
+            'message': tunnel.get("message", "HDC fport refresh failed"),
+            'hdc_connected': True,
+            'target': tunnel.get("target", ""),
+            'tunnel_ready': bool(tunnel.get("tunnel_ready")),
+            'fport_ready': False,
+            'rport_ready': bool(tunnel.get("rport_ready")),
+            'app_server_url': APP_REVERSE_HDC_URL
+        }
 
     start_harmony_agent()
     message = 'agent loop is running and HDC fport/rport refreshed'
     if not tunnel.get("rport_ready"):
         message = 'agent loop is running and HDC fport refreshed; reverse rport is unavailable'
-    payload['status'] = 'ok'
-    payload['message'] = message
-    payload['loop_alive'] = agent_thread is not None and agent_thread.is_alive()
-    return payload
+    return {
+        'status': 'ok',
+        'message': message,
+        'hdc_connected': True,
+        'target': tunnel.get("target", ""),
+        'tunnel_ready': bool(tunnel.get("tunnel_ready")),
+        'fport_ready': True,
+        'rport_ready': bool(tunnel.get("rport_ready")),
+        'app_server_url': APP_REVERSE_HDC_URL,
+        'loop_alive': agent_thread is not None and agent_thread.is_alive()
+    }
 
 def cleanup():
     global agent_thread
@@ -1899,7 +1534,7 @@ if __name__ == '__main__':
         
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = SERVER_PORT
-    server = ThreadingHTTPServer(('0.0.0.0', PORT), HDCServerHandler)
+    server = HTTPServer(('0.0.0.0', PORT), HDCServerHandler)
     if is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
         tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
         print(f">> [HDC] {tunnel.get('message', '')}")

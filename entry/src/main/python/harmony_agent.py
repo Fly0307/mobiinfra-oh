@@ -13,7 +13,6 @@ import argparse
 import threading
 import uuid
 import inspect
-import shlex
 
 # PC 侧视觉自动化 Agent：
 # 1. 轮询 App 内 9126 TCP 服务获取任务；
@@ -37,13 +36,7 @@ NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
 HDC_TARGET = os.environ.get("HDC_TARGET", "").strip()
 HDC_TARGET_OVERRIDE = HDC_TARGET
 HDC_TARGET_CHECKED_AT = 0.0
-HDC_TARGET_LAST_OK_AT = 0.0
-HDC_TARGET_CACHE_TTL = float(os.environ.get("HDC_TARGET_CACHE_TTL", "15"))
-HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3"))
-HDC_TARGET_STALE_GRACE = float(os.environ.get("HDC_TARGET_STALE_GRACE", "30"))
-HDC_COMMAND_TIMEOUT = float(os.environ.get("HDC_COMMAND_TIMEOUT", "10"))
-HDC_ACTION_TIMEOUT = float(os.environ.get("HDC_ACTION_TIMEOUT", "6"))
-HDC_CLEANUP_TIMEOUT = float(os.environ.get("HDC_CLEANUP_TIMEOUT", "3"))
+HDC_TARGET_CACHE_TTL = 2.0
 LAST_TASK_COMPLETED = False
 DEVICE_CONTROL_LOCK = threading.RLock()
 AGENT_LOOP_STOP_EVENT = threading.Event()
@@ -78,18 +71,8 @@ LLM_APP_BUNDLE = "com.example.mnnllmchat"
 LLM_APP_ABILITY = "EntryAbility"
 
 def quiet_system(cmd):
-    try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=HDC_COMMAND_TIMEOUT
-        )
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        print(f">> [HDC timeout] command exceeded {HDC_COMMAND_TIMEOUT}s: {cmd}")
-        return 124
+    # 跨平台静默执行 HDC 辅助命令，避免无任务轮询时刷屏。
+    return os.system(f"{cmd} >{NULL_DEVICE} 2>&1")
 
 def is_wireless_hdc_target(target):
     return ":" in target
@@ -108,29 +91,20 @@ def parse_hdc_targets(output):
             targets.append(target)
     return targets
 
-def list_hdc_targets(return_error=False):
-    targets = []
-    error = ""
+def list_hdc_targets():
     try:
         result = subprocess.run(
             ["hdc", "list", "targets"],
             capture_output=True,
             text=True,
-            timeout=HDC_LIST_TARGETS_TIMEOUT
+            timeout=5
         )
         if result.returncode != 0:
-            error = result.stderr.strip() or result.stdout.strip()
-        else:
-            targets = parse_hdc_targets(result.stdout)
-    except subprocess.TimeoutExpired:
-        error = f"command timed out after {HDC_LIST_TARGETS_TIMEOUT}s: hdc list targets"
+            return []
+        return parse_hdc_targets(result.stdout)
     except Exception as ex:
-        error = str(ex)
-    if error:
-        print(f">> [HDC warning] list targets failed: {error}")
-    if return_error:
-        return targets, error
-    return targets
+        print(f">> [HDC警告] 获取目标设备失败: {ex}")
+        return []
 
 def choose_hdc_target(targets, preferred_target=""):
     if not targets:
@@ -150,12 +124,10 @@ def choose_hdc_target(targets, preferred_target=""):
         return wireless_targets[0]
     return targets[0]
 
-def set_hdc_target(target, checked_at=0.0, mark_ok=False):
-    global HDC_TARGET, HDC_TARGET_CHECKED_AT, HDC_TARGET_LAST_OK_AT
+def set_hdc_target(target, checked_at=0.0):
+    global HDC_TARGET, HDC_TARGET_CHECKED_AT
     HDC_TARGET = target.strip() if isinstance(target, str) else ""
     HDC_TARGET_CHECKED_AT = checked_at
-    if mark_ok and HDC_TARGET and checked_at > 0:
-        HDC_TARGET_LAST_OK_AT = checked_at
     # hmdriver2 may read HDC_TARGET during import; keep runtime selection visible without
     # treating it as the startup override used by choose_hdc_target().
     if HDC_TARGET:
@@ -168,21 +140,6 @@ def clear_hdc_target_cache():
         return
     set_hdc_target("")
 
-def keep_cached_hdc_target_after_probe_error(error, now):
-    global HDC_TARGET_CHECKED_AT
-    if not error or not HDC_TARGET or HDC_TARGET_LAST_OK_AT <= 0:
-        return ""
-    age = now - HDC_TARGET_LAST_OK_AT
-    if age > HDC_TARGET_STALE_GRACE:
-        return ""
-    HDC_TARGET_CHECKED_AT = now
-    remaining = max(0.0, HDC_TARGET_STALE_GRACE - age)
-    print(
-        f">> [HDC] list targets failed; keeping cached target "
-        f"{HDC_TARGET} for {remaining:.1f}s: {error}"
-    )
-    return HDC_TARGET
-
 def get_hdc_target(force=False):
     global HDC_TARGET, HDC_TARGET_CHECKED_AT
     now = time.monotonic()
@@ -190,19 +147,16 @@ def get_hdc_target(force=False):
             now - HDC_TARGET_CHECKED_AT < HDC_TARGET_CACHE_TTL):
         return HDC_TARGET
 
-    targets, error = list_hdc_targets(return_error=True)
+    targets = list_hdc_targets()
     target = choose_hdc_target(targets, HDC_TARGET)
     if not target:
-        stale_target = keep_cached_hdc_target_after_probe_error(error, now)
-        if stale_target:
-            return stale_target
         if HDC_TARGET:
             print(f">> [HDC] 目标设备已失效，清理缓存: {HDC_TARGET}")
         set_hdc_target("", checked_at=now)
         return ""
     if target != HDC_TARGET:
         print(f">> [HDC] 使用目标设备: {target}")
-    set_hdc_target(target, checked_at=now, mark_ok=True)
+    set_hdc_target(target, checked_at=now)
     return HDC_TARGET
 
 def hdc_prefix(force=False):
@@ -227,15 +181,7 @@ def _refresh_hdc_forwarding_for_target(target, verbose=False):
     prefix = hdc_prefix_for_target(target)
     quiet_system(f"{prefix} fport rm tcp:{PORT} tcp:{PORT}")
     if verbose:
-        try:
-            return subprocess.run(
-                f"{prefix} fport tcp:{PORT} tcp:{PORT}",
-                shell=True,
-                timeout=HDC_COMMAND_TIMEOUT
-            ).returncode
-        except subprocess.TimeoutExpired:
-            print(f">> [HDC timeout] fport exceeded {HDC_COMMAND_TIMEOUT}s")
-            return 124
+        return os.system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
     return quiet_system(f"{prefix} fport tcp:{PORT} tcp:{PORT}")
 
 def _refresh_hdc_forwarding_impl(verbose=False):
@@ -399,14 +345,7 @@ def bring_llm_app_to_foreground():
 def _bring_llm_app_to_foreground_impl():
     # 任务结束或异常时回到本 App，方便用户查看日志、截图和错误原因。
     print(">> 任务结束/出错，正在自动跳回 MNN LLM Chat App...")
-    try:
-        _run_timed_command(
-            "bring_llm_app_to_foreground",
-            f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}",
-            timeout=HDC_ACTION_TIMEOUT
-        )
-    except Exception as ex:
-        print(f">> [HDC warning] bring app to foreground failed: {ex}")
+    os.system(f"{hdc_prefix()} shell aa start -b {LLM_APP_BUNDLE} -a {LLM_APP_ABILITY}")
     time.sleep(1)
 APP_MAPPING = {
     # Planner 输出中文 App 名或包名均可；中文名先映射为 HarmonyOS bundleName。
@@ -463,28 +402,16 @@ def load_prompt(filename):
         return f.read()
 
 def run_cmd(cmd):
-    return subprocess.check_output(cmd, shell=True, text=True, timeout=HDC_COMMAND_TIMEOUT)
+    return subprocess.check_output(cmd, shell=True, text=True)
 
-def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIMEOUT):
+def _run_timed_command(label, cmd, capture_output=True):
     started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=capture_output,
-            text=True,
-            timeout=timeout
-        )
-    except subprocess.TimeoutExpired as ex:
-        elapsed = time.perf_counter() - started
-        print(f">> [HDC Timing] {label}: {elapsed:.3f}s (timeout)")
-        output = ""
-        if capture_output:
-            output = (ex.stderr or ex.stdout or "")
-            if isinstance(output, bytes):
-                output = output.decode("utf-8", errors="replace")
-            output = str(output).strip()
-        raise RuntimeError(output or f"{label} timed out after {timeout}s")
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=capture_output,
+        text=True
+    )
     elapsed = time.perf_counter() - started
     print(f">> [HDC Timing] {label}: {elapsed:.3f}s")
     if result.returncode != 0:
@@ -494,28 +421,17 @@ def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIME
         raise RuntimeError(output or f"{label} failed: returncode={result.returncode}")
     return result
 
-def run_hdc_action_command(label, cmd):
-    return _run_timed_command(label, cmd, timeout=HDC_ACTION_TIMEOUT)
-
-def hdc_input_text_command(text):
-    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
-
 def _cleanup_device_file_async(prefix, device_path):
     def cleanup():
         started = time.perf_counter()
-        try:
-            subprocess.run(
-                f"{prefix} shell rm \"{device_path}\"",
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=HDC_CLEANUP_TIMEOUT
-            )
-            elapsed = time.perf_counter() - started
-            print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s")
-        except subprocess.TimeoutExpired:
-            elapsed = time.perf_counter() - started
-            print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s (timeout)")
+        subprocess.run(
+            f"{prefix} shell rm \"{device_path}\"",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        elapsed = time.perf_counter() - started
+        print(f">> [HDC Timing] async rm screenshot temp: {elapsed:.3f}s")
 
     threading.Thread(
         target=cleanup,
@@ -1171,10 +1087,7 @@ def _press_harmony_key_impl(key_name, fallback_code):
             key_code = fallback_code
         run_driver_call(f"Driver.press_key({key_name})", lambda driver: driver.press_key(key_code))
     else:
-        run_hdc_action_command(
-            f"keyEvent({key_name})",
-            f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}"
-        )
+        os.system(f"{hdc_prefix()} shell uitest uiInput keyEvent {fallback_code}")
 
 def execute_action_and_get_details(plan, img_size=(1000, 1000)):
     return run_with_device_control(
@@ -1217,10 +1130,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
         if d:
             run_driver_call("Driver.click", lambda driver: driver.click(int(x), int(y)))
         else:
-            run_hdc_action_command(
-                "decider click",
-                f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}"
-            )
+            os.system(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
         time.sleep(DEVICE_WAIT_TIME)
         
     elif action == "click_input":
@@ -1245,15 +1155,9 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             run_driver_call("Driver.input_text", lambda driver: driver.input_text(text))
             press_harmony_key("ENTER", 2054)
         else:
-            run_hdc_action_command(
-                "decider click_input click",
-                f"{hdc_prefix()} shell uitest uiInput click {px} {py}"
-            )
+            os.system(f"{hdc_prefix()} shell uitest uiInput click {px} {py}")
             time.sleep(DEVICE_WAIT_TIME)
-            run_hdc_action_command(
-                "decider click_input text",
-                hdc_input_text_command(text)
-            )
+            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
         
     elif action == "swipe":
         # 优先支持显式起止坐标；缺省时按方向使用屏幕比例坐标，适配不同分辨率。
@@ -1266,10 +1170,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             if d:
                 run_driver_call("Driver.swipe", lambda driver: driver.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000))
             else:
-                run_hdc_action_command(
-                    "decider swipe coords",
-                    f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
-                )
+                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
         else:
             direction = params.get("direction", "UP")
             print(f">> Swipe direction: {direction}")
@@ -1296,10 +1197,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
                     sx, sy, ex, ey = SWIPE_H_START * width, 0.5 * height, SWIPE_H_END * width, 0.5 * height
                 else:
                     raise ValueError(f"Unknown swipe direction: {direction}")
-                run_hdc_action_command(
-                    "decider swipe direction",
-                    f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
-                )
+                os.system(f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}")
             
     elif action == "input":
         text = params.get("text", "")
@@ -1316,10 +1214,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
                 # fallback to hardcoded ENTER key event or 2054
                 run_driver_call("Driver.press_key(2054)", lambda driver: driver.press_key(2054))
         else:
-            run_hdc_action_command(
-                "decider input text",
-                hdc_input_text_command(text)
-            )
+            os.system(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
 
     elif action == "open_app":
         app_name = params.get("app_name", "")
@@ -1422,11 +1317,7 @@ def _launch_app_impl(app_name, reset_first=True):
         else:
             cmd = f"{hdc_prefix()} shell aa start -b {bundle}"
         print(f">> 执行启动命令 (hdc fallback): {cmd}")
-        try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=HDC_ACTION_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            print(f">> [HDC warning] launch_app fallback timed out after {HDC_ACTION_TIMEOUT}s: {cmd}")
-            return False
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             time.sleep(APP_LAUNCH_WAIT_TIME)
             return True

@@ -46,7 +46,6 @@ export interface WorkflowStep {
   x?: number;
   y?: number;
   text?: string;
-  target_element?: string;
   direction?: string;
   start_x?: number;
   start_y?: number;
@@ -149,6 +148,4 @@ export interface HdcBridgeResponse {
   height?: number;
   action?: string;
   package_name?: string;
-  no_reason?: boolean;
-  max_steps?: number;
 }

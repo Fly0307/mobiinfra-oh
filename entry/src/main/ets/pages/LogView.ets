@@ -42,7 +42,7 @@ struct LogView {
     // Native 日志来自 libentry.so 的 getLogs；Cloud/Gallery 日志来自 AppStorage。
     try {
       if (this.logSource === 0) {
-        const text: string = native.getLogs() || '(empty native runtime logs)'
+        const text = native.getLogs() || '(empty native runtime logs)'
         this.logs = text
       } else if (this.logSource === 1) {
         const text = AppStorage.get('cloudAgentLogs') as string
@@ -169,3 +169,4 @@ struct LogView {
     return 'Gallery Logs'
   }
 }
+

@@ -5,12 +5,9 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
-import { AgentPromptTemplates } from './AgentPromptTemplates';
-import { AgentActionParser } from './AgentActionParser';
 import {
   WorkflowCondition,
   WorkflowDefinition,
-  HdcBridgeResponse,
   WorkflowJsonMap,
   WorkflowJsonValue,
   WorkflowRunResult,
@@ -21,7 +18,7 @@ import {
 } from './WorkflowTypes';
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
-const MAX_GUI_STEPS = 20;
+const MAX_GUI_STEPS = 15;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 interface PlannerResult {
@@ -65,15 +62,6 @@ interface GuiActionOutput {
   height?: number;
   file_name?: string;
   result?: string;
-  reused_screenshot?: boolean;
-  source_screenshot?: string;
-}
-
-interface WorkflowScreenshotCache {
-  image_b64: string;
-  width: number;
-  height: number;
-  source: string;
 }
 
 interface GuiActionPayload {
@@ -81,7 +69,6 @@ interface GuiActionPayload {
   x?: number;
   y?: number;
   text?: string;
-  target_element?: string;
   direction?: string;
   start_x?: number;
   start_y?: number;
@@ -199,7 +186,6 @@ export class WorkflowRunner {
   private currentPackageName: string = '';
   private latestDailyLogPath: string = '';
   private pendingSummaryJobs: PendingSummaryJob[] = [];
-  private latestWorkflowScreenshot: WorkflowScreenshotCache | null = null;
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
     hdcServerIp: string, logHandler: (message: string) => void) {
@@ -232,7 +218,6 @@ export class WorkflowRunner {
     this.currentPackageName = '';
     this.latestDailyLogPath = '';
     this.pendingSummaryJobs = [];
-    this.clearWorkflowScreenshotCache();
     this.runStartedAt = new Date();
     this.dateContext = new WorkflowDateContext(this.runStartedAt);
     this.runDate = this.dateContext.runDate();
@@ -342,6 +327,7 @@ export class WorkflowRunner {
     let safeName = this.sanitizeFileName(task.source || task.id);
     let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
     WorkflowStorage.ensureDirectory(dir);
+    WorkflowStorage.ensureDirectory(dir + '/steps');
     return dir;
   }
 
@@ -373,7 +359,7 @@ export class WorkflowRunner {
   }
 
   private async executeSteps(steps: WorkflowStep[], actualPrefix: string,
-    runtimeValues: WorkflowJsonMap): Promise<Record<string, string>> {
+    runtimeValues: WorkflowJsonMap): Promise<void> {
     let aliases: Record<string, string> = {};
     this.aliasStack.push(aliases);
     this.pushRuntimeValues(runtimeValues);
@@ -393,7 +379,6 @@ export class WorkflowRunner {
           throw new Error('workflow stopped at step ' + actualId);
         }
       }
-      return aliases;
     } finally {
       this.popRuntimeValues(runtimeValues);
       this.aliasStack.pop();
@@ -474,9 +459,7 @@ export class WorkflowRunner {
       this.currentAppName = planner.appName;
       this.currentPackageName = planner.packageName.length > 0 ? planner.packageName : planner.appName;
       this.log('Planner 选择 App：' + planner.appName + ' ' + planner.packageName);
-      this.clearWorkflowScreenshotCache();
       await this.hdcBridge.startApp(planner.appName, planner.packageName, true);
-      this.clearWorkflowScreenshotCache();
       let output: GuiPlannerOutput = {
         step_dir: this.stepDir(actualId),
         task_description: taskDescription,
@@ -539,7 +522,7 @@ export class WorkflowRunner {
       '\n如果不知道 package_name，可以留空，但 app_name 必须填写。' +
       '\n用户任务：' + taskDescription;
     try {
-      let template = AgentPromptTemplates.load('planner_oneshot_harmony.md');
+      let template = await this.hdcBridge.loadPromptTemplate('planner_oneshot_harmony.md');
       if (template.trim().length === 0) {
         return this.withExecutionDatePrompt(fallbackPrompt, 'Planner 用户任务');
       }
@@ -562,44 +545,6 @@ export class WorkflowRunner {
     return this.dateContext.withDatePrompt(prompt, sectionTitle);
   }
 
-  private async captureWorkflowScreenshot(source: string): Promise<WorkflowScreenshotCache> {
-    let shot = await this.hdcBridge.screenshot();
-    let screenshot = this.normalizeWorkflowScreenshot(shot, source);
-    this.latestWorkflowScreenshot = screenshot;
-    return screenshot;
-  }
-
-  private normalizeWorkflowScreenshot(shot: HdcBridgeResponse, source: string): WorkflowScreenshotCache {
-    let imageBase64 = shot.image_b64 || '';
-    if (imageBase64.length === 0) {
-      throw new Error(shot.message || 'screenshot failed');
-    }
-    return {
-      image_b64: imageBase64,
-      width: shot.width || 0,
-      height: shot.height || 0,
-      source: source
-    };
-  }
-
-  private clearWorkflowScreenshotCache(): void {
-    this.latestWorkflowScreenshot = null;
-  }
-
-  private writeScreenshotOutput(output: GuiActionOutput, actualId: string, fileName: string,
-    screenshot: WorkflowScreenshotCache, reused: boolean): void {
-    let imageFileName = this.screenshotFileName(fileName);
-    let imagePath = this.runArtifactPath(actualId, imageFileName);
-    WorkflowStorage.writeBase64Image(imagePath, screenshot.image_b64);
-    output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
-    output.image_b64 = screenshot.image_b64;
-    output.width = screenshot.width;
-    output.height = screenshot.height;
-    output.file_name = imageFileName;
-    output.reused_screenshot = reused;
-    output.source_screenshot = screenshot.source;
-  }
-
   private async runDeciderLoop(taskDescription: string): Promise<string> {
     let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
@@ -613,24 +558,21 @@ export class WorkflowRunner {
         throw new Error('用户取消 workflow');
       }
       AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + MAX_GUI_STEPS + ': 识别屏幕并决策');
-      let shot = await this.captureWorkflowScreenshot('decider:' + String(i + 1));
-      let imageBase64 = shot.image_b64;
-      let width = shot.width;
-      let height = shot.height;
+      let shot = await this.hdcBridge.screenshot();
+      let imageBase64 = shot.image_b64 || '';
+      let width = shot.width || 0;
+      let height = shot.height || 0;
       this.log('Decider 截图完成：' + width + 'x' + height);
       let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
       this.log('Decider response:\n' + response);
-      let parsedAction = AgentActionParser.parse(response);
-      let parsed = parsedAction.data;
-      let action = parsedAction.action;
+      let parsed = this.extractJsonMap(response);
+      let action = this.getMapString(parsed, 'action').toLowerCase();
       AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
         stopReason = 'TASK_COMPLETED_' + action;
         break;
       }
-      let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
-      this.clearWorkflowScreenshotCache();
-      await this.hdcBridge.guiAction(hdcPayload);
+      await this.hdcBridge.executeModelAction(response, width * 2, height * 2);
       history.push(ArkJSON.stringify(parsed));
     }
     return stopReason;
@@ -644,12 +586,16 @@ export class WorkflowRunner {
       device: step.device || 'Harmony'
     };
     if (action === 'screenshot') {
-      let cached = this.latestWorkflowScreenshot;
-      let screenshot = cached === null ? await this.captureWorkflowScreenshot('step:' + actualId) : cached;
-      this.writeScreenshotOutput(output, actualId, step.file_name || 'screenshot.jpg', screenshot, cached !== null);
-      if (cached !== null) {
-        this.log('Step ' + actualId + ' reused screenshot from ' + screenshot.source);
-      }
+      let shot = await this.hdcBridge.screenshot();
+      let imageBase64 = shot.image_b64 || '';
+      let imageFileName = this.screenshotFileName(step.file_name || 'screenshot.jpg');
+      let imagePath = this.stepDir(actualId) + '/' + imageFileName;
+      WorkflowStorage.writeBase64Image(imagePath, imageBase64);
+      output.image_path = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
+      output.image_b64 = imageBase64;
+      output.width = shot.width || 0;
+      output.height = shot.height || 0;
+      output.file_name = imageFileName;
       return output as Object as WorkflowJsonMap;
     }
 
@@ -664,9 +610,6 @@ export class WorkflowRunner {
     }
     if (step.text !== undefined) {
       payload.text = step.text;
-    }
-    if (step.target_element !== undefined) {
-      payload.target_element = step.target_element;
     }
     if (step.direction !== undefined) {
       payload.direction = step.direction;
@@ -695,7 +638,6 @@ export class WorkflowRunner {
     if (action === 'app_start') {
       payload.reset_first = true;
     }
-    this.clearWorkflowScreenshotCache();
     let response = await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
     output.result = response.message || 'ok';
     return output as Object as WorkflowJsonMap;
@@ -749,7 +691,7 @@ export class WorkflowRunner {
     };
     let structuredOutput: WorkflowJsonMap | undefined = undefined;
     if (requiresStructuredOutput) {
-      structuredOutput = this.normalizeStructuredOutput(this.extractJsonMap(response), inputs.json_schema);
+      structuredOutput = this.extractJsonMap(response);
       output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
@@ -905,15 +847,13 @@ export class WorkflowRunner {
         loop: loopValue as Object
       };
       let runtime = runtimeData as Object as WorkflowJsonMap;
-      let iterationAliases = await this.executeSteps(step.steps || [], actualId + '.iter' + (i + 1), runtime);
-      this.aliasStack.push(iterationAliases);
+      await this.executeSteps(step.steps || [], actualId + '.iter' + (i + 1), runtime);
       this.pushRuntimeValues(runtime);
       let shouldBreak = false;
       try {
         shouldBreak = step.break_if ? this.evaluateCondition(step.break_if) : false;
       } finally {
         this.popRuntimeValues(runtime);
-        this.aliasStack.pop();
       }
       let iterationOutput: LoopIterationOutput = {
         iteration: i + 1,
@@ -1128,10 +1068,13 @@ export class WorkflowRunner {
   }
 
   private normalizeConditionValue(value: WorkflowJsonValue, peer: WorkflowJsonValue): WorkflowJsonValue {
-    if ((typeof value === 'string' || typeof value === 'number') && typeof peer === 'boolean') {
-      let normalizedBoolean = this.normalizeBooleanLikeValue(value);
-      if (typeof normalizedBoolean === 'boolean') {
-        return normalizedBoolean;
+    if (typeof value === 'string' && typeof peer === 'boolean') {
+      let lowered = value.trim().toLowerCase();
+      if (lowered === 'true') {
+        return true;
+      }
+      if (lowered === 'false') {
+        return false;
       }
     }
     if (typeof value === 'string' && typeof peer === 'number') {
@@ -1139,32 +1082,6 @@ export class WorkflowRunner {
       if (!isNaN(parsed)) {
         return parsed;
       }
-    }
-    return value;
-  }
-
-  private normalizeBooleanLikeValue(value: WorkflowJsonValue): WorkflowJsonValue {
-    if (typeof value === 'boolean') {
-      return value;
-    }
-    if (typeof value === 'number') {
-      if (value === 1) {
-        return true;
-      }
-      if (value === 0) {
-        return false;
-      }
-      return value;
-    }
-    if (typeof value !== 'string') {
-      return value;
-    }
-    let lowered = value.trim().toLowerCase();
-    if (lowered === 'true' || lowered === 'yes' || lowered === 'y' || lowered === '1') {
-      return true;
-    }
-    if (lowered === 'false' || lowered === 'no' || lowered === 'n' || lowered === '0') {
-      return false;
     }
     return value;
   }
@@ -1238,135 +1155,6 @@ export class WorkflowRunner {
     return typeof summary === 'string' ? summary.trim() : '';
   }
 
-  private normalizeStructuredOutput(output: WorkflowJsonMap, schema: Object | undefined): WorkflowJsonMap {
-    if (schema === undefined || schema === null) {
-      return output;
-    }
-    let schemaMap = schema as Object as WorkflowJsonMap;
-    let schemaKeys = Object.keys(schemaMap);
-    if (schemaKeys.length === 0) {
-      return output;
-    }
-
-    let source = this.findStructuredOutputSource(output, schemaKeys);
-    let sourceKeys = Object.keys(source);
-    let normalized: WorkflowJsonMap = {};
-    let usedKeys: Record<string, string> = {};
-    for (let i = 0; i < schemaKeys.length; i++) {
-      let schemaKey = schemaKeys[i];
-      let sourceKey = this.findEquivalentKey(sourceKeys, schemaKey);
-      if (sourceKey.length === 0) {
-        continue;
-      }
-      normalized[schemaKey] = this.normalizeStructuredFieldValue(source[sourceKey], schemaMap[schemaKey]);
-      usedKeys[sourceKey] = '1';
-    }
-
-    for (let i = 0; i < sourceKeys.length; i++) {
-      let key = sourceKeys[i];
-      if (usedKeys[key] !== '1' && normalized[key] === undefined) {
-        normalized[key] = source[key];
-      }
-    }
-    return normalized;
-  }
-
-  private findStructuredOutputSource(output: WorkflowJsonMap, schemaKeys: string[]): WorkflowJsonMap {
-    if (this.hasAnyEquivalentKey(output, schemaKeys)) {
-      return output;
-    }
-    let wrapperKeys: string[] = [
-      'structured_output',
-      'structuredOutput',
-      'output',
-      'result',
-      'data',
-      'response',
-      'content',
-      'message'
-    ];
-    for (let i = 0; i < wrapperKeys.length; i++) {
-      let nested = this.valueToJsonMap(output[wrapperKeys[i]]);
-      if (nested !== null && this.hasAnyEquivalentKey(nested, schemaKeys)) {
-        return nested;
-      }
-    }
-    return output;
-  }
-
-  private valueToJsonMap(value: WorkflowJsonValue | undefined): WorkflowJsonMap | null {
-    if (value === undefined || value === null || Array.isArray(value)) {
-      return null;
-    }
-    if (typeof value === 'object') {
-      return value as WorkflowJsonMap;
-    }
-    if (typeof value === 'string') {
-      try {
-        return AgentActionParser.extractJsonMap(value, true);
-      } catch (e) {
-        return null;
-      }
-    }
-    return null;
-  }
-
-  private hasAnyEquivalentKey(map: WorkflowJsonMap, expectedKeys: string[]): boolean {
-    let keys = Object.keys(map);
-    for (let i = 0; i < expectedKeys.length; i++) {
-      if (this.findEquivalentKey(keys, expectedKeys[i]).length > 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private findEquivalentKey(keys: string[], expectedKey: string): string {
-    if (keys.indexOf(expectedKey) >= 0) {
-      return expectedKey;
-    }
-    let normalizedExpected = this.normalizeFieldName(expectedKey);
-    for (let i = 0; i < keys.length; i++) {
-      if (this.normalizeFieldName(keys[i]) === normalizedExpected) {
-        return keys[i];
-      }
-    }
-    return '';
-  }
-
-  private normalizeFieldName(key: string): string {
-    return key.replace(/[\s_-]/g, '').toLowerCase();
-  }
-
-  private normalizeStructuredFieldValue(value: WorkflowJsonValue, schemaField: WorkflowJsonValue): WorkflowJsonValue {
-    let fieldType = this.schemaFieldType(schemaField);
-    if (fieldType === 'boolean') {
-      return this.normalizeBooleanLikeValue(value);
-    }
-    if (fieldType === 'number' || fieldType === 'integer') {
-      if (typeof value === 'string') {
-        let parsed = Number(value.trim());
-        if (!isNaN(parsed)) {
-          return parsed;
-        }
-      }
-    }
-    if (fieldType === 'string' && (typeof value === 'number' || typeof value === 'boolean')) {
-      return String(value);
-    }
-    return value;
-  }
-
-  private schemaFieldType(schemaField: WorkflowJsonValue): string {
-    if (schemaField === undefined || schemaField === null || Array.isArray(schemaField) ||
-      typeof schemaField !== 'object') {
-      return '';
-    }
-    let fieldMap = schemaField as WorkflowJsonMap;
-    let typeValue = fieldMap['type'];
-    return typeof typeValue === 'string' ? typeValue.trim().toLowerCase() : '';
-  }
-
   private summaryFromJsonText(raw: string): string {
     let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
@@ -1420,11 +1208,27 @@ export class WorkflowRunner {
   }
 
   private extractJsonMap(raw: string, failOnParseError: boolean = false): WorkflowJsonMap {
+    let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
-      return AgentActionParser.extractJsonMap(raw, true);
+      return ArkJSON.parse(text) as WorkflowJsonMap;
     } catch (e) {
       let err = e as Error;
+      let candidates = WorkflowJsonRepair.repairCandidates(text);
+      let repairMessage = '';
+      for (let i = 0; i < candidates.length; i++) {
+        try {
+          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          this.log('JSON parse repaired after model returned non-strict JSON');
+          return parsed;
+        } catch (repairError) {
+          let repairErr = repairError as Error;
+          repairMessage = repairErr.message || String(repairError);
+        }
+      }
       let message = 'JSON parse failed, raw response preserved: ' + (err.message || String(e));
+      if (repairMessage.length > 0) {
+        message += '; repair failed: ' + repairMessage;
+      }
       this.log(message);
       if (failOnParseError) {
         throw new Error('Planner JSON 解析失败，终止执行，不再进入 Decider：' + (err.message || String(e)));
@@ -1476,11 +1280,9 @@ export class WorkflowRunner {
   }
 
   private stepDir(actualId: string): string {
-    return this.runDir + '/steps/' + actualId;
-  }
-
-  private runArtifactPath(actualId: string, fileName: string): string {
-    return this.runDir + '/' + this.sanitizeFileName('step-' + actualId + '-' + fileName);
+    let dir = this.runDir + '/steps/' + actualId;
+    WorkflowStorage.ensureDirectory(dir);
+    return dir;
   }
 
   private screenshotFileName(value: string): string {

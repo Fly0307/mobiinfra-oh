@@ -27,4 +27,5 @@ build-profile.json5*
 .sandbox_dump/
 .vscode/
 /.codex-tmp/
+/hvigor-workspace-review-fix-*/
 /.codex

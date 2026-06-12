@@ -1,7 +1,7 @@
 // ArkTS 侧引用 libentry.so 的类型声明。这里的函数名必须和 napi_init.cpp Init() 导出保持一致。
-export const loadModel: (configPath: string) => string;
-export const generate: (prompt: string) => string;
-export const chat: (userMessage: string) => string;
+export const loadModel: (configPath: string) => Promise<string>;
+export const generate: (prompt: string) => Promise<string>;
+export const chat: (userMessage: string) => Promise<string>;
 export const reset: () => string;
 export const copyModel: (src: string, dst: string) => string;
 export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;

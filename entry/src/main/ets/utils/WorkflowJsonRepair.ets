@@ -19,9 +19,22 @@ export class WorkflowJsonRepair {
   static repairCandidates(text: string): string[] {
     let candidates: string[] = [];
     let unwrapped = WorkflowJsonRepair.unwrapDuplicateOuterBraces(text);
+    let literalCase = WorkflowJsonRepair.repairJsonLiteralCasing(text);
+    let unwrappedLiteralCase = WorkflowJsonRepair.repairJsonLiteralCasing(unwrapped);
+    let numericArrayComma = WorkflowJsonRepair.repairNumberArrayCommas(text);
+    let closed = WorkflowJsonRepair.closeTruncatedJson(text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, literalCase, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, unwrappedLiteralCase, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(unwrapped), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(closed), text);
     return candidates;
   }
 
@@ -84,6 +97,116 @@ export class WorkflowJsonRepair {
       }
     }
     return trimmed;
+  }
+
+  private static repairNumberArrayCommas(text: string): string {
+    return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static repairJsonLiteralCasing(text: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      let ch = text.charAt(i);
+      if (inString) {
+        result += ch;
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        result += ch;
+        continue;
+      }
+
+      if (WorkflowJsonRepair.isAsciiLetter(ch)) {
+        let start = i;
+        while (i < text.length && WorkflowJsonRepair.isAsciiLetter(text.charAt(i))) {
+          i++;
+        }
+        let word = text.substring(start, i);
+        let lowered = word.toLowerCase();
+        if (lowered === 'true' || lowered === 'false' || lowered === 'null') {
+          result += lowered;
+        } else if (lowered === 'none') {
+          result += 'null';
+        } else {
+          result += word;
+        }
+        i--;
+        continue;
+      }
+
+      result += ch;
+    }
+    return result;
+  }
+
+  private static closeTruncatedJson(text: string): string {
+    let trimmed = text.trim();
+    if (trimmed.length === 0 || (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[')) {
+      return trimmed;
+    }
+
+    let stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < trimmed.length; i++) {
+      let ch = trimmed.charAt(i);
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        stack.push('}');
+      } else if (ch === '[') {
+        stack.push(']');
+      } else if (ch === '}' || ch === ']') {
+        if (stack.length === 0 || stack[stack.length - 1] !== ch) {
+          return trimmed;
+        }
+        stack.pop();
+      }
+    }
+
+    if (trimmed.endsWith(':')) {
+      return trimmed;
+    }
+    let repaired = trimmed;
+    if (repaired.endsWith(',')) {
+      repaired = repaired.substring(0, repaired.length - 1).trim();
+    }
+    if (inString) {
+      if (escaped) {
+        repaired += '\\';
+      }
+      repaired += '"';
+    }
+    while (stack.length > 0) {
+      repaired = repaired.replace(/,\s*$/, '');
+      let closer = stack.pop();
+      if (closer !== undefined) {
+        repaired += closer;
+      }
+    }
+    return repaired;
   }
 
   private static repairJsonStringContent(text: string): string {
@@ -260,6 +383,10 @@ export class WorkflowJsonRepair {
       }
     }
     return -1;
+  }
+
+  private static isAsciiLetter(ch: string): boolean {
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
   }
 
   private static repairLeadingBrokenObjectQuote(text: string): string {

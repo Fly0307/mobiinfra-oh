@@ -13,6 +13,7 @@ import argparse
 import threading
 import uuid
 import inspect
+import shlex
 
 # PC 侧视觉自动化 Agent：
 # 1. 轮询 App 内 9126 TCP 服务获取任务；
@@ -495,6 +496,9 @@ def _run_timed_command(label, cmd, capture_output=True, timeout=HDC_COMMAND_TIME
 
 def run_hdc_action_command(label, cmd):
     return _run_timed_command(label, cmd, timeout=HDC_ACTION_TIMEOUT)
+
+def hdc_input_text_command(text):
+    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
 
 def _cleanup_device_file_async(prefix, device_path):
     def cleanup():
@@ -1248,7 +1252,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             time.sleep(DEVICE_WAIT_TIME)
             run_hdc_action_command(
                 "decider click_input text",
-                f"{hdc_prefix()} shell uitest uiInput inputText '{text}'"
+                hdc_input_text_command(text)
             )
         
     elif action == "swipe":
@@ -1314,7 +1318,7 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
         else:
             run_hdc_action_command(
                 "decider input text",
-                f"{hdc_prefix()} shell uitest uiInput inputText {json.dumps(text, ensure_ascii=False)}"
+                hdc_input_text_command(text)
             )
 
     elif action == "open_app":

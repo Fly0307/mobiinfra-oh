@@ -9,6 +9,7 @@ import threading
 import socket
 import sys
 import re
+import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -27,6 +28,9 @@ HDC_LIST_TARGETS_TIMEOUT = float(os.environ.get("HDC_LIST_TARGETS_TIMEOUT", "3")
 HDC_STALE_TARGET_GRACE = float(os.environ.get("HDC_STALE_TARGET_GRACE", "30"))
 HDC_WORKFLOW_USE_DRIVER_ACTIONS = os.environ.get(
     "HDC_WORKFLOW_USE_DRIVER_ACTIONS", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+HDC_WORKFLOW_USE_DRIVER_INPUT = os.environ.get(
+    "HDC_WORKFLOW_USE_DRIVER_INPUT", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
@@ -1428,6 +1432,30 @@ def hdc_prefix():
         return "hdc -t " + target
     return "hdc"
 
+def hdc_input_text_command(text):
+    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
+
+def workflow_driver_for_action(action):
+    if harmony_agent is None:
+        return None
+    should_use_driver = HDC_WORKFLOW_USE_DRIVER_ACTIONS or (
+        HDC_WORKFLOW_USE_DRIVER_INPUT and action in ('click_input', 'input')
+    )
+    if not should_use_driver:
+        return None
+    driver = getattr(harmony_agent, 'd', None)
+    if driver is not None:
+        return driver
+    ensure_driver = getattr(harmony_agent, 'ensure_driver_available', None)
+    if not callable(ensure_driver):
+        return None
+    try:
+        if ensure_driver():
+            return getattr(harmony_agent, 'd', None)
+    except Exception as ex:
+        print(f">> [Workflow输入警告] Driver 初始化失败，回退到 HDC inputText: {ex}")
+    return None
+
 def payload_bool(payload, key, default):
     value = payload.get(key, default)
     if isinstance(value, bool):
@@ -1506,10 +1534,7 @@ def workflow_gui_action(payload):
 
 def _workflow_gui_action_impl(payload):
     action = str(payload.get('action', '')).lower()
-    driver = (
-        getattr(harmony_agent, 'd', None)
-        if HDC_WORKFLOW_USE_DRIVER_ACTIONS and harmony_agent is not None else None
-    )
+    driver = workflow_driver_for_action(action)
     log_gui_action(payload)
 
     if action == 'click':
@@ -1535,7 +1560,7 @@ def _workflow_gui_action_impl(payload):
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
             time.sleep(harmony_agent.DEVICE_WAIT_TIME)
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText {json.dumps(text, ensure_ascii=False)}")
+            run_hdc_command(hdc_input_text_command(text))
         return {'status': 'ok', 'message': f'click_input {x},{y}'}
 
     if action == 'input':
@@ -1546,7 +1571,7 @@ def _workflow_gui_action_impl(payload):
             harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput inputText '{text}'")
+            run_hdc_command(hdc_input_text_command(text))
         return {'status': 'ok', 'message': 'input'}
 
     if action == 'swipe_with_coords':

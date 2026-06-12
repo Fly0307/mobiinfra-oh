@@ -11,12 +11,18 @@ struct FloatWindow {
   @StorageLink('agentFloatPanelExpanded') panelExpanded: boolean = false
   private textScroller: Scroller = new Scroller()
   private autoScrollText: boolean = true
+  private lastToggleAt: number = 0
 
   private statusLabel(): string {
     return this.pauseRequested ? '暂停' : '执行';
   }
 
   private togglePanel(): void {
+    let now = Date.now();
+    if (now - this.lastToggleAt < 180) {
+      return;
+    }
+    this.lastToggleAt = now;
     this.autoScrollText = true;
     AgentExecutionController.toggleFloatPanelExpanded();
     this.scrollTextToLatest();
@@ -58,12 +64,6 @@ struct FloatWindow {
               .textAlign(TextAlign.Start)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .onClick(() => {
-                this.togglePanel();
-              })
-              .onTouch((event: TouchEvent) => {
-                this.handleMoveTouch(event);
-              })
 
             Scroll(this.textScroller) {
               Text(this.floatText)
@@ -77,10 +77,14 @@ struct FloatWindow {
             .height(30)
             .scrollable(ScrollDirection.Vertical)
             .scrollBar(BarState.Auto)
+            .onClick(() => {
+              this.togglePanel();
+            })
             .onTouch((event: TouchEvent) => {
               if (event.type === TouchType.Down) {
                 this.autoScrollText = false;
               }
+              this.handleMoveTouch(event);
             })
           }
           .layoutWeight(1)
@@ -91,6 +95,12 @@ struct FloatWindow {
           .padding({ left: 9, right: 8 })
           .backgroundColor('#24101827')
           .borderRadius(16)
+          .onClick(() => {
+            this.togglePanel();
+          })
+          .onTouch((event: TouchEvent) => {
+            this.handleMoveTouch(event);
+          })
 
           Column() {
             Text(this.pauseRequested ? '▶' : 'Ⅱ')

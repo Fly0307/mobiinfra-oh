@@ -20,6 +20,7 @@ interface PlannerTarget {
 }
 
 const MAX_AGENT_STEPS: number = 15;
+const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
@@ -85,11 +86,11 @@ export class AgentLoopRunner {
       await this.launchTargetApp(plannerTarget);
       await this.resetLocalContext();
       await this.runAgentSteps(task, 'local');
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('local');
       AgentExecutionController.finishExecution('本地 Agent 已完成');
     } catch (e) {
       let err = e as Error;
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('local');
       AgentExecutionController.finishExecution('本地 Agent 结束');
       throw err;
     } finally {
@@ -110,12 +111,12 @@ export class AgentLoopRunner {
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
       await this.runAgentSteps(task, 'cloud');
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('cloud');
       AgentExecutionController.finishExecution('云端 Agent 已完成');
     } catch (e) {
       let err = e as Error;
       this.cloudClient.cancelActiveRequests();
-      AgentExecutionController.returnToApp();
+      await this.returnToHostApp('cloud');
       AgentExecutionController.finishExecution('云端 Agent 结束');
       throw err;
     } finally {
@@ -194,6 +195,24 @@ export class AgentLoopRunner {
     this.log(this.mode, '>> [Planner] launching target app: ' + target.appName + ' ' + target.packageName);
     await this.hdcBridge.startApp(target.appName, target.packageName, true);
     await this.sleep(300);
+  }
+
+  private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
+    try {
+      await this.hdcBridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      this.log(mode, '>> [Agent] returned to host app via HDC bridge.');
+      return true;
+    } catch (e) {
+      let err = e as Error;
+      this.log(mode, '>> [Agent] HDC return to host app failed: ' + (err.message || String(e)));
+    }
+
+    if (AgentExecutionController.returnToApp()) {
+      this.log(mode, '>> [Agent] return-to-app handler invoked.');
+      return true;
+    }
+    this.log(mode, '>> [Agent] return-to-app handler is unavailable.');
+    return false;
   }
 
   private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {

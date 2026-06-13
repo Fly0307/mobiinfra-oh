@@ -32,6 +32,7 @@ import {
   normalizeProfileShortSummary,
   normalizedSimilarityKey,
   normalizedTransactionSignature,
+  runLimitedTasks,
   selectCandidateRecords,
   sourceDisplayName,
   stableUnique,
@@ -450,6 +451,10 @@ const PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT: string =
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
 const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
+const SPLIT_BATCH_REQUEST_CONCURRENCY: number = 8;
+const ENRICH_BATCH_REQUEST_CONCURRENCY: number = 16;
+const BATCH_FACT_SPLIT_REQUEST_SIZE: number = 8;
+const BATCH_ENRICH_REQUEST_SIZE: number = 8;
 
 const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
   '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。\n' +
@@ -497,32 +502,14 @@ export class DataPipelineModelClient {
     if (!this.isEnabled(config) || entries.length === 0) {
       return result;
     }
-    let chunks = this.chunkSourceEntries(entries, 24);
-    for (let chunk of chunks) {
-      let entryMap: Record<string, SourceEntry> = {};
-      chunk.forEach((entry: SourceEntry) => {
-        entryMap[entry.source_ref] = entry;
-      });
-      let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
-      try {
-        dataManagerInfo(`Batch split request: entries=${chunk.length}`);
-        let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
-        let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
-        rawItems.forEach((rawItem: JsonMap) => {
-          let sourceRef = normalizeFreeText(rawItem['source_ref']);
-          let entry = entryMap[sourceRef];
-          if (!entry) {
-            return;
-          }
-          let rawFacts = Array.isArray(rawItem['facts']) ? rawItem['facts'] as JsonMap[] : [];
-          let facts = this.normalizeFactPayloads(rawFacts, entry, 'model_batch_split');
-          result[sourceRef] = facts.length > 0 ? facts : heuristicSplit(entry);
-        });
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError('Batch split fallback: ' + err.message);
-      }
-    }
+    let chunks = this.chunkSourceEntries(entries, BATCH_FACT_SPLIT_REQUEST_SIZE);
+    let tasks = chunks.map((chunk: SourceEntry[], chunkIndex: number): (() => Promise<boolean>) => {
+      return async (): Promise<boolean> => {
+        await this.requestBatchSplitChunk(chunk, result, config, chunkIndex + 1, chunks.length);
+        return true;
+      };
+    });
+    await runLimitedTasks<boolean>(tasks, SPLIT_BATCH_REQUEST_CONCURRENCY);
     return result;
   }
 
@@ -580,31 +567,67 @@ export class DataPipelineModelClient {
     if (!this.isEnabled(config) || events.length === 0) {
       return events.map((event: IndexedEvent) => result[event.event_id]);
     }
-    let chunks = this.chunkEventsByTodoGuide(events, 32);
-    for (let chunk of chunks) {
-      let eventMap: Record<string, IndexedEvent> = {};
-      chunk.forEach((event: IndexedEvent) => {
-        eventMap[event.event_id] = event;
-      });
-      let preview = buildEnrichPromptPreview(chunk);
-      try {
-        dataManagerInfo(`Batch enrich request: events=${chunk.length}`);
-        let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
-        let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
-        rawEvents.forEach((rawEvent: JsonMap) => {
-          let eventId = normalizeFreeText(rawEvent['event_id']);
-          let event = eventMap[eventId];
-          if (!event) {
-            return;
-          }
-          result[eventId] = this.enrichEventFromPayload(event, rawEvent, 'model_batch');
-        });
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError('Batch enrich fallback: ' + err.message);
-      }
-    }
+    let chunks = this.chunkEventsByTodoGuide(events, BATCH_ENRICH_REQUEST_SIZE);
+    let tasks = chunks.map((chunk: IndexedEvent[], chunkIndex: number): (() => Promise<boolean>) => {
+      return async (): Promise<boolean> => {
+        await this.requestBatchEnrichChunk(chunk, result, config, chunkIndex + 1, chunks.length);
+        return true;
+      };
+    });
+    await runLimitedTasks<boolean>(tasks, ENRICH_BATCH_REQUEST_CONCURRENCY);
     return events.map((event: IndexedEvent) => result[event.event_id]);
+  }
+
+  private async requestBatchSplitChunk(chunk: SourceEntry[], result: Record<string, CandidateFact[]>,
+    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number): Promise<void> {
+    let entryMap: Record<string, SourceEntry> = new Object() as Record<string, SourceEntry>;
+    chunk.forEach((entry: SourceEntry) => {
+      entryMap[entry.source_ref] = entry;
+    });
+    let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
+    try {
+      dataManagerInfo(`Batch split request: chunk=${chunkIndex}/${chunkCount}, entries=${chunk.length}`);
+      let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+      let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
+      rawItems.forEach((rawItem: JsonMap) => {
+        let sourceRef = normalizeFreeText(rawItem['source_ref']);
+        let entry = entryMap[sourceRef];
+        if (!entry) {
+          return;
+        }
+        let rawFacts = Array.isArray(rawItem['facts']) ? rawItem['facts'] as JsonMap[] : [];
+        let facts = this.normalizeFactPayloads(rawFacts, entry, 'model_batch_split');
+        result[sourceRef] = facts.length > 0 ? facts : heuristicSplit(entry);
+      });
+    } catch (e) {
+      let err = e as Error;
+      dataManagerError(`Batch split fallback: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
+    }
+  }
+
+  private async requestBatchEnrichChunk(chunk: IndexedEvent[], result: Record<string, IndexedEvent>,
+    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number): Promise<void> {
+    let eventMap: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
+    chunk.forEach((event: IndexedEvent) => {
+      eventMap[event.event_id] = event;
+    });
+    let preview = buildEnrichPromptPreview(chunk);
+    try {
+      dataManagerInfo(`Batch enrich request: chunk=${chunkIndex}/${chunkCount}, events=${chunk.length}`);
+      let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
+      let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
+      rawEvents.forEach((rawEvent: JsonMap) => {
+        let eventId = normalizeFreeText(rawEvent['event_id']);
+        let event = eventMap[eventId];
+        if (!event) {
+          return;
+        }
+        result[eventId] = this.enrichEventFromPayload(event, rawEvent, 'model_batch');
+      });
+    } catch (e) {
+      let err = e as Error;
+      dataManagerError(`Batch enrich fallback: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
+    }
   }
 
   async generateSummary(level: string, items: string[], eventCount: number, config: DataManagerModelConfig): Promise<string> {

@@ -9,6 +9,8 @@ import { createEmptyHomeProfileViewModel } from '../../datamanager/DataManagerFa
 import { AvatarDomainSnapshot, AvatarGenerationMode, AvatarVersionViewModel } from '../../datamanager/avatar/AvatarTypes';
 import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { promptAction } from '@kit.ArkUI';
+import { AppLogger } from '../../utils/AppLogger';
+import { showToastSafely } from '../../utils/PromptSafe';
 
 // “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
@@ -125,8 +127,7 @@ export struct HomePage {
       await this.onGenerateAvatar('text_to_image', '');
       this.avatarGenerationOpen = false;
     } catch (e) {
-      let err = e as Error;
-      console.error('submitAvatarGeneration failed: ' + err.message);
+      AppLogger.errorCause('Home.Avatar', 'submitAvatarGeneration failed', e as Error);
     } finally {
       this.avatarGenerating = false;
     }
@@ -140,13 +141,13 @@ export struct HomePage {
       let picker = new GalleryPhotoPicker();
       let uris = await picker.selectImageUris(1);
       if (uris.length === 0) {
-        promptAction.showToast({ message: '未选择照片', duration: 1200 });
+        showToastSafely('未选择照片', 1200);
         return;
       }
       this.selectedAvatarPhotoUri = uris[0];
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '选择照片失败：' + err.message, duration: 1800 });
+      showToastSafely('选择照片失败：' + err.message, 1800);
     }
   }
 
@@ -155,7 +156,7 @@ export struct HomePage {
       return;
     }
     if (this.selectedAvatarPhotoUri.length === 0) {
-      promptAction.showToast({ message: '请先选择参考照片', duration: 1200 });
+      showToastSafely('请先选择参考照片', 1200);
       return;
     }
     this.avatarGenerating = true;
@@ -163,8 +164,7 @@ export struct HomePage {
       await this.onGenerateAvatar('image_to_image', this.selectedAvatarPhotoUri);
       this.avatarGenerationOpen = false;
     } catch (e) {
-      let err = e as Error;
-      console.error('submitAvatarPhotoGeneration failed: ' + err.message);
+      AppLogger.errorCause('Home.Avatar', 'submitAvatarPhotoGeneration failed', e as Error);
     } finally {
       this.avatarGenerating = false;
     }
@@ -838,7 +838,7 @@ export struct HomePage {
   private async executeAgentTask(): Promise<void> {
     let task = this.agentTaskDraft.trim();
     if (task.length === 0) {
-      promptAction.showToast({ message: '请输入要执行的任务', duration: 1200 });
+      showToastSafely('请输入要执行的任务', 1200);
       return;
     }
     if (this.agentTaskSubmitting) {
@@ -850,7 +850,7 @@ export struct HomePage {
       this.closeRecommendationDetail();
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '任务下发失败：' + err.message, duration: 1800 });
+      showToastSafely('任务下发失败：' + err.message, 1800);
     } finally {
       this.agentTaskSubmitting = false;
     }

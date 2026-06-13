@@ -3,6 +3,7 @@ import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
+import { showToastSafely } from '../../utils/PromptSafe';
 
 @Entry
 @Component
@@ -222,16 +223,13 @@ struct WorkflowFileViewer {
     let deleted = WorkflowStorage.deleteManagedFileForCategory(this.filesDir, this.category, file);
     this.setFileSelected(file, false);
     this.loadFiles();
-    promptAction.showToast({
-      message: deleted > 0 ? '已删除：' + title : '删除失败：' + title,
-      duration: 1500
-    });
+    showToastSafely(deleted > 0 ? '已删除：' + title : '删除失败：' + title, 1500);
   }
 
   private deleteSelectedFiles(): void {
     let selected = this.selectedManagedFiles();
     if (selected.length === 0) {
-      promptAction.showToast({ message: '请先选择文件', duration: 1200 });
+      showToastSafely('请先选择文件', 1200);
       return;
     }
     promptAction.showDialog({
@@ -247,7 +245,7 @@ struct WorkflowFileViewer {
         this.manageMode = false;
         this.selectedDeletePaths = [];
         this.loadFiles();
-        promptAction.showToast({ message: '已删除文件：' + deleted, duration: 1500 });
+        showToastSafely('已删除文件：' + deleted, 1500);
       }
     }).catch(() => {});
   }

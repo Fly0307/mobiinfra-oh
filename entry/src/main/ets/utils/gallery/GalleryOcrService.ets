@@ -6,12 +6,17 @@ export class GalleryOcrService {
 
   async recognize(pixelMap: image.PixelMap): Promise<string> {
     await this.ensureInitialized();
-    let result = await textRecognition.recognizeText({
-      pixelMap: pixelMap
-    }, {
-      isDirectionDetectionSupported: true
-    });
-    return result.value ? result.value : '';
+    try {
+      let result = await textRecognition.recognizeText({
+        pixelMap: pixelMap
+      }, {
+        isDirectionDetectionSupported: true
+      });
+      return result.value ? result.value : '';
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    }
   }
 
   async release(): Promise<void> {

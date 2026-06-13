@@ -41,6 +41,7 @@ import {
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
 import { workflowSceneLabel } from '../utils/WorkflowSceneConfig';
+import { stringifyJsonCompat } from '../utils/JsonCompat';
 
 interface BatchSplitEntryPromptPayload {
   source_date: string;
@@ -276,7 +277,7 @@ function buildBatchSplitPromptPayload(entries: SourceEntry[]): BatchSplitPromptP
 export function buildFactSplitPromptPreview(entries: SourceEntry[]): FactSplitPromptPreview {
   let preview: FactSplitPromptPreview = {
     systemPrompt: BATCH_FACT_SPLIT_SYSTEM_PROMPT,
-    userPrompt: ArkJSON.stringify(buildBatchSplitPromptPayload(entries), null, 2)
+    userPrompt: stringifyJsonCompat(buildBatchSplitPromptPayload(entries) as Object, 2)
   };
   return preview;
 }
@@ -397,7 +398,7 @@ function enrichTodoGuideForEvents(events: IndexedEvent[]): string {
 export function buildEnrichPromptPreview(events: IndexedEvent[]): EnrichPromptPreview {
   let preview: EnrichPromptPreview = {
     systemPrompt: BATCH_ENRICH_SYSTEM_PROMPT + enrichTodoGuideForEvents(events),
-    userPrompt: ArkJSON.stringify(buildBatchEnrichPromptPayload(events), null, 2)
+    userPrompt: stringifyJsonCompat(buildBatchEnrichPromptPayload(events) as Object, 2)
   };
   return preview;
 }
@@ -538,7 +539,7 @@ export class DataPipelineModelClient {
       },
       existing_records: existingRecords
     };
-    let prompt = ArkJSON.stringify(promptPayload, null, 2);
+    let prompt = stringifyJsonCompat(promptPayload as Object, 2);
     try {
       let payload = await this.callJson(config, 'dedup', DEDUP_SYSTEM_PROMPT, prompt);
       let decision = normalizeFreeText(payload['decision']);
@@ -587,7 +588,8 @@ export class DataPipelineModelClient {
     let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
     try {
       dataManagerInfo(`Batch split request: chunk=${chunkIndex}/${chunkCount}, entries=${chunk.length}`);
-      let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+      let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT,
+        stringifyJsonCompat(promptPayload as Object, 2));
       let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
       rawItems.forEach((rawItem: JsonMap) => {
         let sourceRef = normalizeFreeText(rawItem['source_ref']);
@@ -658,7 +660,8 @@ export class DataPipelineModelClient {
       mentions: mentions
     };
     try {
-      let payload = await this.callJson(config, 'entity.resolve', ENTITY_RESOLUTION_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+      let payload = await this.callJson(config, 'entity.resolve', ENTITY_RESOLUTION_SYSTEM_PROMPT,
+        stringifyJsonCompat(promptPayload as Object, 2));
       let rawEntities = Array.isArray(payload['entities']) ? payload['entities'] as JsonMap[] : [];
       let resolved: EntityMention[] = [];
       rawEntities.forEach((raw: JsonMap) => {
@@ -783,7 +786,8 @@ export class DataPipelineModelClient {
       title: title,
       events: promptEvents
     };
-    let payload = await this.callJson(config, 'collection.group.' + tabId, COLLECTION_GROUPING_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    let payload = await this.callJson(config, 'collection.group.' + tabId, COLLECTION_GROUPING_SYSTEM_PROMPT,
+      stringifyJsonCompat(promptPayload as Object, 2));
     return this.normalizeCollectionPlannerGroups(payload, tabId, idPrefix);
   }
 
@@ -825,7 +829,8 @@ export class DataPipelineModelClient {
       events: promptEvents
     };
     dataManagerInfo(`Home recommendation planner request: events=${events.length}, currentDate=${currentDate}`);
-    let payload = await this.callJson(config, 'home.recommendation', HOME_RECOMMENDATION_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    let payload = await this.callJson(config, 'home.recommendation', HOME_RECOMMENDATION_SYSTEM_PROMPT,
+      stringifyJsonCompat(promptPayload as Object, 2));
     return this.normalizeHomeRecommendations(payload);
   }
 
@@ -848,7 +853,8 @@ export class DataPipelineModelClient {
       title: title,
       groups: promptGroups
     };
-    let payload = await this.callJson(config, 'collection.merge.' + tabId, COLLECTION_GROUP_MERGE_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload, null, 2));
+    let payload = await this.callJson(config, 'collection.merge.' + tabId, COLLECTION_GROUP_MERGE_SYSTEM_PROMPT,
+      stringifyJsonCompat(promptPayload as Object, 2));
     let rawGroups = Array.isArray(payload['groups']) ? payload['groups'] as JsonMap[] : [];
     let merged: CollectionGroupState[] = [];
     rawGroups.forEach((rawGroup: JsonMap, index: number) => {

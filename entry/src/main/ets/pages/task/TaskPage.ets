@@ -3,6 +3,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
+import { showToastSafely } from '../../utils/PromptSafe';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -181,10 +182,15 @@ export struct TaskPage {
 
   private openFileViewer(category: string): void {
     this.fileViewerCategory = category;
-    router.pushUrl({
-      url: 'pages/task/WorkflowFileViewer',
-      params: { category: category }
-    });
+    try {
+      router.pushUrl({
+        url: 'pages/task/WorkflowFileViewer',
+        params: { category: category }
+      });
+    } catch (e) {
+      let err = e as Error;
+      showToastSafely('打开文件管理失败：' + err.message, 1800);
+    }
   }
 
   private deleteFileCategory(category: string): void {
@@ -238,7 +244,7 @@ export struct TaskPage {
     this.tasks = WorkflowStorage.loadTasks(this.filesDir);
     let task = this.findTask(taskId);
     if (!task) {
-      promptAction.showToast({ message: 'Workflow 已不存在，请刷新后重试', duration: 1800 });
+      showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
       return;
     }
     this.editingTaskId = task.id;
@@ -263,7 +269,7 @@ export struct TaskPage {
       this.editorOpen = true;
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '无法打开 Workflow：' + err.message, duration: 2500 });
+      showToastSafely('无法打开 Workflow：' + err.message, 2500);
     }
   }
 
@@ -321,11 +327,11 @@ export struct TaskPage {
       this.editorOpen = false;
       this.selectedPath = '';
       this.taskScene = this.editorSceneId;
-      promptAction.showToast({ message: 'Workflow 已保存', duration: 1500 });
+      showToastSafely('Workflow 已保存', 1500);
       this.refreshStatsText();
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '保存失败：' + err.message, duration: 2500 });
+      showToastSafely('保存失败：' + err.message, 2500);
     }
   }
 
@@ -360,7 +366,7 @@ export struct TaskPage {
       this.editorMode = mode;
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '切换失败：' + err.message, duration: 2500 });
+      showToastSafely('切换失败：' + err.message, 2500);
     }
   }
 
@@ -397,15 +403,15 @@ export struct TaskPage {
     this.reloadTasks();
     let currentTask = this.findTask(task.id);
     if (!currentTask) {
-      promptAction.showToast({ message: 'Workflow 已不存在，请刷新后重试', duration: 1800 });
+      showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
       return;
     }
     if (!currentTask.enabled) {
-      promptAction.showToast({ message: '任务已停用，请先打开开关', duration: 1500 });
+      showToastSafely('任务已停用，请先打开开关', 1500);
       return;
     }
     if (this.runningTaskId.length > 0) {
-      promptAction.showToast({ message: '已有 workflow 正在执行', duration: 1500 });
+      showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
     this.runningTaskId = currentTask.id;
@@ -424,16 +430,16 @@ export struct TaskPage {
     try {
       let copied = WorkflowStorage.duplicateTask(this.filesDir, task.id);
       this.reloadTasks();
-      promptAction.showToast({ message: '已复制：' + copied.title, duration: 1500 });
+      showToastSafely('已复制：' + copied.title, 1500);
     } catch (e) {
       let err = e as Error;
-      promptAction.showToast({ message: '复制失败：' + err.message, duration: 2500 });
+      showToastSafely('复制失败：' + err.message, 2500);
     }
   }
 
   private deleteWorkflowTask(task: WorkflowTask): void {
     if (this.runningTaskId === task.id) {
-      promptAction.showToast({ message: 'Workflow 正在执行，无法删除', duration: 1500 });
+      showToastSafely('Workflow 正在执行，无法删除', 1500);
       return;
     }
     promptAction.showDialog({
@@ -452,7 +458,7 @@ export struct TaskPage {
           this.selectedPath = '';
         }
         this.refreshStatsText();
-        promptAction.showToast({ message: 'Workflow 已删除', duration: 1500 });
+        showToastSafely('Workflow 已删除', 1500);
       }
     }).catch(() => {});
   }
@@ -469,7 +475,7 @@ export struct TaskPage {
       if (data.index === 1) {
         let count = WorkflowStorage.deleteConfigs(this.filesDir);
         this.reloadTasks();
-        promptAction.showToast({ message: '已删除配置项：' + count, duration: 1500 });
+        showToastSafely('已删除配置项：' + count, 1500);
       }
     }).catch(() => {});
   }
@@ -486,7 +492,7 @@ export struct TaskPage {
       if (data.index === 1) {
         let count = WorkflowStorage.deleteDailyLogs(this.filesDir);
         this.refreshStatsText();
-        promptAction.showToast({ message: '已删除 daily-log 项：' + count, duration: 1500 });
+        showToastSafely('已删除 daily-log 项：' + count, 1500);
       }
     }).catch(() => {});
   }
@@ -503,7 +509,7 @@ export struct TaskPage {
       if (data.index === 1) {
         let count = WorkflowStorage.deleteRunFiles(this.filesDir);
         this.refreshStatsText();
-        promptAction.showToast({ message: '已删除运行文件项：' + count, duration: 1500 });
+        showToastSafely('已删除运行文件项：' + count, 1500);
       }
     }).catch(() => {});
   }

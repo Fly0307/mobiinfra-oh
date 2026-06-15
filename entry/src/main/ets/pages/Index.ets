@@ -1148,6 +1148,15 @@ struct Index {
     this.modelDownloadProgressText = message;
   }
 
+  private async showModelScopeVerifyingFile(downloadedBytes: number, totalBytes: number, path: string): Promise<void> {
+    this.updateModelDownloadProgress(downloadedBytes, totalBytes, '校验文件中: ' + path);
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        resolve();
+      }, 0);
+    });
+  }
+
   private errorMessage(err: Object): string {
     if (err instanceof Error) {
       return err.message;
@@ -1785,8 +1794,7 @@ struct Index {
   }
 
   private modelScopeSha256Field(item: JsonMap): string {
-    let keys: string[] = ['Sha256', 'SHA256', 'sha256', 'Sha256Hash', 'sha256Hash', 'sha256_hash',
-      'Checksum', 'checksum', 'Digest', 'digest', 'Hash', 'hash', 'Oid', 'oid'];
+    let keys: string[] = ['Sha256', 'SHA256', 'sha256', 'Sha256Hash', 'sha256Hash', 'sha256_hash'];
     for (let i = 0; i < keys.length; i++) {
       let value = item[keys[i]];
       if (value === undefined || value === null) {
@@ -1889,7 +1897,7 @@ struct Index {
     return parts.join('/');
   }
 
-  private downloadModelScopeFile(owner: string, repo: string, task: ModelScopeFileTask, index: number,
+  private async downloadModelScopeFile(owner: string, repo: string, task: ModelScopeFileTask, index: number,
     fileCount: number, completedBytes: number, totalBytes: number): Promise<number> {
     if (this.modelScopePauseRequested) {
       AppLogger.info('ModelDownload', 'skip before start because pause requested path=' + task.path);
@@ -1901,6 +1909,7 @@ struct Index {
       let st = fs.statSync(target);
       if (st.size === task.size) {
         if (task.sha256 !== undefined && task.sha256.length > 0) {
+          await this.showModelScopeVerifyingFile(completedBytes, totalBytes, task.path);
           let digest = this.sha256File(target);
           if (digest.length === 0) {
             AppLogger.warn('ModelDownload', 'skip existing with size-only check path=' + task.path);
@@ -2010,6 +2019,16 @@ struct Index {
           fileSize = fs.statSync(target).size;
         } catch (e) {
         }
+        let completeFile = (): void => {
+          AppLogger.info('ModelDownload', 'file completed path=' + task.path + ', size=' + fileSize.toString());
+          if (resolved) return;
+          resolved = true;
+          httpReq.off('dataReceive');
+          httpReq.off('dataReceiveProgress');
+          httpReq.off('dataEnd');
+          httpReq.destroy();
+          resolve(fileSize);
+        };
         if (task.size > 0 && fileSize !== task.size) {
           self.updateModelDownloadMessage('校验失败：文件大小不匹配 ' + task.path);
           AppLogger.warn('ModelDownload', 'size mismatch path=' + task.path + ', expected=' + task.size.toString() +
@@ -2019,28 +2038,27 @@ struct Index {
           return;
         }
         if (task.sha256 !== undefined && task.sha256.length > 0) {
-          let digest = self.sha256File(target);
-          if (digest.length === 0) {
-            AppLogger.warn('ModelDownload', 'sha256 unavailable after download, size-only verified path=' + task.path);
-          } else if (digest !== task.sha256) {
-            self.updateModelDownloadMessage('校验失败：文件 SHA256 不匹配 ' + task.path);
-            AppLogger.warn('ModelDownload', 'sha256 mismatch path=' + task.path +
-              ', expected=' + task.sha256 + ', actual=' + digest);
-            try { fs.unlinkSync(target); } catch (e) {}
-            finish(-3);
-            return;
-          } else {
-            AppLogger.info('ModelDownload', 'sha256 verified path=' + task.path);
-          }
+          self.showModelScopeVerifyingFile(completedBytes + fileSize, totalBytes, task.path).then(() => {
+            let digest = self.sha256File(target);
+            if (digest.length === 0) {
+              AppLogger.warn('ModelDownload', 'sha256 unavailable after download, size-only verified path=' + task.path);
+            } else if (digest !== task.sha256) {
+              self.updateModelDownloadMessage('校验失败：文件 SHA256 不匹配 ' + task.path);
+              AppLogger.warn('ModelDownload', 'sha256 mismatch path=' + task.path +
+                ', expected=' + task.sha256 + ', actual=' + digest);
+              try { fs.unlinkSync(target); } catch (e) {}
+              finish(-3);
+              return;
+            } else {
+              AppLogger.info('ModelDownload', 'sha256 verified path=' + task.path);
+            }
+            completeFile();
+          }).catch(() => {
+            completeFile();
+          });
+          return;
         }
-        AppLogger.info('ModelDownload', 'file completed path=' + task.path + ', size=' + fileSize.toString());
-        if (resolved) return;
-        resolved = true;
-        httpReq.off('dataReceive');
-        httpReq.off('dataReceiveProgress');
-        httpReq.off('dataEnd');
-        httpReq.destroy();
-        resolve(fileSize);
+        completeFile();
       });
       let streamHeaders: Record<string, string> = {};
       if (startOffset > 0) {

@@ -2011,11 +2011,11 @@ struct Index {
         } catch (e) {
         }
         if (task.size > 0 && fileSize !== task.size) {
-          self.updateModelDownloadMessage('文件大小不匹配: ' + task.path);
+          self.updateModelDownloadMessage('校验失败：文件大小不匹配 ' + task.path);
           AppLogger.warn('ModelDownload', 'size mismatch path=' + task.path + ', expected=' + task.size.toString() +
             ', actual=' + fileSize.toString());
           try { fs.unlinkSync(target); } catch (e) {}
-          finish(-1);
+          finish(-3);
           return;
         }
         if (task.sha256 !== undefined && task.sha256.length > 0) {
@@ -2023,11 +2023,11 @@ struct Index {
           if (digest.length === 0) {
             AppLogger.warn('ModelDownload', 'sha256 unavailable after download, size-only verified path=' + task.path);
           } else if (digest !== task.sha256) {
-            self.updateModelDownloadMessage('文件 SHA256 不匹配: ' + task.path);
+            self.updateModelDownloadMessage('校验失败：文件 SHA256 不匹配 ' + task.path);
             AppLogger.warn('ModelDownload', 'sha256 mismatch path=' + task.path +
               ', expected=' + task.sha256 + ', actual=' + digest);
             try { fs.unlinkSync(target); } catch (e) {}
-            finish(-1);
+            finish(-3);
             return;
           } else {
             AppLogger.info('ModelDownload', 'sha256 verified path=' + task.path);
@@ -2186,6 +2186,8 @@ struct Index {
           AppLogger.info('ModelDownload', 'paused repo=' + this.modelScopeMnnRepo + ', saved=' +
             this.formatSize(savedBytes));
           return;
+        } else if (size === -3) {
+          failed.push('校验失败：' + files[j].path);
         } else if (size < 0) {
           failed.push(files[j].path);
         } else {
@@ -2194,12 +2196,11 @@ struct Index {
       }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
-        this.updateModelDownloadProgress(completedBytes, totalBytes, '已完成，点击“加载大模型”开始使用');
+        this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
           this.formatSize(completedBytes));
       } else {
-        this.updateModelDownloadProgress(completedBytes, totalBytes,
-          failed.length.toString() + ' 个失败: ' + failed.join(', '));
+        this.updateModelDownloadMessage('ModelScope 下载失败：' + failed.join('，'));
         AppLogger.warn('ModelDownload', 'partial failure repo=' + this.modelScopeMnnRepo + ', failed=' +
           failed.length.toString() + ', downloaded=' + this.formatSize(completedBytes));
       }

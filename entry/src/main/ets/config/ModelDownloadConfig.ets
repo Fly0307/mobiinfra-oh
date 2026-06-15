@@ -1,2 +1,2 @@
 export const DEFAULT_MODELSCOPE_MNN_REPO: string =
-  'YYDH21/MAI-UI-2B-0422-instruct-1ep_RLv2_4NPUS_bs128_ds5050_step100-w8g128-MNN';
+  'doulujiyao/mnn_mobi_gptq_new_sym_e2e_2B_w8a8_half_rl_n64_s512_visual';

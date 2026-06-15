@@ -4,6 +4,7 @@ import {
   DOMAIN_DESCRIPTIONS,
   AggregatedRecord,
   CandidateFact,
+  CollectionGroupAssignment,
   CollectionGroupState,
   DataManagerModelConfig,
   DedupDecision,
@@ -16,7 +17,8 @@ import {
   ProfileClaim,
   ProfileModelPayload,
   RawProfileClaim,
-  SourceEntry
+  SourceEntry,
+  createStringMap
 } from './DataManagerTypes';
 import {
   atomicizeCandidateFacts,
@@ -37,6 +39,7 @@ import {
   sourceDisplayName,
   stableUnique,
   summarizeText,
+  dateToTime,
   weekdayLabelFromDate
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
@@ -194,6 +197,35 @@ interface CollectionPlannerMergePromptPayload {
   tab_id: string;
   title: string;
   groups: CollectionPlannerMergeGroupPromptPayload[];
+}
+
+interface CollectionGroupAssignmentEventPromptPayload {
+  event_id: string;
+  date: string;
+  summary: string;
+  normalized_fact: string;
+  source: string;
+  domains: string[];
+  entities: string[];
+  keywords: string[];
+  candidate_group_ids: string[];
+}
+
+interface CollectionGroupAssignmentCandidatePromptPayload {
+  group_id: string;
+  title: string;
+  source: string;
+  domain: string;
+  time: string;
+  event_count: number;
+  event_summaries: string[];
+}
+
+interface CollectionGroupAssignmentPromptPayload {
+  tab_id: string;
+  title: string;
+  events: CollectionGroupAssignmentEventPromptPayload[];
+  existing_groups: CollectionGroupAssignmentCandidatePromptPayload[];
 }
 
 interface HomeRecommendationEventPromptPayload {
@@ -453,7 +485,7 @@ const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
 const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
 const SPLIT_BATCH_REQUEST_CONCURRENCY: number = 8;
-const ENRICH_BATCH_REQUEST_CONCURRENCY: number = 16;
+const ENRICH_BATCH_REQUEST_CONCURRENCY: number = 8;
 const BATCH_FACT_SPLIT_REQUEST_SIZE: number = 8;
 const BATCH_ENRICH_REQUEST_SIZE: number = 8;
 
@@ -462,7 +494,7 @@ const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
   '分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或内容主题。\n\n' +
   '返回严格 JSON：\n' +
   '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。\n\n' +
-  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。\n\n' +
+  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；可以按语义自然生成多个分组，不要为了固定数量合并不相关内容。\n\n' +
   '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。\n' +
   '聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。\n\n' +
   '避免低信息标题：平台名、纯数字、日期时间、单个技术词、单个截图/图片/贴图/表情包等界面元素、或“微信聊天记录”“工作相关聊天记录”“聊天记录”“通知记录”“视频记录”“订单记录”这类泛称。不要输出 markdown。';
@@ -471,7 +503,15 @@ const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
   '你是一个事件语义分组合并助手。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。\n\n' +
   '返回严格 JSON：\n' +
   '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。\n\n' +
-  '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；分组数量最多 12 个。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
+  '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；可以按语义自然生成多个分组，不要为了固定数量合并不相关内容。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
+
+const COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT: string =
+  '你是一个事件增量归组助手。输入包含少量待归组事件，以及这些事件时间附近可追加的既有分组。\n\n' +
+  '你的任务是为每个待归组事件选择一个目标：如果事件和某个候选既有分组语义相同、上下文连续、联系人/商户/来源一致或主题高度相关，就追加到该既有 group_id；否则创建新分组。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"assignments":[{"event_id":"输入事件id","group_id":"候选既有group_id或new:短标识","title":"新分组短标题，追加既有分组时可为空","source":"主要来源","domain":"eat|wear|live|travel|work|other"}]}。\n\n' +
+  '每个输入 event_id 必须且只能返回一次；只能把事件追加到该事件 candidate_group_ids 中列出的既有 group_id；如果没有合适候选，group_id 必须使用 new: 开头，同一新主题可复用同一个 new: 标识。\n' +
+  '追加既有分组时不要改写旧标题；title 只用于创建新分组。不要编造输入里没有的人名、商户、商品、金额、地点或行动。不要输出 markdown。';
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '你是用户待办事项推荐助手。\n' +
@@ -562,11 +602,8 @@ export class DataPipelineModelClient {
 
   async enrichEvents(events: IndexedEvent[], config: DataManagerModelConfig): Promise<IndexedEvent[]> {
     let result: Record<string, IndexedEvent> = {};
-    events.forEach((event: IndexedEvent) => {
-      result[event.event_id] = this.heuristicEnrichEvent(event, this.isEnabled(config) ? 'heuristic_batch_fallback' : 'heuristic');
-    });
     if (!this.isEnabled(config) || events.length === 0) {
-      return events.map((event: IndexedEvent) => result[event.event_id]);
+      return events.map((event: IndexedEvent) => this.heuristicEnrichEvent(event, 'heuristic'));
     }
     let chunks = this.chunkEventsByTodoGuide(events, BATCH_ENRICH_REQUEST_SIZE);
     let tasks = chunks.map((chunk: IndexedEvent[], chunkIndex: number): (() => Promise<boolean>) => {
@@ -576,7 +613,10 @@ export class DataPipelineModelClient {
       };
     });
     await runLimitedTasks<boolean>(tasks, ENRICH_BATCH_REQUEST_CONCURRENCY);
-    return events.map((event: IndexedEvent) => result[event.event_id]);
+    return events.map((event: IndexedEvent): IndexedEvent => {
+      let enriched = result[event.event_id];
+      return enriched ? enriched : this.heuristicEnrichEvent(event, 'heuristic_batch_fallback');
+    });
   }
 
   private async requestBatchSplitChunk(chunk: SourceEntry[], result: Record<string, CandidateFact[]>,
@@ -767,6 +807,80 @@ export class DataPipelineModelClient {
     }
   }
 
+  async assignCollectionGroupEvents(tabId: string, title: string, pendingEvents: IndexedEvent[], candidateGroups: CollectionGroupState[],
+    eventMap: Record<string, IndexedEvent>, config: DataManagerModelConfig): Promise<CollectionGroupAssignment[]> {
+    if (!this.isEnabled(config) || pendingEvents.length === 0) {
+      return [];
+    }
+    let planningEvents = this.collectionPlanningEvents(tabId, pendingEvents);
+    let chunks = this.chunkEvents(planningEvents, 80);
+    let assignments: CollectionGroupAssignment[] = [];
+    let chunkIndex = 0;
+    for (let chunk of chunks) {
+      try {
+        dataManagerInfo(`Collection assignment request: tab=${tabId}, chunk=${chunkIndex + 1}/${chunks.length}, events=${chunk.length}, candidates=${candidateGroups.length}`);
+        assignments = assignments.concat(await this.assignCollectionGroupChunk(tabId, title, chunk, candidateGroups, eventMap, config));
+      } catch (e) {
+        let err = e as Error;
+        dataManagerError(`Collection assignment chunk failed: tab=${tabId}, chunk=${chunkIndex}, error=${err.message}`);
+      }
+      chunkIndex++;
+    }
+    return assignments;
+  }
+
+  private async assignCollectionGroupChunk(tabId: string, title: string, events: IndexedEvent[], candidateGroups: CollectionGroupState[],
+    eventMap: Record<string, IndexedEvent>, config: DataManagerModelConfig): Promise<CollectionGroupAssignment[]> {
+    let includedGroups: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let promptEvents: CollectionGroupAssignmentEventPromptPayload[] = events.map((event: IndexedEvent): CollectionGroupAssignmentEventPromptPayload => {
+      let candidateIds: string[] = [];
+      candidateGroups.forEach((group: CollectionGroupState) => {
+        let groupId = normalizeFreeText(group.group_id);
+        if (groupId.length > 0 && this.isCollectionAssignmentCandidate(event, group)) {
+          candidateIds.push(groupId);
+          includedGroups[groupId] = true;
+        }
+      });
+      let item: CollectionGroupAssignmentEventPromptPayload = {
+        event_id: event.event_id,
+        date: event.event_date,
+        summary: summarizeText(event.summary || event.normalized_fact, 120),
+        normalized_fact: summarizeText(event.normalized_fact || event.summary, 180),
+        source: event.sources.length > 0 ? event.sources.join('、') : sourceDisplayName(event.source_state_file),
+        domains: (event.domains || []).slice(0, 4),
+        entities: (event.entities || []).slice(0, 8),
+        keywords: (event.keywords || []).slice(0, 8),
+        candidate_group_ids: candidateIds
+      };
+      return item;
+    });
+    let promptGroups: CollectionGroupAssignmentCandidatePromptPayload[] = [];
+    candidateGroups.forEach((group: CollectionGroupState) => {
+      if (includedGroups[group.group_id] !== true) {
+        return;
+      }
+      let item: CollectionGroupAssignmentCandidatePromptPayload = {
+        group_id: group.group_id,
+        title: group.title,
+        source: group.source,
+        domain: group.domain,
+        time: group.time,
+        event_count: group.event_ids.length,
+        event_summaries: this.collectionGroupEventSummaries(group, eventMap)
+      };
+      promptGroups.push(item);
+    });
+    let promptPayload: CollectionGroupAssignmentPromptPayload = {
+      tab_id: tabId,
+      title: title,
+      events: promptEvents,
+      existing_groups: promptGroups
+    };
+    let payload = await this.callJson(config, 'collection.assign.' + tabId, COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT,
+      stringifyJsonCompat(promptPayload as Object, 2));
+    return this.normalizeCollectionGroupAssignments(payload);
+  }
+
   private async planCollectionGroupChunk(tabId: string, title: string, events: IndexedEvent[], config: DataManagerModelConfig, idPrefix: string): Promise<CollectionGroupState[]> {
     let promptEvents: CollectionPlannerEventPromptPayload[] = events.map((event: IndexedEvent): CollectionPlannerEventPromptPayload => {
       let item: CollectionPlannerEventPromptPayload = {
@@ -789,6 +903,27 @@ export class DataPipelineModelClient {
     let payload = await this.callJson(config, 'collection.group.' + tabId, COLLECTION_GROUPING_SYSTEM_PROMPT,
       stringifyJsonCompat(promptPayload as Object, 2));
     return this.normalizeCollectionPlannerGroups(payload, tabId, idPrefix);
+  }
+
+  private isCollectionAssignmentCandidate(event: IndexedEvent, group: CollectionGroupState): boolean {
+    let eventTime = dateToTime(event.event_date);
+    let groupTime = dateToTime(group.time);
+    if (eventTime <= 0 || groupTime <= 0) {
+      return false;
+    }
+    return Math.abs(eventTime - groupTime) <= 7 * 86400000;
+  }
+
+  private collectionGroupEventSummaries(group: CollectionGroupState, eventMap: Record<string, IndexedEvent>): string[] {
+    let summaries: string[] = [];
+    for (let id of (group.event_ids || []).slice(0, 3)) {
+      let event = eventMap[id];
+      if (!event) {
+        continue;
+      }
+      summaries.push(summarizeText(event.summary || event.normalized_fact, 80));
+    }
+    return summaries;
   }
 
   private collectionPlanningEvents(tabId: string, events: IndexedEvent[]): IndexedEvent[] {
@@ -887,11 +1022,43 @@ export class DataPipelineModelClient {
         meta: '',
         status: '',
         domain: domain,
-        event_ids: eventIds
+        event_ids: eventIds,
+        source_input_hash: '',
+        event_input_hashes: createStringMap()
       };
       merged.push(group);
     });
     return merged.length > 0 ? merged : groups;
+  }
+
+  private normalizeCollectionGroupAssignments(payload: JsonMap): CollectionGroupAssignment[] {
+    let rawItems = Array.isArray(payload['assignments']) ? payload['assignments'] as JsonMap[] : [];
+    let result: CollectionGroupAssignment[] = [];
+    rawItems.forEach((raw: JsonMap, index: number) => {
+      let eventId = normalizeFreeText(raw['event_id']);
+      if (eventId.length === 0) {
+        return;
+      }
+      let groupId = normalizeFreeText(raw['group_id']);
+      if (groupId.length === 0) {
+        groupId = normalizeFreeText(raw['target_group_id']);
+      }
+      if (groupId.length === 0) {
+        groupId = normalizeFreeText(raw['new_group_key']);
+      }
+      if (groupId.length === 0) {
+        groupId = 'new:' + String(index + 1);
+      }
+      let item: CollectionGroupAssignment = {
+        event_id: eventId,
+        group_id: groupId,
+        title: normalizeFreeText(raw['title']),
+        source: normalizeFreeText(raw['source']),
+        domain: normalizeFreeText(raw['domain'])
+      };
+      result.push(item);
+    });
+    return result;
   }
 
   private normalizeHomeRecommendations(payload: JsonMap): HomeRecommendationState[] {
@@ -950,7 +1117,9 @@ export class DataPipelineModelClient {
         meta: '',
         status: '',
         domain: normalizeFreeText(rawGroup['domain']),
-        event_ids: ids
+        event_ids: ids,
+        source_input_hash: '',
+        event_input_hashes: createStringMap()
       };
       groups.push(group);
     });

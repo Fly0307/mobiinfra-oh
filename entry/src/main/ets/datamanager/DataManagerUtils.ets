@@ -19,7 +19,7 @@ import { parseJsonCompat } from '../utils/JsonCompat';
 export const DAILY_LOG_METADATA_PATTERN: RegExp = /^<!-- DAILY_LOG_METADATA\n([\s\S]*?)\n-->\n*/;
 export const STATE_FILE_SUFFIX: string = '.state.json';
 export const RECENT_MATCH_DAYS: number = 7;
-export const RECENT_MATCH_MAX_RECORDS: number = 100;
+export const RECENT_MATCH_MAX_RECORDS: number = 0;
 
 type RegExpMap = Record<string, RegExp>;
 
@@ -587,22 +587,20 @@ export function atomicizeCandidateFacts(entry: SourceEntry, facts: CandidateFact
 }
 
 export function selectRecentScopeRecords(records: AggregatedRecord[], fact: CandidateFact): AggregatedRecord[] {
-  let factDate = fact.source_date;
-  let lower = addDays(factDate, -(RECENT_MATCH_DAYS - 1));
-  let recentByDate = records.filter((record: AggregatedRecord) => record.last_seen_date >= lower && record.last_seen_date <= factDate);
-  let recentByCount = records.slice().sort((left: AggregatedRecord, right: AggregatedRecord) => {
-    if (left.last_seen_date !== right.last_seen_date) {
-      return right.last_seen_date.localeCompare(left.last_seen_date);
-    }
-    return right.record_id - left.record_id;
-  }).slice(0, RECENT_MATCH_MAX_RECORDS).reverse();
-  if (recentByDate.length === 0) {
-    return recentByCount;
+  let factDate = isIsoDate(fact.event_date) ? fact.event_date : fact.source_date;
+  if (!isIsoDate(factDate)) {
+    return [];
   }
-  if (recentByCount.length === 0) {
-    return recentByDate;
+  let factTime = dateToTime(factDate);
+  if (factTime <= 0) {
+    return [];
   }
-  return recentByDate.length <= recentByCount.length ? recentByDate : recentByCount;
+  let lowerTime = factTime - (RECENT_MATCH_DAYS - 1) * 86400000;
+  return records.filter((record: AggregatedRecord) => {
+    let firstSeenDate = normalizeFreeText(record.first_seen_date);
+    let firstSeenTime = dateToTime(firstSeenDate);
+    return firstSeenTime >= lowerTime && firstSeenTime <= factTime;
+  });
 }
 
 export function findExactExistingMatch(records: AggregatedRecord[], fact: CandidateFact): AggregatedRecord | null {

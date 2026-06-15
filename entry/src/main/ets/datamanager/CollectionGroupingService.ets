@@ -5,6 +5,7 @@ import { DataPipelineModelClient } from './DataPipelineModelClient';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
 import {
   BooleanMap,
+  CollectionGroupAssignment,
   CollectionGroupState,
   CollectionGroupsDocument,
   DataManagerModelConfig,
@@ -21,6 +22,7 @@ import {
 } from './DataManagerTypes';
 import {
   displayDomainName,
+  dateToTime,
   eventSearchText,
   normalizeFreeText,
   normalizeLookupText,
@@ -50,8 +52,9 @@ export interface CollectionTabSpec {
 type EventMap = Record<string, IndexedEvent>;
 type EventGroupMap = Record<string, IndexedEvent[]>;
 type CollectionGroupMap = Record<string, CollectionGroupState[]>;
+type CollectionAssignmentMap = Record<string, CollectionGroupAssignment>;
 
-const MAX_GROUPS_PER_TAB: number = 12;
+const COLLECTION_GROUP_ASSIGNMENT_WINDOW_DAYS: number = 7;
 const DEFAULT_COLLECTION_TAB_CONCURRENCY: number = 3;
 
 interface CollectionTabBuildResult {
@@ -59,6 +62,12 @@ interface CollectionTabBuildResult {
   eventCount: number;
   reusedGroupDocs: number;
   updatedGroupDocs: number;
+}
+
+export interface IncrementalCollectionGroupPlan {
+  eventMap: Record<string, IndexedEvent>;
+  reusedGroups: CollectionGroupState[];
+  pendingEvents: IndexedEvent[];
 }
 
 export function collectionTabSpecs(): CollectionTabSpec[] {
@@ -160,12 +169,12 @@ export function normalizeCollectionGroups(tabId: string, title: string, events: 
     }
     return right.event_ids.length - left.event_ids.length;
   });
-  normalized = compactCollectionGroups(tabId, title, normalized, eventMap);
   normalized = prepareCollectionGroupTitles(tabId, title, normalized, eventMap);
   normalized.forEach((group: CollectionGroupState, index: number) => {
     group.group_id = stableGroupId(tabId, index, group.event_ids);
     group.meta = `${group.event_ids.length} 条`;
     group.status = '已整理';
+    refreshCollectionGroupHashes(group, eventMap);
   });
   return normalized;
 }
@@ -211,7 +220,7 @@ export class CollectionGroupingService {
             updatedGroupDocs: 0
           };
         }
-        let groups = await this.buildGroupsForTab(spec, events, modelConfig);
+        let groups = await this.buildGroupsForTab(spec, events, modelConfig, previous);
         let document: CollectionGroupsDocument = {
           generated_at: nowIsoLocal(),
           tab_id: spec.tabId,
@@ -261,9 +270,13 @@ export class CollectionGroupingService {
     dataManagerInfo('Collection groups cleared: ' + this.paths.collectionGroupsRoot);
   }
 
-  private async buildGroupsForTab(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig): Promise<CollectionGroupState[]> {
+  private async buildGroupsForTab(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig,
+    previous: CollectionGroupsDocument): Promise<CollectionGroupState[]> {
     if (events.length === 0) {
       return [];
+    }
+    if ((previous.groups || []).length > 0) {
+      return await this.buildIncrementalGroupsForTab(spec, events, modelConfig, previous);
     }
     try {
       let planned = await this.modelClient.planCollectionGroups(spec.tabId, spec.title, events, modelConfig);
@@ -276,6 +289,25 @@ export class CollectionGroupingService {
       dataManagerError(`Collection grouping planner fallback: tab=${spec.tabId}, error=${err.message}`);
     }
     return heuristicCollectionGroups(spec.tabId, spec.title, events);
+  }
+
+  private async buildIncrementalGroupsForTab(spec: CollectionTabSpec, events: IndexedEvent[], modelConfig: DataManagerModelConfig,
+    previous: CollectionGroupsDocument): Promise<CollectionGroupState[]> {
+    let planning = prepareIncrementalCollectionGroups(spec.tabId, spec.title, events, previous.groups || []);
+    let assignments: CollectionGroupAssignment[] = [];
+    if (planning.pendingEvents.length > 0 && modelConfig.enabled) {
+      try {
+        assignments = await this.modelClient.assignCollectionGroupEvents(spec.tabId, spec.title, planning.pendingEvents,
+          planning.reusedGroups, planning.eventMap, modelConfig);
+      } catch (e) {
+        let err = e as Error;
+        dataManagerError(`Collection assignment fallback: tab=${spec.tabId}, error=${err.message}`);
+      }
+    }
+    let groups = applyIncrementalCollectionGroupAssignments(spec.tabId, spec.title, events, planning.reusedGroups,
+      planning.pendingEvents, assignments);
+    dataManagerInfo(`Collection groups incremental: tab=${spec.tabId}, reusedGroups=${planning.reusedGroups.length}, pendingEvents=${planning.pendingEvents.length}, groups=${groups.length}`);
+    return groups;
   }
 
   private loadGroupsDocumentBySpec(spec: CollectionTabSpec): CollectionGroupsDocument {
@@ -311,6 +343,147 @@ export class CollectionGroupingService {
     }
     progress(createDataManagerProgress(stage, message, current, total, percent));
   }
+}
+
+export function collectionGroupEventInputFingerprint(event: IndexedEvent): string {
+  let parts: string[] = [
+    event.event_id,
+    event.event_date,
+    event.summary,
+    event.normalized_fact,
+    (event.sources || []).join(','),
+    (event.workflow_scene_ids || []).join(','),
+    (event.domains || []).join(','),
+    (event.keywords || []).join(','),
+    (event.entities || []).join(',')
+  ];
+  return stableTextHash(parts.map((part: string): string => normalizeFreeText(part)).join('\u001f'));
+}
+
+export function collectionGroupSourceInputFingerprint(eventIds: string[], eventMap: Record<string, IndexedEvent>): string {
+  let parts: string[] = [];
+  stableUnique(eventIds || []).sort().forEach((id: string) => {
+    let event = eventMap[id];
+    if (!event) {
+      return;
+    }
+    parts.push(id + '\u001f' + collectionGroupEventInputFingerprint(event));
+  });
+  return stableTextHash(parts.join('\u001e'));
+}
+
+export function prepareIncrementalCollectionGroups(tabId: string, title: string, events: IndexedEvent[],
+  previousGroups: CollectionGroupState[]): IncrementalCollectionGroupPlan {
+  let eventMap = eventMapFromEvents(events);
+  let eventHashes: StringMap = createStringMap();
+  events.forEach((event: IndexedEvent) => eventHashes[event.event_id] = collectionGroupEventInputFingerprint(event));
+  let covered: BooleanMap = createBooleanMap();
+  let pending: BooleanMap = createBooleanMap();
+  let reusedGroups: CollectionGroupState[] = [];
+  (previousGroups || []).forEach((previous: CollectionGroupState) => {
+    let groupId = normalizeFreeText(previous.group_id);
+    let groupTitle = normalizeFreeText(previous.title);
+    if (groupId.length === 0 || groupTitle.length === 0) {
+      return;
+    }
+    let retainedIds: string[] = [];
+    stableUnique(previous.event_ids || []).forEach((id: string) => {
+      let event = eventMap[id];
+      if (!event) {
+        return;
+      }
+      let previousHash = previous.event_input_hashes ? normalizeFreeText(previous.event_input_hashes[id]) : '';
+      if (previousHash.length > 0 && previousHash === eventHashes[id] && covered[id] !== true) {
+        retainedIds.push(id);
+        covered[id] = true;
+      } else {
+        pending[id] = true;
+      }
+    });
+    if (retainedIds.length === 0) {
+      return;
+    }
+    let group = copyCollectionGroup(previous);
+    group.event_ids = retainedIds;
+    let refreshed = refreshCollectionGroupFromEvents(tabId, title, group, eventMap);
+    if (refreshed) {
+      reusedGroups.push(refreshed);
+    }
+  });
+  events.forEach((event: IndexedEvent) => {
+    if (covered[event.event_id] !== true) {
+      pending[event.event_id] = true;
+    }
+  });
+  let pendingEvents = events.filter((event: IndexedEvent): boolean => pending[event.event_id] === true && covered[event.event_id] !== true);
+  return {
+    eventMap: eventMap,
+    reusedGroups: reusedGroups,
+    pendingEvents: pendingEvents
+  };
+}
+
+export function applyIncrementalCollectionGroupAssignments(tabId: string, title: string, events: IndexedEvent[],
+  reusedGroups: CollectionGroupState[], pendingEvents: IndexedEvent[], assignments: CollectionGroupAssignment[]): CollectionGroupState[] {
+  let eventMap = eventMapFromEvents(events);
+  let activeGroups: CollectionGroupState[] = reusedGroups.map((group: CollectionGroupState): CollectionGroupState => copyCollectionGroup(group));
+  let activeById: Record<string, CollectionGroupState> = new Object() as Record<string, CollectionGroupState>;
+  activeGroups.forEach((group: CollectionGroupState) => {
+    let id = normalizeFreeText(group.group_id);
+    if (id.length > 0 && !activeById[id]) {
+      activeById[id] = group;
+    }
+  });
+  let pendingById: BooleanMap = createBooleanMap();
+  pendingEvents.forEach((event: IndexedEvent) => pendingById[event.event_id] = true);
+  let assignedPending: BooleanMap = createBooleanMap();
+  let newBuckets: CollectionAssignmentMap = new Object() as CollectionAssignmentMap;
+  let newBucketEvents: Record<string, string[]> = new Object() as Record<string, string[]>;
+  let newBucketOrder: string[] = [];
+  (assignments || []).forEach((assignment: CollectionGroupAssignment) => {
+    let eventId = normalizeFreeText(assignment.event_id);
+    let event = eventMap[eventId];
+    if (!event || pendingById[eventId] !== true || assignedPending[eventId] === true) {
+      return;
+    }
+    let targetId = normalizeFreeText(assignment.group_id);
+    let existing = activeById[targetId];
+    if (existing && isCollectionAssignmentCandidate(event, existing)) {
+      existing.event_ids = stableUnique((existing.event_ids || []).concat([eventId]));
+      assignedPending[eventId] = true;
+      return;
+    }
+    let bucketKey = newCollectionAssignmentBucketKey(existing ? '' : targetId, assignment, eventId);
+    if (!newBuckets[bucketKey]) {
+      newBuckets[bucketKey] = assignment;
+      newBucketEvents[bucketKey] = [];
+      newBucketOrder.push(bucketKey);
+    }
+    newBucketEvents[bucketKey].push(eventId);
+    assignedPending[eventId] = true;
+  });
+  let candidates: CollectionGroupState[] = activeGroups;
+  newBucketOrder.forEach((key: string) => {
+    let assignment = newBuckets[key];
+    let group: CollectionGroupState = {
+      group_id: '',
+      title: normalizeFreeText(assignment.title),
+      source: normalizeFreeText(assignment.source),
+      time: '',
+      meta: '',
+      status: '',
+      domain: normalizeFreeText(assignment.domain),
+      event_ids: stableUnique(newBucketEvents[key] || []),
+      source_input_hash: '',
+      event_input_hashes: createStringMap()
+    };
+    candidates.push(group);
+  });
+  let fallbackEvents = pendingEvents.filter((event: IndexedEvent): boolean => assignedPending[event.event_id] !== true);
+  if (fallbackEvents.length > 0) {
+    candidates = candidates.concat(heuristicCollectionGroupsWithoutNormalize(tabId, title, fallbackEvents));
+  }
+  return finalizeIncrementalCollectionGroups(tabId, title, events, candidates);
 }
 
 function heuristicCollectionGroupsWithoutNormalize(tabId: string, title: string, events: IndexedEvent[]): CollectionGroupState[] {
@@ -369,7 +542,9 @@ function groupFromEvents(tabId: string, title: string, preferredTitle: string, e
     meta: `${ids.length} 条`,
     status: '已整理',
     domain: domain,
-    event_ids: ids
+    event_ids: ids,
+    source_input_hash: '',
+    event_input_hashes: createStringMap()
   };
   return group;
 }
@@ -487,6 +662,149 @@ function eventsForGroup(group: CollectionGroupState, eventMap: EventMap): Indexe
   return events;
 }
 
+function eventMapFromEvents(events: IndexedEvent[]): EventMap {
+  let eventMap: EventMap = new Object() as EventMap;
+  events.forEach((event: IndexedEvent) => eventMap[event.event_id] = event);
+  return eventMap;
+}
+
+function copyCollectionGroup(group: CollectionGroupState): CollectionGroupState {
+  let hashes: StringMap = createStringMap();
+  let sourceHashes = group.event_input_hashes || createStringMap();
+  Object.keys(sourceHashes).forEach((key: string) => hashes[key] = sourceHashes[key]);
+  return {
+    group_id: normalizeFreeText(group.group_id),
+    title: normalizeFreeText(group.title),
+    source: normalizeFreeText(group.source),
+    time: normalizeFreeText(group.time),
+    meta: normalizeFreeText(group.meta),
+    status: normalizeFreeText(group.status),
+    domain: normalizeFreeText(group.domain),
+    event_ids: stableUnique(group.event_ids || []),
+    source_input_hash: normalizeFreeText(group.source_input_hash),
+    event_input_hashes: hashes
+  };
+}
+
+function refreshCollectionGroupFromEvents(tabId: string, title: string, group: CollectionGroupState,
+  eventMap: EventMap): CollectionGroupState | null {
+  let eventIds = stableUnique(group.event_ids || []).filter((id: string): boolean => eventMap[id] !== undefined);
+  if (eventIds.length === 0) {
+    return null;
+  }
+  let groupEvents = eventIds.map((id: string): IndexedEvent => eventMap[id]);
+  let refreshed = groupFromEvents(tabId, title, group.title, groupEvents);
+  refreshed.group_id = normalizeFreeText(group.group_id);
+  refreshed.title = summarizeText(normalizeFreeText(group.title) || refreshed.title, 28);
+  refreshCollectionGroupHashes(refreshed, eventMap);
+  return refreshed;
+}
+
+function refreshCollectionGroupHashes(group: CollectionGroupState, eventMap: EventMap): void {
+  let hashes: StringMap = createStringMap();
+  stableUnique(group.event_ids || []).forEach((id: string) => {
+    let event = eventMap[id];
+    if (event) {
+      hashes[id] = collectionGroupEventInputFingerprint(event);
+    }
+  });
+  group.event_input_hashes = hashes;
+  group.source_input_hash = collectionGroupSourceInputFingerprint(group.event_ids || [], eventMap);
+}
+
+function finalizeIncrementalCollectionGroups(tabId: string, title: string, events: IndexedEvent[],
+  candidates: CollectionGroupState[]): CollectionGroupState[] {
+  let eventMap = eventMapFromEvents(events);
+  let assigned: BooleanMap = createBooleanMap();
+  let usedGroupIds: BooleanMap = createBooleanMap();
+  let result: CollectionGroupState[] = [];
+  candidates.forEach((candidate: CollectionGroupState) => {
+    let eventIds = stableUnique(candidate.event_ids || []).filter((id: string): boolean => {
+      return eventMap[id] !== undefined && assigned[id] !== true;
+    });
+    if (eventIds.length === 0) {
+      return;
+    }
+    eventIds.forEach((id: string) => assigned[id] = true);
+    let group = copyCollectionGroup(candidate);
+    group.event_ids = eventIds;
+    group.group_id = nextCollectionGroupId(tabId, group, usedGroupIds);
+    let refreshed = refreshCollectionGroupFromEvents(tabId, title, group, eventMap);
+    if (refreshed) {
+      result.push(refreshed);
+    }
+  });
+  let missing = events.filter((event: IndexedEvent): boolean => assigned[event.event_id] !== true);
+  if (missing.length > 0) {
+    let fallbackGroups = heuristicCollectionGroupsWithoutNormalize(tabId, title, missing);
+    fallbackGroups.forEach((fallback: CollectionGroupState) => {
+      let group = copyCollectionGroup(fallback);
+      group.group_id = nextCollectionGroupId(tabId, group, usedGroupIds);
+      let refreshed = refreshCollectionGroupFromEvents(tabId, title, group, eventMap);
+      if (refreshed) {
+        result.push(refreshed);
+      }
+    });
+  }
+  return result.sort((left: CollectionGroupState, right: CollectionGroupState) => {
+    if (left.time !== right.time) {
+      return right.time.localeCompare(left.time);
+    }
+    return right.event_ids.length - left.event_ids.length;
+  });
+}
+
+function nextCollectionGroupId(tabId: string, group: CollectionGroupState, usedGroupIds: BooleanMap): string {
+  let existing = normalizeFreeText(group.group_id);
+  if (existing.length > 0 && usedGroupIds[existing] !== true) {
+    usedGroupIds[existing] = true;
+    return existing;
+  }
+  let base = `${tabId}-g-${stableTextHash(stableUnique(group.event_ids || []).sort().join('|'))}`;
+  let candidate = base;
+  let index = 2;
+  while (usedGroupIds[candidate] === true) {
+    candidate = `${base}-${index}`;
+    index++;
+  }
+  usedGroupIds[candidate] = true;
+  return candidate;
+}
+
+function newCollectionAssignmentBucketKey(targetId: string, assignment: CollectionGroupAssignment, eventId: string): string {
+  let key = normalizeFreeText(targetId);
+  if (key.length > 0) {
+    return key;
+  }
+  key = [
+    normalizeLookupText(assignment.title),
+    normalizeLookupText(assignment.source),
+    normalizeLookupText(assignment.domain)
+  ].join('|');
+  if (key.replace(/\|/g, '').length > 0) {
+    return key;
+  }
+  return eventId;
+}
+
+function isCollectionAssignmentCandidate(event: IndexedEvent, group: CollectionGroupState): boolean {
+  let eventTime = dateToTime(event.event_date);
+  let groupTime = dateToTime(group.time);
+  if (eventTime <= 0 || groupTime <= 0) {
+    return false;
+  }
+  return Math.abs(eventTime - groupTime) <= COLLECTION_GROUP_ASSIGNMENT_WINDOW_DAYS * 86400000;
+}
+
+function stableTextHash(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 function isGenericGroupTitle(tabId: string, value: string): boolean {
   let title = normalizeLookupText(value);
   if (title.length === 0) {
@@ -567,28 +885,6 @@ function sourceDetailName(event: IndexedEvent): string {
     }
   }
   return '';
-}
-
-function compactCollectionGroups(tabId: string, title: string, groups: CollectionGroupState[], eventMap: EventMap): CollectionGroupState[] {
-  if (groups.length <= MAX_GROUPS_PER_TAB) {
-    return groups;
-  }
-  let kept = groups.slice(0, MAX_GROUPS_PER_TAB - 1);
-  let remainderIds: string[] = [];
-  groups.slice(MAX_GROUPS_PER_TAB - 1).forEach((group: CollectionGroupState) => {
-    remainderIds = remainderIds.concat(group.event_ids || []);
-  });
-  let remainderEvents: IndexedEvent[] = [];
-  stableUnique(remainderIds).forEach((id: string) => {
-    let event = eventMap[id];
-    if (event) {
-      remainderEvents.push(event);
-    }
-  });
-  if (remainderEvents.length > 0) {
-    kept.push(groupFromEvents(tabId, title, '其他已整理记录', remainderEvents));
-  }
-  return kept;
 }
 
 function stableGroupId(tabId: string, index: number, eventIds: string[]): string {

@@ -8,6 +8,7 @@ export interface GalleryAnalyzerConfig {
   ocrConcurrency: number;
   modelConcurrency: number;
   embeddingConcurrency: number;
+  parallelFieldRequests: boolean;
   embeddingMode: string;
   embeddingBaseUrl: string;
   embeddingApiKey: string;

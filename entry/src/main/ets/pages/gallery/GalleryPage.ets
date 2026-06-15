@@ -30,6 +30,7 @@ import {
   DEFAULT_GALLERY_MODEL,
   DEFAULT_GALLERY_MODEL_CONCURRENCY,
   DEFAULT_GALLERY_OCR_CONCURRENCY,
+  DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS,
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   registerGallerySettingsDefaults
@@ -119,6 +120,7 @@ struct GalleryPage {
   @StorageLink('galleryOcrConcurrency') galleryOcrConcurrency: string = DEFAULT_GALLERY_OCR_CONCURRENCY;
   @StorageLink('galleryModelConcurrency') galleryModelConcurrency: string = DEFAULT_GALLERY_MODEL_CONCURRENCY;
   @StorageLink('galleryEmbeddingConcurrency') galleryEmbeddingConcurrency: string = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
+  @StorageLink('galleryParallelFieldRequests') galleryParallelFieldRequests: string = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
   @StorageLink('galleryEmbeddingMode') galleryEmbeddingMode: string = DEFAULT_GALLERY_EMBEDDING_MODE;
   @StorageLink('galleryEmbeddingBaseUrl') galleryEmbeddingBaseUrl: string = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
   @StorageLink('galleryEmbeddingApiKey') galleryEmbeddingApiKey: string = DEFAULT_GALLERY_EMBEDDING_API_KEY;
@@ -171,6 +173,9 @@ struct GalleryPage {
     }
     if (this.galleryUseOcrKeywordFilter.trim().length === 0) {
       this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
+    }
+    if (this.galleryParallelFieldRequests.trim().length === 0) {
+      this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
     }
     if (this.galleryAmapWebKey.trim().length === 0) {
       this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
@@ -1377,6 +1382,10 @@ struct GalleryPage {
       this.galleryUseOcrKeywordFilter = value;
       return;
     }
+    if (fieldId === 11) {
+      this.galleryParallelFieldRequests = value;
+      return;
+    }
     if (fieldId === 10) {
       this.galleryAmapWebKey = value;
       return;
@@ -1489,6 +1498,7 @@ struct GalleryPage {
                   this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
                   this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
+                  this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)
                   this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码', 10)
                   this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
                   this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
@@ -1523,6 +1533,7 @@ struct GalleryPage {
                 this.galleryOcrConcurrency = DEFAULT_GALLERY_OCR_CONCURRENCY;
                 this.galleryModelConcurrency = DEFAULT_GALLERY_MODEL_CONCURRENCY;
                 this.galleryEmbeddingConcurrency = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
+                this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
                 this.galleryEmbeddingMode = DEFAULT_GALLERY_EMBEDDING_MODE;
                 this.galleryEmbeddingBaseUrl = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
                 this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
@@ -2216,6 +2227,7 @@ struct GalleryPage {
       ocrConcurrency: parseInt(this.galleryOcrConcurrency),
       modelConcurrency: parseInt(this.galleryModelConcurrency),
       embeddingConcurrency: parseInt(this.galleryEmbeddingConcurrency),
+      parallelFieldRequests: this.galleryParallelFieldRequests === 'true',
       embeddingMode: this.galleryEmbeddingMode === 'remote' ? 'remote' : 'huawei_local',
       embeddingBaseUrl: this.galleryEmbeddingBaseUrl.trim().length > 0 ? this.galleryEmbeddingBaseUrl.trim() : DEFAULT_GALLERY_EMBEDDING_BASE_URL,
       embeddingApiKey: this.galleryEmbeddingApiKey.trim(),

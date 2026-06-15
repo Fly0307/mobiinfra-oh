@@ -816,7 +816,7 @@ export class CloudModelClient {
     }
     AppLogger.warn('CloudModel', 'gallery field json parse failed key=' + key +
       ' rawTail=' + this.debugTail(rawText));
-    return this.fallbackGalleryFieldFromText(key, cleaned);
+    return this.fallbackGalleryFieldFromText(key, rawText);
   }
 
   private normalizeGalleryFieldJson(key: GalleryFieldKey, parsed: GalleryModelJson): GalleryModelJson {
@@ -852,27 +852,99 @@ export class CloudModelClient {
 
   private fallbackGalleryFieldFromText(key: GalleryFieldKey, text: string): GalleryModelJson {
     let trimmed = text.replace(/```(?:json)?/g, '').replace(/```/g, '').trim();
+    let loose = this.looseGalleryFieldText(key, trimmed);
     let result: GalleryModelJson = {};
-    if (key === 'title' && trimmed.length > 0) {
-      result.title = trimmed;
+    if (key === 'title' && loose.length > 0) {
+      result.title = loose;
     } else if (key === 'category') {
-      let category = this.normalizeGalleryCategory(trimmed);
+      let category = this.normalizeGalleryCategory(loose);
+      if (category.length === 0) {
+        category = this.normalizeGalleryCategory(trimmed);
+      }
       if (category.length > 0) {
         result.category = category;
       }
-    } else if (key === 'summary' && trimmed.length > 0) {
-      result.summary = trimmed;
+    } else if (key === 'summary' && loose.length > 0) {
+      result.summary = loose;
     } else if (key === 'details') {
-      result.details = this.galleryFieldStringArray(trimmed, true);
+      result.details = this.looseGalleryFieldArray(key, trimmed);
     } else if (key === 'tags') {
-      result.tags = this.galleryFieldStringArray(trimmed, true);
+      result.tags = this.looseGalleryFieldArray(key, trimmed);
     } else if (key === 'importance') {
-      let importance = this.galleryFieldNumber(trimmed);
+      let importance = this.looseGalleryImportance(trimmed);
       if (!isNaN(importance)) {
         result.importance = Math.max(0, Math.min(1, importance));
       }
     }
     return result;
+  }
+
+  private looseGalleryFieldText(key: GalleryFieldKey, text: string): string {
+    let cleaned = text.replace(/```(?:json)?/g, '')
+      .replace(/```/g, '')
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/，/g, ',')
+      .replace(/[：:]/g, '')
+      .replace(/[()（）]/g, '')
+      .replace(/[“”"'‘’`]+/g, '')
+      .replace(/[{}]/g, '')
+      .replace(/\s+/g, '');
+    cleaned = this.stripLooseGalleryFieldName(cleaned, key);
+    return cleaned.replace(/^[\[:,，、;；]+/, '').replace(/[\],，、;；]+$/, '');
+  }
+
+  private looseGalleryFieldArrayText(key: GalleryFieldKey, text: string): string {
+    return this.looseGalleryFieldText(key, text).replace(/[\[\]]/g, '');
+  }
+
+  private looseGalleryFieldArray(key: GalleryFieldKey, text: string): string[] {
+    let markdownItems = this.markdownListItems(text);
+    if (markdownItems.length > 0) {
+      return markdownItems;
+    }
+    return this.galleryFieldStringArray(this.looseGalleryFieldArrayText(key, text), true);
+  }
+
+  private markdownListItems(text: string): string[] {
+    let lines = text.replace(/\r/g, '\n').split('\n');
+    let result: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      let match = lines[i].match(/^\s*(?:[-*+]|[0-9]+[.)、])\s+(.+)$/);
+      if (match && match.length > 1) {
+        let value = match[1].trim().replace(/[“”"'‘’`]+/g, '');
+        if (value.length > 0 && result.indexOf(value) < 0) {
+          result.push(value);
+        }
+      }
+    }
+    return result;
+  }
+
+  private looseGalleryImportance(text: string): number {
+    let normalized = text.replace(/％/g, '%');
+    let percent = normalized.match(/([0-9]+(?:\.[0-9]+)?)\s*%/);
+    if (percent && percent.length > 1) {
+      return Number(percent[1]) / 100;
+    }
+    let number = normalized.match(/([0-9]+(?:\.[0-9]+)?)/);
+    if (!number || number.length <= 1) {
+      return NaN;
+    }
+    let value = Number(number[1]);
+    return value > 1 ? value / 100 : value;
+  }
+
+  private stripLooseGalleryFieldName(text: string, key: GalleryFieldKey): string {
+    let cleaned = text;
+    let markers: string[] = [key + ':'];
+    for (let i = 0; i < markers.length; i++) {
+      cleaned = cleaned.split(markers[i]).join('');
+    }
+    if (cleaned.startsWith(key)) {
+      cleaned = cleaned.substring(key.length);
+    }
+    return cleaned;
   }
 
   private galleryFieldString(value: Object | string | number | boolean | null | undefined): string {

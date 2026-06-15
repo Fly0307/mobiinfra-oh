@@ -834,6 +834,12 @@ export class GalleryAnalyzer {
     let withoutComma = this.removeTrailingJsonComma(trimmed);
     let withoutJsonCommas = this.removeJsonTrailingCommas(trimmed);
     let normalizedKeys = this.normalizeModelJsonKeys(trimmed);
+    let cjkPunctuation = this.normalizeCjkJsonPunctuation(trimmed);
+    let withoutParentheses = this.removeJsonParentheses(trimmed);
+    let cjkPunctuationWithoutParentheses = this.removeJsonParentheses(cjkPunctuation);
+    let quotedKnownKeys = this.quoteKnownModelJsonKeys(trimmed);
+    let singleQuoted = this.repairSingleQuotedModelJson(trimmed);
+    let quotedArrayItems = this.quoteBareModelJsonArrayItems(trimmed);
     this.pushModelJsonCandidate(candidates, withoutComma + ']}');
     this.pushModelJsonCandidate(candidates, withoutComma + '"]}');
     this.pushModelJsonCandidate(candidates, withoutComma + '}');
@@ -841,6 +847,19 @@ export class GalleryAnalyzer {
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutJsonCommas));
     this.pushModelJsonCandidate(candidates, normalizedKeys);
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(normalizedKeys));
+    this.pushModelJsonCandidate(candidates, cjkPunctuation);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(cjkPunctuation));
+    this.pushModelJsonCandidate(candidates, this.normalizeModelJsonKeys(cjkPunctuation));
+    this.pushModelJsonCandidate(candidates, withoutParentheses);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutParentheses));
+    this.pushModelJsonCandidate(candidates, cjkPunctuationWithoutParentheses);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(cjkPunctuationWithoutParentheses));
+    this.pushModelJsonCandidate(candidates, quotedKnownKeys);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(quotedKnownKeys));
+    this.pushModelJsonCandidate(candidates, singleQuoted);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(singleQuoted));
+    this.pushModelJsonCandidate(candidates, quotedArrayItems);
+    this.pushModelJsonCandidate(candidates, this.quoteBareModelJsonArrayItems(cjkPunctuation));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + ']}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '"]}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '}'));
@@ -1010,6 +1029,47 @@ export class GalleryAnalyzer {
       .replace(/"summary\s*:/g, '"summary":')
       .replace(/"details\s*:/g, '"details":')
       .replace(/"tags\s*:/g, '"tags":');
+  }
+
+  private normalizeCjkJsonPunctuation(text: string): string {
+    return text.replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/，/g, ',')
+      .replace(/：/g, ':');
+  }
+
+  private removeJsonParentheses(text: string): string {
+    return text.replace(/[()（）]/g, '');
+  }
+
+  private quoteKnownModelJsonKeys(text: string): string {
+    return text.replace(/([{,]\s*)(title|category|summary|details|tags|importance)\s*:/g, '$1"$2":');
+  }
+
+  private repairSingleQuotedModelJson(text: string): string {
+    return text.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+  }
+
+  private quoteBareModelJsonArrayItems(text: string): string {
+    return text.replace(/\[([^\[\]{}"]*)\]/g, (match: string, body: string): string => {
+      if (body.indexOf(':') >= 0) {
+        return match;
+      }
+      let parts = body.split(/[,，、;；]/);
+      let quoted: string[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        let value = parts[i].trim();
+        if (value.length === 0) {
+          continue;
+        }
+        if (value === 'true' || value === 'false' || value === 'null' || !isNaN(Number(value))) {
+          quoted.push(value);
+        } else {
+          quoted.push('"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
+        }
+      }
+      return '[' + quoted.join(',') + ']';
+    });
   }
 
   private debugTail(text: string): string {

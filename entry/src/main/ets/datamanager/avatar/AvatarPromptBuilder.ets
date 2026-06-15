@@ -1,4 +1,3 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import { DataManagerStorage } from '../DataManagerStorage';
 import {
   DOMAIN_DISPLAY_NAMES,
@@ -12,6 +11,7 @@ import {
   AvatarGenerationMode,
   AvatarProfileSnapshot
 } from './AvatarTypes';
+import { stringifyJsonCompat } from '../../utils/JsonCompat';
 
 const DEFAULT_AVATAR_GENDER: string = '男';
 const DEFAULT_AVATAR_AGE: string = '';
@@ -42,7 +42,7 @@ export class AvatarPromptBuilder {
   }
 
   snapshotHash(snapshot: AvatarProfileSnapshot): string {
-    return this.storage.sha256Text(ArkJSON.stringify(snapshot));
+    return this.storage.sha256Text(stringifyJsonCompat(snapshot as Object));
   }
 
   buildPrompt(snapshot: AvatarProfileSnapshot, mode: AvatarGenerationMode = 'text_to_image'): string {

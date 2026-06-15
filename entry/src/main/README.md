@@ -1,209 +1,117 @@
-# entry/src/main 代码结构说明
+# entry/src/main 架构说明
 
-本目录是 HarmonyOS 端应用、Native MNN 推理桥接、PC 端 Agent 脚本和 Prompt 模板的主目录。整体链路如下：
+本目录包含 HarmonyOS App、Native MNN 推理桥、PC 侧 HDC bridge、workflow 编排和 Agent prompt 相关代码。
 
-1. HarmonyOS App 在 `Index.ets` 中提供界面、模型下载、模型加载、本地/云端 Agent 启动入口。
-2. App 内的 `AgentRouterServer.ets` 在手机侧监听 TCP 端口 `9126`，接收 PC 端 Python Agent 的请求。
-3. 本地 MNN Agent 通过 `libentry.so` 调用 `napi_init.cpp` 中暴露的 Native 接口，复用 Prefix KV Cache 执行多步任务。
-4. 云端 Agent 通过 `CloudModelClient.ets` 调用 OpenAI/Qwen 兼容接口，并把动作 JSON 返回给 PC 端执行。
-5. PC 端 `harmony_agent.py` 负责轮询任务、截图、解析模型 JSON、通过 HDC/hmdriver2 执行动作。
+当前主架构是：Agent loop 尽量在手机 App 内执行，PC 端只负责 HDC 设备控制、截图和少量控制层准备。旧版 PC 轮询 `9126` 的链路仍保留用于兼容和调试，但本地 MNN Agent、云端 Agent、workflow 的主路径不再依赖 PC 发起整个 loop。
 
-## 顶层文件
+## 主链路
 
-| 文件 | 作用 |
-| --- | --- |
-| `module.json5` | HAP 模块配置，声明入口 Ability、页面列表、网络/后台运行/悬浮窗权限，以及备份扩展 Ability。 |
+1. HarmonyOS App 在 `pages/Index.ets` 提供 UI、模型加载、云端配置、workflow 入口和 HDC bridge 配置。
+2. 本地 MNN Agent 和云端 Agent 由 `utils/AgentLoopRunner.ets` 在 App 内执行完整 loop：拼装 prompt、调用 Planner/Decider、解析 JSON、维护 history、控制暂停/取消和确认弹窗。
+3. workflow 由 `utils/WorkflowRunner.ets` 在 App 内执行编排、Planner、Decider、工具步骤、run summary、daily-log 和输出文件写入。
+4. PC 端 `python/hdc_server.py` 暴露 `POST /api/workflow`，作为 HDC bridge 执行截图、启动 App、点击、输入、滑动、按键、等待、设备控制准备等操作。
+5. `python/harmony_agent.py` 中的旧版 PC Agent loop、截图和动作实现仍作为 HDC bridge 的底层能力与兼容路径保留。
 
-## ArkTS/ETS 应用代码
+## Agent loop 分工
 
-### `ets/entryability`
+### 本地 MNN Agent
 
-| 文件 | 作用 |
-| --- | --- |
-| `entryability/EntryAbility.ets` | App 主 Ability。负责应用生命周期、前后台切换、后台长时任务申请、悬浮窗创建/销毁，并注册 `AgentExecutionController` 的同步回调。 |
-
-### `ets/entrybackupability`
-
-| 文件 | 作用 |
-| --- | --- |
-| `entrybackupability/EntryBackupAbility.ets` | 备份/恢复扩展 Ability，目前仅记录 `onBackup` 和 `onRestore` 日志。 |
-
-### `ets/autoagent`
-
-| 文件 | 作用 |
-| --- | --- |
-| `autoagent/AutoAgentAbility.ets` | Accessibility 扩展 Ability。连接后把 Accessibility 上下文写入 `AppStorage`，为自动点击/滑动能力预留入口。 |
-
-### `ets/components`
-
-| 文件 | 作用 |
-| --- | --- |
-| `components/AppHeader.ets` | 通用页面头部组件，展示标题、副标题和隐私守护状态。 |
-
-### `ets/pages`
-
-| 文件 | 作用 |
-| --- | --- |
-| `pages/Index.ets` | 主页面。包含模型下载/删除/配置修改、模型加载、本地 Agent 启动、云端 Agent 配置与调试、日志入口、底部 Tab 容器等功能。 |
-| `pages/FloatWindow.ets` | Agent 运行时悬浮窗页面。展示流式输出文本，并提供“终止”按钮触发 `AgentExecutionController.requestCancellation()`。 |
-| `pages/LogView.ets` | 日志查看页面。支持查看 Native runtime 日志和云端 Agent 日志、自动刷新、复制和清空。 |
-| `pages/OpTest.ets` | Native 算子/HiAI 精度与性能测试页面，用于调试 `opTest`、CPU/HiAI 模式、量化模式等。属于开发调试入口。 |
-| `pages/home/HomePage.ets` | 首页展示页，展示数字分身、画像完整度、偏好标签和推荐卡片。 |
-| `pages/collection/CollectionPage.ets` | 数据采集展示页，按聊天/购物/通知/娱乐模块展示模拟采集数据和偏好分布。 |
-| `pages/task/TaskPage.ets` | 定时任务展示页，按场景展示任务卡片、状态和创建任务入口。 |
-
-### `ets/utils`
-
-| 文件 | 作用 |
-| --- | --- |
-| `utils/AgentExecutionController.ets` | Agent 执行状态控制器。集中维护是否运行、是否取消、悬浮窗同步回调、本地/云端取消回调、回到 App 回调。 |
-| `utils/AgentRouterServer.ets` | 当前主要使用的手机端 TCP 路由服务器。监听 PC 端请求，并根据路由模式分发到本地 MNN Agent 或云端 Agent。处理 `poll`、`clear`、`agent_prefill`、`agent_step`、`agent_reset`、`action` 等协议。 |
-| `utils/CloudModelClient.ets` | 云端模型客户端。负责构造 OpenAI/Qwen 兼容 Chat Completions 请求、管理请求取消、格式化调试 Prompt、调用 Planner/Decider。 |
-| `utils/CloudDeciderPrompt.ets` | 云端 Qwen Decider 使用的 System/User/Step Prompt 常量。 |
-| `utils/AccessibilityHelper.ts` | Accessibility 动态手势注入辅助封装。通过 `Reflect` 兼容部分系统 API 暴露差异。 |
-
-## Native C++ 代码
-
-| 文件/目录 | 作用 |
-| --- | --- |
-| `cpp/CMakeLists.txt` | Native `entry` 动态库构建配置，链接 NAPI、HiLog、rawfile、NNRT、CANN/HiAI 和 MNN 库。 |
-| `cpp/napi_init.cpp` | 核心 Native NAPI 实现。暴露模型加载、普通对话、Agent Prefix/Step/Reset、Runtime 日志捕获、OMC/HiAI 算子测试、CPU/HiAI 精度测试等能力。 |
-| `cpp/HIAIModelManager.h` | HiAI/NNRT 离线模型管理类声明，封装 OMC 模型加载、I/O Tensor 初始化、输入写入、推理和输出读取。 |
-| `cpp/HIAIModelManager.cpp` | HiAI/NNRT 离线模型管理实现，选择 `HIAI_F` 设备、构建执行器、创建/释放 Tensor、执行同步推理。 |
-| `cpp/types/libentry/Index.d.ts` | ArkTS 侧导入 `libentry.so` 时使用的 Native API 类型声明。 |
-| `cpp/types/libentry/oh-package.json5` | Native 类型包描述文件。 |
-| `cpp/include/MNN/**` | MNN SDK 头文件，属于第三方依赖，不建议业务开发中直接修改。 |
-| `cpp/include/llm/**` | MNN LLM/VLM 相关头文件及 `httplib.h`，属于第三方/上游依赖，不建议业务开发中直接修改。 |
-
-## PC 端 Python 脚本
-
-| 文件 | 作用 |
-| --- | --- |
-| `python/harmony_agent.py` | HarmonyOS 端到端 Agent 主脚本。负责 HDC 端口转发、任务轮询、截图、Planner、Agent Prefill/Step 请求、JSON 恢复解析、动作执行、任务收尾和自愈。 |
-| `python/hdc_server.py` | PC 端 HTTP 控制服务，默认监听 `9124`。App 可通过它执行 HDC 连接命令，并在检测到设备后自动拉起 `harmony_agent.py`。 |
-| `python/serve_model.py` | PC 端模型文件 HTTP 服务，默认监听 `9123`，提供 `/api/files` 文件列表接口和静态文件下载。 |
-
-## Prompt 模板
-
-| 文件 | 作用 |
-| --- | --- |
-| `python/prompts/planner.md` | 通用 Planner Prompt，用于从用户任务中识别目标 App 等信息。 |
-| `python/prompts/planner_fill.md` | Planner 补全/改写类模板。 |
-| `python/prompts/planner_oneshot.md` | One-shot Planner 示例模板。 |
-| `python/prompts/planner_oneshot_harmony.md` | HarmonyOS 应用场景的 One-shot Planner 模板。 |
-| `python/prompts/change_task_description.md` | 任务描述改写模板。 |
-| `python/prompts/auto_decider.md` | 自动决策模板。 |
-| `python/prompts/decider.md` | 通用 Decider 模板。 |
-| `python/prompts/decider_nohistory.md` | 不带历史的 Decider 模板。 |
-| `python/prompts/decider_nohistory_v2.md` | 不带历史的新版 Decider 模板。 |
-| `python/prompts/decider_v2.md` | 新版 Decider 模板。 |
-| `python/prompts/decider_qwen3.md` | Qwen3 Decider 模板。 |
-| `python/prompts/decider_qwen3_nohistory.md` | 不带历史的 Qwen3 Decider 模板。 |
-| `python/prompts/e2e.md` | 端到端动作决策模板。 |
-| `python/prompts/e2e_nohistory.md` | 不带历史的端到端动作决策模板。 |
-| `python/prompts/e2e_qwen3.md` | Qwen3 端到端动作决策模板。 |
-| `python/prompts/e2e_v2.md` | V2 端到端动作决策模板。 |
-| `python/prompts/e2e_v2_old.md` | 旧版 V2 端到端模板，保留用于对照。 |
-| `python/prompts/e2e_v2_agent_prefix.md` | Agent 模式 Prefix Prompt，定义动作空间、输出 JSON 格式、当前任务和约束。 |
-| `python/prompts/e2e_v2_agent_variable.md` | Agent 模式每一步 Variable Prompt，填充历史和截图占位符。 |
-| `python/prompts/e2e_v2_agent_prefix_noreason.md` | 无 reasoning 的 Agent Prefix Prompt。 |
-| `python/prompts/e2e_v2_agent_variable_noreason.md` | 无 reasoning 的 Agent Variable Prompt。 |
-| `python/prompts/e2e_v2_agent_prefixorigin.md` | 原始 Agent Prefix Prompt 备份。 |
-| `python/prompts/e2e_v2_agent_variableorigin.md` | 原始 Agent Variable Prompt 备份。 |
-| `python/prompts/e2e_v2_agent_prefixtest.md` | Agent Prefix 测试模板。 |
-| `python/prompts/e2e_v2_agent_variabletest.md` | Agent Variable 测试模板。 |
-| `python/prompts/grounder_bbox.md` | Grounder 框选坐标模板，输出 bbox。 |
-| `python/prompts/grounder_coordinates.md` | Grounder 点坐标模板。 |
-| `python/prompts/grounder_qwen3_bbox.md` | Qwen3 Grounder bbox 坐标模板。 |
-| `python/prompts/grounder_qwen3_coordinates.md` | Qwen3 Grounder 点坐标模板。 |
-| `python/prompts/annotation_en_general.md` | 英文通用动作标注说明模板。 |
-| `python/prompts/annotation_zh_general.md` | 中文通用动作标注说明模板。 |
-
-## 资源文件
-
-| 文件/目录 | 作用 |
-| --- | --- |
-| `resources/base/element/string.json` | 字符串资源，包括模块描述、入口 Ability 描述和应用标签。 |
-| `resources/base/element/color.json` | 浅色主题颜色资源，目前包含启动窗口背景色。 |
-| `resources/base/element/float.json` | 浮点资源，目前包含页面文字大小示例值。 |
-| `resources/dark/element/color.json` | 深色主题颜色资源。 |
-| `resources/base/profile/main_pages.json` | 页面路由注册，包含 `Index`、`FloatWindow`、`OpTest`、`LogView`。 |
-| `resources/base/profile/network_config.json` | 网络安全配置，允许 cleartext HTTP 流量，便于本地/内网调试。 |
-| `resources/base/profile/backup_config.json` | 备份恢复配置。 |
-| `resources/base/media/layered_image.json` | 应用图标 layered image 配置。 |
-| `resources/base/media/background.png` | 应用图标/启动图背景图片。 |
-| `resources/base/media/foreground.png` | 应用图标/启动图前景图片。 |
-| `resources/base/media/startIcon.png` | 启动窗口图标。 |
-| `resources/base/media/digital_avatar.png` | 首页数字分身展示图。 |
-| `resources/base/media/rec_food.png` | 推荐卡片中的美食图片。 |
-| `resources/base/media/rec_sport.png` | 推荐卡片中的运动图片。 |
-| `resources/base/media/rec_travel.png` | 推荐卡片中的出行图片。 |
-
-## 通信协议约定
-
-PC 与手机 App TCP 服务之间使用简单文本协议：
-
-- 请求体：JSON 字符串 + `<<EOF>>`
-- 响应体：JSON 或模型原始文本 + `<<EOF>>`
-- 常用请求类型：
-  - `poll`：PC 轮询当前任务。
-  - `clear`：清理当前任务和模型上下文。
-  - `error`：PC 上报任务执行错误。
-  - `agent_prefill`：本地 Agent 预填 Prefix Prompt，建立 KV Cache。
-  - `agent_step`：发送每一步变量 Prompt 和截图。
-  - `agent_reset`：重置 Agent 上下文。
-  - `action`：一次性文本/图文推理请求。
-  - `cloud_history_append`：云端 Agent 在 PC 执行动作成功后追加历史。
-
-## Workflow / Agent / PC Server 运行链路
-
-### 端口和服务边界
-
-| 端口 | 所在端 | 入口 | 作用 |
-| --- | --- | --- | --- |
-| `9123` | PC | `python/serve_model.py` | 模型文件 HTTP 下载服务。 |
-| `9124` | PC | `python/hdc_server.py` | App 调 PC 的 HDC HTTP 服务，暴露 `/api/run_cmd`、`/api/workflow`、`/api/agent_loop/ensure`。 |
-| `9126` | 手机 App | `utils/AgentRouterServer.ets` | App 内 TCP Agent Router，PC 通过 HDC `fport` 访问。 |
-
-`hdc_server.py` 是 PC 侧常驻入口。默认启动时会拉起一个后台线程运行 `harmony_agent.run_agent_loop()`，用于轮询 App 内 `9126` 的云端/MNN Agent 任务；同时它还提供 `/api/workflow`，用于 workflow 任务的按需桥接。仅运行 workflow 时可用 `--workflow_only` 关闭后台轮询。
-
-### Workflow 任务
-
-1. `pages/task/TaskPage.ets` 触发 `Index.runWorkflowTask()`。
-2. `utils/WorkflowRunner.ets` 在 App 沙箱内编排 workflow step，并负责调用云端 Planner、Decider 和 Summary。
-3. 需要设备动作时，`WorkflowRunner` 通过 `utils/HdcWorkflowBridge.ets` POST 到 PC `http://<pc>:9124/api/workflow`。
-4. `python/hdc_server.py` 根据 action 分发到 `python/harmony_agent.py`，执行 `app_start`、`screenshot`、`gui_action`、`execute_decider_action` 等能力。
-5. 任务结束后，`WorkflowRunner.returnToHostApp()` 会把宿主 App 拉回前台，并通过 `AgentExecutionController.finishExecution()` 清理浮窗状态。
-
-Workflow 不走 `9126` 的 `poll`。它的模型请求在 App 侧直接发生，PC 侧主要负责 HDC/hmdriver2 设备控制。
+- 入口：`Index.ets` 本地 Agent 按钮。
+- Loop：`AgentLoopRunner.runLocalTask()`。
+- 模型调用：`libentry.so` 的 `chat`、`agentPrefill`、`agentStep`、`agentReset`。
+- Planner prompt：`planner_oneshot_harmony.md`，找不到时回退 `planner.md`。
+- Decider prompt：`e2e_v2_agent_prefix.md` / `e2e_v2_agent_variable.md`；当 PC HDC server 以 `--no_reason` 启动时使用 `_noreason` 版本。
+- 截图：App 先隐藏悬浮窗，再请求 PC HDC bridge 截图；本地 MNN 使用 `factor=0.25`，并按旧逻辑把 `<img>...<hw>h,w</hw></img>` 注入 prompt。
+- JSON 解析：App 内 `AgentActionParser.ets` 解析模型输出，并把 0-1000 归一化坐标转换为真实屏幕坐标。
+- 动作执行：App 把已解析的 HDC action payload 发送给 PC `/api/workflow` 的 `gui_action`。
 
 ### 云端 Agent
 
-1. `Index.ensureCloudAgentBackend()` 切换 `AgentRouterServer` 到 `cloud` 模式。
-2. `AgentRouterServer.ensureStarted()` 确保手机端 `9126` 正在监听；如果上一轮 workflow 或前后台切换导致监听状态不可靠，空闲状态下会先 close 再重新 listen。
-3. App 调用 PC `POST /api/agent_loop/ensure`，让 `hdc_server.py` 确认后台 `harmony_agent.run_agent_loop()` 存活，并刷新 `hdc fport tcp:9126 tcp:9126`。
-4. `submitCloudTask()` 设置 `currentTask`。PC 侧 `harmony_agent.poll_task()` 通过 `9126` 获取任务。
-5. PC 侧负责截图和执行动作；Planner/Decider 请求通过 `AgentRouterServer.handleCloudRequest()` 转发给 `CloudModelClient`。
+- 入口：`Index.ets` 云端 Agent 按钮、首页推荐任务。
+- Loop：`AgentLoopRunner.runCloudTask()`。
+- Planner：`CloudModelClient.chatPlanner()`，使用 Planner 服务地址。
+- Decider：`CloudModelClient.chatQwenDecider()`，使用 `CloudDeciderPrompt.ets` 中的 Qwen system/user/current-step prompt。
+- 云端 Agent 的 prefix prompt 只用于保持和旧逻辑一致的 task 提取与 no-reason 配置；真正的 Decider 输入仍由 `CloudDeciderPrompt.ets` 组织，和 workflow 的 Qwen Decider 组织方式保持一致。
+- 截图：云端 Agent 使用 `factor=0.5`，PC 仅截图，不再反向连接 `9126` 控制悬浮窗。
+- history：App 在 HDC 动作执行成功后追加规范化后的模型 JSON 字符串，保持旧 `cloud_history_append` 的语义。
 
-### MNN 本地 Agent
+### Workflow
 
-1. `Index.ensureLocalAgentReady()` 先确保本地模型已通过 `mnnllm.loadModel()` 加载。
-2. App 将 `AgentRouterServer` 切换到 `local` 模式，并同样确保 `9126` 监听和 PC loop/fport 可用。
-3. `submitLocalTask()` 设置 `currentTask`。PC 侧轮询获得任务后，仍由 `harmony_agent.py` 截图和执行动作。
-4. Planner/Decider 请求通过 `AgentRouterServer.handleLocalRequest()` 调用 `libentry.so` 暴露的 `agentPrefill`、`agentStep`、`agentReset` 或 `chat`。
+- 入口：`TaskPage.ets` 触发 `Index.runWorkflowTask()`。
+- Loop：`WorkflowRunner.ets`。
+- Planner prompt：`planner_oneshot_harmony.md`，由 App 侧 `AgentPromptTemplates.ets` 读取，不再向 PC 拉取模板。
+- Decider prompt：`CloudModelClient.chatQwenDecider()`，不要和 MNN/cloud Agent 的 `e2e_v2_agent_*` prompt 混用。
+- JSON 解析：`WorkflowRunner` 使用 `AgentActionParser` 在 App 内解析 Decider 输出，再发送结构化 HDC payload 给 PC。
+- 输出结构：workflow 的 run summary、daily-log、截图、工具输出等仍写在 App `filesDir/workflows` 下，保持现有输出字段和文件结构；不再创建空的 `steps/1/2/3` 目录。
 
-### 串行切换约定
+## Prompt 模板
 
-- 三种入口可以在一个任务完成后串行切换，不需要重启 PC `hdc_server.py`。
-- App 侧在启动云端/MNN Agent 前会恢复 `9126` Router，并请求 PC 刷新 loop/fport。
-- 同一时间仍只应运行一个自动化任务。并发启动多个入口会同时竞争手机前台 App、截图和 HDC 控制，不属于当前支持场景。
-- PC 侧 `poll` 请求设置了短超时，避免 workflow 把 App 切到后台后旧连接长时间挂住，导致后续 Agent 任务无法被轮询到。
+Python prompt 源文件仍位于：
 
-## 维护建议
+```text
+python/prompts/
+```
 
-1. 优先维护 `AgentRouterServer.ets`。当前主流程统一通过它承接手机侧 TCP 请求分发和本地/云端 Agent 路由。
-2. 默认服务器地址已集中为 `Index.ets` 顶部常量，修改部署地址时优先改常量，不要在 UI 逻辑中散落硬编码。
-3. `python/harmony_agent.py` 是 HarmonyOS 任务执行主入口；调整 Prompt、动作协议或设备控制逻辑时应优先验证它的主链路。
-4. `cpp/include/**` 是第三方依赖目录，业务修改应集中在 `napi_init.cpp`、`HIAIModelManager.*` 和 ArkTS/Python 调用层。
-5. Prompt 文件会直接影响模型输出 JSON 格式，修改后应同步验证 `extract_json_payload()` 和动作执行链路。
-6. 运行中产生的截图、日志、`__pycache__`、模型文件和调试输出不应提交到源码仓库。
+App 主路径使用 `utils/AgentPromptTemplates.ets` 中的模板镜像，目的是让 prompt 装配在 App 内完成，同时保证模型输入和原 Python prompt 完全一致。更新 prompt 时要同步：
+
+- `planner_oneshot_harmony.md`
+- `planner.md`
+- `e2e_v2_agent_prefix.md`
+- `e2e_v2_agent_prefix_noreason.md`
+- `e2e_v2_agent_variable.md`
+- `e2e_v2_agent_variable_noreason.md`
+- `e2e_v2.md`
+
+注意：MNN/cloud Agent 的 `e2e_v2_agent_*` prompt、workflow 的 Planner prompt、Qwen Decider 的 `CloudDeciderPrompt.ets` 是不同输入，不要合并成一套。
+
+## PC HDC Server
+
+常用启动：
+
+```bash
+python entry/src/main/python/hdc_server.py
+python entry/src/main/python/hdc_server.py --no_reason
+python entry/src/main/python/hdc_server.py --workflow_only
+```
+
+`hdc_server.py` 默认监听 `9124`。主接口是 `POST /api/workflow`，常用 action：
+
+- `health`：检查 HDC/tunnel 状态。
+- `agent_config`：返回 `no_reason` 和 step 配置。
+- `prepare_agent_run`：重置 hmdriver2/HDC 控制层状态。
+- `screenshot`：只做 HDC 截图和 resize；悬浮窗隐藏/恢复由 App 负责。
+- `app_start`：启动目标 App。
+- `gui_action`：执行 App 已解析好的 click、click_input、input、swipe、keyevent、sleep、app_start 等动作。
+- `execute_decider_action`、`load_prompt_template`：旧兼容接口，新主路径不依赖它们。
+
+## 9126 兼容链路
+
+`utils/AgentRouterServer.ets` 仍可在 App 内监听 `9126`，处理旧 PC `harmony_agent.run_agent_loop()` 的 `poll`、`agent_prefill`、`agent_step`、`action` 等请求。这个链路现在是兼容和调试用途：
+
+- 旧 PC loop 仍可轮询 App 任务并执行。
+- 新 MNN/cloud Agent 主路径不再调用 `submitLocalTask()` / `submitCloudTask()` 等待 PC 轮询。
+- `capture_overlay_hide` / `capture_overlay_restore` 仍为旧截图函数保留；新 `/api/workflow` 截图不再反连 `9126`。
+
+## 关键文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `ets/pages/Index.ets` | UI 入口、模型加载、HDC 配置、Agent/workflow 启动和确认弹窗。 |
+| `ets/utils/AgentLoopRunner.ets` | App 内 MNN/cloud Agent loop。 |
+| `ets/utils/AgentActionParser.ets` | 模型 JSON 提取、动作解析、坐标还原、HDC payload 生成。 |
+| `ets/utils/AgentPromptTemplates.ets` | App 侧 prompt 模板镜像。 |
+| `ets/utils/HdcWorkflowBridge.ets` | App 到 PC `/api/workflow` 的 HTTP bridge。 |
+| `ets/utils/WorkflowRunner.ets` | App 内 workflow 编排和输出文件写入。 |
+| `ets/utils/CloudModelClient.ets` | OpenAI-compatible Planner/Decider 请求。 |
+| `ets/utils/CloudDeciderPrompt.ets` | Qwen Decider 专用 prompt。 |
+| `ets/utils/AgentRouterServer.ets` | 旧 9126 TCP Agent router 兼容层。 |
+| `cpp/napi_init.cpp` | Native MNN/NAPI 实现。 |
+| `python/hdc_server.py` | PC HDC bridge HTTP 服务。 |
+| `python/harmony_agent.py` | 旧 PC Agent loop 和 HDC/hmdriver2 底层能力。 |
+
+## 验证建议
+
+- Python 改动：运行 `python -m py_compile entry/src/main/python/hdc_server.py entry/src/main/python/harmony_agent.py`。
+- ArkTS 改动：优先用 DevEco/Hvigor 构建 entry 模块。
+- HDC 可达性：运行 `hdc list targets`，并在 App 内触发 HDC Server 检查。
+- Agent 行为：分别验证本地 MNN Agent、云端 Agent、workflow 中至少一个需要点击/输入/滑动的任务，确认截图、prompt、history、动作执行和输出文件都正常。

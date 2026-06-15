@@ -13,7 +13,9 @@
 #undef LOG_DOMAIN
 #define LOG_DOMAIN 0x0000
 #undef LOG_TAG
-#define LOG_TAG "HIAIModelMgr"
+#define LOG_TAG "MobiInfra"
+#define HIAI_LOGI(fmt, ...) OH_LOG_INFO(LOG_APP, "[MobiInfra][HIAIModel] " fmt, ##__VA_ARGS__)
+#define HIAI_LOGE(fmt, ...) OH_LOG_ERROR(LOG_APP, "[MobiInfra][HIAIModel] " fmt, ##__VA_ARGS__)
 
 HIAIModelManager &HIAIModelManager::GetInstance() {
     static HIAIModelManager instance;
@@ -29,17 +31,17 @@ size_t GetDeviceID() {
     uint32_t deviceCount = 0;
     OH_NN_ReturnCode ret = OH_NNDevice_GetAllDevicesID(&allDevicesID, &deviceCount);
     if (ret != OH_NN_SUCCESS || allDevicesID == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "OH_NNDevice_GetAllDevicesID failed");
+        HIAI_LOGE("OH_NNDevice_GetAllDevicesID failed");
         return deviceID;
     }
     for (uint32_t i = 0; i < deviceCount; i++) {
         const char *name = nullptr;
         ret = OH_NNDevice_GetName(allDevicesID[i], &name);
         if (ret != OH_NN_SUCCESS || name == nullptr) continue;
-        OH_LOG_INFO(LOG_APP, "Found device: %{public}s", name);
+        HIAI_LOGI("Found device: %{public}s", name);
         if (std::string(name) == "HIAI_F") {
             deviceID = allDevicesID[i];
-            OH_LOG_INFO(LOG_APP, "Selected NPU device: %{public}s (id=%{public}zu)", name, deviceID);
+            HIAI_LOGI("Selected NPU device: %{public}s (id=%{public}zu)", name, deviceID);
             break;
         }
     }
@@ -62,11 +64,11 @@ void DestroyTensors(std::vector<NN_Tensor*> &tensors) {
 OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_t modelSize) {
     // 从 .omc 内存 buffer 构建离线模型，编译完成后保存 executor_ 供后续 RunSync。
     if (executor_ != nullptr) {
-        OH_LOG_ERROR(LOG_APP, "executor already initialized");
+        HIAI_LOGE("executor already initialized");
         return OH_NN_FAILED;
     }
     if (modelData == nullptr || modelSize == 0) {
-        OH_LOG_ERROR(LOG_APP, "invalid offline model buffer");
+        HIAI_LOGE("invalid offline model buffer");
         return OH_NN_FAILED;
     }
     // (compatibility check skipped — CANNKit header may not be available)
@@ -74,13 +76,13 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
     // OMC 已经是离线模型，这里直接从内存 buffer 构造 Compilation。
     OH_NNCompilation *compilation = OH_NNCompilation_ConstructWithOfflineModelBuffer(modelData, modelSize);
     if (compilation == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "OH_NNCompilation_ConstructWithOfflineModelBuffer failed");
+        HIAI_LOGE("OH_NNCompilation_ConstructWithOfflineModelBuffer failed");
         return OH_NN_FAILED;
     }
 
     size_t deviceID = GetDeviceID();
     if (deviceID == 0) {
-        OH_LOG_ERROR(LOG_APP, "GetDeviceID failed — no HIAI_F device found");
+        HIAI_LOGE("GetDeviceID failed — no HIAI_F device found");
         OH_NNCompilation_Destroy(&compilation);
         return OH_NN_FAILED;
     }
@@ -88,7 +90,7 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
 
     OH_NN_ReturnCode ret = OH_NNCompilation_SetDevice(compilation, deviceID);
     if (ret != OH_NN_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "OH_NNCompilation_SetDevice failed");
+        HIAI_LOGE("OH_NNCompilation_SetDevice failed");
         OH_NNCompilation_Destroy(&compilation);
         return ret;
     }
@@ -96,35 +98,35 @@ OH_NN_ReturnCode HIAIModelManager::LoadModelFromBuffer(uint8_t *modelData, size_
     // 设置 NPU 优先执行，逻辑与 CANNKit demo 保持一致。
     HiAI_BandMode bandMode = HiAI_BandMode::HIAI_BANDMODE_NORMAL;
     ret = HMS_HiAIOptions_SetBandMode(compilation, bandMode);
-    OH_LOG_INFO(LOG_APP, "SetBandMode ret=%{public}d", ret);
+    HIAI_LOGI("SetBandMode ret=%{public}d", ret);
     if (ret == OH_NN_SUCCESS) {
         std::vector<HiAI_ExecuteDevice> devices {HiAI_ExecuteDevice::HIAI_EXECUTE_DEVICE_NPU};
         ret = HMS_HiAIOptions_SetModelDeviceOrder(compilation, devices.data(), devices.size());
-        OH_LOG_INFO(LOG_APP, "SetModelDeviceOrder(NPU) ret=%{public}d", ret);
+        HIAI_LOGI("SetModelDeviceOrder(NPU) ret=%{public}d", ret);
     }
 
     ret = OH_NNCompilation_Build(compilation);
     if (ret != OH_NN_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "OH_NNCompilation_Build failed, ret=%{public}d", ret);
+        HIAI_LOGE("OH_NNCompilation_Build failed, ret=%{public}d", ret);
         OH_NNCompilation_Destroy(&compilation);
         return ret;
     }
 
     executor_ = OH_NNExecutor_Construct(compilation);
     if (executor_ == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "OH_NNExecutor_Construct failed");
+        HIAI_LOGE("OH_NNExecutor_Construct failed");
         OH_NNCompilation_Destroy(&compilation);
         return OH_NN_FAILED;
     }
     OH_NNCompilation_Destroy(&compilation);
-    OH_LOG_INFO(LOG_APP, "LoadModelFromBuffer success");
+    HIAI_LOGI("LoadModelFromBuffer success");
     return OH_NN_SUCCESS;
 }
 
 OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
     // 根据 executor 描述自动创建输入/输出 tensor，调用方只需要按 index 写入数据。
     if (executor_ == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "executor not initialized");
+        HIAI_LOGE("executor not initialized");
         return OH_NN_FAILED;
     }
     if (!inputTensors_.empty()) { DestroyTensors(inputTensors_); }
@@ -134,7 +136,7 @@ OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
     size_t inputCount = 0;
     OH_NN_ReturnCode ret = OH_NNExecutor_GetInputCount(executor_, &inputCount);
     if (ret != OH_NN_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "GetInputCount failed");
+        HIAI_LOGE("GetInputCount failed");
         return ret;
     }
     for (size_t i = 0; i < inputCount; ++i) {
@@ -155,7 +157,7 @@ OH_NN_ReturnCode HIAIModelManager::InitIOTensors() {
         if (desc) OH_NNTensorDesc_Destroy(&desc);
     }
 
-    OH_LOG_INFO(LOG_APP, "InitIOTensors success: %{public}zu in, %{public}zu out",
+    HIAI_LOGI("InitIOTensors success: %{public}zu in, %{public}zu out",
                 inputTensors_.size(), outputTensors_.size());
     return OH_NN_SUCCESS;
 }
@@ -178,14 +180,14 @@ OH_NN_ReturnCode HIAIModelManager::SetInputData(int idx, const float *data, size
 OH_NN_ReturnCode HIAIModelManager::RunModel() {
     // 同步执行 OMC 模型，主要用于和 MNN CPU 输出做精度/性能对比。
     if (!executor_ || inputTensors_.empty() || outputTensors_.empty()) {
-        OH_LOG_ERROR(LOG_APP, "model/io not ready");
+        HIAI_LOGE("model/io not ready");
         return OH_NN_FAILED;
     }
-    OH_LOG_INFO(LOG_APP, "RunSync BEGIN");
+    HIAI_LOGI("RunSync BEGIN");
     OH_NN_ReturnCode ret = OH_NNExecutor_RunSync(executor_,
         inputTensors_.data(), inputTensors_.size(),
         outputTensors_.data(), outputTensors_.size());
-    OH_LOG_INFO(LOG_APP, "RunSync END ret=%{public}d", ret);
+    HIAI_LOGI("RunSync END ret=%{public}d", ret);
     return ret;
 }
 

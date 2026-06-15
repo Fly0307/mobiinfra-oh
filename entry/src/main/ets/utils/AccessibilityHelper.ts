@@ -1,4 +1,5 @@
 import { accessibility } from '@kit.AccessibilityKit';
+import { AppLogger } from './AppLogger';
 
 // 无障碍手势注入辅助类。部分 HarmonyOS SDK 对 GesturePath 的构造类型暴露不稳定，
 // 所以这里通过 Reflect 动态访问，尽量绕开 ArkTS 严格类型校验带来的编译限制。
@@ -30,7 +31,7 @@ export class AccessibilityWrapper {
         return true;
       }
     } catch (e) {
-      console.error(`Dynamic gesture inject failed: ${e}`);
+      AppLogger.error('Accessibility', 'Dynamic gesture inject failed: ' + String(e));
     }
     return false;
   }

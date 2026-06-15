@@ -11,6 +11,10 @@ import {
   createEmptyAvatarState
 } from './AvatarTypes';
 
+interface AvatarVersionIndex {
+  version_ids: string[];
+}
+
 export class AvatarStorage {
   private paths: DataManagerPaths;
   private storage: DataManagerStorage;
@@ -47,6 +51,10 @@ export class AvatarStorage {
     return this.storage.join(this.paths.avatarVersionsRoot, versionId + '.json');
   }
 
+  versionIndexPath(): string {
+    return this.storage.join(this.paths.avatarRoot, 'version-index.json');
+  }
+
   assetPath(versionId: string, outputFormat?: string): string {
     return this.storage.join(this.paths.avatarAssetsRoot, versionId + this.avatarAssetExtension(outputFormat));
   }
@@ -66,6 +74,7 @@ export class AvatarStorage {
   saveVersion(version: AvatarVersionState): void {
     this.ensureReady();
     this.storage.writeJsonAtomic(this.versionPath(version.version_id), version as Object);
+    this.saveVersionId(version.version_id);
   }
 
   loadVersion(versionId: string): AvatarVersionState | null {
@@ -78,12 +87,21 @@ export class AvatarStorage {
 
   listVersions(): AvatarVersionState[] {
     let result: AvatarVersionState[] = [];
+    let seen: Record<string, boolean> = new Object() as Record<string, boolean>;
+    this.loadVersionIds().forEach((versionId: string) => {
+      let version = this.loadVersion(versionId);
+      if (version !== null && version.version_id.length > 0) {
+        seen[version.version_id] = true;
+        result.push(version);
+      }
+    });
     this.storage.listDir(this.paths.avatarVersionsRoot).forEach((name: string) => {
       if (!name.endsWith('.json')) {
         return;
       }
       let version = this.storage.readJson<AvatarVersionState | null>(this.storage.join(this.paths.avatarVersionsRoot, name), null);
-      if (version !== null && version.version_id.length > 0) {
+      if (version !== null && version.version_id.length > 0 && seen[version.version_id] !== true) {
+        seen[version.version_id] = true;
         result.push(version);
       }
     });
@@ -138,6 +156,33 @@ export class AvatarStorage {
       profileSnapshotHash: version.profile_snapshot_hash,
       consentSnapshot: version.consent_snapshot
     };
+  }
+
+  private loadVersionIds(): string[] {
+    let index = this.storage.readJson<AvatarVersionIndex>(this.versionIndexPath(), { version_ids: [] });
+    let result: string[] = [];
+    let seen: Record<string, boolean> = new Object() as Record<string, boolean>;
+    for (let versionId of index.version_ids || []) {
+      if (versionId.length > 0 && seen[versionId] !== true) {
+        seen[versionId] = true;
+        result.push(versionId);
+      }
+    }
+    return result;
+  }
+
+  private saveVersionId(versionId: string): void {
+    if (versionId.length === 0) {
+      return;
+    }
+    let ids = this.loadVersionIds();
+    if (ids.indexOf(versionId) < 0) {
+      ids.push(versionId);
+    }
+    let index: AvatarVersionIndex = {
+      version_ids: ids
+    };
+    this.storage.writeJsonAtomic(this.versionIndexPath(), index as Object);
   }
 
   private actionLabel(status: AvatarStatus): string {

@@ -1,11 +1,15 @@
 import { http } from '@kit.NetworkKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { AgentExecutionController } from './AgentExecutionController';
+import { AppLogger } from './AppLogger';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 
 interface HdcBridgeRequest {
   action: string;
   payload: WorkflowJsonMap;
+}
+
+interface EmptyBridgePayload {
 }
 
 interface StartAppPayload {
@@ -16,6 +20,8 @@ interface StartAppPayload {
 
 interface ScreenshotPayload {
   factor: number;
+  style?: string;
+  manage_overlay?: boolean;
 }
 
 interface ExecuteDeciderPayload {
@@ -51,13 +57,44 @@ export class HdcWorkflowBridge {
     });
   }
 
-  async request(action: string, payload: WorkflowJsonMap = {}): Promise<HdcBridgeResponse> {
+  private elapsedMs(startedAtMs: number): number {
+    return new Date().getTime() - startedAtMs;
+  }
+
+  private payloadKeysText(payload: WorkflowJsonMap): string {
+    let keys = Object.keys(payload);
+    return keys.length > 0 ? keys.join('|') : '(empty)';
+  }
+
+  private compactText(value: string, maxChars: number): string {
+    let text = value.replace(/\s+/g, ' ').trim();
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return text.substring(0, maxChars) + '...';
+  }
+
+  private responseSummary(requestAction: string, response: HdcBridgeResponse): string {
+    let message = response.message && response.message.length > 0 ? this.compactText(response.message, 160) : '(empty)';
+    let responseAction = response.action && response.action.length > 0 ? response.action : requestAction;
+    let width = response.width === undefined ? '(empty)' : String(response.width);
+    let height = response.height === undefined ? '(empty)' : String(response.height);
+    return 'status=' + response.status + ', message=' + message + ', action=' + responseAction +
+      ', width=' + width + ', height=' + height;
+  }
+
+  async request(action: string, payload?: WorkflowJsonMap): Promise<HdcBridgeResponse> {
+    let emptyPayload: EmptyBridgePayload = {};
+    let requestPayload = payload === undefined ? emptyPayload as Object as WorkflowJsonMap : payload;
     let body: HdcBridgeRequest = {
       action: action,
-      payload: payload
+      payload: requestPayload
     };
     let httpReq = http.createHttp();
+    let startedAt = new Date().getTime();
     try {
+      AppLogger.info('HdcBridge', 'request action=' + action + ', payloadKeys=' +
+        this.payloadKeysText(requestPayload));
       let options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json' },
@@ -68,18 +105,25 @@ export class HdcWorkflowBridge {
       };
       let resp = await httpReq.request(this.workflowUrl(), options);
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
-        return {
+        let errorResponse: HdcBridgeResponse = {
           status: 'error',
           message: 'HDC bridge HTTP ' + resp.responseCode + ': ' + String(resp.result)
         };
+        AppLogger.info('HdcBridge', 'response http=' + resp.responseCode + ', durationMs=' +
+          this.elapsedMs(startedAt) + ', ' + this.responseSummary(action, errorResponse));
+        return errorResponse;
       }
       let parsed = ArkJSON.parse(resp.result as string) as HdcBridgeResponse;
+      AppLogger.info('HdcBridge', 'response http=' + resp.responseCode + ', durationMs=' +
+        this.elapsedMs(startedAt) + ', ' + this.responseSummary(action, parsed));
       if (parsed.status !== 'ok') {
         this.logHandler('HDC bridge 返回失败：' + (parsed.message || parsed.status));
       }
       return parsed;
     } catch (e) {
       let err = e as Error;
+      AppLogger.errorCause('HdcBridge', 'request failed action=' + action + ', durationMs=' +
+        this.elapsedMs(startedAt), err);
       return {
         status: 'error',
         message: 'HDC bridge 请求失败：' + err.message
@@ -107,13 +151,19 @@ export class HdcWorkflowBridge {
   }
 
   async screenshot(): Promise<HdcBridgeResponse> {
+    return await this.screenshotWithFactor(0.5);
+  }
+
+  async screenshotWithFactor(factor: number): Promise<HdcBridgeResponse> {
     let restoreToken = await AgentExecutionController.hideCaptureOverlay();
     try {
       if (restoreToken) {
         await this.sleep(120);
       }
       let payload: ScreenshotPayload = {
-        factor: 0.5
+        factor: factor,
+        style: factor <= 0.25 ? 'local' : 'mobiagent',
+        manage_overlay: false
       };
       let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
       if (response.status !== 'ok' || !response.image_b64) {
@@ -147,6 +197,21 @@ export class HdcWorkflowBridge {
       throw new Error(response.message || 'load_prompt_template failed');
     }
     return response.result || '';
+  }
+
+  async agentConfig(): Promise<HdcBridgeResponse> {
+    let response = await this.request('agent_config');
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'agent_config failed');
+    }
+    return response;
+  }
+
+  async prepareAgentRun(): Promise<void> {
+    let response = await this.request('prepare_agent_run');
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'prepare_agent_run failed');
+    }
   }
 
   async guiAction(payload: WorkflowJsonMap): Promise<HdcBridgeResponse> {

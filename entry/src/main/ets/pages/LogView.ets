@@ -2,6 +2,7 @@ import native from 'libentry.so';
 import { router } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction } from '@kit.ArkUI';
+import { AppLogger } from '../utils/AppLogger';
 
 // 运行日志页：可在原生日志 ring buffer、云端 Agent 日志和图库分析日志之间切换，
 // 用于调试模型加载、推理、HDC 通信、云端 Decider 输入输出和图库入库状态。
@@ -42,7 +43,7 @@ struct LogView {
     // Native 日志来自 libentry.so 的 getLogs；Cloud/Gallery 日志来自 AppStorage。
     try {
       if (this.logSource === 0) {
-        const text = native.getLogs() || '(empty native runtime logs)'
+        const text: string = native.getLogs() || '(empty native runtime logs)'
         this.logs = text
       } else if (this.logSource === 1) {
         const text = AppStorage.get('cloudAgentLogs') as string
@@ -55,6 +56,7 @@ struct LogView {
         this.scroller.scrollEdge(Edge.Bottom)
       }
     } catch (e) {
+      AppLogger.errorCause('LogView', 'getLogs failed source=' + String(this.logSource), e as Error)
       this.logs = 'getLogs error: ' + JSON.stringify(e)
     }
   }
@@ -117,7 +119,10 @@ struct LogView {
             const pb = pasteboard.getSystemPasteboard()
             pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.logs))
               .then(() => { promptAction.showToast({ message: 'Copied!', duration: 1500 }) })
-              .catch(() => { promptAction.showToast({ message: 'Copy failed', duration: 1500 }) })
+              .catch((e: Error) => {
+                AppLogger.warnCause('LogView', 'copy logs failed', e)
+                promptAction.showToast({ message: 'Copy failed', duration: 1500 })
+              })
           })
         Button('Clear').fontSize(14).height(36).flexGrow(1).margin({ left: 8 })
           .backgroundColor('#F44336')
@@ -132,6 +137,7 @@ struct LogView {
               }
               this.logs = '(cleared)'
             } catch (e) {
+              AppLogger.errorCause('LogView', 'clearLogs failed source=' + String(this.logSource), e as Error)
               this.logs = 'clearLogs error: ' + JSON.stringify(e)
             }
           })
@@ -169,4 +175,3 @@ struct LogView {
     return 'Gallery Logs'
   }
 }
-

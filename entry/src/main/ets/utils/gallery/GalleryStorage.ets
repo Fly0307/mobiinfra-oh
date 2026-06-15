@@ -121,34 +121,49 @@ export class GalleryStorage {
   }
 
   static readText(path: string): string {
-    let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
     try {
-      let stat = fs.statSync(path);
-      let buf = new ArrayBuffer(stat.size);
-      fs.readSync(file.fd, buf);
-      let textDecoder = util.TextDecoder.create('utf-8');
-      return textDecoder.decodeWithStream(new Uint8Array(buf));
-    } finally {
-      fs.closeSync(file);
+      let file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        let stat = fs.statSync(path);
+        let buf = new ArrayBuffer(stat.size);
+        fs.readSync(file.fd, buf);
+        let textDecoder = util.TextDecoder.create('utf-8');
+        return textDecoder.decodeWithStream(new Uint8Array(buf));
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
   static writeText(path: string, content: string): void {
-    let byteStr = util.TextEncoder.create('utf-8').encodeInto(content);
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, byteStr.buffer);
-    } finally {
-      fs.closeSync(file);
+      let byteStr = util.TextEncoder.create('utf-8').encodeInto(content);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, byteStr.buffer);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 
   static writeBytes(path: string, data: ArrayBuffer): void {
-    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, data);
-    } finally {
-      fs.closeSync(file);
+      let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, data);
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw err;
     }
   }
 

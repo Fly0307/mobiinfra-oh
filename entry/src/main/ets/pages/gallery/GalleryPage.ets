@@ -1717,6 +1717,11 @@ struct GalleryPage {
     this.DetailBulletSlot(item, 0)
     this.DetailBulletSlot(item, 1)
     this.DetailBulletSlot(item, 2)
+    this.DetailBulletSlot(item, 3)
+    this.DetailBulletSlot(item, 4)
+    this.DetailBulletSlot(item, 5)
+    this.DetailBulletSlot(item, 6)
+    this.DetailBulletSlot(item, 7)
   }
 
   @Builder DetailTagSlot(item: GalleryAnalysisResult, index: number) {
@@ -2063,7 +2068,7 @@ struct GalleryPage {
   }
 
   private hasAnyDisplayDetail(item: GalleryAnalysisResult): boolean {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 8; i++) {
       if (this.detailAt(item, i).length > 0) {
         return true;
       }

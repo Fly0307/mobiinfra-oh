@@ -52,7 +52,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
-import { WorkflowStorage } from '../utils/WorkflowStorage';
+import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
@@ -920,7 +920,7 @@ struct Index {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     try {
-      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, ctx.resourceManager);
+      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
     } catch (e) {
       AppLogger.errorCause('WorkflowStorage', 'install default workflow resources failed', e as Error);
     }

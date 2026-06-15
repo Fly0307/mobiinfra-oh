@@ -1,6 +1,7 @@
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
 import resourceManager from '@ohos.resourceManager';
+import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import {
   WorkflowCondition,
@@ -29,6 +30,24 @@ interface DefaultWorkflowConfig {
   fileName: string;
   rawFilePath: string;
 }
+
+export interface RawWorkflowResourceReader {
+  getRawFileContentSync(path: string): Uint8Array;
+}
+
+export class SystemResourceManagerReader implements RawWorkflowResourceReader {
+  private delegate: resourceManager.ResourceManager;
+
+  constructor(delegate: resourceManager.ResourceManager) {
+    this.delegate = delegate;
+  }
+
+  getRawFileContentSync(path: string): Uint8Array {
+    return this.delegate.getRawFileContentSync(path);
+  }
+}
+
+type DefaultWorkflowInstallFailureHandler = (rawFilePath: string, cause: Error) => void;
 
 const DEFAULT_WORKFLOW_CONFIGS: DefaultWorkflowConfig[] = [
   {
@@ -208,9 +227,23 @@ export class WorkflowStorage {
     }
   }
 
-  static installDefaultWorkflowResources(filesDir: string, manager: resourceManager.ResourceManager): void {
+  static installDefaultWorkflowResources(filesDir: string, manager: RawWorkflowResourceReader): void {
+    WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager,
+      (rawFilePath: string, cause: Error) => {
+        AppLogger.warnCause('WorkflowStorage', 'install default workflow rawfile failed path=' + rawFilePath, cause);
+      });
+  }
+
+  static installDefaultWorkflowResourcesForTest(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
+    return WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager, onFailure);
+  }
+
+  private static installDefaultWorkflowResourcesWithFailureHandler(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
     WorkflowStorage.ensureWorkspace(filesDir);
     let shouldInstallConfigs = !WorkflowStorage.fileExists(WorkflowStorage.indexPath(filesDir));
+    let failureCount = 0;
     for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
       let config = DEFAULT_WORKFLOW_CONFIGS[i];
       try {
@@ -221,11 +254,15 @@ export class WorkflowStorage {
           WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, config.fileName), rawJson);
         }
       } catch (e) {
+        let err = e as Error;
+        failureCount++;
+        onFailure(config.rawFilePath, err);
       }
     }
+    return failureCount;
   }
 
-  private static readRawFileText(manager: resourceManager.ResourceManager, path: string): string {
+  private static readRawFileText(manager: RawWorkflowResourceReader, path: string): string {
     let bytes = manager.getRawFileContentSync(path);
     return util.TextDecoder.create('utf-8').decodeWithStream(bytes);
   }

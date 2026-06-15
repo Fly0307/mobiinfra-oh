@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
-import { WorkflowStorage } from '../../utils/WorkflowStorage';
+import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
   WorkflowCondition,
@@ -153,7 +153,7 @@ export struct TaskPage {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     try {
-      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, ctx.resourceManager);
+      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
     } catch (e) {
     }
     this.reloadTasks();

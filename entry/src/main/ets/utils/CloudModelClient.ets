@@ -796,8 +796,18 @@ export class CloudModelClient {
   }
 
   private parseGalleryFieldJson(key: GalleryFieldKey, rawText: string): GalleryModelJson {
+    let raw = rawText.trim();
+    let rawParsed = this.tryParseGalleryFieldJson(raw);
+    if (rawParsed) {
+      return this.normalizeGalleryFieldJson(key, rawParsed);
+    }
     let cleaned = WorkflowJsonRepair.normalizeJsonText(rawText);
-    let candidates: string[] = [cleaned];
+    let cleanedParsed = this.tryParseGalleryFieldJson(cleaned);
+    if (cleanedParsed) {
+      AppLogger.info('CloudModel', 'gallery field json normalized key=' + key);
+      return this.normalizeGalleryFieldJson(key, cleanedParsed);
+    }
+    let candidates: string[] = [];
     let repairedCandidates = WorkflowJsonRepair.repairCandidates(cleaned);
     for (let i = 0; i < repairedCandidates.length; i++) {
       if (candidates.indexOf(repairedCandidates[i]) < 0) {
@@ -807,10 +817,8 @@ export class CloudModelClient {
     for (let i = 0; i < candidates.length; i++) {
       let parsed = this.tryParseGalleryFieldJson(candidates[i]);
       if (parsed) {
-        if (i > 0) {
-          AppLogger.info('CloudModel', 'gallery field json repaired key=' + key +
-            ' candidate=' + (i + 1).toString() + '/' + candidates.length.toString());
-        }
+        AppLogger.info('CloudModel', 'gallery field json repaired key=' + key +
+          ' candidate=' + (i + 1).toString() + '/' + candidates.length.toString());
         return this.normalizeGalleryFieldJson(key, parsed);
       }
     }

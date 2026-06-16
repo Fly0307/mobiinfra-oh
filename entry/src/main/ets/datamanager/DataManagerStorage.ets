@@ -1,7 +1,7 @@
-import { util } from '@kit.ArkTS';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from '../utils/JsonCompat';
+import { decodeUtf8Compat, encodeUtf8Compat } from '../utils/TextEncodingCompat';
 
 const EMPTY_SHA256: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
@@ -334,11 +334,11 @@ export class DataManagerStorage {
   }
 
   private decodeText(bytes: Uint8Array): string {
-    return util.TextDecoder.create('utf-8').decodeWithStream(bytes);
+    return decodeUtf8Compat(bytes);
   }
 
   private encodeText(value: string): Uint8Array {
-    return util.TextEncoder.create('utf-8').encodeInto(value);
+    return encodeUtf8Compat(value);
   }
 
   private stableFallbackHash(bytes: Uint8Array): string {

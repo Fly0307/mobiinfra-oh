@@ -2,7 +2,6 @@ import { inputMethod } from '@kit.IMEKit';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
-  chatModeSwitcherVisibleAfterScroll,
   chatModeLabel,
   chatModePlaceholder
 } from './ChatPageTypes';
@@ -16,7 +15,6 @@ export struct ChatPage {
   @Link cloudUserInput: string;
   @Link userInput: string;
   @State previewImagePath: string = '';
-  @State modeSwitcherVisible: boolean = true;
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
@@ -91,65 +89,77 @@ export struct ChatPage {
     return this.localThinking ? '本地模型正在生成...' : '';
   }
 
-  private isModeSwitcherShown(): boolean {
-    return this.messages.length === 0 || this.modeSwitcherVisible;
-  }
-
-  private updateModeSwitcherVisibility(yOffset: number): void {
-    if (this.messages.length === 0) {
-      this.modeSwitcherVisible = true;
-      return;
+  private compactModeLabel(mode: string): string {
+    if (mode === CHAT_MODE_LOCAL_INFERENCE) {
+      return '本地';
     }
-    this.modeSwitcherVisible = chatModeSwitcherVisibleAfterScroll(this.modeSwitcherVisible, yOffset);
+    return '云端';
   }
 
-  @Builder ModeChip(mode: string) {
-    Text(chatModeLabel(mode))
-      .fontSize(13)
+  @Builder ModeTopTab(mode: string) {
+    Text(this.compactModeLabel(mode))
+      .fontSize(12)
       .fontWeight(this.chatMode === mode ? FontWeight.Bold : FontWeight.Regular)
       .fontColor(this.chatMode === mode ? Color.White : '#5D6472')
-      .height(34)
-      .padding({ left: 14, right: 14 })
+      .width(46)
+      .height(28)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.chatMode === mode ? '#111827' : '#F4F6FA')
-      .borderRadius(17)
+      .borderRadius(14)
       .onClick(async () => {
         await this.onSwitchMode(mode);
       })
   }
 
+  @Builder ModeTopTabs() {
+    Row() {
+      this.ModeTopTab(CHAT_MODE_CLOUD_AGENT)
+      Blank()
+        .width(4)
+      this.ModeTopTab(CHAT_MODE_LOCAL_INFERENCE)
+    }
+    .height(32)
+    .padding({ left: 2, right: 2 })
+    .backgroundColor('#F4F6FA')
+    .borderRadius(16)
+  }
+
   @Builder PromptChip(text: string) {
-    Text(text)
-      .fontSize(14)
-      .fontColor('#232936')
-      .height(42)
-      .padding({ left: 16, right: 16 })
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .backgroundColor(Color.White)
-      .borderRadius(21)
-      .border({ width: 1, color: '#E7EAF0' })
-      .margin({ right: 10, bottom: 10 })
-      .onClick(() => {
-        this.setActiveInput(text);
-      })
+    Row() {
+      Text(text)
+        .fontSize(14)
+        .fontColor('#232936')
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .height(42)
+    .padding({ left: 16, right: 16 })
+    .backgroundColor(Color.White)
+    .borderRadius(22)
+    .border({ width: 1, color: '#E7EAF0' })
+    .margin({ bottom: 8 })
+    .onClick(() => {
+      this.setActiveInput(text);
+    })
   }
 
   @Builder WelcomeAvatarHero() {
     if (this.avatarForegroundUri.length > 0) {
       Row() {
         Image(this.avatarForegroundUri)
-          .width(128)
-          .height(160)
+          .width(177)
+          .height(221)
           .objectFit(ImageFit.Contain)
           .margin({ left: 6 })
         Blank()
           .layoutWeight(1)
       }
       .width('100%')
-      .height(168)
+      .height(176)
       .alignItems(VerticalAlign.Bottom)
-      .margin({ top: 18 })
+      .margin({ top: 0 })
     } else {
       Text('H')
         .fontSize(20)
@@ -164,54 +174,59 @@ export struct ChatPage {
   }
 
   @Builder EmptyWelcome() {
-    Column() {
-      if (this.avatarForegroundUri.length > 0) {
-        this.WelcomeAvatarHero()
-        Text('我是 MobiAgent')
-          .fontSize(34)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#D8D5EA')
-          .width('100%')
-          .margin({ top: 6 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      } else {
-        Row() {
+    Scroll() {
+      Column() {
+        if (this.avatarForegroundUri.length > 0) {
           this.WelcomeAvatarHero()
           Text('我是 MobiAgent')
-            .fontSize(34)
+            .fontSize(25)
             .fontWeight(FontWeight.Bold)
             .fontColor('#D8D5EA')
-            .margin({ left: 18 })
+            .width('100%')
+            .margin({ top: 2 })
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+        } else {
+          Row() {
+            this.WelcomeAvatarHero()
+            Text('我是 MobiAgent')
+              .fontSize(25)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#D8D5EA')
+              .margin({ left: 18 })
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+          .margin({ top: 46 })
+        }
+
+        Text('随时为你答疑、规划，也可以下发自动化任务')
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#9AA3B2')
+          .width('100%')
+          .margin({ top: 8 })
+          .maxLines(2)
+          .lineHeight(22)
+
+        Column() {
+          this.PromptChip('整理今天截图里的关键信息')
+          this.PromptChip('规划一个收集微信聊天记录的 workflow')
+          this.PromptChip('淘宝搜索耳机比价')
         }
         .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .margin({ top: 64 })
-      }
+        .margin({ top: 14 })
 
-      Text('随时为你答疑、规划，也可以下发自动化任务')
-        .fontSize(18)
-        .fontWeight(FontWeight.Medium)
-        .fontColor('#9AA3B2')
-        .width('100%')
-        .margin({ top: 22 })
-        .maxLines(2)
-
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.PromptChip('整理今天截图里的关键信息')
-        this.PromptChip('规划一个收集微信聊天记录的 workflow')
-        this.PromptChip('淘宝搜索耳机比价')
+        Blank()
+          .height(this.avatarForegroundUri.length > 0 ? 152 : 176)
       }
       .width('100%')
-      .margin({ top: 28 })
-
-      Blank()
-        .height(this.avatarForegroundUri.length > 0 ? 96 : 190)
     }
     .width('100%')
     .layoutWeight(1)
+    .scrollBar(BarState.Off)
   }
 
   @Builder ConversationPanel() {
@@ -223,7 +238,7 @@ export struct ChatPage {
         modeMark: this.isCloudMode() ? '云' : '本',
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
-        onScrollContent: (yOffset: number) => { this.updateModeSwitcherVisibility(yOffset); }
+        onScrollContent: (_yOffset: number) => {}
       })
     } else {
       Scroll() {
@@ -372,15 +387,16 @@ export struct ChatPage {
             })
           Row() {
             Text('MobiAgent')
-              .fontSize(24)
+              .fontSize(18)
               .fontWeight(FontWeight.Bold)
               .fontColor('#111827')
               .maxLines(1)
-            Text(chatModeLabel(this.chatMode))
-              .fontSize(12)
-              .fontColor('#6B7280')
-              .margin({ left: 8, top: 4 })
-              .maxLines(1)
+              .layoutWeight(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Row() {
+              this.ModeTopTabs()
+            }
+            .margin({ left: 6 })
           }
           .justifyContent(FlexAlign.Center)
           .layoutWeight(1)
@@ -396,20 +412,6 @@ export struct ChatPage {
         .padding({ left: 18, right: 18, top: 22 })
 
         Column() {
-          Column() {
-            Row() {
-              this.ModeChip(CHAT_MODE_CLOUD_AGENT)
-              this.ModeChip(CHAT_MODE_LOCAL_INFERENCE)
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.Center)
-            .margin({ top: 24 })
-          }
-          .width('100%')
-          .height(this.isModeSwitcherShown() ? 58 : 0)
-          .opacity(this.isModeSwitcherShown() ? 1 : 0)
-          .clip(true)
-
           if (this.hasConversationContent()) {
             this.ConversationPanel()
           } else {

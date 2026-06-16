@@ -5,7 +5,8 @@ import {
   chatComposerBarHeight,
   chatComposerTextAreaHeight,
   chatModeLabel,
-  chatModePlaceholder
+  chatModePlaceholder,
+  chatTimeGreeting
 } from './ChatPageTypes';
 import { ChatMessage, ChatSessionSummary } from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
@@ -61,6 +62,10 @@ export struct ChatPage {
 
   private composerTextAreaHeight(): number {
     return chatComposerTextAreaHeight(this.activeInput());
+  }
+
+  private welcomeGreeting(): string {
+    return chatTimeGreeting(new Date().getHours());
   }
 
   private setActiveInput(value: string): void {
@@ -235,7 +240,7 @@ export struct ChatPage {
       Column() {
         this.WelcomeAvatarHero()
 
-        Text('下午好')
+        Text(this.welcomeGreeting())
           .fontSize(28)
           .fontWeight(FontWeight.Bold)
           .fontColor('#111827')
@@ -528,7 +533,7 @@ export struct ChatPage {
         }
         .width('100%')
         .height(this.composerBarHeight())
-        .alignItems(VerticalAlign.Bottom)
+        .alignItems(VerticalAlign.Center)
         .padding({ left: 12, right: 12 })
         .backgroundColor(Color.White)
         .borderRadius(26)

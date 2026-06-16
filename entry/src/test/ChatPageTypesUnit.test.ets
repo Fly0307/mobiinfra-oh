@@ -9,6 +9,7 @@ import {
   chatModeLabel,
   chatModePlaceholder,
   chatModeSwitcherVisibleAfterScroll,
+  chatTimeGreeting,
   cloudAgentDisplayText,
   hasCloudAgentDisplayOutput,
   isSupportedChatMode
@@ -53,6 +54,14 @@ export default function chatPageTypesUnitTest() {
       expect(chatComposerBarHeight('第一行\n第二行')).assertEqual(80);
       expect(chatComposerLineCount('请帮我整理今天截图里的关键信息，并按照时间线、待办事项、需要继续跟进的问题分别输出')).assertEqual(4);
       expect(chatComposerBarHeight('请帮我整理今天截图里的关键信息，并按照时间线、待办事项、需要继续跟进的问题分别输出')).assertEqual(124);
+    });
+
+    it('usesTimeAwareWelcomeGreeting', 0, () => {
+      expect(chatTimeGreeting(2)).assertEqual('夜深了');
+      expect(chatTimeGreeting(8)).assertEqual('早上好');
+      expect(chatTimeGreeting(12)).assertEqual('中午好');
+      expect(chatTimeGreeting(15)).assertEqual('下午好');
+      expect(chatTimeGreeting(21)).assertEqual('晚上好');
     });
 
     it('updatesModeSwitcherVisibilityByScrollDirection', 0, () => {

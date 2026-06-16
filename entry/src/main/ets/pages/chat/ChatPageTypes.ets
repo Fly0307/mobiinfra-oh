@@ -35,6 +35,22 @@ export function chatInputAfterAcceptedSend(currentInput: string, accepted: boole
   return accepted ? '' : currentInput;
 }
 
+export function chatTimeGreeting(hour: number): string {
+  if (hour >= 6 && hour < 11) {
+    return '早上好';
+  }
+  if (hour >= 11 && hour < 14) {
+    return '中午好';
+  }
+  if (hour >= 14 && hour < 18) {
+    return '下午好';
+  }
+  if (hour >= 18 && hour < 24) {
+    return '晚上好';
+  }
+  return '夜深了';
+}
+
 function chatComposerSegmentLineCount(segment: string, charsPerLine: number): number {
   if (segment.length <= 0) {
     return 1;

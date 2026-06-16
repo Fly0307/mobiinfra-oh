@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
+import { RawWorkflowResourceReader, WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
 import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
@@ -30,6 +30,19 @@ function findWeixinChatSummaryQuestion(steps: WorkflowStep[]): string {
     }
   }
   return '';
+}
+
+class FailingRawWorkflowResourceReader implements RawWorkflowResourceReader {
+  private requestedPaths: string[];
+
+  constructor(requestedPaths: string[]) {
+    this.requestedPaths = requestedPaths;
+  }
+
+  getRawFileContentSync(path: string): Uint8Array {
+    this.requestedPaths.push(path);
+    throw new Error('missing raw workflow resource: ' + path);
+  }
 }
 
 export default function workflowStorageUnitTest() {
@@ -163,6 +176,25 @@ export default function workflowStorageUnitTest() {
       let preserved = WorkflowStorage.mergeCodeDefinedDefaultTaskForTest(defaultTask, modifiedTask);
       expect(preserved.workflowJson).assertEqual(storedTask.workflowJson);
       expect(preserved.isUserModified).assertTrue();
+    });
+
+    it('defaultWorkflowResourceInstallReportsRawFileFailures', 0, () => {
+      let requestedPaths: string[] = [];
+      let failurePaths: string[] = [];
+      let failureMessages: string[] = [];
+      let reader: RawWorkflowResourceReader = new FailingRawWorkflowResourceReader(requestedPaths);
+
+      let failureCount = WorkflowStorage.installDefaultWorkflowResourcesForTest('/tmp/workflow-raw-install-failure',
+        reader, (rawFilePath: string, cause: Error) => {
+          failurePaths.push(rawFilePath);
+          failureMessages.push(cause.message);
+        });
+
+      expect(failureCount > 0).assertTrue();
+      expect(failurePaths.length).assertEqual(failureCount);
+      expect(failurePaths[0].startsWith('workflows/configs/')).assertTrue();
+      expect(failureMessages[0].indexOf(failurePaths[0]) >= 0).assertTrue();
+      expect(requestedPaths[0]).assertEqual(failurePaths[0]);
     });
   });
 }

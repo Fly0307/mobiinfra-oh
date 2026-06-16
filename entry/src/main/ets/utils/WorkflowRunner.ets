@@ -799,7 +799,9 @@ export class WorkflowRunner {
       output.structured_output = structuredOutput;
     }
     if (mode === 'summary') {
-      let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(response, structuredOutput));
+      let dailyLogText = this.dailySummaryLogText(response, structuredOutput);
+      let dailyLogPath = this.appendDailySummaryLog(dailyLogText);
+      output.response = dailyLogText;
       output.daily_log_path = dailyLogPath;
     }
     return output as Object as WorkflowJsonMap;
@@ -874,9 +876,10 @@ export class WorkflowRunner {
       }
       if (result.ok) {
         this.log('VLM QA deferred response (' + result.actual_id + '):\n' + result.response);
-        let dailyLogPath = this.appendDailySummaryLog(this.summaryLogText(result.response));
+        let dailyLogText = this.dailySummaryLogText(result.response);
+        let dailyLogPath = this.appendDailySummaryLog(dailyLogText);
         if (dailyLogPath.length > 0) {
-          this.updateDeferredSummaryOutput(result.actual_id, result.response, dailyLogPath);
+          this.updateDeferredSummaryOutput(result.actual_id, dailyLogText, dailyLogPath);
           this.writeRunSummary('running');
         } else {
           let error = 'empty daily-log path after VLM summary';
@@ -1216,7 +1219,7 @@ export class WorkflowRunner {
   }
 
   private appendDailySummaryLog(summaryText: string): string {
-    let text = this.dateContext.normalizeDailyLogText(summaryText.trim());
+    let text = summaryText.trim();
     if (text.length === 0) {
       return '';
     }
@@ -1274,6 +1277,10 @@ export class WorkflowRunner {
       return jsonSummary;
     }
     return response.trim();
+  }
+
+  private dailySummaryLogText(response: string, structuredOutput?: WorkflowJsonMap): string {
+    return this.dateContext.normalizeDailyLogText(this.summaryLogText(response, structuredOutput).trim());
   }
 
   private structuredSummaryText(output?: WorkflowJsonMap): string {

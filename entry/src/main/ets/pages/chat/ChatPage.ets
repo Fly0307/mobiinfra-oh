@@ -204,15 +204,15 @@ export struct ChatPage {
     if (this.avatarForegroundUri.length > 0) {
       Row() {
         Image(this.avatarForegroundUri)
-          .width(177)
-          .height(221)
+          .width(120)
+          .height(150)
           .objectFit(ImageFit.Contain)
           .margin({ left: 8 })
         Blank()
           .layoutWeight(1)
       }
       .width('100%')
-      .height(200)
+      .height(180)
       .alignItems(VerticalAlign.Bottom)
       .margin({ top: 0 })
     } else {

@@ -5,9 +5,16 @@ import { DataManagerPaths } from '../DataManagerPaths';
 import { DataManagerStorage } from '../DataManagerStorage';
 import { dataManagerWarn } from '../DataManagerLog';
 import { AvatarStorage } from './AvatarStorage';
+import {
+  AvatarAlphaCropBounds,
+  AvatarCroppedRgba,
+  cropRgbaToAlphaBounds,
+  findAlphaCropBounds
+} from './AvatarForegroundCrop';
 import { avatarErrorMessage } from './AvatarTypes';
 
 const AVATAR_FOREGROUND_SEGMENT_MAX_COUNT: number = 1;
+const AVATAR_FOREGROUND_ALPHA_THRESHOLD: number = 0;
 
 export class AvatarForegroundService {
   private paths: DataManagerPaths;
@@ -54,6 +61,7 @@ export class AvatarForegroundService {
     let imageSource: image.ImageSource | null = null;
     let sourcePixelMap: image.PixelMap | null = null;
     let foregroundPixelMap: image.PixelMap | null = null;
+    let croppedForegroundPixelMap: image.PixelMap | null = null;
     let packer: image.ImagePacker | null = null;
     try {
       imageFile = await fileIo.open(sourcePath, fileIo.OpenMode.READ_ONLY);
@@ -78,9 +86,11 @@ export class AvatarForegroundService {
         return '';
       }
 
+      croppedForegroundPixelMap = await this.cropForegroundAlphaBounds(foregroundPixelMap);
+      let pngPixelMap: image.PixelMap = croppedForegroundPixelMap === null ? foregroundPixelMap : croppedForegroundPixelMap;
       // 前景图是用于 UI 叠放的透明缓存，必须保存为 PNG，避免 JPEG 丢失 alpha 通道。
       packer = image.createImagePacker();
-      let data = await packer.packToData(foregroundPixelMap, {
+      let data = await packer.packToData(pngPixelMap, {
         format: 'image/png',
         quality: 100
       });
@@ -104,6 +114,13 @@ export class AvatarForegroundService {
         } catch (e) {
         }
       }
+      if (croppedForegroundPixelMap !== null && croppedForegroundPixelMap !== foregroundPixelMap &&
+        croppedForegroundPixelMap !== sourcePixelMap) {
+        try {
+          await croppedForegroundPixelMap.release();
+        } catch (e) {
+        }
+      }
       if (sourcePixelMap !== null) {
         try {
           await sourcePixelMap.release();
@@ -123,6 +140,42 @@ export class AvatarForegroundService {
         }
       }
       await this.release();
+    }
+  }
+
+  private async cropForegroundAlphaBounds(pixelMap: image.PixelMap): Promise<image.PixelMap | null> {
+    try {
+      let info: image.ImageInfo = await pixelMap.getImageInfo();
+      let width: number = info.size.width;
+      let height: number = info.size.height;
+      if (width <= 0 || height <= 0) {
+        return null;
+      }
+      let tightStride: number = width * 4;
+      let sourceStride: number = info.stride > tightStride ? info.stride : tightStride;
+      let buffer: ArrayBuffer = new ArrayBuffer(sourceStride * height);
+      await pixelMap.readPixelsToBuffer(buffer);
+      let pixels: Uint8Array = new Uint8Array(buffer);
+      let bounds: AvatarAlphaCropBounds = findAlphaCropBounds(pixels, width, height,
+        AVATAR_FOREGROUND_ALPHA_THRESHOLD, sourceStride);
+      if (bounds.isEmpty || (bounds.left === 0 && bounds.top === 0 && bounds.width === width && bounds.height === height)) {
+        return null;
+      }
+      let cropped: AvatarCroppedRgba = cropRgbaToAlphaBounds(pixels, width, bounds, sourceStride);
+      return await image.createPixelMap(cropped.buffer, {
+        size: {
+          width: cropped.width,
+          height: cropped.height
+        },
+        srcPixelFormat: image.PixelMapFormat.RGBA_8888,
+        pixelFormat: image.PixelMapFormat.RGBA_8888,
+        editable: true
+      });
+    } catch (e) {
+      dataManagerWarn('Avatar foreground crop skipped: ' +
+        avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+          'unknown foreground crop error'));
+      return null;
     }
   }
 

@@ -3,6 +3,8 @@ import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
   chatModeActionLabel,
+  chatComposerBarHeight,
+  chatComposerLineCount,
   chatInputAfterAcceptedSend,
   chatModeLabel,
   chatModePlaceholder,
@@ -42,6 +44,15 @@ export default function chatPageTypesUnitTest() {
     it('clearsDraftOnlyAfterAcceptedSend', 0, () => {
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', true)).assertEqual('');
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', false)).assertEqual('请问您做什么呢？');
+    });
+
+    it('expandsComposerHeightForMultiLineDrafts', 0, () => {
+      expect(chatComposerLineCount('短消息')).assertEqual(1);
+      expect(chatComposerBarHeight('短消息')).assertEqual(58);
+      expect(chatComposerLineCount('第一行\n第二行')).assertEqual(2);
+      expect(chatComposerBarHeight('第一行\n第二行')).assertEqual(80);
+      expect(chatComposerLineCount('请帮我整理今天截图里的关键信息，并按照时间线、待办事项、需要继续跟进的问题分别输出')).assertEqual(4);
+      expect(chatComposerBarHeight('请帮我整理今天截图里的关键信息，并按照时间线、待办事项、需要继续跟进的问题分别输出')).assertEqual(124);
     });
 
     it('updatesModeSwitcherVisibilityByScrollDirection', 0, () => {

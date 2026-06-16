@@ -2,6 +2,8 @@ import { inputMethod } from '@kit.IMEKit';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
+  chatComposerBarHeight,
+  chatComposerTextAreaHeight,
   chatModeLabel,
   chatModePlaceholder
 } from './ChatPageTypes';
@@ -51,6 +53,14 @@ export struct ChatPage {
 
   private activeInput(): string {
     return this.isCloudMode() ? this.cloudUserInput : this.userInput;
+  }
+
+  private composerBarHeight(): number {
+    return chatComposerBarHeight(this.activeInput());
+  }
+
+  private composerTextAreaHeight(): number {
+    return chatComposerTextAreaHeight(this.activeInput());
   }
 
   private setActiveInput(value: string): void {
@@ -124,24 +134,64 @@ export struct ChatPage {
     .borderRadius(16)
   }
 
-  @Builder PromptChip(text: string) {
+  @Builder WelcomeActionIcon(kind: string) {
+    // 欢迎态功能卡使用 ASCII 命名资源，避免在 ArkTS 中直接引用中文资源名。
+    Stack({ alignContent: Alignment.Center }) {
+      if (kind === 'image') {
+        Image($r('app.media.chat_card_image'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      } else if (kind === 'flow') {
+        Image($r('app.media.chat_card_flow'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      } else {
+        Image($r('app.media.chat_card_search'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      }
+    }
+    .width(38)
+    .height(38)
+    .backgroundColor('#F2F5FF')
+    .borderRadius(14)
+  }
+
+  @Builder WelcomeActionCard(kind: string, title: string, desc: string, task: string) {
     Row() {
-      Text(text)
-        .fontSize(14)
-        .fontColor('#232936')
-        .layoutWeight(1)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      this.WelcomeActionIcon(kind)
+      Column() {
+        Text(title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#111827')
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(desc)
+          .fontSize(11)
+          .fontColor('#7B8392')
+          .width('100%')
+          .margin({ top: 2 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
     }
     .width('100%')
-    .height(42)
-    .padding({ left: 16, right: 16 })
+    .height(58)
+    .padding({ left: 14, right: 14 })
     .backgroundColor(Color.White)
-    .borderRadius(22)
-    .border({ width: 1, color: '#E7EAF0' })
+    .borderRadius(16)
+    .shadow({ radius: 8, color: '#10000000', offsetX: 0, offsetY: 3 })
     .margin({ bottom: 8 })
     .onClick(() => {
-      this.setActiveInput(text);
+      this.setActiveInput(task);
     })
   }
 
@@ -152,77 +202,70 @@ export struct ChatPage {
           .width(177)
           .height(221)
           .objectFit(ImageFit.Contain)
-          .margin({ left: 6 })
+          .margin({ left: 8 })
         Blank()
           .layoutWeight(1)
       }
       .width('100%')
-      .height(176)
+      .height(200)
       .alignItems(VerticalAlign.Bottom)
       .margin({ top: 0 })
     } else {
-      Text('H')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .width(54)
-        .height(54)
-        .textAlign(TextAlign.Center)
-        .backgroundColor('#5968FF')
-        .borderRadius(18)
+      Row() {
+        Text('H')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+          .width(56)
+          .height(56)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#5968FF')
+          .borderRadius(18)
+        Blank()
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .height(118)
+      .alignItems(VerticalAlign.Bottom)
     }
   }
 
   @Builder EmptyWelcome() {
     Scroll() {
       Column() {
-        if (this.avatarForegroundUri.length > 0) {
-          this.WelcomeAvatarHero()
-          Text('我是 MobiAgent')
-            .fontSize(25)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#D8D5EA')
-            .width('100%')
-            .margin({ top: 2 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        } else {
-          Row() {
-            this.WelcomeAvatarHero()
-            Text('我是 MobiAgent')
-              .fontSize(25)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#D8D5EA')
-              .margin({ left: 18 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .margin({ top: 46 })
-        }
+        this.WelcomeAvatarHero()
 
-        Text('随时为你答疑、规划，也可以下发自动化任务')
+        Text('下午好')
+          .fontSize(28)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#111827')
+          .width('100%')
+          .margin({ top: 8 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text('我可以帮你整理信息、执行任务')
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#9AA3B2')
+          .fontColor('#6F7787')
           .width('100%')
           .margin({ top: 8 })
           .maxLines(2)
           .lineHeight(22)
 
         Column() {
-          this.PromptChip('整理今天截图里的关键信息')
-          this.PromptChip('规划一个收集微信聊天记录的 workflow')
-          this.PromptChip('淘宝搜索耳机比价')
+          this.WelcomeActionCard('image', '整理今天截图里的关键信息', '从图片和聊天里提取重点', '整理今天截图里的关键信息')
+          this.WelcomeActionCard('flow', '规划一个自动化 workflow', '拆解步骤并生成执行计划', '规划一个收集微信聊天记录的 workflow')
+          this.WelcomeActionCard('search', '淘宝搜索耳机比价', '帮你比较价格和参数', '淘宝搜索耳机比价')
         }
         .width('100%')
         .margin({ top: 14 })
 
         Blank()
-          .height(this.avatarForegroundUri.length > 0 ? 152 : 176)
+          .height(124)
       }
       .width('100%')
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .layoutWeight(1)
@@ -424,66 +467,73 @@ export struct ChatPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(Color.White)
+      .backgroundColor(this.hasConversationContent() ? Color.White : '#F4F8FF')
 
       Column() {
         Row() {
           Text('深度思考')
-            .fontSize(13)
+            .fontSize(12)
             .fontColor('#222222')
-            .height(38)
-            .padding({ left: 14, right: 14 })
+            .height(34)
+            .padding({ left: 13, right: 13 })
             .backgroundColor(Color.White)
-            .borderRadius(19)
+            .borderRadius(17)
             .border({ width: 1, color: '#E2E5EA' })
             .onClick(async () => { await this.runPrimaryAction(); })
           Text('下发任务')
-            .fontSize(13)
+            .fontSize(12)
             .fontColor('#222222')
-            .height(38)
-            .padding({ left: 14, right: 14 })
+            .height(34)
+            .padding({ left: 13, right: 13 })
             .backgroundColor(Color.White)
-            .borderRadius(19)
+            .borderRadius(17)
             .border({ width: 1, color: '#E2E5EA' })
             .margin({ left: 10 })
             .onClick(async () => { await this.runTaskAction(); })
         }
         .width('100%')
         .padding({ left: 24, right: 24 })
-        .margin({ bottom: 12 })
+        .margin({ bottom: 8 })
 
         Row() {
-          // Text('语')
-          //   .fontSize(18)
-          //   .fontWeight(FontWeight.Bold)
-          //   .fontColor('#111827')
-          //   .width(44)
-          //   .height(44)
-          //   .textAlign(TextAlign.Center)
-          //   .borderRadius(22)
-          //   .border({ width: 2, color: '#111827' })
-          TextInput({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
+          if (!this.hasConversationContent()) {
+            Text('+')
+              .fontSize(30)
+              .fontColor('#111827')
+              .width(40)
+              .height(40)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(Color.White)
+              .borderRadius(20)
+              .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
+              .onClick(async () => { await this.runTaskAction(); })
+          }
+          TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
-            .height(52)
-            .fontSize(16)
+            .height(this.composerTextAreaHeight())
+            .fontSize(15)
+            .lineHeight(20)
+            .fontColor('#4B5563')
             .backgroundColor('#00FFFFFF')
-            .padding({ left: 12, right: 12 })
+            .padding({ left: this.hasConversationContent() ? 12 : 14, right: 12, top: 8, bottom: 8 })
+            .margin({ left: this.hasConversationContent() ? 0 : 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
           Button(this.isBusy() ? '...' : '发送')
-            .width(72)
-            .height(44)
+            .width(68)
+            .height(40)
             .fontSize(14)
             .backgroundColor(this.isBusy() ? '#AEB7C8' : '#111827')
-            .borderRadius(22)
+            .borderRadius(20)
             .onClick(async () => { await this.runPrimaryAction(); })
         }
         .width('100%')
-        .height(68)
-        .padding({ left: 14, right: 14 })
+        .height(this.composerBarHeight())
+        .alignItems(VerticalAlign.Bottom)
+        .padding({ left: 12, right: 12 })
         .backgroundColor(Color.White)
-        .borderRadius(28)
-        .shadow({ radius: 18, color: '#22000000', offsetX: 0, offsetY: 6 })
-        .margin({ left: 20, right: 20, bottom: 28 })
+        .borderRadius(26)
+        .shadow({ radius: 14, color: '#20000000', offsetX: 0, offsetY: 5 })
+        .margin({ left: 20, right: 20, bottom: 22 })
       }
       .width('100%')
 

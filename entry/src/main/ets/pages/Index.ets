@@ -3155,20 +3155,41 @@ struct Index {
     this.debugImagePath = '';
   }
 
+  // 将 ASCII tab 资源名映射到静态 $r 引用，避免直接引用中文资源文件名。
+  private tabIconResource(icon: string): Resource {
+    if (icon === 'tab_home') {
+      return $r('app.media.tab_home');
+    }
+    if (icon === 'tab_summary') {
+      return $r('app.media.tab_summary');
+    }
+    if (icon === 'tab_chat') {
+      return $r('app.media.tab_chat');
+    }
+    if (icon === 'tab_task') {
+      return $r('app.media.tab_task');
+    }
+    if (icon === 'tab_settings') {
+      return $r('app.media.tab_settings');
+    }
+    return $r('app.media.tab_home');
+  }
+
   @Builder TabItem(icon: string, label: string, index: number) {
     Column() {
-      Text(icon)
-        .fontSize(13)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.currentTab === index ? Color.White : '#747B87')
+      Stack({ alignContent: Alignment.Center }) {
+        Image(this.tabIconResource(icon))
+          .width(21)
+          .height(21)
+          .objectFit(ImageFit.Contain)
+      }
         .width(32)
         .height(32)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(this.currentTab === index ? '#4F68FF' : '#00FFFFFF')
+        .backgroundColor(this.currentTab === index ? '#EEF0FF' : '#00FFFFFF')
         .borderRadius(16)
       Text(label)
         .fontSize(13)
-        .fontColor(this.currentTab === index ? '#4F68FF' : '#747B87')
+        .fontColor(this.currentTab === index ? '#5B5CE2' : '#747B87')
         .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Regular)
         .margin({ top: 2 })
         .maxLines(1)

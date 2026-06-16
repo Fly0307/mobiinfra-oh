@@ -22,18 +22,40 @@ export class WorkflowJsonRepair {
     let literalCase = WorkflowJsonRepair.repairJsonLiteralCasing(text);
     let unwrappedLiteralCase = WorkflowJsonRepair.repairJsonLiteralCasing(unwrapped);
     let numericArrayComma = WorkflowJsonRepair.repairNumberArrayCommas(text);
+    let cjkPunctuation = WorkflowJsonRepair.normalizeCjkJsonPunctuation(text);
+    let withoutParentheses = WorkflowJsonRepair.removeParentheses(text);
+    let cjkPunctuationWithoutParentheses = WorkflowJsonRepair.removeParentheses(cjkPunctuation);
+    let quotedKnownKeys = WorkflowJsonRepair.quoteKnownJsonKeys(text);
+    let singleQuoted = WorkflowJsonRepair.repairSingleQuotedJson(text);
+    let quotedArrayItems = WorkflowJsonRepair.quoteBareJsonArrayItems(text);
     let closed = WorkflowJsonRepair.closeTruncatedJson(text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, literalCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrappedLiteralCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, cjkPunctuation, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, withoutParentheses, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(withoutParentheses), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, cjkPunctuationWithoutParentheses, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(cjkPunctuationWithoutParentheses), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, quotedKnownKeys, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(quotedKnownKeys), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, singleQuoted, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(singleQuoted), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, quotedArrayItems, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.quoteBareJsonArrayItems(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonLiteralCasing(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(withoutParentheses), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(closed), text);
     return candidates;
   }
@@ -101,6 +123,47 @@ export class WorkflowJsonRepair {
 
   private static repairNumberArrayCommas(text: string): string {
     return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static normalizeCjkJsonPunctuation(text: string): string {
+    return text.replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/，/g, ',')
+      .replace(/：/g, ':');
+  }
+
+  private static removeParentheses(text: string): string {
+    return text.replace(/[()（）]/g, '');
+  }
+
+  private static quoteKnownJsonKeys(text: string): string {
+    return text.replace(/([{,]\s*)(title|category|summary|details|tags|importance)\s*:/g, '$1"$2":');
+  }
+
+  private static repairSingleQuotedJson(text: string): string {
+    return text.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+  }
+
+  private static quoteBareJsonArrayItems(text: string): string {
+    return text.replace(/\[([^\[\]{}"]*)\]/g, (match: string, body: string): string => {
+      if (body.indexOf(':') >= 0) {
+        return match;
+      }
+      let parts = body.split(/[,，、;；]/);
+      let quoted: string[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        let value = parts[i].trim();
+        if (value.length === 0) {
+          continue;
+        }
+        if (value === 'true' || value === 'false' || value === 'null' || !isNaN(Number(value))) {
+          quoted.push(value);
+        } else {
+          quoted.push('"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
+        }
+      }
+      return '[' + quoted.join(',') + ']';
+    });
   }
 
   private static repairJsonLiteralCasing(text: string): string {

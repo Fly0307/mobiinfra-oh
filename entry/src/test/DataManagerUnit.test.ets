@@ -9,13 +9,18 @@ import {
   parseDailyLogDocument,
   parseNumberedEntries,
   profileShortSummaryFromText,
+  selectRecentScopeRecords,
   sourceAppDisplayName,
   sourceDisplayName,
   weekdayLabelFromDate
 } from '../main/ets/datamanager/DataManagerUtils';
 import {
+  applyIncrementalCollectionGroupAssignments,
+  collectionGroupEventInputFingerprint,
+  collectionGroupSourceInputFingerprint,
   heuristicCollectionGroups,
-  normalizeCollectionGroups
+  normalizeCollectionGroups,
+  prepareIncrementalCollectionGroups
 } from '../main/ets/datamanager/CollectionGroupingService';
 import { GalleryExifUtils } from '../main/ets/utils/gallery/GalleryExifUtils';
 import {
@@ -51,6 +56,7 @@ import {
 import {
   AggregatedRecord,
   CandidateFact,
+  CollectionGroupAssignment,
   CollectionGroupState,
   HomeRecommendationsDocument,
   HomeRecommendationState,
@@ -142,6 +148,39 @@ function demoRecommendationState(id: string, completed: boolean): HomeRecommenda
   };
 }
 
+function demoAggregatedRecord(id: number, firstSeenDate: string, lastSeenDate: string, text: string): AggregatedRecord {
+  return {
+    record_id: id,
+    first_seen_date: firstSeenDate,
+    last_seen_date: lastSeenDate,
+    source_refs: ['2026-05-21/demo.md#' + String(id)],
+    source_dates: [firstSeenDate],
+    workflow_scene_ids: [1],
+    summary: text,
+    normalized_fact: text,
+    raw_excerpts: [text],
+    tags: [],
+    dedup_status: 'new',
+    model_notes: [],
+    dedup_text: text
+  };
+}
+
+function demoCandidateFact(eventDate: string, sourceDate: string, text: string): CandidateFact {
+  return {
+    summary: text,
+    normalized_fact: text,
+    event_date: eventDate,
+    tags: [],
+    model_notes: 'test',
+    raw_excerpt: text,
+    source_ref: sourceDate + '/demo.md#99',
+    source_date: sourceDate,
+    workflow_scene_id: 1,
+    dedup_text: text
+  };
+}
+
 function demoHomeDomain(domain: string, desc: string): HomeDomainViewModel {
   return {
     domain: domain,
@@ -212,6 +251,33 @@ function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
     map[event.event_id] = event;
   });
   return map;
+}
+
+function demoCollectionGroupState(id: string, title: string, events: IndexedEvent[]): CollectionGroupState {
+  let eventMap = demoEventMap(events);
+  let hashes = createStringMap();
+  let eventIds = events.map((event: IndexedEvent): string => {
+    hashes[event.event_id] = collectionGroupEventInputFingerprint(event);
+    return event.event_id;
+  });
+  let time = '';
+  events.forEach((event: IndexedEvent) => {
+    if (event.event_date > time) {
+      time = event.event_date;
+    }
+  });
+  return {
+    group_id: id,
+    title: title,
+    source: events.length > 0 ? events[0].sources[0] : '',
+    time: time,
+    meta: `${eventIds.length} 条`,
+    status: '已整理',
+    domain: events.length > 0 ? events[0].domains[0] : 'other',
+    event_ids: eventIds,
+    source_input_hash: collectionGroupSourceInputFingerprint(eventIds, eventMap),
+    event_input_hashes: hashes
+  };
 }
 
 function demoAvatarProfileDomainState(domain: string, displayName: string, shortSummary: string, summary: string, claims: string[]): ProfileDomainState {
@@ -467,6 +533,41 @@ export default function dataManagerUnitTest() {
       expect(match === null).assertTrue();
     });
 
+    it('selectRecentScopeRecordsUsesEventDateAndFirstSeenWindow', 0, () => {
+      let recent = demoAggregatedRecord(1, '2026-05-24', '2026-06-01', '近期订单');
+      let tooOldButTouched = demoAggregatedRecord(2, '2026-05-23', '2026-06-01', '很早之前的订单');
+      let future = demoAggregatedRecord(3, '2026-05-31', '2026-05-31', '未来记录');
+      let fact = demoCandidateFact('2026-05-30', '2026-06-01', '新增订单');
+      let scoped = selectRecentScopeRecords([recent, tooOldButTouched, future], fact);
+      expect(scoped.length).assertEqual(1);
+      expect(scoped[0].record_id).assertEqual(1);
+    });
+
+    it('selectRecentScopeRecordsDoesNotFallbackToRecentCount', 0, () => {
+      let oldRecord = demoAggregatedRecord(1, '2026-05-01', '2026-06-01', '很早之前的订单');
+      let fact = demoCandidateFact('2026-05-30', '2026-06-01', '新增订单');
+      let scoped = selectRecentScopeRecords([oldRecord], fact);
+      expect(scoped.length).assertEqual(0);
+    });
+
+    it('selectRecentScopeRecordsFallsBackToSourceDateWhenEventDateInvalid', 0, () => {
+      let sourceDateMatch = demoAggregatedRecord(1, '2026-06-01', '2026-06-01', '来源日期附近订单');
+      let eventDateOnlyMatch = demoAggregatedRecord(2, '2026-05-25', '2026-05-25', '无效事件日期附近订单');
+      let fact = demoCandidateFact('', '2026-06-01', '新增订单');
+      let scoped = selectRecentScopeRecords([sourceDateMatch, eventDateOnlyMatch], fact);
+      expect(scoped.length).assertEqual(1);
+      expect(scoped[0].record_id).assertEqual(1);
+    });
+
+    it('exactMatchCannotMergeOutsideRecentScope', 0, () => {
+      let oldRecord = demoAggregatedRecord(1, '2026-05-01', '2026-06-01', '同一条订单');
+      let fact = demoCandidateFact('2026-05-30', '2026-06-01', '同一条订单');
+      let scoped = selectRecentScopeRecords([oldRecord], fact);
+      let match = findExactExistingMatch(scoped, fact);
+      expect(scoped.length).assertEqual(0);
+      expect(match === null).assertTrue();
+    });
+
     it('normalizeCollectionGroupsValidatesIdsAndBackfills', 0, () => {
       let events = [
         demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐'),
@@ -481,7 +582,9 @@ export default function dataManagerUnitTest() {
         meta: '',
         status: '',
         domain: 'eat',
-        event_ids: ['e1', 'missing', 'e1', 'e2']
+        event_ids: ['e1', 'missing', 'e1', 'e2'],
+        source_input_hash: '',
+        event_input_hashes: createStringMap()
       };
       let groups = normalizeCollectionGroups('chat', '最近聊天', events, [candidate]);
       let ids: string[] = [];
@@ -508,9 +611,9 @@ export default function dataManagerUnitTest() {
         demoIndexedEvent('e3', '联系人丙围绕一个技术配置项和用户继续沟通。', '联系人丙', 'work', 'API')
       ];
       let candidates: CollectionGroupState[] = [
-        { group_id: 'raw-1', title: '12讨论', source: '联系人甲', time: '', meta: '', status: '', domain: 'work', event_ids: ['e1'] },
-        { group_id: 'raw-2', title: '截图讨论', source: '联系人乙', time: '', meta: '', status: '', domain: 'work', event_ids: ['e2'] },
-        { group_id: 'raw-3', title: 'API讨论', source: '联系人丙', time: '', meta: '', status: '', domain: 'work', event_ids: ['e3'] }
+        { group_id: 'raw-1', title: '12讨论', source: '联系人甲', time: '', meta: '', status: '', domain: 'work', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() },
+        { group_id: 'raw-2', title: '截图讨论', source: '联系人乙', time: '', meta: '', status: '', domain: 'work', event_ids: ['e2'], source_input_hash: '', event_input_hashes: createStringMap() },
+        { group_id: 'raw-3', title: 'API讨论', source: '联系人丙', time: '', meta: '', status: '', domain: 'work', event_ids: ['e3'], source_input_hash: '', event_input_hashes: createStringMap() }
       ];
       let groups = normalizeCollectionGroups('chat', '最近聊天', events, candidates);
       let titles = groups.map((group: CollectionGroupState) => group.title).join('|');
@@ -520,6 +623,125 @@ export default function dataManagerUnitTest() {
       expect(titles.indexOf('与联系人甲的对话') >= 0).assertTrue();
       expect(titles.indexOf('与联系人乙的对话') >= 0).assertTrue();
       expect(titles.indexOf('与联系人丙的对话') >= 0).assertTrue();
+    });
+
+    it('incrementalCollectionGroupsReusesOldGroupAndFallsBackForUnrelatedNewEvent', 0, () => {
+      let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
+      let e2 = demoIndexedEvent('e2', '微信里继续讨论晚餐安排', '微信聊天', 'eat', '晚餐');
+      let e3 = demoIndexedEvent('e3', '支付宝出现一条停车缴费通知', '支付宝', 'travel', '停车');
+      e3.event_date = '2026-06-20';
+      let previous = [demoCollectionGroupState('old-dinner', '晚餐计划', [e1, e2])];
+      let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, e2, e3], previous);
+      expect(plan.reusedGroups.length).assertEqual(1);
+      expect(plan.pendingEvents.length).assertEqual(1);
+      expect(plan.pendingEvents[0].event_id).assertEqual('e3');
+
+      let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2, e3], plan.reusedGroups, plan.pendingEvents, []);
+      let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
+      expect(oldGroup.title).assertEqual('晚餐计划');
+      expect(oldGroup.event_ids.length).assertEqual(2);
+      expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
+      expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
+      let newGroups = groups.filter((group: CollectionGroupState): boolean => group.group_id !== 'old-dinner');
+      expect(newGroups.length).assertEqual(1);
+      expect(newGroups[0].event_ids[0]).assertEqual('e3');
+    });
+
+    it('incrementalCollectionGroupsMarksChangedEventPending', 0, () => {
+      let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
+      let oldE2 = demoIndexedEvent('e2', '微信里继续讨论晚餐安排', '微信聊天', 'eat', '晚餐');
+      let changedE2 = demoIndexedEvent('e2', '微信里改成讨论周末出游路线', '微信聊天', 'travel', '出游');
+      let previous = [demoCollectionGroupState('old-dinner', '晚餐计划', [e1, oldE2])];
+      let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, changedE2], previous);
+      expect(plan.reusedGroups.length).assertEqual(1);
+      expect(plan.reusedGroups[0].event_ids.join('|')).assertEqual('e1');
+      expect(plan.pendingEvents.length).assertEqual(1);
+      expect(plan.pendingEvents[0].event_id).assertEqual('e2');
+    });
+
+    it('incrementalCollectionGroupsRemovesDeletedEventsAndDropsEmptyGroups', 0, () => {
+      let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
+      let e2 = demoIndexedEvent('e2', '微信里继续讨论晚餐安排', '微信聊天', 'eat', '晚餐');
+      let e3 = demoIndexedEvent('e3', '淘宝浏览运动鞋', '淘宝', 'wear', '运动鞋');
+      let previous = [
+        demoCollectionGroupState('old-dinner', '晚餐计划', [e1, e2]),
+        demoCollectionGroupState('old-shoes', '运动鞋记录', [e3])
+      ];
+      let plan = prepareIncrementalCollectionGroups('orders', '购物记录', [e1], previous);
+      expect(plan.reusedGroups.length).assertEqual(1);
+      expect(plan.reusedGroups[0].group_id).assertEqual('old-dinner');
+      expect(plan.reusedGroups[0].event_ids.join('|')).assertEqual('e1');
+      let groups = applyIncrementalCollectionGroupAssignments('orders', '购物记录', [e1], plan.reusedGroups, plan.pendingEvents, []);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].group_id).assertEqual('old-dinner');
+    });
+
+    it('incrementalCollectionGroupsAppendsAssignmentWithoutRenamingOldGroup', 0, () => {
+      let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
+      let e2 = demoIndexedEvent('e2', '微信里补充晚餐人数', '微信聊天', 'eat', '晚餐');
+      e2.event_date = '2026-05-30';
+      let previous = [demoCollectionGroupState('old-dinner', '稳定晚餐标题', [e1])];
+      let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, e2], previous);
+      let assignments: CollectionGroupAssignment[] = [{
+        event_id: 'e2',
+        group_id: 'old-dinner',
+        title: '模型新标题不应覆盖',
+        source: '微信聊天',
+        domain: 'eat'
+      }];
+      let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2], plan.reusedGroups, plan.pendingEvents, assignments);
+      let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
+      expect(oldGroup.title).assertEqual('稳定晚餐标题');
+      expect(oldGroup.event_ids.length).assertEqual(2);
+      expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
+      expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
+    });
+
+    it('incrementalCollectionGroupsRejectsAssignmentOutsideSevenDayWindow', 0, () => {
+      let e1 = demoIndexedEvent('e1', '微信里讨论晚餐计划', '微信聊天', 'eat', '晚餐');
+      let e2 = demoIndexedEvent('e2', '微信里讨论一个新的月底旅行计划', '微信聊天', 'travel', '旅行');
+      e2.event_date = '2026-06-20';
+      let previous = [demoCollectionGroupState('old-dinner', '稳定晚餐标题', [e1])];
+      let plan = prepareIncrementalCollectionGroups('chat', '最近聊天', [e1, e2], previous);
+      let assignments: CollectionGroupAssignment[] = [{
+        event_id: 'e2',
+        group_id: 'old-dinner',
+        title: '旅行计划',
+        source: '微信聊天',
+        domain: 'travel'
+      }];
+      let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2], plan.reusedGroups, plan.pendingEvents, assignments);
+      let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
+      expect(oldGroup.event_ids.length).assertEqual(1);
+      let newGroups = groups.filter((group: CollectionGroupState): boolean => group.group_id !== 'old-dinner');
+      expect(newGroups.length).assertEqual(1);
+      expect(newGroups[0].event_ids[0]).assertEqual('e2');
+    });
+
+    it('normalizeCollectionGroupsDoesNotCompactPastTwelveGroups', 0, () => {
+      let events: IndexedEvent[] = [];
+      let candidates: CollectionGroupState[] = [];
+      for (let index = 1; index <= 13; index++) {
+        let event = demoIndexedEvent('e' + String(index), '第' + String(index) + '条独立记录', '来源' + String(index), 'other', '主题' + String(index));
+        event.event_date = '2026-05-' + String(10 + index).padStart(2, '0');
+        events.push(event);
+        candidates.push({
+          group_id: 'raw-' + String(index),
+          title: '独立主题' + String(index),
+          source: '来源' + String(index),
+          time: '',
+          meta: '',
+          status: '',
+          domain: 'other',
+          event_ids: [event.event_id],
+          source_input_hash: '',
+          event_input_hashes: createStringMap()
+        });
+      }
+      let groups = normalizeCollectionGroups('notifications', '通知记录', events, candidates);
+      expect(groups.length).assertEqual(13);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('其他已整理记录') < 0).assertTrue();
     });
 
     it('indexQueryLimitZeroReturnsAll', 0, () => {

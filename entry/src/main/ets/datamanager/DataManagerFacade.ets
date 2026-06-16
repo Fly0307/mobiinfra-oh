@@ -544,7 +544,7 @@ export class DataManagerFacade {
         total_records: 0,
         month: '',
         recent_match_days: 7,
-        recent_match_max_records: 100
+        recent_match_max_records: 0
       },
       records: []
     });
@@ -578,7 +578,7 @@ export class DataManagerFacade {
           total_records: 0,
           month: '',
           recent_match_days: 7,
-          recent_match_max_records: 100
+          recent_match_max_records: 0
         },
         records: []
       });

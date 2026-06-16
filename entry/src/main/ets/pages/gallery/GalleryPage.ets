@@ -30,6 +30,7 @@ import {
   DEFAULT_GALLERY_MODEL,
   DEFAULT_GALLERY_MODEL_CONCURRENCY,
   DEFAULT_GALLERY_OCR_CONCURRENCY,
+  DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS,
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   registerGallerySettingsDefaults
@@ -49,7 +50,6 @@ import {
   GalleryScanSession
 } from '../../utils/gallery/GalleryTypes';
 import { GallerySearchHit, GallerySearchService } from '../../utils/gallery/GallerySearchService';
-
 const GALLERY_RESULT_PAGE_SIZE = 10;
 
 interface GalleryCoordinate {
@@ -120,6 +120,7 @@ struct GalleryPage {
   @StorageLink('galleryOcrConcurrency') galleryOcrConcurrency: string = DEFAULT_GALLERY_OCR_CONCURRENCY;
   @StorageLink('galleryModelConcurrency') galleryModelConcurrency: string = DEFAULT_GALLERY_MODEL_CONCURRENCY;
   @StorageLink('galleryEmbeddingConcurrency') galleryEmbeddingConcurrency: string = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
+  @StorageLink('galleryParallelFieldRequests') galleryParallelFieldRequests: string = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
   @StorageLink('galleryEmbeddingMode') galleryEmbeddingMode: string = DEFAULT_GALLERY_EMBEDDING_MODE;
   @StorageLink('galleryEmbeddingBaseUrl') galleryEmbeddingBaseUrl: string = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
   @StorageLink('galleryEmbeddingApiKey') galleryEmbeddingApiKey: string = DEFAULT_GALLERY_EMBEDDING_API_KEY;
@@ -172,6 +173,9 @@ struct GalleryPage {
     }
     if (this.galleryUseOcrKeywordFilter.trim().length === 0) {
       this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
+    }
+    if (this.galleryParallelFieldRequests.trim().length === 0) {
+      this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
     }
     if (this.galleryAmapWebKey.trim().length === 0) {
       this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
@@ -1378,6 +1382,10 @@ struct GalleryPage {
       this.galleryUseOcrKeywordFilter = value;
       return;
     }
+    if (fieldId === 11) {
+      this.galleryParallelFieldRequests = value;
+      return;
+    }
     if (fieldId === 10) {
       this.galleryAmapWebKey = value;
       return;
@@ -1488,8 +1496,9 @@ struct GalleryPage {
                   this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, 'https://api.example.com/v1', 0)
                   this.SettingInput('API Key', this.galleryApiKey, 'Bearer token 或服务密钥', 1)
                   this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
-                  this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
+                  this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
+                  this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)
                   this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码', 10)
                   this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
                   this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
@@ -1524,6 +1533,7 @@ struct GalleryPage {
                 this.galleryOcrConcurrency = DEFAULT_GALLERY_OCR_CONCURRENCY;
                 this.galleryModelConcurrency = DEFAULT_GALLERY_MODEL_CONCURRENCY;
                 this.galleryEmbeddingConcurrency = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
+                this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
                 this.galleryEmbeddingMode = DEFAULT_GALLERY_EMBEDDING_MODE;
                 this.galleryEmbeddingBaseUrl = DEFAULT_GALLERY_EMBEDDING_BASE_URL;
                 this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
@@ -1688,6 +1698,50 @@ struct GalleryPage {
       .margin({ right: 7, top: 7 })
   }
 
+  @Builder DetailBullet(detail: string) {
+    Text('· ' + detail)
+      .fontSize(12)
+      .fontColor('#4D5566')
+      .lineHeight(18)
+      .width('100%')
+      .margin({ top: 6 })
+  }
+
+  @Builder DetailBulletSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.detailAt(item, index).length > 0) {
+      this.DetailBullet(this.detailAt(item, index))
+    }
+  }
+
+  @Builder DetailBulletSlots(item: GalleryAnalysisResult) {
+    this.DetailBulletSlot(item, 0)
+    this.DetailBulletSlot(item, 1)
+    this.DetailBulletSlot(item, 2)
+    this.DetailBulletSlot(item, 3)
+    this.DetailBulletSlot(item, 4)
+    this.DetailBulletSlot(item, 5)
+    this.DetailBulletSlot(item, 6)
+    this.DetailBulletSlot(item, 7)
+  }
+
+  @Builder DetailTagSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.tagAt(item, index).length > 0) {
+      this.DetailTag(this.tagAt(item, index))
+    }
+  }
+
+  @Builder DetailTagSlots(item: GalleryAnalysisResult) {
+    Row() {
+      this.DetailTagSlot(item, 0)
+      this.DetailTagSlot(item, 1)
+      this.DetailTagSlot(item, 2)
+      this.DetailTagSlot(item, 3)
+      this.DetailTagSlot(item, 4)
+    }
+    .width('100%')
+    .margin({ top: 1 })
+  }
+
   @Builder ResultDetailPanel() {
     if (this.selectedDetailId.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -1771,25 +1825,12 @@ struct GalleryPage {
 
                 if (this.resultDetails(item).length > 0) {
                   this.DetailSectionTitle('分析明细')
-                  ForEach(this.resultDetails(item), (detail: string) => {
-                    Text('· ' + detail)
-                      .fontSize(12)
-                      .fontColor('#4D5566')
-                      .lineHeight(18)
-                      .width('100%')
-                      .margin({ top: 6 })
-                  }, (detail: string, index: number) => item.id + '_detail_' + index.toString())
+                  this.DetailBulletSlots(item)
                 }
 
                 if (this.resultTags(item).length > 0) {
                   this.DetailSectionTitle('标签')
-                  Row() {
-                    ForEach(this.resultTags(item), (tag: string) => {
-                      this.DetailTag(tag)
-                    }, (tag: string, index: number) => item.id + '_tag_' + index.toString())
-                  }
-                  .width('100%')
-                  .margin({ top: 1 })
+                  this.DetailTagSlots(item)
                 }
 
                 if (item.ocrText && item.ocrText.length > 0) {
@@ -2007,7 +2048,12 @@ struct GalleryPage {
   }
 
   private hasAnyDisplayTag(item: GalleryAnalysisResult): boolean {
-    return this.tagAt(item, 0).length > 0 || this.tagAt(item, 1).length > 0 || this.tagAt(item, 2).length > 0;
+    for (let i = 0; i < 3; i++) {
+      if (this.tagAt(item, i).length > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private detailAt(item: GalleryAnalysisResult, index: number): string {
@@ -2022,7 +2068,12 @@ struct GalleryPage {
   }
 
   private hasAnyDisplayDetail(item: GalleryAnalysisResult): boolean {
-    return this.detailAt(item, 0).length > 0 || this.detailAt(item, 1).length > 0 || this.detailAt(item, 2).length > 0;
+    for (let i = 0; i < 8; i++) {
+      if (this.detailAt(item, i).length > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private selectedDetailItems(): GalleryAnalysisResult[] {
@@ -2072,6 +2123,44 @@ struct GalleryPage {
       .margin({ right: 6, top: 6 })
   }
 
+  @Builder InsightDetailSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.detailAt(item, index).length > 0) {
+      Text('· ' + this.detailAt(item, index))
+        .fontSize(11)
+        .fontColor('#667085')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ top: index === 0 ? 0 : 2 })
+    }
+  }
+
+  @Builder InsightDetailSlots(item: GalleryAnalysisResult) {
+    Column() {
+      this.InsightDetailSlot(item, 0)
+      this.InsightDetailSlot(item, 1)
+      this.InsightDetailSlot(item, 2)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .margin({ top: 6 })
+  }
+
+  @Builder InsightTagSlot(item: GalleryAnalysisResult, index: number) {
+    if (this.tagAt(item, index).length > 0) {
+      this.TagChip(this.tagAt(item, index))
+    }
+  }
+
+  @Builder InsightTagSlots(item: GalleryAnalysisResult) {
+    Row() {
+      this.InsightTagSlot(item, 0)
+      this.InsightTagSlot(item, 1)
+      this.InsightTagSlot(item, 2)
+    }
+    .width('100%')
+    .height(24)
+  }
+
   @Builder InsightCard(item: GalleryAnalysisResult) {
     Row() {
       Image(this.previewUri(item))
@@ -2102,35 +2191,10 @@ struct GalleryPage {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.hasAnyDisplayDetail(item)) {
-          Column() {
-            if (this.detailAt(item, 0).length > 0) {
-              Text('· ' + this.detailAt(item, 0)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-            if (this.detailAt(item, 1).length > 0) {
-              Text('· ' + this.detailAt(item, 1)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 2 })
-            }
-            if (this.detailAt(item, 2).length > 0) {
-              Text('· ' + this.detailAt(item, 2)).fontSize(11).fontColor('#667085').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 2 })
-            }
-          }
-          .alignItems(HorizontalAlign.Start)
-          .width('100%')
-          .margin({ top: 6 })
+          this.InsightDetailSlots(item)
         }
         if (this.hasAnyDisplayTag(item)) {
-          Row() {
-            if (this.tagAt(item, 0).length > 0) {
-              this.TagChip(this.tagAt(item, 0))
-            }
-            if (this.tagAt(item, 1).length > 0) {
-              this.TagChip(this.tagAt(item, 1))
-            }
-            if (this.tagAt(item, 2).length > 0) {
-              this.TagChip(this.tagAt(item, 2))
-            }
-          }
-          .width('100%')
-          .height(24)
+          this.InsightTagSlots(item)
         }
         Row() {
           Text(this.resultTime(item))
@@ -2168,6 +2232,7 @@ struct GalleryPage {
       ocrConcurrency: parseInt(this.galleryOcrConcurrency),
       modelConcurrency: parseInt(this.galleryModelConcurrency),
       embeddingConcurrency: parseInt(this.galleryEmbeddingConcurrency),
+      parallelFieldRequests: this.galleryParallelFieldRequests === 'true',
       embeddingMode: this.galleryEmbeddingMode === 'remote' ? 'remote' : 'huawei_local',
       embeddingBaseUrl: this.galleryEmbeddingBaseUrl.trim().length > 0 ? this.galleryEmbeddingBaseUrl.trim() : DEFAULT_GALLERY_EMBEDDING_BASE_URL,
       embeddingApiKey: this.galleryEmbeddingApiKey.trim(),
@@ -2675,7 +2740,6 @@ struct GalleryPage {
   private persistLocationToResult(item: GalleryAnalysisResult, record: GalleryLocationCacheRecord): void {
     item.location = record;
     let normalized = GalleryStorage.writeResult(this.filesDir, item);
-    GalleryStorage.rebuildDaily(this.filesDir, normalized.date);
     this.mergeResult(normalized);
     this.locationResolveRevision += 1;
   }

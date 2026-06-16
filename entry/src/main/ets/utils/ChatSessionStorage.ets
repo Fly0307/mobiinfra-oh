@@ -1,6 +1,6 @@
+import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
-import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
   ChatMessage,
   ChatSessionIndex,
@@ -89,14 +89,14 @@ export class ChatSessionStorage {
       let stat = fs.statSync(path);
       let buf = new ArrayBuffer(stat.size);
       fs.readSync(file.fd, buf);
-      return decodeUtf8Compat(new Uint8Array(buf));
+      return util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
     } finally {
       fs.closeSync(file);
     }
   }
 
   static writeText(path: string, content: string): void {
-    let encoded = encodeUtf8Compat(content);
+    let encoded = util.TextEncoder.create('utf-8').encodeInto(content);
     let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, encoded.buffer);

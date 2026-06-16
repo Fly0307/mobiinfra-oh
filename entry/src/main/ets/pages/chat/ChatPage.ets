@@ -28,6 +28,8 @@ export struct ChatPage {
   @Prop sessions: ChatSessionSummary[] = [];
   @Prop activeSessionId: string = '';
   @Prop messages: ChatMessage[] = [];
+  // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
+  @Prop avatarForegroundUri: string = '';
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
@@ -133,29 +135,61 @@ export struct ChatPage {
       })
   }
 
+  @Builder WelcomeAvatarHero() {
+    if (this.avatarForegroundUri.length > 0) {
+      Row() {
+        Image(this.avatarForegroundUri)
+          .width(128)
+          .height(160)
+          .objectFit(ImageFit.Contain)
+          .margin({ left: 6 })
+        Blank()
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .height(168)
+      .alignItems(VerticalAlign.Bottom)
+      .margin({ top: 18 })
+    } else {
+      Text('H')
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(54)
+        .height(54)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#5968FF')
+        .borderRadius(18)
+    }
+  }
+
   @Builder EmptyWelcome() {
     Column() {
-      Row() {
-        Text('H')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Color.White)
-          .width(54)
-          .height(54)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#5968FF')
-          .borderRadius(18)
+      if (this.avatarForegroundUri.length > 0) {
+        this.WelcomeAvatarHero()
         Text('我是 MobiAgent')
           .fontSize(34)
           .fontWeight(FontWeight.Bold)
           .fontColor('#D8D5EA')
-          .margin({ left: 18 })
+          .width('100%')
+          .margin({ top: 6 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+      } else {
+        Row() {
+          this.WelcomeAvatarHero()
+          Text('我是 MobiAgent')
+            .fontSize(34)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#D8D5EA')
+            .margin({ left: 18 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .margin({ top: 64 })
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      .margin({ top: 64 })
 
       Text('随时为你答疑、规划，也可以下发自动化任务')
         .fontSize(18)
@@ -174,7 +208,7 @@ export struct ChatPage {
       .margin({ top: 28 })
 
       Blank()
-        .height(190)
+        .height(this.avatarForegroundUri.length > 0 ? 96 : 190)
     }
     .width('100%')
     .layoutWeight(1)

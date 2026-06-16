@@ -46,7 +46,8 @@ import {
   AvatarGenerationMode,
   AvatarHomeViewModel,
   AvatarProviderConfig,
-  AvatarVersionViewModel
+  AvatarVersionViewModel,
+  avatarErrorMessage
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
@@ -233,6 +234,8 @@ struct Index {
   private modelScopeActiveHttpReq: http.HttpRequest | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
+  private avatarForegroundEnsuring: boolean = false;
+  private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
@@ -683,6 +686,7 @@ struct Index {
   private mergeHomeAvatarView(avatar: AvatarHomeViewModel): void {
     this.homeProfile = {
       avatarUri: avatar.avatarUri,
+      avatarForegroundUri: avatar.avatarForegroundUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -694,6 +698,34 @@ struct Index {
       recommendations: this.homeProfile.recommendations,
       empty: this.homeProfile.empty
     };
+  }
+
+  private ensureCurrentAvatarForegroundCache(): void {
+    let versionId = this.homeProfile.avatarVersionId;
+    if (this.dataManagerFacade === null || this.avatarForegroundEnsuring ||
+      versionId.length === 0 || this.homeProfile.avatarForegroundUri.length > 0 ||
+      this.avatarForegroundAttemptedVersionId === versionId) {
+      return;
+    }
+    let facade = this.dataManagerFacade;
+    this.avatarForegroundEnsuring = true;
+    facade.ensureCurrentAvatarForeground().then((avatar: AvatarHomeViewModel) => {
+      if (this.dataManagerFacade !== facade || this.homeProfile.avatarVersionId !== versionId ||
+        avatar.avatarVersionId !== versionId) {
+        this.avatarForegroundEnsuring = false;
+        return;
+      }
+      if (avatar.avatarForegroundUri.length > 0) {
+        this.avatarForegroundAttemptedVersionId = versionId;
+      }
+      this.mergeHomeAvatarView(avatar);
+      this.avatarVersions = facade.listAvatarVersions();
+      this.avatarForegroundEnsuring = false;
+    }).catch((err: Error | Object | string | number | boolean | null | undefined) => {
+      dataManagerWarn('ensureCurrentAvatarForegroundCache failed: ' +
+        avatarErrorMessage(err, 'unknown foreground error'));
+      this.avatarForegroundEnsuring = false;
+    });
   }
 
   private async confirmUnchangedAvatarRegeneration(): Promise<boolean> {
@@ -804,12 +836,13 @@ struct Index {
       showToastSafely('数字分身已生成', 1500);
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
-      let err = e as Error;
+      let message = avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+        '未知错误');
       this.reloadDataManagerViewModels();
-      dataManagerError('generateHomeAvatar failed: ' + err.message);
-      this.appendCloudLog('Avatar generation failed: ' + err.message);
-      showToastSafely('数字分身生成失败：' + err.message, 2200);
-      throw err;
+      dataManagerError('generateHomeAvatar failed: ' + message);
+      this.appendCloudLog('Avatar generation failed: ' + message);
+      showToastSafely('数字分身生成失败：' + message, 2200);
+      throw new Error(message);
     }
   }
 
@@ -834,6 +867,7 @@ struct Index {
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
     this.homeRecommendationViewDateKey = this.currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
+    this.ensureCurrentAvatarForegroundCache();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
@@ -3224,6 +3258,7 @@ struct Index {
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
             messages: this.activeChatMessages,
+            avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },

@@ -78,6 +78,7 @@ function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
   let avatar = createEmptyAvatarHomeViewModel();
   return {
     avatarUri: avatar.avatarUri,
+    avatarForegroundUri: avatar.avatarForegroundUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -89,6 +90,7 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
   let avatar = createHomeProfileAvatarDefaults();
   return {
     avatarUri: avatar.avatarUri,
+    avatarForegroundUri: avatar.avatarForegroundUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -599,6 +601,7 @@ export class DataManagerFacade {
     let avatar = this.avatarService.homeView(profile, completeness);
     return {
       avatarUri: avatar.avatarUri,
+      avatarForegroundUri: avatar.avatarForegroundUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -649,6 +652,10 @@ export class DataManagerFacade {
 
   async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
     return this.avatarService.generate(config, request);
+  }
+
+  async ensureCurrentAvatarForeground(): Promise<AvatarHomeViewModel> {
+    return await this.avatarService.ensureCurrentForeground();
   }
 
   listAvatarVersions(): AvatarVersionViewModel[] {

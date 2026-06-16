@@ -1,6 +1,7 @@
 import { router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
+import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
   DEFAULT_GALLERY_AMAP_WEB_KEY,
   DEFAULT_GALLERY_API_BASE_URL,
@@ -14,10 +15,12 @@ import {
   DEFAULT_GALLERY_MODEL,
   DEFAULT_GALLERY_MODEL_CONCURRENCY,
   DEFAULT_GALLERY_OCR_CONCURRENCY,
+  DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS,
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
+import { showToastSafely } from '../../utils/PromptSafe';
 import {
   isSettingsSectionSelected,
   normalizeSettingsSectionId,
@@ -38,15 +41,22 @@ export struct SettingsCenterPage {
   @Link threadNumInput: string;
   @Link backendTypeInput: string;
   @Link mllmBackendTypeInput: string;
-  @Prop output: string = '';
-  @Prop cloudOutput: string = '';
+  @Link output: string;
+  @Link cloudOutput: string;
+  @Link modelDownloadProgressVisible: boolean;
+  @Link modelDownloadProgressPercent: number;
+  @Link modelDownloadProgressText: string;
+  @Link modelDownloadProgressTitle: string;
   @Prop downloading: boolean = false;
   @Prop connected: boolean = false;
+  @Prop modelScopeDownloading: boolean = false;
+  @Prop modelScopePauseRequested: boolean = false;
   @Prop hdcAutoStatus: string = '';
   @Prop hdcAutoConnected: boolean = false;
   @Prop hdcAutoConnecting: boolean = false;
   @Prop hdcManualPairing: boolean = false;
   @Prop selectedModelVariant: string = '';
+  @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
@@ -65,6 +75,7 @@ export struct SettingsCenterPage {
   @StorageLink('galleryModel') galleryModel: string = DEFAULT_GALLERY_MODEL;
   @StorageLink('gallerySkipOcr') gallerySkipOcr: string = DEFAULT_GALLERY_SKIP_OCR;
   @StorageLink('galleryUseOcrKeywordFilter') galleryUseOcrKeywordFilter: string = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
+  @StorageLink('galleryParallelFieldRequests') galleryParallelFieldRequests: string = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
   @StorageLink('galleryOcrConcurrency') galleryOcrConcurrency: string = DEFAULT_GALLERY_OCR_CONCURRENCY;
   @StorageLink('galleryModelConcurrency') galleryModelConcurrency: string = DEFAULT_GALLERY_MODEL_CONCURRENCY;
   @StorageLink('galleryEmbeddingConcurrency') galleryEmbeddingConcurrency: string = DEFAULT_GALLERY_EMBEDDING_CONCURRENCY;
@@ -78,6 +89,8 @@ export struct SettingsCenterPage {
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
+  onDownloadModelScopeModel: () => Promise<void> = async () => {};
+  onPauseModelScopeDownload: () => void = () => {};
   onUpdateConfigThreadNum: () => void = () => {};
   onShowConfigJson: () => void = () => {};
   onDiscoverHdc: () => Promise<void> = async () => {};
@@ -263,6 +276,49 @@ export struct SettingsCenterPage {
     .margin({ top: 10 })
   }
 
+  @Builder ModelDownloadProgressPanel() {
+    if (this.modelDownloadProgressVisible) {
+      Column() {
+        Row() {
+          Text(this.modelDownloadProgressTitle.length > 0 ? this.modelDownloadProgressTitle : '模型下载进度')
+            .fontSize(12)
+            .fontColor('#6F7684')
+            .layoutWeight(1)
+          Text(Math.max(0, Math.min(100, this.modelDownloadProgressPercent)).toString() + '%')
+            .fontSize(12)
+            .fontColor('#4B8BFF')
+        }
+        .width('100%')
+
+        Progress({ value: Math.max(0, Math.min(100, this.modelDownloadProgressPercent)), total: 100, type: ProgressType.Linear })
+          .width('100%')
+          .height(8)
+          .color('#4B8BFF')
+          .backgroundColor('#DCE8FF')
+          .borderRadius(6)
+          .margin({ top: 8 })
+
+        Row() {
+          Blank()
+          Text(this.modelDownloadProgressText.length > 0 ? this.modelDownloadProgressText : '等待下载')
+            .fontSize(11)
+            .fontColor('#7B8290')
+            .textAlign(TextAlign.End)
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+        .margin({ top: 5 })
+      }
+      .width('100%')
+      .padding(12)
+      .backgroundColor('#F4F8FF')
+      .borderRadius(12)
+      .border({ width: 1, color: '#D9E5FF' })
+      .margin({ top: 10 })
+    }
+  }
+
   @Builder SettingsListItem(item: SettingsSectionItem) {
     Row() {
       Text(this.sectionInitial(item.id))
@@ -399,6 +455,8 @@ export struct SettingsCenterPage {
         (value: boolean) => { this.gallerySkipOcr = value ? 'true' : 'false'; })
       this.SettingToggle('OCR 关键词预筛', '自动分析时先用 OCR 关键词过滤图片', this.galleryUseOcrKeywordFilter === 'true',
         (value: boolean) => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; })
+      this.SettingToggle('字段级并发请求', '同一张图并发请求各分析字段，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true',
+        (value: boolean) => { this.galleryParallelFieldRequests = value ? 'true' : 'false'; })
       this.SettingInput('OCR 并发请求数', this.galleryOcrConcurrency, DEFAULT_GALLERY_OCR_CONCURRENCY,
         (value: string) => { this.galleryOcrConcurrency = value; })
       this.SettingInput('大模型并发请求数', this.galleryModelConcurrency, DEFAULT_GALLERY_MODEL_CONCURRENCY,
@@ -584,6 +642,43 @@ export struct SettingsCenterPage {
       }
       .width('100%')
       .margin({ top: 10 })
+
+      this.FieldLabel('ModelScope 仓库')
+      TextInput({ placeholder: 'modelscope仓库("用户名/模型名")', text: this.modelScopeMnnRepo })
+        .height(42)
+        .width('100%')
+        .fontSize(12)
+        .backgroundColor('#F2F5FC')
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => { this.modelScopeMnnRepo = value; })
+
+      Row() {
+        Button('从 ModelScope 下载')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor('#4B8BFF')
+          .borderRadius(12)
+          .enabled(!this.downloading)
+          .onClick(async () => {
+            showToastSafely('开始 ModelScope 下载');
+            await this.onDownloadModelScopeModel();
+          })
+        Button(this.modelScopePauseRequested ? '暂停中' : '暂停下载')
+          .height(40)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor(this.modelScopePauseRequested ? '#A9B0BE' : '#607D8B')
+          .borderRadius(12)
+          .margin({ left: 10 })
+          .enabled(this.modelScopeDownloading && !this.modelScopePauseRequested)
+          .onClick(() => { this.onPauseModelScopeDownload(); })
+      }
+      .width('100%')
+      .margin({ top: 10 })
+
+      this.ModelDownloadProgressPanel()
 
       Row() {
         Text('线程数')

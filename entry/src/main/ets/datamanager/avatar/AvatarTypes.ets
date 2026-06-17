@@ -1,9 +1,11 @@
 export type AvatarStatus = 'empty' | 'current' | 'stale' | 'generating' | 'failed';
 export type AvatarGenerationMode = 'text_to_image' | 'image_to_image';
 export type AvatarStringMap = Record<string, string>;
+export type AvatarErrorValue = Error | Object | string | number | boolean | null | undefined;
 
 export interface AvatarHomeViewModel {
   avatarUri: string;
+  avatarForegroundUri: string;
   avatarStatus: AvatarStatus;
   avatarUpdatedLabel: string;
   avatarActionLabel: string;
@@ -124,6 +126,7 @@ export interface AvatarProviderResult {
 export function createEmptyAvatarHomeViewModel(): AvatarHomeViewModel {
   return {
     avatarUri: '',
+    avatarForegroundUri: '',
     avatarStatus: 'empty',
     avatarUpdatedLabel: '',
     avatarActionLabel: '生成数字分身',
@@ -156,4 +159,16 @@ export function createDefaultAvatarGenerationParams(size: string, responseFormat
 
 export function createEmptyRawMetadata(): AvatarStringMap {
   return new Object() as AvatarStringMap;
+}
+
+export function avatarErrorMessage(value: AvatarErrorValue, fallback: string): string {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  if (value instanceof Error) {
+    let message = value.message.trim();
+    return message.length > 0 ? message : fallback;
+  }
+  let text = String(value).replace(/\s+/g, ' ').trim();
+  return text.length > 0 ? text : fallback;
 }

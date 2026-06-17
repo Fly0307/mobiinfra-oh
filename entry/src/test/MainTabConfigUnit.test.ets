@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { MAIN_TAB_ITEMS, MainTabIndex, centerTabIndex, mainTabLabel } from '../main/ets/pages/main/MainTabConfig';
+import { MAIN_TAB_ITEMS, MainTabIndex, centerTabIndex, mainTabIcon, mainTabLabel } from '../main/ets/pages/main/MainTabConfig';
 
 export default function mainTabConfigUnitTest() {
   describe('mainTabConfigUnitTest', () => {
@@ -16,6 +16,14 @@ export default function mainTabConfigUnitTest() {
       expect(centerTabIndex()).assertEqual(MainTabIndex.Chat);
       expect(mainTabLabel(MainTabIndex.Chat)).assertEqual('聊天');
       expect(mainTabLabel(MainTabIndex.Summary)).assertEqual('汇总');
+    });
+
+    it('exposesAsciiSemanticIconResources', 0, () => {
+      expect(mainTabIcon(MainTabIndex.Home)).assertEqual('tab_home');
+      expect(mainTabIcon(MainTabIndex.Summary)).assertEqual('tab_summary');
+      expect(mainTabIcon(MainTabIndex.Chat)).assertEqual('tab_chat');
+      expect(mainTabIcon(MainTabIndex.Task)).assertEqual('tab_task');
+      expect(mainTabIcon(MainTabIndex.Settings)).assertEqual('tab_settings');
     });
   });
 }

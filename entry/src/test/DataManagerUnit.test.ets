@@ -77,6 +77,7 @@ import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPrompt
 import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
 import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
 import {
+  avatarErrorMessage,
   createDefaultAvatarGenerationParams,
   createEmptyAvatarHomeViewModel
 } from '../main/ets/datamanager/avatar/AvatarTypes';
@@ -1032,10 +1033,18 @@ export default function dataManagerUnitTest() {
     it('avatarHomeViewModelDefaultsToStaticFallbackState', 0, () => {
       let avatar = createEmptyAvatarHomeViewModel();
       expect(avatar.avatarUri).assertEqual('');
+      expect(avatar.avatarForegroundUri).assertEqual('');
       expect(avatar.avatarStatus).assertEqual('empty');
       expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
       expect(avatar.avatarVersionId).assertEqual('');
       expect(avatar.avatarUpdatedLabel).assertEqual('');
+    });
+
+    it('avatarErrorMessageHandlesNullSystemErrors', 0, () => {
+      expect(avatarErrorMessage(null, 'fallback error')).assertEqual('fallback error');
+      expect(avatarErrorMessage(undefined, 'fallback error')).assertEqual('fallback error');
+      expect(avatarErrorMessage(new Error('real error'), 'fallback error')).assertEqual('real error');
+      expect(avatarErrorMessage('plain error', 'fallback error')).assertEqual('plain error');
     });
 
     it('dataManagerPathsExposeAvatarStorageRoots', 0, () => {
@@ -1153,6 +1162,63 @@ export default function dataManagerUnitTest() {
       expect(service.isCurrentProfileSnapshotUnchanged(profile, 100)).assertFalse();
     });
 
+    it('avatarServiceRecoversFailedStateWhenLatestVersionWasAlreadySaved', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-failed-state-recovery';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let profile = demoProfileStateForAvatar();
+      let promptBuilder = new AvatarPromptBuilder(storage);
+      let latestHash = service.previewProfileSnapshotHash(profile, 100);
+      let snapshot = promptBuilder.buildSnapshot(profile, 100);
+      avatarStorage.saveVersion({
+        version_id: 'v-orphan',
+        created_at: '2026-06-16T11:09:31',
+        image_path: 'assets/v-orphan.jpg',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: snapshot,
+        profile_snapshot_hash: latestHash,
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      let failedState = avatarStorage.emptyState();
+      failedState.status = 'failed';
+      failedState.current_version_id = '';
+      failedState.profile_snapshot_hash = '';
+      failedState.last_error_code = 'AVATAR_GENERATE_FAILED';
+      failedState.last_error_message = 'Cannot read property message of null';
+      failedState.updated_at = '2026-06-16T11:09:34';
+      avatarStorage.saveState(failedState);
+
+      let view = service.homeView(profile, 100);
+      let persistedState = avatarStorage.loadState();
+      expect(view.avatarStatus).assertEqual('current');
+      expect(view.avatarVersionId).assertEqual('v-orphan');
+      expect(view.avatarUri).assertEqual('file:///tmp/demo-avatar-failed-state-recovery/workflows/avatar/assets/v-orphan.jpg');
+      expect(persistedState.status).assertEqual('current');
+      expect(persistedState.current_version_id).assertEqual('v-orphan');
+      expect(persistedState.profile_snapshot_hash).assertEqual(latestHash);
+      expect(persistedState.last_error_message).assertEqual('');
+    });
+
     it('avatarGenerateRequestKeepsOriginalPhotoSourceInConsent', 0, () => {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);
@@ -1249,6 +1315,7 @@ export default function dataManagerUnitTest() {
         }
       });
       expect(view.avatarUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
+      expect(view.avatarForegroundUri).assertEqual('');
       expect(view.avatarActionLabel).assertEqual('数字分身已更新');
     });
 
@@ -1268,6 +1335,20 @@ export default function dataManagerUnitTest() {
       let relativePath = avatarStorage.saveAssetBase64('v2', 'AQID', 'jpeg');
       expect(relativePath).assertEqual('assets/v2.jpg');
       expect(avatarStorage.displayUri(relativePath)).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v2.jpg');
+    });
+
+    it('avatarStorageBuildsForegroundPngCachePathAndUri', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-foreground';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      expect(avatarStorage.foregroundAssetPath('v-main')).assertEqual('/tmp/demo-avatar-foreground/workflows/avatar/assets/v-main-foreground.png');
+      expect(avatarStorage.relativeAvatarForegroundPath('v-main')).assertEqual('assets/v-main-foreground.png');
+      expect(avatarStorage.foregroundExists('v-main')).assertFalse();
+      avatarStorage.saveForegroundPng('v-main', new Uint8Array([137, 80, 78, 71]));
+      expect(avatarStorage.foregroundExists('v-main')).assertTrue();
+      expect(avatarStorage.foregroundDisplayUri('v-main')).assertEqual('file:///tmp/demo-avatar-foreground/workflows/avatar/assets/v-main-foreground.png');
     });
 
     it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {
@@ -1352,6 +1433,7 @@ export default function dataManagerUnitTest() {
       expect(home.avatarActionLabel).assertEqual('生成数字分身');
       expect(home.avatarVersionId).assertEqual('');
       expect(home.avatarUpdatedLabel).assertEqual('');
+      expect(home.avatarForegroundUri).assertEqual('');
     });
   });
 }

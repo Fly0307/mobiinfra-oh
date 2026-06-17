@@ -392,7 +392,7 @@ def build_llm_messages(count: int, domains: list[str]) -> list[JsonMap]:
         f"请生成 {count} 条 mock daily-log 原始条目，领域限定为：{domain_text}。\n"
         "输出 JSON 格式：{\"entries\":[{\"domain\":\"takeout|shopping|chat|social|travel|life|entertainment\","
         "\"source_app\":\"应用名\",\"package_name\":\"包名\",\"date\":\"YYYY-MM-DD\",\"text\":\"自然语言页面摘要\"}]}。\n"
-        "要求：日期分布在 2026-06-05 到 2026-06-12；text 不要编号，不要 markdown；"
+        "要求：日期分布在 2026-06-10 到 2026-06-15；text 不要编号，不要 markdown；"
         "内容要覆盖订单、消费、聊天、内容浏览、出行或生活服务等可被后续分析拆分成事实的原始信息。"
     )
     return [

@@ -1,8 +1,10 @@
 import { DataManagerPaths } from '../DataManagerPaths';
 import { DataManagerStorage } from '../DataManagerStorage';
+import { dataManagerWarn } from '../DataManagerLog';
 import { ProfileState } from '../DataManagerTypes';
 import { nowIsoLocal } from '../DataManagerUtils';
 import { AvatarPromptBuilder } from './AvatarPromptBuilder';
+import { AvatarForegroundService } from './AvatarForegroundService';
 import { AvatarStorage } from './AvatarStorage';
 import { SeedreamAvatarProvider } from './SeedreamAvatarProvider';
 import {
@@ -15,16 +17,19 @@ import {
   AvatarProviderResult,
   AvatarState,
   AvatarVersionState,
-  AvatarVersionViewModel
+  AvatarVersionViewModel,
+  avatarErrorMessage
 } from './AvatarTypes';
 
 export class AvatarService {
   private avatarStorage: AvatarStorage;
+  private foregroundService: AvatarForegroundService;
   private promptBuilder: AvatarPromptBuilder;
   private provider: SeedreamAvatarProvider;
 
   constructor(paths: DataManagerPaths, storage: DataManagerStorage) {
     this.avatarStorage = new AvatarStorage(paths, storage);
+    this.foregroundService = new AvatarForegroundService(paths, storage, this.avatarStorage);
     this.promptBuilder = new AvatarPromptBuilder(storage);
     this.provider = new SeedreamAvatarProvider();
   }
@@ -36,8 +41,9 @@ export class AvatarService {
   homeView(profile: ProfileState, completeness: number): AvatarHomeViewModel {
     this.ensureReady();
     let state = this.avatarStorage.loadState();
+    let latestHash = profile.event_count > 0 ? this.previewProfileSnapshotHash(profile, completeness) : '';
+    state = this.recoverFailedStateFromLatestSavedVersion(state, latestHash);
     if (profile.event_count > 0 && state.current_version_id.length > 0) {
-      let latestHash = this.previewProfileSnapshotHash(profile, completeness);
       if (state.status === 'current' && latestHash !== state.profile_snapshot_hash) {
         state.status = 'stale';
         state.updated_at = nowIsoLocal();
@@ -46,6 +52,33 @@ export class AvatarService {
     }
     let currentVersion = this.avatarStorage.loadVersion(state.current_version_id);
     return this.avatarStorage.homeViewFromState(state, currentVersion);
+  }
+
+  private recoverFailedStateFromLatestSavedVersion(state: AvatarState, latestHash: string): AvatarState {
+    if (state.status !== 'failed' || latestHash.length === 0) {
+      return state;
+    }
+    let versions = this.avatarStorage.listVersions();
+    if (versions.length === 0) {
+      return state;
+    }
+    let latestVersion = versions[0];
+    if (latestVersion.version_id === state.current_version_id || latestVersion.image_path.length === 0 ||
+      latestVersion.profile_snapshot_hash !== latestHash) {
+      return state;
+    }
+    let recoveredState: AvatarState = {
+      current_version_id: latestVersion.version_id,
+      profile_snapshot_hash: latestVersion.profile_snapshot_hash,
+      status: 'current',
+      last_error_code: '',
+      last_error_message: '',
+      updated_at: latestVersion.created_at
+    };
+    // 兼容旧版本 bug：主图已写入历史版本后，派生前景抠图失败曾把状态误写为 failed。
+    this.avatarStorage.saveState(recoveredState);
+    dataManagerWarn('Avatar failed state recovered from latest saved version: ' + latestVersion.version_id);
+    return recoveredState;
   }
 
   previewProfileSnapshotHash(profile: ProfileState, completeness: number): string {
@@ -64,6 +97,19 @@ export class AvatarService {
   listVersionViewModels(): AvatarVersionViewModel[] {
     this.ensureReady();
     return this.avatarStorage.listVersionViewModels();
+  }
+
+  async ensureCurrentForeground(): Promise<AvatarHomeViewModel> {
+    this.ensureReady();
+    let state = this.avatarStorage.loadState();
+    let currentVersion = this.avatarStorage.loadVersion(state.current_version_id);
+    if (currentVersion !== null && currentVersion.image_path.length > 0 &&
+      !this.avatarStorage.foregroundExists(currentVersion.version_id)) {
+      await this.ensureForegroundBestEffort(currentVersion);
+    }
+    let latestState = this.avatarStorage.loadState();
+    let latestVersion = this.avatarStorage.loadVersion(latestState.current_version_id);
+    return this.avatarStorage.homeViewFromState(latestState, latestVersion);
   }
 
   buildGenerateRequest(profile: ProfileState, completeness: number, mode: AvatarGenerationMode,
@@ -148,19 +194,32 @@ export class AvatarService {
         updated_at: createdAt
       };
       this.avatarStorage.saveState(currentState);
+      await this.ensureForegroundBestEffort(version);
       return this.avatarStorage.homeViewFromState(currentState, version);
     } catch (e) {
-      let err = e as Error;
+      let message = avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+        'Avatar generation failed');
       let failedState: AvatarState = {
         current_version_id: previousState.current_version_id,
         profile_snapshot_hash: previousState.profile_snapshot_hash,
         status: 'failed',
         last_error_code: 'AVATAR_GENERATE_FAILED',
-        last_error_message: err.message,
+        last_error_message: message,
         updated_at: nowIsoLocal()
       };
       this.avatarStorage.saveState(failedState);
-      throw err;
+      throw new Error(message);
+    }
+  }
+
+  private async ensureForegroundBestEffort(version: AvatarVersionState): Promise<void> {
+    try {
+      // 前景图是由版本原图派生出的透明 PNG 缓存，生成失败不能反向影响数字分身主图状态。
+      await this.foregroundService.ensureForegroundForVersion(version.version_id, version.image_path);
+    } catch (e) {
+      dataManagerWarn('Avatar foreground best effort failed: ' +
+        avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+          'unknown foreground error'));
     }
   }
 

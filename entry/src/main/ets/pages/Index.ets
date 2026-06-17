@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
@@ -46,17 +47,19 @@ import {
   AvatarGenerationMode,
   AvatarHomeViewModel,
   AvatarProviderConfig,
-  AvatarVersionViewModel
+  AvatarVersionViewModel,
+  avatarErrorMessage
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
-import { WorkflowStorage } from '../utils/WorkflowStorage';
+import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
 import {
@@ -104,6 +107,12 @@ const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
 interface ServerFile {
   name: string;
   size: number;
+}
+
+interface ModelScopeFileTask {
+  path: string;
+  size: number;
+  sha256?: string;
 }
 
 interface HdcConnectRequest {
@@ -154,6 +163,7 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
+PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -200,8 +210,14 @@ struct Index {
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State downloading: boolean = false;
+  @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
   @State connected: boolean = false;
+  @State modelScopePauseRequested: boolean = false;
+  @State modelDownloadProgressVisible: boolean = false;
+  @State modelDownloadProgressPercent: number = 0;
+  @State modelDownloadProgressText: string = '';
+  @State modelDownloadProgressTitle: string = '';
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
@@ -215,6 +231,7 @@ struct Index {
   @State taskScene: number = 0;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
+  @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
@@ -280,7 +297,11 @@ struct Index {
   private serverFiles: ServerFile[] = [];
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
+  private modelScopeActiveHttpReq: http.HttpRequest | null = null;
+  private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
+  private avatarForegroundEnsuring: boolean = false;
+  private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
@@ -731,6 +752,7 @@ struct Index {
   private mergeHomeAvatarView(avatar: AvatarHomeViewModel): void {
     this.homeProfile = {
       avatarUri: avatar.avatarUri,
+      avatarForegroundUri: avatar.avatarForegroundUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -742,6 +764,34 @@ struct Index {
       recommendations: this.homeProfile.recommendations,
       empty: this.homeProfile.empty
     };
+  }
+
+  private ensureCurrentAvatarForegroundCache(): void {
+    let versionId = this.homeProfile.avatarVersionId;
+    if (this.dataManagerFacade === null || this.avatarForegroundEnsuring ||
+      versionId.length === 0 || this.homeProfile.avatarForegroundUri.length > 0 ||
+      this.avatarForegroundAttemptedVersionId === versionId) {
+      return;
+    }
+    let facade = this.dataManagerFacade;
+    this.avatarForegroundEnsuring = true;
+    facade.ensureCurrentAvatarForeground().then((avatar: AvatarHomeViewModel) => {
+      if (this.dataManagerFacade !== facade || this.homeProfile.avatarVersionId !== versionId ||
+        avatar.avatarVersionId !== versionId) {
+        this.avatarForegroundEnsuring = false;
+        return;
+      }
+      if (avatar.avatarForegroundUri.length > 0) {
+        this.avatarForegroundAttemptedVersionId = versionId;
+      }
+      this.mergeHomeAvatarView(avatar);
+      this.avatarVersions = facade.listAvatarVersions();
+      this.avatarForegroundEnsuring = false;
+    }).catch((err: Error | Object | string | number | boolean | null | undefined) => {
+      dataManagerWarn('ensureCurrentAvatarForegroundCache failed: ' +
+        avatarErrorMessage(err, 'unknown foreground error'));
+      this.avatarForegroundEnsuring = false;
+    });
   }
 
   private async confirmUnchangedAvatarRegeneration(): Promise<boolean> {
@@ -852,12 +902,13 @@ struct Index {
       showToastSafely('数字分身已生成', 1500);
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
-      let err = e as Error;
+      let message = avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+        '未知错误');
       this.reloadDataManagerViewModels();
-      dataManagerError('generateHomeAvatar failed: ' + err.message);
-      this.appendCloudLog('Avatar generation failed: ' + err.message);
-      showToastSafely('数字分身生成失败：' + err.message, 2200);
-      throw err;
+      dataManagerError('generateHomeAvatar failed: ' + message);
+      this.appendCloudLog('Avatar generation failed: ' + message);
+      showToastSafely('数字分身生成失败：' + message, 2200);
+      throw new Error(message);
     }
   }
 
@@ -882,6 +933,7 @@ struct Index {
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
     this.homeRecommendationViewDateKey = this.currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
+    this.ensureCurrentAvatarForegroundCache();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
@@ -1050,6 +1102,11 @@ struct Index {
     }
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    try {
+      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
+    } catch (e) {
+      AppLogger.errorCause('WorkflowStorage', 'install default workflow resources failed', e as Error);
+    }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
     try {
@@ -1225,6 +1282,85 @@ struct Index {
     if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}KB`;
     if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)}MB`;
     return `${(bytes / 1073741824).toFixed(2)}GB`;
+  }
+
+  private formatMegabytes(bytes: number): string {
+    return (Math.max(0, bytes) / 1048576).toFixed(1) + 'MB';
+  }
+
+  private formatDownloadSpeed(downloadedBytes: number): string {
+    let elapsedMs = new Date().getTime() - this.modelDownloadStartedAt;
+    if (downloadedBytes <= 0 || elapsedMs <= 0) {
+      return '速度计算中';
+    }
+    let bytesPerSecond = downloadedBytes * 1000 / elapsedMs;
+    if (bytesPerSecond < 1048576) {
+      return (bytesPerSecond / 1024).toFixed(1) + 'KB/s';
+    }
+    return (bytesPerSecond / 1048576).toFixed(1) + 'MB/s';
+  }
+
+  private formatRemainingTime(downloadedBytes: number, totalBytes: number): string {
+    if (downloadedBytes <= 0 || totalBytes <= 0 || downloadedBytes >= totalBytes) {
+      return downloadedBytes >= totalBytes && totalBytes > 0 ? '已完成' : '计算中';
+    }
+    let elapsedMs = new Date().getTime() - this.modelDownloadStartedAt;
+    if (elapsedMs <= 0) {
+      return '计算中';
+    }
+    let remainingMs = Math.floor(elapsedMs * (totalBytes - downloadedBytes) / downloadedBytes);
+    let seconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    if (seconds < 60) {
+      return seconds.toString() + '秒';
+    }
+    let minutes = Math.floor(seconds / 60);
+    let restSeconds = seconds % 60;
+    if (minutes < 60) {
+      return minutes.toString() + '分' + (restSeconds > 0 ? restSeconds.toString() + '秒' : '');
+    }
+    let hours = Math.floor(minutes / 60);
+    let restMinutes = minutes % 60;
+    return hours.toString() + '小时' + (restMinutes > 0 ? restMinutes.toString() + '分' : '');
+  }
+
+  private beginModelDownloadProgress(title: string, totalBytes: number): void {
+    this.modelDownloadStartedAt = new Date().getTime();
+    this.modelDownloadProgressVisible = true;
+    this.modelDownloadProgressTitle = title;
+    this.updateModelDownloadProgress(0, totalBytes, '计算中');
+  }
+
+  private updateModelDownloadProgress(downloadedBytes: number, totalBytes: number, status?: string): void {
+    let safeTotal = Math.max(0, totalBytes);
+    let safeDownloaded = Math.max(0, Math.min(Math.max(downloadedBytes, 0), safeTotal > 0 ? safeTotal : downloadedBytes));
+    this.modelDownloadProgressVisible = true;
+    this.modelDownloadProgressPercent = safeTotal > 0 ? Math.floor(safeDownloaded * 100 / safeTotal) : 0;
+    let speed = this.formatDownloadSpeed(safeDownloaded);
+    let suffix = status && status.length > 0 ? speed + '，' + status :
+      speed + '，剩余 ' + this.formatRemainingTime(safeDownloaded, safeTotal);
+    this.modelDownloadProgressText = '已下载 ' + this.formatMegabytes(safeDownloaded) + ' / ' +
+      this.formatMegabytes(safeTotal) + '（' + suffix + '）';
+  }
+
+  private updateModelDownloadMessage(message: string): void {
+    this.modelDownloadProgressVisible = true;
+    this.modelDownloadProgressText = message;
+  }
+
+  private async showModelScopeVerifyingFile(downloadedBytes: number, totalBytes: number, path: string): Promise<void> {
+    this.updateModelDownloadProgress(downloadedBytes, totalBytes, '校验文件中: ' + path);
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        resolve();
+      }, 0);
+    });
+  }
+
+  private errorMessage(err: Object): string {
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return String(err);
   }
 
   clearScreenshots() {
@@ -1634,18 +1770,15 @@ struct Index {
     try {
       let st = fs.statSync(savePath);
       if (st.size === file.size) {
-        this.output = `[${index + 1}/${fileCount}] ${file.name}\n` +
-          `已存在 (${this.formatSize(st.size)})，跳过\n` +
-          `总进度: ${this.formatSize(completedBytes + file.size)} / ${this.formatSize(this.totalBytesAll)}`;
+        this.updateModelDownloadProgress(completedBytes + file.size, this.totalBytesAll, '跳过已存在文件');
         return Promise.resolve(file.size);
       }
     } catch {
       // not exists
     }
 
-    this.output = `[${index + 1}/${fileCount}] 连接: ${file.name}`;
+    this.updateModelDownloadProgress(completedBytes, this.totalBytesAll, '连接 ' + file.name);
     let self = this;
-    let idx = index;
     let completed = completedBytes;
 
     return new Promise<number>((resolve) => {
@@ -1659,7 +1792,7 @@ struct Index {
         fileHandle = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY |
         fs.OpenMode.TRUNC);
       } catch {
-        self.output = `[${idx + 1}/${fileCount}] 创建文件失败: ${file.name}`;
+        self.updateModelDownloadMessage('创建文件失败: ' + file.name);
         httpReq.destroy();
         resolve(-1);
         return;
@@ -1691,21 +1824,14 @@ struct Index {
       // Subscribe: download progress
       httpReq.on('dataReceiveProgress', (data: http.DataReceiveProgressInfo) => {
         if (failed) return;
-        let filePct = data.totalSize > 0 ? Math.floor(data.receiveSize * 100 / data.totalSize)
-          : 0;
         let overallRecv = completed + data.receiveSize;
-        let overallPct = self.totalBytesAll > 0
-          ? Math.floor(overallRecv * 100 / self.totalBytesAll) : 0;
-        self.output =
-          `[${idx + 1}/${fileCount}] ${file.name}\n` +
-            `文件: ${self.formatSize(data.receiveSize)} / ${self.formatSize(data.totalSize)} ${filePct}%\n` +
-            `总量: ${self.formatSize(overallRecv)} / ${self.formatSize(self.totalBytesAll)} ${overallPct}%`;
+        self.updateModelDownloadProgress(overallRecv, self.totalBytesAll);
       });
 
       // Subscribe: data receive complete
       httpReq.on('dataEnd', () => {
         if (failed) {
-          self.output = `[${idx + 1}/${fileCount}] ${file.name} 写入失败`;
+          self.updateModelDownloadMessage(file.name + ' 写入失败');
           finish(-1);
         } else {
           let fileSize = 0;
@@ -1713,7 +1839,7 @@ struct Index {
             fs.closeSync(fileHandle);
             fileSize = fs.statSync(savePath).size;
           } catch {}
-          self.output = `[${idx + 1}/${fileCount}] ${file.name} 完成 (${self.formatSize(fileSize)})`;
+          self.updateModelDownloadProgress(completed + fileSize, self.totalBytesAll);
           if (resolved) return;
           resolved = true;
           httpReq.off('dataReceive');
@@ -1733,13 +1859,13 @@ struct Index {
       httpReq.requestInStream(url, streamOptions).then((code: number) => {
         if (code !== 200) {
           failed = true;
-          self.output = `[${idx + 1}/${fileCount}] ${file.name} HTTP ${code}`;
+          self.updateModelDownloadMessage(file.name + ' HTTP ' + code.toString());
           finish(-1);
         }
         // if 200, wait for dataEnd
       }).catch((err: BusinessError) => {
         failed = true;
-        self.output = `[${idx + 1}/${fileCount}] ${file.name} 错误: code=${err.code} ${err.message}`;
+        self.updateModelDownloadMessage(file.name + ' 错误: code=' + err.code + ' ' + err.message);
         finish(-1);
       });
     });
@@ -1748,11 +1874,12 @@ struct Index {
   // ========== Step 3: Download all files ==========
   async downloadAll() {
     if (this.serverFiles.length === 0) {
-      this.output = '请先检查服务器连接';
+      this.updateModelDownloadMessage('请先检查服务器连接');
       return;
     }
     this.downloading = true;
     try { fs.mkdirSync(this.modelDir); } catch {}
+    this.beginModelDownloadProgress('模型下载进度', this.totalBytesAll);
 
     let completedBytes = 0;
     let failed: string[] = [];
@@ -1768,11 +1895,541 @@ struct Index {
     }
 
     if (failed.length === 0) {
-      this.output = `全部下载完成!\n模型总大小: ${this.formatSize(completedBytes)}\n\n切换到聊天页的本地推理模式后会自动加载模型`;
+      this.updateModelDownloadProgress(completedBytes, this.totalBytesAll, '已完成');
     } else {
-      this.output = `${failed.length} 个失败: ${failed.join(', ')}\n已下载: ${this.formatSize(completedBytes)}\n再次点击可继续，已有文件会跳过。`;
+      this.updateModelDownloadProgress(completedBytes, this.totalBytesAll,
+        failed.length.toString() + ' 个失败，再次点击可继续');
     }
     this.downloading = false;
+  }
+
+  private modelScopeRepoParts(): string[] {
+    let repo = this.modelScopeMnnRepo.trim().replace(/^ModelScope\//, '');
+    let parts = repo.split('/');
+    if (parts.length !== 2 || parts[0].trim().length === 0 || parts[1].trim().length === 0) {
+      return [];
+    }
+    return [parts[0].trim(), parts[1].trim()];
+  }
+
+  private async fetchModelScopeFileList(owner: string, repo: string): Promise<ModelScopeFileTask[]> {
+    let url = 'https://modelscope.cn/api/v1/models/' + owner + '/' + repo + '/repo/files?Recursive=1';
+    let httpReq = http.createHttp();
+    try {
+      let options: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        connectTimeout: 30000,
+        readTimeout: 60000,
+        expectDataType: http.HttpDataType.STRING
+      };
+      let resp = await httpReq.request(url, options);
+      if (resp.responseCode < 200 || resp.responseCode >= 300) {
+        throw new Error('ModelScope 文件清单请求失败 HTTP ' + resp.responseCode);
+      }
+      let root = ArkJSON.parse(resp.result as string);
+      let files = this.extractModelScopeFileArray(root);
+      if (files.length === 0) {
+        throw new Error('ModelScope 文件清单格式异常');
+      }
+      let tasks: ModelScopeFileTask[] = [];
+      for (let i = 0; i < files.length; i++) {
+        let item = files[i] as JsonMap;
+        let type = this.stringField(item, 'Type', 'type');
+        if (type === 'tree') {
+          continue;
+        }
+        let path = this.stringField(item, 'Path', 'path');
+        let size = this.numberField(item, 'Size', 'size');
+        if (path.length === 0 || isNaN(size) || size < 0) {
+          continue;
+        }
+        let sha256 = this.modelScopeSha256Field(item);
+        let task: ModelScopeFileTask = { path: path, size: size };
+        if (sha256.length > 0) {
+          task.sha256 = sha256;
+        }
+        tasks.push(task);
+      }
+      return tasks;
+    } finally {
+      httpReq.destroy();
+    }
+  }
+
+  private extractModelScopeFileArray(root: JsonValue): Object[] {
+    if (root === null || typeof root !== 'object') {
+      return [];
+    }
+    if (Array.isArray(root)) {
+      return root as Object[];
+    }
+    let rootMap = root as JsonMap;
+    let data = rootMap['Data'] !== undefined ? rootMap['Data'] : rootMap['data'];
+    if (Array.isArray(data)) {
+      return data as Object[];
+    }
+    let dataMap = data as JsonMap;
+    if (dataMap) {
+      let dataFiles = dataMap['Files'] !== undefined ? dataMap['Files'] : dataMap['files'];
+      if (Array.isArray(dataFiles)) {
+        return dataFiles as Object[];
+      }
+    }
+    let rootFiles = rootMap['Files'] !== undefined ? rootMap['Files'] : rootMap['files'];
+    if (Array.isArray(rootFiles)) {
+      return rootFiles as Object[];
+    }
+    return [];
+  }
+
+  private stringField(item: JsonMap, upperKey: string, lowerKey: string): string {
+    let value = item[upperKey] !== undefined ? item[upperKey] : item[lowerKey];
+    return value === undefined || value === null ? '' : String(value);
+  }
+
+  private numberField(item: JsonMap, upperKey: string, lowerKey: string): number {
+    let value = item[upperKey] !== undefined ? item[upperKey] : item[lowerKey];
+    return value === undefined || value === null ? NaN : Number(value);
+  }
+
+  private modelScopeSha256Field(item: JsonMap): string {
+    let keys: string[] = ['Sha256', 'SHA256', 'sha256', 'Sha256Hash', 'sha256Hash', 'sha256_hash'];
+    for (let i = 0; i < keys.length; i++) {
+      let value = item[keys[i]];
+      if (value === undefined || value === null) {
+        continue;
+      }
+      let normalized = this.normalizeSha256Text(String(value));
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+    return '';
+  }
+
+  private normalizeSha256Text(value: string): string {
+    let text = value.trim().toLowerCase();
+    let prefix = 'sha256:';
+    let prefixIndex = text.indexOf(prefix);
+    if (prefixIndex >= 0) {
+      text = text.substring(prefixIndex + prefix.length);
+    }
+    let match = text.match(/[0-9a-f]{64}/);
+    return match ? match[0] : '';
+  }
+
+  private bytesToHex(bytes: Uint8Array): string {
+    let parts: string[] = [];
+    for (let i = 0; i < bytes.length; i++) {
+      parts.push(bytes[i].toString(16).padStart(2, '0'));
+    }
+    return parts.join('');
+  }
+
+  private sha256File(path: string): string {
+    let file: fs.File | null = null;
+    try {
+      let md = cryptoFramework.createMd('SHA256');
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let buffer = new ArrayBuffer(4 * 1024 * 1024);
+      while (true) {
+        let readSize = fs.readSync(file.fd, buffer);
+        if (readSize <= 0) {
+          break;
+        }
+        let chunk = readSize === buffer.byteLength ? new Uint8Array(buffer) : new Uint8Array(buffer.slice(0, readSize));
+        let blob: cryptoFramework.DataBlob = { data: chunk };
+        md.updateSync(blob);
+      }
+      return this.bytesToHex(md.digestSync().data);
+    } catch (e) {
+      AppLogger.warn('ModelDownload', 'sha256 unavailable, fallback to size check path=' + path +
+        ', error=' + this.errorMessage(e));
+      return '';
+    } finally {
+      if (file !== null) {
+        try { fs.closeSync(file); } catch (e) {}
+      }
+    }
+  }
+
+  private ensureDirectoryRecursive(path: string): void {
+    let parts = path.split('/');
+    let current = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) {
+        current = '/';
+        continue;
+      }
+      current = current === '/' ? '/' + parts[i] : current + '/' + parts[i];
+      try {
+        if (!fs.accessSync(current)) {
+          fs.mkdirSync(current);
+        }
+      } catch (e) {
+        try {
+          fs.mkdirSync(current);
+        } catch (err) {
+        }
+      }
+    }
+  }
+
+  private safeModelScopeTargetPath(relativePath: string): string {
+    let normalized = relativePath.replace(/\\/g, '/');
+    if (normalized.indexOf('..') >= 0 || normalized.startsWith('/')) {
+      throw new Error('非法 ModelScope 文件路径: ' + relativePath);
+    }
+    return this.modelDir + '/' + normalized;
+  }
+
+  private parentDir(path: string): string {
+    let index = path.lastIndexOf('/');
+    return index > 0 ? path.substring(0, index) : this.modelDir;
+  }
+
+  private encodeModelScopePath(relativePath: string): string {
+    let parts = relativePath.replace(/\\/g, '/').split('/');
+    for (let i = 0; i < parts.length; i++) {
+      parts[i] = encodeURIComponent(parts[i]);
+    }
+    return parts.join('/');
+  }
+
+  private async downloadModelScopeFile(owner: string, repo: string, task: ModelScopeFileTask, index: number,
+    fileCount: number, completedBytes: number, totalBytes: number): Promise<number> {
+    if (this.modelScopePauseRequested) {
+      AppLogger.info('ModelDownload', 'skip before start because pause requested path=' + task.path);
+      return Promise.resolve(-2);
+    }
+    let target = this.safeModelScopeTargetPath(task.path);
+    let resumeOffset = 0;
+    try {
+      let st = fs.statSync(target);
+      if (st.size === task.size) {
+        if (task.sha256 !== undefined && task.sha256.length > 0) {
+          await this.showModelScopeVerifyingFile(completedBytes, totalBytes, task.path);
+          let digest = this.sha256File(target);
+          if (digest.length === 0) {
+            AppLogger.warn('ModelDownload', 'skip existing with size-only check path=' + task.path);
+            this.updateModelDownloadProgress(completedBytes + task.size, totalBytes, '跳过已存在文件（大小校验）');
+            return Promise.resolve(task.size);
+          }
+          if (digest !== task.sha256) {
+            AppLogger.warn('ModelDownload', 'existing sha256 mismatch path=' + task.path +
+              ', expected=' + task.sha256 + ', actual=' + digest);
+            try { fs.unlinkSync(target); } catch (e) {}
+          } else {
+            AppLogger.info('ModelDownload', 'skip existing verified path=' + task.path + ', size=' + this.formatSize(st.size));
+            this.updateModelDownloadProgress(completedBytes + task.size, totalBytes, '跳过已校验文件');
+            return Promise.resolve(task.size);
+          }
+        }
+        AppLogger.info('ModelDownload', 'skip existing path=' + task.path + ', size=' + this.formatSize(st.size));
+        this.updateModelDownloadProgress(completedBytes + task.size, totalBytes, '跳过已存在文件');
+        return Promise.resolve(task.size);
+      }
+      if (st.size > 0 && st.size < task.size) {
+        resumeOffset = st.size;
+        AppLogger.info('ModelDownload', 'resume path=' + task.path + ', offset=' + resumeOffset.toString());
+      } else if (st.size > task.size) {
+        AppLogger.warn('ModelDownload', 'remove oversized partial file path=' + task.path + ', size=' + st.size.toString());
+        try { fs.unlinkSync(target); } catch (e) {}
+      }
+    } catch (e) {
+    }
+
+    this.ensureDirectoryRecursive(this.parentDir(target));
+    let url = 'https://modelscope.cn/models/' + owner + '/' + repo + '/resolve/master/' + this.encodeModelScopePath(task.path);
+    let self = this;
+    let completed = completedBytes;
+    let startOffset = resumeOffset;
+    AppLogger.info('ModelDownload', 'file start path=' + task.path +
+      ', index=' + (index + 1).toString() + '/' + fileCount.toString() +
+      ', resume=' + startOffset.toString());
+    return new Promise<number>((resolve) => {
+      let httpReq = http.createHttp();
+      self.modelScopeActiveHttpReq = httpReq;
+      let fileHandle: fs.File;
+      let failed = false;
+      let resolved = false;
+      try {
+        if (startOffset > 0) {
+          fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
+        } else {
+          fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        }
+      } catch (e) {
+        self.updateModelDownloadMessage('创建文件失败: ' + task.path);
+        AppLogger.error('ModelDownload', 'create file failed path=' + task.path + ', target=' + target);
+        httpReq.destroy();
+        resolve(-1);
+        return;
+      }
+      let finish = (size: number): void => {
+        if (resolved) return;
+        resolved = true;
+        httpReq.off('dataReceive');
+        httpReq.off('dataReceiveProgress');
+        httpReq.off('dataEnd');
+        try { fs.closeSync(fileHandle); } catch (e) {}
+        if (self.modelScopeActiveHttpReq === httpReq) {
+          self.modelScopeActiveHttpReq = null;
+        }
+        httpReq.destroy();
+        resolve(size);
+      };
+      httpReq.on('dataReceive', (data: ArrayBuffer) => {
+        if (self.modelScopePauseRequested) {
+          failed = true;
+          AppLogger.info('ModelDownload', 'stream paused path=' + task.path);
+          finish(-2);
+          return;
+        }
+        if (!failed) {
+          try {
+            fs.writeSync(fileHandle.fd, data);
+          } catch (e) {
+            failed = true;
+            AppLogger.error('ModelDownload', 'write failed path=' + task.path);
+          }
+        }
+      });
+      httpReq.on('dataReceiveProgress', (data: http.DataReceiveProgressInfo) => {
+        if (self.modelScopePauseRequested) return;
+        if (failed) return;
+        let currentBytes = completed + startOffset + data.receiveSize;
+        self.updateModelDownloadProgress(currentBytes, totalBytes);
+      });
+      httpReq.on('dataEnd', () => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
+        if (failed) {
+          self.updateModelDownloadMessage('写入失败: ' + task.path);
+          AppLogger.error('ModelDownload', 'dataEnd write failed path=' + task.path);
+          finish(-1);
+          return;
+        }
+        let fileSize = 0;
+        try {
+          fs.closeSync(fileHandle);
+          fileSize = fs.statSync(target).size;
+        } catch (e) {
+        }
+        let completeFile = (): void => {
+          AppLogger.info('ModelDownload', 'file completed path=' + task.path + ', size=' + fileSize.toString());
+          if (resolved) return;
+          resolved = true;
+          httpReq.off('dataReceive');
+          httpReq.off('dataReceiveProgress');
+          httpReq.off('dataEnd');
+          httpReq.destroy();
+          resolve(fileSize);
+        };
+        if (task.size > 0 && fileSize !== task.size) {
+          self.updateModelDownloadMessage('校验失败：文件大小不匹配 ' + task.path);
+          AppLogger.warn('ModelDownload', 'size mismatch path=' + task.path + ', expected=' + task.size.toString() +
+            ', actual=' + fileSize.toString());
+          try { fs.unlinkSync(target); } catch (e) {}
+          finish(-3);
+          return;
+        }
+        if (task.sha256 !== undefined && task.sha256.length > 0) {
+          self.showModelScopeVerifyingFile(completedBytes + fileSize, totalBytes, task.path).then(() => {
+            let digest = self.sha256File(target);
+            if (digest.length === 0) {
+              AppLogger.warn('ModelDownload', 'sha256 unavailable after download, size-only verified path=' + task.path);
+            } else if (digest !== task.sha256) {
+              self.updateModelDownloadMessage('校验失败：文件 SHA256 不匹配 ' + task.path);
+              AppLogger.warn('ModelDownload', 'sha256 mismatch path=' + task.path +
+                ', expected=' + task.sha256 + ', actual=' + digest);
+              try { fs.unlinkSync(target); } catch (e) {}
+              finish(-3);
+              return;
+            } else {
+              AppLogger.info('ModelDownload', 'sha256 verified path=' + task.path);
+            }
+            completeFile();
+          }).catch(() => {
+            completeFile();
+          });
+          return;
+        }
+        completeFile();
+      });
+      let streamHeaders: Record<string, string> = {};
+      if (startOffset > 0) {
+        streamHeaders['Range'] = 'bytes=' + startOffset.toString() + '-';
+      }
+      let streamOptions: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        connectTimeout: 30000,
+        readTimeout: 7200000,
+        header: streamHeaders
+      };
+      httpReq.requestInStream(url, streamOptions).then((code: number) => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
+        if (startOffset > 0 && code === 200) {
+          failed = true;
+          self.updateModelDownloadMessage('服务端未支持断点续传，准备重下: ' + task.path);
+          AppLogger.warn('ModelDownload', 'resume unsupported path=' + task.path + ', restarting');
+          try { fs.unlinkSync(target); } catch (e) {}
+          finish(-1);
+          return;
+        }
+        if (code < 200 || code >= 300) {
+          failed = true;
+          self.updateModelDownloadMessage('HTTP ' + code.toString() + ': ' + task.path);
+          AppLogger.warn('ModelDownload', 'http error path=' + task.path + ', code=' + code.toString());
+          finish(-1);
+        }
+      }).catch((err: BusinessError) => {
+        if (self.modelScopePauseRequested) {
+          finish(-2);
+          return;
+        }
+        failed = true;
+        self.updateModelDownloadMessage('错误: code=' + err.code + ' ' + err.message);
+        AppLogger.error('ModelDownload', 'request failed path=' + task.path + ', code=' + err.code.toString() +
+          ', message=' + err.message);
+        finish(-1);
+      });
+    });
+  }
+
+  private disableModelThinkingByDefault(): void {
+    let cfgPath = this.modelDir + '/config.json';
+    try {
+      if (!fs.accessSync(cfgPath)) {
+        return;
+      }
+      let file = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(cfgPath);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      fs.closeSync(file);
+      let content = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      let root = ArkJSON.parse(content) as JsonMap;
+      let jinja = root['jinja'] as JsonMap;
+      if (!jinja) {
+        jinja = {};
+        root['jinja'] = jinja;
+      }
+      let context = jinja['context'] as JsonMap;
+      if (!context) {
+        context = {};
+        jinja['context'] = context;
+      }
+      context['enable_thinking'] = false;
+      let newStr = ArkJSON.stringify(root, null, 4);
+      let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
+      let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      fs.writeSync(fileWrite.fd, byteStr.buffer);
+      fs.closeSync(fileWrite);
+    } catch (e) {
+    }
+  }
+
+  pauseModelScopeDownload(): void {
+    if (!this.modelScopeDownloading) {
+      return;
+    }
+    this.modelScopePauseRequested = true;
+    AppLogger.info('ModelDownload', 'pause requested repo=' + this.modelScopeMnnRepo);
+    this.updateModelDownloadMessage('正在暂停 ModelScope 下载...');
+    if (this.modelScopeActiveHttpReq !== null) {
+      try {
+        this.modelScopeActiveHttpReq.destroy();
+      } catch (e) {
+      }
+      this.modelScopeActiveHttpReq = null;
+    }
+  }
+
+  async downloadModelScopeModel() {
+    let parts = this.modelScopeRepoParts();
+    if (parts.length !== 2) {
+      let message = 'ModelScope 仓库格式不正确，应为 owner/repo，例如 doulujiyao/model-name';
+      this.updateModelDownloadMessage(message);
+      AppLogger.warn('ModelDownload', message);
+      return;
+    }
+    this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
+    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo);
+    this.downloading = true;
+    this.modelScopeDownloading = true;
+    this.modelScopePauseRequested = false;
+    this.connected = false;
+    this.modelLoaded = false;
+    try {
+      this.ensureDirectoryRecursive(this.modelDir);
+      this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
+      AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
+      let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
+      if (files.length === 0) {
+        let message = 'ModelScope 文件清单为空: ' + this.modelScopeMnnRepo;
+        this.updateModelDownloadMessage(message);
+        AppLogger.warn('ModelDownload', message);
+        return;
+      }
+      let totalBytes = 0;
+      for (let i = 0; i < files.length; i++) {
+        totalBytes += files[i].size;
+      }
+      this.beginModelDownloadProgress('ModelScope 下载进度', totalBytes);
+      let completedBytes = 0;
+      let failed: string[] = [];
+      for (let j = 0; j < files.length; j++) {
+        if (this.modelScopePauseRequested) {
+          break;
+        }
+        let size = await this.downloadModelScopeFile(parts[0], parts[1], files[j], j, files.length, completedBytes, totalBytes);
+        if (size === -2 || this.modelScopePauseRequested) {
+          let savedBytes = completedBytes;
+          try {
+            let pausedTarget = this.safeModelScopeTargetPath(files[j].path);
+            let pausedStat = fs.statSync(pausedTarget);
+            if (pausedStat.size > 0 && pausedStat.size < files[j].size) {
+              savedBytes += pausedStat.size;
+            }
+          } catch (e) {
+          }
+          this.updateModelDownloadProgress(savedBytes, totalBytes, '已暂停，再次点击可继续');
+          AppLogger.info('ModelDownload', 'paused repo=' + this.modelScopeMnnRepo + ', saved=' +
+            this.formatSize(savedBytes));
+          return;
+        } else if (size === -3) {
+          failed.push('校验失败：' + files[j].path);
+        } else if (size < 0) {
+          failed.push(files[j].path);
+        } else {
+          completedBytes += files[j].size;
+        }
+      }
+      this.disableModelThinkingByDefault();
+      if (failed.length === 0) {
+        this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
+        AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
+          this.formatSize(completedBytes));
+      } else {
+        this.updateModelDownloadMessage('ModelScope 下载失败：' + failed.join('，'));
+        AppLogger.warn('ModelDownload', 'partial failure repo=' + this.modelScopeMnnRepo + ', failed=' +
+          failed.length.toString() + ', downloaded=' + this.formatSize(completedBytes));
+      }
+    } catch (e) {
+      let message = 'ModelScope 下载失败: ' + this.errorMessage(e);
+      this.updateModelDownloadMessage(message);
+      AppLogger.error('ModelDownload', message);
+    } finally {
+      this.modelScopeActiveHttpReq = null;
+      this.modelScopeDownloading = false;
+      this.downloading = false;
+    }
   }
 
   private getCloudConfig(): CloudModelConfig {
@@ -1867,28 +2524,6 @@ struct Index {
   private hdcApiUrl(baseUrl: string, path: string): string {
     let url = this.normalizeHdcUrl(baseUrl);
     return url + path;
-  }
-
-  private hdcInputEditable(): boolean {
-    return this.hdcManualPairing || !this.hdcConnected;
-  }
-
-  private hdcInputBackgroundColor(): string {
-    return this.hdcInputEditable() ? '#F2F5FC' : '#E6EAF2';
-  }
-
-  private hdcInputTextColor(): string {
-    return this.hdcInputEditable() ? '#11182F' : '#7A8494';
-  }
-
-  private hdcStatusColor(): string {
-    if (this.hdcConnected) {
-      return '#2D9B73';
-    }
-    if (this.hdcAutoConnecting) {
-      return '#4F68FF';
-    }
-    return '#D26B31';
   }
 
   private addHdcCandidate(candidates: string[], value: string): void {
@@ -2413,12 +3048,6 @@ struct Index {
     }
   }
 
-  private async startLocalBackend(): Promise<boolean> {
-    // 本地模式下 9126 请求会进入 libentry.so/MNN，本函数只负责切换路由并启动监听。
-    this.agentRouter.useLocal();
-    return await this.agentRouter.ensureStarted(DEFAULT_ENDPOINT_CONFIG.agentRouterPort, this.filesDir);
-  }
-
   private async ensureLocalAgentReady(): Promise<boolean> {
     if (!await this.ensureLocalModelLoaded()) {
       return false;
@@ -2431,6 +3060,19 @@ struct Index {
       return false;
     }
     return true;
+  }
+
+  private async startLocalAgentTask(task: string): Promise<void> {
+    if (task.length === 0) {
+      this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (!await this.ensureLocalAgentReady()) {
+      return;
+    }
+    this.agentRouter.submitLocalTask(task);
+    AgentExecutionController.beginExecution('等待 PC 控制本地任务...');
+    this.output = `====== 等待 PC 截图 ======\n当前任务已设定为: ${task}\nPC 脚本检测到任务后将自动开始。`;
   }
 
   private async ensureCloudAgentBackend(): Promise<boolean> {
@@ -2673,20 +3315,41 @@ struct Index {
     this.debugImagePath = '';
   }
 
+  // 将 ASCII tab 资源名映射到静态 $r 引用，避免直接引用中文资源文件名。
+  private tabIconResource(icon: string): Resource {
+    if (icon === 'tab_home') {
+      return $r('app.media.tab_home');
+    }
+    if (icon === 'tab_summary') {
+      return $r('app.media.tab_summary');
+    }
+    if (icon === 'tab_chat') {
+      return $r('app.media.tab_chat');
+    }
+    if (icon === 'tab_task') {
+      return $r('app.media.tab_task');
+    }
+    if (icon === 'tab_settings') {
+      return $r('app.media.tab_settings');
+    }
+    return $r('app.media.tab_home');
+  }
+
   @Builder TabItem(icon: string, label: string, index: number) {
     Column() {
-      Text(icon)
-        .fontSize(13)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.currentTab === index ? Color.White : '#747B87')
+      Stack({ alignContent: Alignment.Center }) {
+        Image(this.tabIconResource(icon))
+          .width(21)
+          .height(21)
+          .objectFit(ImageFit.Contain)
+      }
         .width(32)
         .height(32)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(this.currentTab === index ? '#4F68FF' : '#00FFFFFF')
+        .backgroundColor(this.currentTab === index ? '#EEF0FF' : '#00FFFFFF')
         .borderRadius(16)
       Text(label)
         .fontSize(13)
-        .fontColor(this.currentTab === index ? '#4F68FF' : '#747B87')
+        .fontColor(this.currentTab === index ? '#5B5CE2' : '#747B87')
         .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Regular)
         .margin({ top: 2 })
         .maxLines(1)
@@ -2785,6 +3448,7 @@ struct Index {
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
             messages: this.activeChatMessages,
+            avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
@@ -2817,10 +3481,16 @@ struct Index {
             backendTypeInput: $backendTypeInput,
             mllmBackendTypeInput: $mllmBackendTypeInput,
             selectedSectionId: $settingsSectionId,
-            output: this.output,
-            cloudOutput: this.cloudOutput,
+            output: $output,
+            cloudOutput: $cloudOutput,
+            modelDownloadProgressVisible: $modelDownloadProgressVisible,
+            modelDownloadProgressPercent: $modelDownloadProgressPercent,
+            modelDownloadProgressText: $modelDownloadProgressText,
+            modelDownloadProgressTitle: $modelDownloadProgressTitle,
             downloading: this.downloading,
             connected: this.connected,
+            modelScopeDownloading: this.modelScopeDownloading,
+            modelScopePauseRequested: this.modelScopePauseRequested,
             hdcAutoStatus: this.hdcAutoStatus,
             hdcAutoConnected: this.hdcAutoConnected,
             hdcAutoConnecting: this.hdcAutoConnecting,
@@ -2829,6 +3499,8 @@ struct Index {
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
+            onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
+            onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
             onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
             onShowConfigJson: () => { this.showConfigJson(); },
             onDiscoverHdc: async () => {

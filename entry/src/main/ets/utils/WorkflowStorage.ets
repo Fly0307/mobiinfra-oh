@@ -1,5 +1,7 @@
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
+import resourceManager from '@ohos.resourceManager';
+import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
@@ -21,6 +23,103 @@ const RUN_DIR = 'runs';
 const DAILY_LOG_DIR = 'daily-log';
 const TASK_INDEX_FILE = 'task-index.json';
 const DELETED_DEFAULT_TASKS_FILE = 'deleted-default-tasks.json';
+const DEFAULT_WORKFLOW_RAW_ROOT = 'workflows/configs';
+
+interface DefaultWorkflowConfig {
+  id: string;
+  sceneId: number;
+  fileName: string;
+  rawFilePath: string;
+}
+
+export interface RawWorkflowResourceReader {
+  getRawFileContentSync(path: string): Uint8Array;
+}
+
+export class SystemResourceManagerReader implements RawWorkflowResourceReader {
+  private delegate: resourceManager.ResourceManager;
+
+  constructor(delegate: resourceManager.ResourceManager) {
+    this.delegate = delegate;
+  }
+
+  getRawFileContentSync(path: string): Uint8Array {
+    return this.delegate.getRawFileContentSync(path);
+  }
+}
+
+type DefaultWorkflowInstallFailureHandler = (rawFilePath: string, cause: Error) => void;
+
+const DEFAULT_WORKFLOW_CONFIGS: DefaultWorkflowConfig[] = [
+  {
+    id: 'default_alipay_bill',
+    sceneId: 0,
+    fileName: 'default_alipay_bill.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_alipay_bill.json'
+  },
+  {
+    id: 'default_ele_order',
+    sceneId: 1,
+    fileName: 'default_ele_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_ele_order.json'
+  },
+  {
+    id: 'default_bilibili_history',
+    sceneId: 2,
+    fileName: 'default_bilibili_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_bilibili_history.json'
+  },
+  {
+    id: 'default_tencent_video_history',
+    sceneId: 2,
+    fileName: 'default_tencent_video_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_tencent_video_history.json'
+  },
+  {
+    id: 'default_weixin_chat',
+    sceneId: 3,
+    fileName: 'default_weixin_chat.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weixin_chat.json'
+  },
+  {
+    id: 'default_weixin_today_chat',
+    sceneId: 3,
+    fileName: 'default_weixin_today_chat.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weixin_today_chat.json'
+  },
+  {
+    id: 'default_dianping_order',
+    sceneId: 4,
+    fileName: 'default_dianping_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_dianping_order.json'
+  },
+  {
+    id: 'default_meituan_order',
+    sceneId: 4,
+    fileName: 'default_meituan_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_meituan_order.json'
+  },
+  {
+    id: 'default_weibo_hot_search',
+    sceneId: 5,
+    fileName: 'default_weibo_hot_search.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weibo_hot_search.json'
+  },
+  {
+    id: 'default_xiaohongshu_history',
+    sceneId: 5,
+    fileName: 'default_xiaohongshu_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_xiaohongshu_history.json'
+  },
+  {
+    id: 'default_ctrip_order',
+    sceneId: 6,
+    fileName: 'default_ctrip_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_ctrip_order.json'
+  }
+];
+
+const DEFAULT_WORKFLOW_JSON_CACHE: Record<string, string> = {};
 
 interface VlmJsonSchemaField {
   type: string;
@@ -127,6 +226,46 @@ export class WorkflowStorage {
     } catch (e) {
       return false;
     }
+  }
+
+  static installDefaultWorkflowResources(filesDir: string, manager: RawWorkflowResourceReader): void {
+    WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager,
+      (rawFilePath: string, cause: Error) => {
+        AppLogger.warnCause('WorkflowStorage', 'install default workflow rawfile failed path=' + rawFilePath, cause);
+      });
+  }
+
+  static installDefaultWorkflowResourcesForTest(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
+    return WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager, onFailure);
+  }
+
+  private static installDefaultWorkflowResourcesWithFailureHandler(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
+    WorkflowStorage.ensureWorkspace(filesDir);
+    let shouldInstallConfigs = !WorkflowStorage.fileExists(WorkflowStorage.indexPath(filesDir));
+    let failureCount = 0;
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      let config = DEFAULT_WORKFLOW_CONFIGS[i];
+      try {
+        let rawJson = WorkflowStorage.readRawFileText(manager, config.rawFilePath);
+        WorkflowStorage.validateWorkflowJson(rawJson, false);
+        DEFAULT_WORKFLOW_JSON_CACHE[config.id] = rawJson;
+        if (shouldInstallConfigs && !WorkflowStorage.fileExists(WorkflowStorage.configPath(filesDir, config.fileName))) {
+          WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, config.fileName), rawJson);
+        }
+      } catch (e) {
+        let err = e as Error;
+        failureCount++;
+        onFailure(config.rawFilePath, err);
+      }
+    }
+    return failureCount;
+  }
+
+  private static readRawFileText(manager: RawWorkflowResourceReader, path: string): string {
+    let bytes = manager.getRawFileContentSync(path);
+    return decodeUtf8Compat(bytes);
   }
 
   static readBytes(path: string): ArrayBuffer {
@@ -832,38 +971,92 @@ export class WorkflowStorage {
 
   static createDefaultTasks(filesDir: string): WorkflowTask[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return [
-      WorkflowStorage.createTaskFromJson(filesDir, 0, WorkflowStorage.defaultAlipayWorkflow(), 'default_alipay_bill'),
-      WorkflowStorage.createTaskFromJson(filesDir, 1, WorkflowStorage.defaultEleWorkflow(), 'default_ele_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 2, WorkflowStorage.defaultBilibiliWorkflow(), 'default_bilibili_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 2, WorkflowStorage.defaultTencentVideoWorkflow(), 'default_tencent_video_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 3, WorkflowStorage.defaultWeixinWorkflow(), 'default_weixin_chat'),
-      WorkflowStorage.createTaskFromJson(filesDir, 3, WorkflowStorage.defaultWeixinTodayWorkflow(), 'default_weixin_today_chat'),
-      WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultDianpingWorkflow(), 'default_dianping_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultMeituanWorkflow(), 'default_meituan_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultWeiboWorkflow(), 'default_weibo_hot_search'),
-      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultXiaohongshuWorkflow(), 'default_xiaohongshu_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 6, WorkflowStorage.defaultCtripWorkflow(), 'default_ctrip_order')
-    ];
+    let tasks: WorkflowTask[] = [];
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      let config = DEFAULT_WORKFLOW_CONFIGS[i];
+      tasks.push(WorkflowStorage.createTaskFromJson(filesDir, config.sceneId,
+        WorkflowStorage.defaultWorkflowJsonForConfig(filesDir, config), config.id));
+    }
+    return tasks;
   }
 
-  static defaultWorkflowForScene(sceneId: number): string {
+  static defaultWorkflowForScene(sceneId: number, filesDir: string = ''): string {
     if (sceneId === 1) {
-      return WorkflowStorage.defaultEleWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_ele_order');
     }
     if (sceneId === 2) {
-      return WorkflowStorage.defaultBilibiliWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_bilibili_history');
     }
     if (sceneId === 3) {
-      return WorkflowStorage.defaultWeixinWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_weixin_chat');
     }
     if (sceneId === 4) {
-      return WorkflowStorage.defaultMeituanWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_meituan_order');
     }
     if (sceneId === 5) {
-      return WorkflowStorage.defaultWeiboWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_weibo_hot_search');
     }
     if (sceneId === 6) {
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_ctrip_order');
+    }
+    return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_alipay_bill');
+  }
+
+  private static defaultWorkflowJsonForTaskId(filesDir: string, taskId: string): string {
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      if (DEFAULT_WORKFLOW_CONFIGS[i].id === taskId) {
+        return WorkflowStorage.defaultWorkflowJsonForConfig(filesDir, DEFAULT_WORKFLOW_CONFIGS[i]);
+      }
+    }
+    return WorkflowStorage.defaultAlipayWorkflow();
+  }
+
+  private static defaultWorkflowJsonForConfig(filesDir: string, config: DefaultWorkflowConfig): string {
+    let cached = DEFAULT_WORKFLOW_JSON_CACHE[config.id];
+    if (cached && cached.length > 0) {
+      return cached;
+    }
+    if (filesDir.length > 0) {
+      try {
+        let path = WorkflowStorage.configPath(filesDir, config.fileName);
+        if (WorkflowStorage.fileExists(path)) {
+          return WorkflowStorage.readText(path);
+        }
+      } catch (e) {
+      }
+    }
+    return WorkflowStorage.legacyDefaultWorkflowForTaskId(config.id);
+  }
+
+  private static legacyDefaultWorkflowForTaskId(taskId: string): string {
+    if (taskId === 'default_ele_order') {
+      return WorkflowStorage.defaultEleWorkflow();
+    }
+    if (taskId === 'default_bilibili_history') {
+      return WorkflowStorage.defaultBilibiliWorkflow();
+    }
+    if (taskId === 'default_tencent_video_history') {
+      return WorkflowStorage.defaultTencentVideoWorkflow();
+    }
+    if (taskId === 'default_weixin_chat') {
+      return WorkflowStorage.defaultWeixinWorkflow();
+    }
+    if (taskId === 'default_weixin_today_chat') {
+      return WorkflowStorage.defaultWeixinTodayWorkflow();
+    }
+    if (taskId === 'default_dianping_order') {
+      return WorkflowStorage.defaultDianpingWorkflow();
+    }
+    if (taskId === 'default_meituan_order') {
+      return WorkflowStorage.defaultMeituanWorkflow();
+    }
+    if (taskId === 'default_weibo_hot_search') {
+      return WorkflowStorage.defaultWeiboWorkflow();
+    }
+    if (taskId === 'default_xiaohongshu_history') {
+      return WorkflowStorage.defaultXiaohongshuWorkflow();
+    }
+    if (taskId === 'default_ctrip_order') {
       return WorkflowStorage.defaultCtripWorkflow();
     }
     return WorkflowStorage.defaultAlipayWorkflow();

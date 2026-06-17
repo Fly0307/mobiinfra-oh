@@ -12,12 +12,13 @@ export interface MainTabItem {
   label: string;
 }
 
+// 使用 ASCII 资源名，避免 ArkTS $r 引用直接依赖中文文件名。
 export const MAIN_TAB_ITEMS: MainTabItem[] = [
-  { index: MainTabIndex.Home, icon: 'H', label: '首页' },
-  { index: MainTabIndex.Summary, icon: 'S', label: '汇总' },
-  { index: MainTabIndex.Chat, icon: 'A', label: '聊天' },
-  { index: MainTabIndex.Task, icon: 'T', label: '任务' },
-  { index: MainTabIndex.Settings, icon: 'C', label: '设置' }
+  { index: MainTabIndex.Home, icon: 'tab_home', label: '首页' },
+  { index: MainTabIndex.Summary, icon: 'tab_summary', label: '汇总' },
+  { index: MainTabIndex.Chat, icon: 'tab_chat', label: '聊天' },
+  { index: MainTabIndex.Task, icon: 'tab_task', label: '任务' },
+  { index: MainTabIndex.Settings, icon: 'tab_settings', label: '设置' }
 ];
 
 export function centerTabIndex(): MainTabIndex {

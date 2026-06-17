@@ -293,6 +293,8 @@ export interface CollectionGroupState {
   status: string;
   domain: string;
   event_ids: string[];
+  source_input_hash: string;
+  event_input_hashes: StringMap;
 }
 
 export interface CollectionGroupsDocument {
@@ -303,6 +305,14 @@ export interface CollectionGroupsDocument {
   input_hash: string;
   total_events: number;
   groups: CollectionGroupState[];
+}
+
+export interface CollectionGroupAssignment {
+  event_id: string;
+  group_id: string;
+  title: string;
+  source: string;
+  domain: string;
 }
 
 export interface HomeDomainViewModel {

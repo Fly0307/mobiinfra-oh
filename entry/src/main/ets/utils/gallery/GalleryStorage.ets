@@ -1,5 +1,6 @@
 import fs from '@ohos.file.fs';
-import { util, JSON as ArkJSON } from '@kit.ArkTS';
+import { JSON as ArkJSON } from '@kit.ArkTS';
+import { decodeUtf8Compat, encodeUtf8Compat } from '../TextEncodingCompat';
 import {
   GalleryAnalysisResult,
   GalleryEmbeddingRecord,
@@ -116,7 +117,6 @@ export class GalleryStorage {
 
   static ensureWorkspace(filesDir: string): void {
     GalleryStorage.ensureDirectory(GalleryStorage.rootDir(filesDir));
-    GalleryStorage.ensureDirectory(GalleryStorage.dailyRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.itemRoot(filesDir));
     GalleryStorage.ensureDirectory(GalleryStorage.embeddingRoot(filesDir));
   }
@@ -128,8 +128,7 @@ export class GalleryStorage {
         let stat = fs.statSync(path);
         let buf = new ArrayBuffer(stat.size);
         fs.readSync(file.fd, buf);
-        let textDecoder = util.TextDecoder.create('utf-8');
-        return textDecoder.decodeWithStream(new Uint8Array(buf));
+        return decodeUtf8Compat(new Uint8Array(buf));
       } finally {
         fs.closeSync(file);
       }
@@ -141,7 +140,7 @@ export class GalleryStorage {
 
   static writeText(path: string, content: string): void {
     try {
-      let byteStr = util.TextEncoder.create('utf-8').encodeInto(content);
+      let byteStr = encodeUtf8Compat(content);
       let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
       try {
         fs.writeSync(file.fd, byteStr.buffer);

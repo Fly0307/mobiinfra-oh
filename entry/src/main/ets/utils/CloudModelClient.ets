@@ -60,13 +60,39 @@ export interface CloudImagePart {
 
 export type CloudContentPart = CloudTextPart | CloudImagePart;
 
+export interface CloudToolCallFunction {
+  name: string;
+  arguments: string;
+}
+
+export interface CloudToolCall {
+  id: string;
+  type: string;
+  function: CloudToolCallFunction;
+}
+
 export interface CloudChatMessage {
   role: string;
   content: string | CloudContentPart[];
+  tool_call_id?: string;
+  tool_calls?: CloudToolCall[];
+  name?: string;
 }
 
 export interface CloudChatTemplateKwargs {
   enable_thinking: boolean;
+}
+
+export interface CloudChatToolFunctionDefinition {
+  name: string;
+  description: string;
+  parameters: Object;
+  strict?: boolean;
+}
+
+export interface CloudChatToolDefinition {
+  type: string;
+  function: CloudChatToolFunctionDefinition;
 }
 
 export interface CloudChatCompletionOptions {
@@ -83,6 +109,8 @@ export interface CloudChatCompletionOptions {
   min_p?: number;
   presence_penalty?: number;
   repetition_penalty?: number;
+  tools?: CloudChatToolDefinition[];
+  toolChoice?: string;
 }
 
 interface CloudChatRequest {
@@ -97,6 +125,8 @@ interface CloudChatRequest {
   presence_penalty?: number;
   repetition_penalty?: number;
   chat_template_kwargs?: CloudChatTemplateKwargs;
+  tools?: CloudChatToolDefinition[];
+  tool_choice?: string;
 }
 
 interface CloudChatOptions {
@@ -110,15 +140,25 @@ interface CloudChatOptions {
 }
 
 interface CloudChatMessageResult {
-  content: string;
+  role?: string;
+  content?: string | null;
+  tool_calls?: CloudToolCall[];
 }
 
 interface CloudChatChoice {
   message: CloudChatMessageResult;
+  finish_reason?: string;
 }
 
 interface CloudChatResponse {
   choices: CloudChatChoice[];
+}
+
+export interface CloudChatCompletionResult {
+  content: string;
+  toolCalls: CloudToolCall[];
+  finishReason: string;
+  assistantMessage: CloudChatMessage;
 }
 
 interface CloudEmbeddingRequest {
@@ -245,7 +285,7 @@ export class CloudModelClient {
     return url + '/v1/embeddings';
   }
 
-  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
+  private buildChatRequestBody(options: CloudChatCompletionOptions): CloudChatRequest {
     let requestBody: CloudChatRequest = {
       messages: options.messages,
       temperature: options.temperature,
@@ -275,6 +315,47 @@ export class CloudModelClient {
     if (options.chatTemplateKwargs !== undefined) {
       requestBody.chat_template_kwargs = options.chatTemplateKwargs;
     }
+    if (options.tools !== undefined && options.tools.length > 0) {
+      requestBody.tools = options.tools;
+      if (options.toolChoice !== undefined && options.toolChoice.length > 0) {
+        requestBody.tool_choice = options.toolChoice;
+      }
+    }
+    return requestBody;
+  }
+
+  static parseChatCompletionResponseText(text: string): CloudChatCompletionResult {
+    let parsed: CloudChatResponse;
+    try {
+      parsed = ArkJSON.parse(text) as CloudChatResponse;
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Cloud response JSON parse failed: ' + err.message);
+    }
+    let choices = parsed.choices === undefined ? [] : parsed.choices;
+    if (choices.length === 0) {
+      throw new Error('Cloud response has no choices');
+    }
+    let choice = choices[0];
+    let message = choice.message;
+    let rawContent = message.content;
+    let content = typeof rawContent === 'string' ? rawContent : '';
+    let toolCalls = message.tool_calls === undefined ? [] : message.tool_calls.slice();
+    let assistantMessage: CloudChatMessage = {
+      role: 'assistant',
+      content: content,
+      tool_calls: toolCalls
+    };
+    return {
+      content: content,
+      toolCalls: toolCalls,
+      finishReason: choice.finish_reason === undefined ? '' : choice.finish_reason,
+      assistantMessage: assistantMessage
+    };
+  }
+
+  async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
+    let requestBody = this.buildChatRequestBody(options);
 
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -296,17 +377,7 @@ export class CloudModelClient {
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
-      let parsed: CloudChatResponse;
-      try {
-        parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
-      } catch (e) {
-        let err = e as Error;
-        throw new Error('Cloud response JSON parse failed: ' + err.message);
-      }
-      if (parsed.choices.length === 0) {
-        throw new Error('Cloud response has no choices');
-      }
-      return parsed.choices[0].message.content;
+      return CloudModelClient.parseChatCompletionResponseText(response.result as string);
     } catch (e) {
       let err = e as Error;
       throw err;
@@ -314,6 +385,11 @@ export class CloudModelClient {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
     }
+  }
+
+  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
+    let result = await this.chatCompletion(options);
+    return result.content;
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,

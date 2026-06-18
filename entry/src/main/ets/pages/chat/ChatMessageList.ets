@@ -76,6 +76,14 @@ export struct ChatMessageList {
     return this.isUserMessage(message) ? '#FFFFFF' : '#1F2937';
   }
 
+  private toolCallCount(message: ChatMessage): number {
+    if (message.role !== 'assistant' || message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ||
+      message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      return 0;
+    }
+    return message.trace.length;
+  }
+
   private formatMessageTime(time: number): string {
     if (time <= 0) {
       return '';
@@ -112,6 +120,8 @@ export struct ChatMessageList {
       }
       .width('100%')
 
+      this.ToolCallSummary(message)
+
       Text(message.content)
         .fontSize(15)
         .fontColor(this.textColor(message))
@@ -129,6 +139,17 @@ export struct ChatMessageList {
       width: this.isUserMessage(message) ? 0 : 1,
       color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' : '#E8ECF3'
     })
+  }
+
+  @Builder ToolCallSummary(message: ChatMessage) {
+    if (this.toolCallCount(message) > 0) {
+      Text('已执行 ' + String(this.toolCallCount(message)) + ' 次工具调用')
+        .fontSize(12)
+        .fontColor('#9CA3AF')
+        .lineHeight(18)
+        .width('100%')
+        .margin({ top: 6 })
+    }
   }
 
   @Builder MessageImagePreview(message: ChatMessage) {

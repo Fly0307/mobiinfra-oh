@@ -6,6 +6,8 @@ import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
 import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
+import chatReactAgentUnitTest from './ChatReactAgentUnit.test';
+import dataManagerQueryEventsToolUnitTest from './DataManagerQueryEventsToolUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 
@@ -18,6 +20,8 @@ export default function testsuite() {
   chatPageTypesUnitTest();
   settingsCenterConfigUnitTest();
   chatSessionStorageUnitTest();
+  chatReactAgentUnitTest();
+  dataManagerQueryEventsToolUnitTest();
   appLoggerUnitTest();
   avatarForegroundCropUnitTest();
 }

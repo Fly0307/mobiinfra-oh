@@ -39,8 +39,11 @@ import {
   DataManagerModelConfig,
   DataManagerProgress,
   HomeDomainViewModel,
-  HomeProfileViewModel
+  HomeProfileViewModel,
+  QueryOptions,
+  QueryResult
 } from '../datamanager/DataManagerTypes';
+import { createQueryEventsTool } from '../datamanager/DataManagerQueryEventsTool';
 import {
   AvatarGenerateRequest,
   AvatarGenerationMode,
@@ -53,6 +56,8 @@ import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanag
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
+import { ChatReactAgent } from '../utils/ChatReactAgent';
+import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -242,6 +247,7 @@ struct Index {
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
+  private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -854,8 +860,21 @@ struct Index {
     dataManagerInfo('initDataManager start: filesDir=' + this.filesDir);
     this.dataManagerFacade = new DataManagerFacade(this.filesDir);
     this.dataManagerFacade.ensureReady();
+    this.registerDataManagerChatTools();
     this.reloadDataManagerViewModels();
     dataManagerInfo('initDataManager done');
+  }
+
+  private registerDataManagerChatTools(): void {
+    this.chatToolRegistry.registerTool(createQueryEventsTool(
+      (): boolean => this.dataManagerFacade !== null && this.dataManagerFacade.hasBuiltIndexes(),
+      (options: QueryOptions): QueryResult => {
+        if (this.dataManagerFacade === null) {
+          throw new Error('DataManager is not initialized.');
+        }
+        return this.dataManagerFacade.queryIndexedEvents(options);
+      }
+    ));
   }
 
   private reloadDataManagerViewModels(): void {
@@ -2327,17 +2346,27 @@ struct Index {
       new Date().getTime());
     let contextMessages = buildCloudContextMessages(activeSession.messages.concat([userMessage]));
     this.appendActiveChatMessage(userMessage);
-    this.appendCloudLog(`手动调用 Planner，任务：${task}`);
+    this.appendCloudLog(`ReAct 云端聊天开始，任务：${task}`);
+    let toolTraceLines: string[] = [];
     try {
-      let response = await this.cloudClient.chatPlannerMessages(contextMessages, this.getCloudConfig());
+      let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
+      let result = await reactAgent.run(contextMessages, this.getCloudConfig(), {
+        filesDir: this.filesDir,
+        sessionId: activeSession.id,
+        userMessage: task,
+        onTrace: (line: string) => {
+          toolTraceLines.push(line);
+        }
+      });
+      let response = result.content;
       this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime()));
-      this.appendCloudLog(`Planner 手动返回：\n${response}`);
+        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime(), toolTraceLines));
+      this.appendCloudLog(`ReAct 云端聊天返回：\n${response}`);
     } catch (e) {
       let err = e as Error;
       this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime()));
-      this.appendCloudLog('云端 Planner 推理失败：' + err.message);
+        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime(), toolTraceLines));
+      this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
     } finally {
       this.cloudThinking = false;
     }

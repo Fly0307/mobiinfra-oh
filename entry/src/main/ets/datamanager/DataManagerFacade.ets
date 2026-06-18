@@ -35,6 +35,8 @@ import {
   ProfileClaim,
   ProfileDomainState,
   ProfileState,
+  QueryOptions,
+  QueryResult,
   RefreshSummary,
   DataManagerProgressCallback,
   NumberMap,
@@ -252,6 +254,16 @@ export class DataManagerFacade {
     this.paths.ensureBaseDirs();
     this.avatarService.ensureReady();
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
+  }
+
+  hasBuiltIndexes(): boolean {
+    this.ensureReady();
+    return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json'));
+  }
+
+  queryIndexedEvents(options: QueryOptions): QueryResult {
+    this.ensureReady();
+    return this.indexService.query(options);
   }
 
   hasDailyLogData(): boolean {

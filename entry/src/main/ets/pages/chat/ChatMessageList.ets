@@ -5,6 +5,8 @@ import {
   chatMessageImagePath,
   chatMessageRenderKey
 } from './ChatSessionTypes';
+import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
+import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
 @Component
 export struct ChatMessageList {
@@ -72,8 +74,16 @@ export struct ChatMessageList {
     return '#F8FAFD';
   }
 
-  private textColor(message: ChatMessage): string {
-    return this.isUserMessage(message) ? '#FFFFFF' : '#1F2937';
+  private markdownVariant(message: ChatMessage): MarkdownViewVariant {
+    return this.isUserMessage(message) ? 'chat_user' : 'chat_assistant';
+  }
+
+  private traceTitle(message: ChatMessage): string {
+    let title = markdownTitleText(message.content);
+    if (title.length > 0) {
+      return title;
+    }
+    return message.content.length > 0 ? message.content : '任务执行过程';
   }
 
   private toolCallCount(message: ChatMessage): number {
@@ -122,10 +132,7 @@ export struct ChatMessageList {
 
       this.ToolCallSummary(message)
 
-      Text(message.content)
-        .fontSize(15)
-        .fontColor(this.textColor(message))
-        .lineHeight(22)
+      MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
         .width('100%')
         .margin({ top: 6 })
 
@@ -177,7 +184,7 @@ export struct ChatMessageList {
           .height(22)
           .textAlign(TextAlign.Center)
         Column() {
-          Text(message.content.length > 0 ? message.content : '任务执行过程')
+          Text(this.traceTitle(message))
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
             .fontColor('#4C1D95')

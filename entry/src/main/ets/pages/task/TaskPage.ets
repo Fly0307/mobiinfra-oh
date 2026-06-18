@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
+import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
@@ -144,6 +145,7 @@ export struct TaskPage {
   @State fileViewerFiles: WorkflowManagedFile[] = [];
   @State fileViewerSelectedName: string = '';
   @State fileViewerText: string = '';
+  @State fileViewerPreviewMode: boolean = false;
 
   private filesDir: string = '';
   private pendingStructureSelectionPath: string = '';
@@ -519,6 +521,7 @@ export struct TaskPage {
   }
 
   private openConfigFileViewer(): void {
+    this.fileViewerCategory = 'config';
     this.fileViewerTitle = 'Workflow 配置文件';
     this.fileViewerFiles = WorkflowStorage.listConfigFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -527,10 +530,12 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无 workflow 配置文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openDailyLogFileViewer(): void {
+    this.fileViewerCategory = 'daily';
     this.fileViewerTitle = 'daily-log 文件';
     this.fileViewerFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -539,10 +544,12 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无 daily-log 文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openRunFileViewer(): void {
+    this.fileViewerCategory = 'run';
     this.fileViewerTitle = '运行文件';
     this.fileViewerFiles = WorkflowStorage.listRunFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -551,17 +558,28 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无运行文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
     this.fileViewerSelectedName = file.name;
+    this.fileViewerPreviewMode = this.defaultFileViewerPreviewMode(file);
     try {
       this.fileViewerText = WorkflowStorage.readText(file.path);
     } catch (e) {
       let err = e as Error;
       this.fileViewerText = '读取失败：' + (err.message || String(e));
     }
+  }
+
+  private defaultFileViewerPreviewMode(file: WorkflowManagedFile): boolean {
+    // 内联文件面板沿用独立查看页的默认规则，保证后续入口恢复时预览/原文行为一致。
+    let lowerName = file.name.toLowerCase();
+    if (this.fileViewerCategory === 'daily') {
+      return true;
+    }
+    return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
   }
 
   private contextToText(context: WorkflowJsonMap | undefined): string {
@@ -3543,12 +3561,37 @@ export struct TaskPage {
             .width('100%')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Row() {
+            Button('预览')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(this.fileViewerPreviewMode ? Color.White : '#5968FF')
+              .backgroundColor(this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .onClick(() => { this.fileViewerPreviewMode = true; })
+            Button('原文')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(!this.fileViewerPreviewMode ? Color.White : '#5968FF')
+              .backgroundColor(!this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ left: 8 })
+              .onClick(() => { this.fileViewerPreviewMode = false; })
+          }
+          .width('100%')
+          .margin({ top: 8 })
           Scroll() {
-            Text(this.fileViewerText)
-              .fontSize(11)
-              .fontFamily('monospace')
-              .fontColor('#2F3645')
-              .width('100%')
+            if (this.fileViewerPreviewMode) {
+              MarkdownView({ text: this.fileViewerText, variant: 'file_preview' })
+            } else {
+              Text(this.fileViewerText)
+                .fontSize(11)
+                .fontFamily('monospace')
+                .fontColor('#2F3645')
+                .width('100%')
+            }
           }
           .width('100%')
           .height(280)

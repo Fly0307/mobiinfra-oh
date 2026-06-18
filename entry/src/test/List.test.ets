@@ -9,7 +9,9 @@ import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
 import chatReactAgentUnitTest from './ChatReactAgentUnit.test';
 import dataManagerQueryEventsToolUnitTest from './DataManagerQueryEventsToolUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
+import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
+import markdownParserUnitTest from './MarkdownParserUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -23,5 +25,7 @@ export default function testsuite() {
   chatReactAgentUnitTest();
   dataManagerQueryEventsToolUnitTest();
   appLoggerUnitTest();
+  wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
+  markdownParserUnitTest();
 }

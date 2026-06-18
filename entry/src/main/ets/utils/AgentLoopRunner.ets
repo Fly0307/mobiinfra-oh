@@ -66,12 +66,15 @@ export class AgentLoopRunner {
   }
 
   async requestCancellation(): Promise<void> {
+    let activeMode = this.mode;
     this.cancellationRequested = true;
-    if (this.mode === 'cloud') {
+    if (activeMode === 'cloud') {
       this.cloudClient.cancelActiveRequests();
-      return;
     }
-    await this.resetLocalContext();
+    await this.returnToHostApp(activeMode);
+    if (activeMode === 'local') {
+      await this.resetLocalContext();
+    }
   }
 
   async runLocalTask(task: string): Promise<void> {
@@ -395,7 +398,7 @@ export class AgentLoopRunner {
     let streamedText = '';
     let response = await agentStep(finalVariable, (token: string) => {
       if (this.isCancellationRequested()) {
-        throw new Error('__agent_cancelled__');
+        return;
       }
       streamedText += token;
       AgentExecutionController.replaceFloatText(streamedText);

@@ -952,6 +952,20 @@ static napi_value Reset(napi_env env, napi_callback_info info) {
     return result;
 }
 
+static napi_value UnloadModel(napi_env env, napi_callback_info info) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_llm.reset();
+    g_agent_mode = false;
+    g_prefix_pos = 0;
+    g_agent_step = 0;
+    g_messages.clear();
+    g_messages.emplace_back("system", "You are a helpful assistant.");
+
+    napi_value result;
+    napi_create_string_utf8(env, "ok", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
 // ========== 9. CPU BackendConfig overrides for op precision test ==========
 // These globals are consumed by runConvTest / runConvTestInt8 when building
 // the CPU Executor. HiAI side is unaffected (its backend has no use for
@@ -4152,6 +4166,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, AgentPrefillAsync,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},

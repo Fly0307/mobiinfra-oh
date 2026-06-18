@@ -3,6 +3,7 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
+import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AppLogger } from './AppLogger';
 
 type RequestValue = Object | string | number | boolean | null;
@@ -15,6 +16,9 @@ type AgentStepHandler = (variablePart: string, onToken?: (token: string) => void
 type AgentResetHandler = () => Promise<string>;
 type AgentChatHandler = (userMessage: string) => Promise<string>;
 type NativeResetHandler = () => string;
+type HdcServerUrlProvider = () => string;
+
+const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 type RequestKey =
   'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |
@@ -83,6 +87,7 @@ export class AgentRouterServer {
   private cloudLogHandler: LogHandler | null = null;
   private cloudApprovalHandler: ApprovalHandler | null = null;
   private cloudConfigProvider: CloudConfigProvider | null = null;
+  private hdcServerUrlProvider: HdcServerUrlProvider | null = null;
   public currentTask: string = '';
 
   public running(): boolean {
@@ -115,6 +120,10 @@ export class AgentRouterServer {
     this.cloudConfigProvider = cloudConfigProvider;
     this.cloudLogHandler = onLog;
     this.cloudApprovalHandler = onRequireApproval ?? null;
+  }
+
+  public setHdcServerUrlProvider(provider: HdcServerUrlProvider | null): void {
+    this.hdcServerUrlProvider = provider;
   }
 
   public useLocal(): void {
@@ -160,6 +169,7 @@ export class AgentRouterServer {
     this.currentTask = '';
     this.cloudActionHistory = [];
     this.cloudTask = '';
+    let returnPromise = this.returnToHostApp(activeMode);
     this.log(activeMode, '>> [Cancel] 用户点击悬浮窗，请求终止当前任务。');
 
     if (activeMode === 'cloud') {
@@ -167,6 +177,7 @@ export class AgentRouterServer {
         this.cloudClientRef?.cancelActiveRequests();
       } catch (e) {
       }
+      await returnPromise;
       return;
     }
 
@@ -183,6 +194,33 @@ export class AgentRouterServer {
       this.localReset();
     } catch (e) {
     }
+    await returnPromise;
+  }
+
+  private async returnToHostApp(mode: AgentRouteMode): Promise<boolean> {
+    let returned = false;
+    if (AgentExecutionController.returnToApp()) {
+      this.log(mode, '>> [Cancel] return-to-app handler invoked before local cleanup.');
+      returned = true;
+    }
+
+    let hdcServerUrl = this.hdcServerUrlProvider ? this.hdcServerUrlProvider().trim() : '';
+    if (hdcServerUrl.length === 0) {
+      return returned;
+    }
+
+    try {
+      let bridge = new HdcWorkflowBridge(hdcServerUrl, (message: string) => {
+        this.log(mode, message);
+      });
+      await bridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      this.log(mode, '>> [Cancel] returned to host app via HDC bridge before local cleanup.');
+      return true;
+    } catch (e) {
+      let err = e as Error;
+      this.log(mode, '>> [Cancel] HDC return to host app failed before cleanup: ' + (err.message || String(e)));
+    }
+    return returned;
   }
 
   public async start(port: number, filesDir: string): Promise<boolean> {
@@ -419,7 +457,7 @@ export class AgentRouterServer {
       try {
         let response = await this.localAgentStep(variable, (token: string) => {
           if (this.isCancellationRequested()) {
-            throw new Error('__agent_cancelled__');
+            return;
           }
           streamedText += token;
           AgentExecutionController.replaceFloatText(streamedText);

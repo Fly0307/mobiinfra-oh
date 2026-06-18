@@ -110,6 +110,7 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertEqual(parse_chat_time("上午 10:45", reference), datetime(2026, 6, 11, 10, 45))
         self.assertEqual(parse_chat_time("昨天下午 07:39", reference), datetime(2026, 6, 10, 19, 39))
         self.assertEqual(parse_chat_time("星期一 下午 03:47", reference), datetime(2026, 6, 8, 15, 47))
+        self.assertEqual(parse_chat_time("2025年12月31日 20:55", reference), datetime(2025, 12, 31, 20, 55))
         self.assertIsNone(parse_chat_time("以上是打招呼的内容", reference))
         for malformed in ["6月31号", "13/01 下午 01:00", "上午 25:00"]:
             with self.subTest(malformed=malformed):
@@ -199,6 +200,47 @@ class WechatCollectParserTests(unittest.TestCase):
         self.assertIn("昨天消息", texts)
         self.assertIn("上午 09:12", texts)
         self.assertIn("今天消息", texts)
+
+    def test_missing_days_stop_at_first_older_date_and_keep_requested_days(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        older_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,220][1256,300]", children=[
+                    ui_node("Text", text="6/14 下午 02:12", bounds="[490,230][766,280]"),
+                ]),
+                ui_node("ListItem", bounds="[0,320][1256,430]", children=[
+                    ui_node("Text", text="范围外消息", bounds="[160,340][560,410]"),
+                    ui_node("Image", bounds="[70,340][150,420]"),
+                ]),
+            ]),
+        ])
+        newer_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,220][1256,300]", children=[
+                    ui_node("Text", text="昨天 下午 04:21", bounds="[490,230][766,280]"),
+                ]),
+                ui_node("ListItem", bounds="[0,320][1256,430]", children=[
+                    ui_node("Text", text="昨天消息", bounds="[160,340][560,410]"),
+                    ui_node("Image", bounds="[70,340][150,420]"),
+                ]),
+                ui_node("ListItem", bounds="[0,460][1256,540]", children=[
+                    ui_node("Text", text="上午 09:12", bounds="[510,470][746,520]"),
+                ]),
+                ui_node("ListItem", bounds="[0,560][1256,670]", children=[
+                    ui_node("Text", text="今天消息", bounds="[160,580][560,650]"),
+                    ui_node("Image", bounds="[70,580][150,660]"),
+                ]),
+            ]),
+        ])
+
+        cutoff = cutoff_for_days(3, reference)
+        payload = build_chat_payload_from_snapshots([newer_root, older_root], days=3, reference_now=reference)
+        texts = [message["text"] for message in payload["messages"]]
+
+        self.assertTrue(snapshot_reaches_cutoff(older_root, cutoff, reference))
+        self.assertNotIn("6/14 下午 02:12", texts)
+        self.assertNotIn("范围外消息", texts)
+        self.assertEqual(texts, ["昨天 下午 04:21", "昨天消息", "上午 09:12", "今天消息"])
 
     def test_boundary_day_first_time_separator_is_earliest_message(self):
         reference = datetime(2026, 6, 18, 12, 0)

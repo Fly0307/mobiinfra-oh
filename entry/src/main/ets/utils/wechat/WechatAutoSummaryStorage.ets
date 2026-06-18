@@ -35,6 +35,14 @@ export function wechatAutoSummaryRunDir(filesDir: string, runId: string): string
 
 export function renderWechatAutoSummaryDailyLog(runId: string, mode: string, days: number,
   entries: string[]): string {
+  let numberedBlocks: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    let block = wechatDailyLogEntryBlock(entries[i]);
+    if (block.length > 0) {
+      // DataManager 通过编号条目切分 daily-log；微信联系人块需要保持同一条编号记录内。
+      numberedBlocks.push((numberedBlocks.length + 1).toString() + '. ' + block);
+    }
+  }
   let metadata: WechatAutoSummaryDailyMetadata = {
     task_scene_id: 3,
     source_app: 'wechat',
@@ -45,7 +53,7 @@ export function renderWechatAutoSummaryDailyLog(runId: string, mode: string, day
   };
   let envelope: WechatAutoSummaryDailyMetadataEnvelope = {
     workflow_metadata: metadata,
-    latest_entry_index: entries.length
+    latest_entry_index: numberedBlocks.length
   };
   let lines: string[] = [
     '<!-- DAILY_LOG_METADATA',
@@ -53,12 +61,9 @@ export function renderWechatAutoSummaryDailyLog(runId: string, mode: string, day
     '-->',
     ''
   ];
-  for (let i = 0; i < entries.length; i++) {
-    let block = wechatDailyLogEntryBlock(entries[i]);
-    if (block.length > 0) {
-      lines.push(block);
-      lines.push('');
-    }
+  for (let block of numberedBlocks) {
+    lines.push(block);
+    lines.push('');
   }
   return lines.join('\n');
 }

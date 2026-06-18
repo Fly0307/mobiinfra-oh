@@ -1,6 +1,10 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 import {
+  parseDailyLogDocument,
+  parseNumberedEntries
+} from '../main/ets/datamanager/DataManagerUtils';
+import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
   DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
@@ -183,8 +187,16 @@ export default function wechatAutoSummaryUnitTest() {
       expect(content.indexOf('"workflow_metadata"') >= 0).assertTrue();
       expect(content.indexOf('"task_scene_id": 3') >= 0).assertTrue();
       expect(content.indexOf('"latest_entry_index": 2') >= 0).assertTrue();
-      expect(content.indexOf('## 小赵提醒下午三点开会') >= 0).assertTrue();
-      expect(content.indexOf('1. 小赵提醒下午三点开会') < 0).assertTrue();
+      expect(content.indexOf('1. ## 小赵提醒下午三点开会') >= 0).assertTrue();
+      expect(content.indexOf('2. ## 小李确认周五前提交材料') >= 0).assertTrue();
+
+      let document = parseDailyLogDocument(content);
+      let numberedEntries = parseNumberedEntries(document.body);
+      expect(numberedEntries.length).assertEqual(2);
+      expect(numberedEntries[0].index).assertEqual(1);
+      expect(numberedEntries[0].text.indexOf('## 小赵提醒下午三点开会')).assertEqual(0);
+      expect(numberedEntries[1].index).assertEqual(2);
+      expect(numberedEntries[1].text.indexOf('## 小李确认周五前提交材料')).assertEqual(0);
     });
 
     it('buildsDailyEntriesFromConversationsWhenServiceEntriesAreEmpty', 0, () => {

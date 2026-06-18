@@ -1,5 +1,8 @@
-// These prompt mirrors come from entry/src/main/python/prompts/*.md.
-// Keep them readable so App-side Agent behavior can be reviewed without decoding base64.
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
+
+// Built-in fallbacks mirror the legacy prompt files. Model directories can override
+// Agent prompts with standardized markdown files beside config.json.
 
 const PLANNER_ONESHOT_HARMONY_PROMPT: string = `## 角色定义
 你是一个任务规划专家，负责理解用户意图，选择最合适的应用，并生成一个结构化、可执行的最终任务描述。
@@ -256,7 +259,23 @@ The sequence of actions you have already taken:
 - If the task is completed, verify the result before outputting 'done'.
 `;
 
+export const AGENT_PROMPT_PREFIX_FILE: string = 'agent_prompt_prefix.md';
+export const AGENT_PROMPT_VARIABLE_FILE: string = 'agent_prompt_variable.md';
+export const AGENT_PROMPT_PREFIX_NOREASON_FILE: string = 'agent_prompt_prefix_noreason.md';
+export const AGENT_PROMPT_VARIABLE_NOREASON_FILE: string = 'agent_prompt_variable_noreason.md';
+
 export class AgentPromptTemplates {
+  static loadFromModelDir(modelDir: string, name: string): string {
+    let fileName = AgentPromptTemplates.modelPromptFileName(name);
+    if (modelDir.length > 0 && fileName.length > 0) {
+      let text = AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName);
+      if (text.trim().length > 0) {
+        return AgentPromptTemplates.normalize(text);
+      }
+    }
+    return AgentPromptTemplates.load(name);
+  }
+
   static load(name: string): string {
     if (name === 'planner_oneshot_harmony.md') {
       return AgentPromptTemplates.normalize(PLANNER_ONESHOT_HARMONY_PROMPT);
@@ -280,6 +299,45 @@ export class AgentPromptTemplates {
       return AgentPromptTemplates.normalize(E2E_PROMPT);
     }
     return '';
+  }
+
+  private static modelPromptFileName(name: string): string {
+    if (name === 'e2e_v2_agent_prefix.md') {
+      return AGENT_PROMPT_PREFIX_FILE;
+    }
+    if (name === 'e2e_v2_agent_prefix_noreason.md') {
+      return AGENT_PROMPT_PREFIX_NOREASON_FILE;
+    }
+    if (name === 'e2e_v2_agent_variable.md') {
+      return AGENT_PROMPT_VARIABLE_FILE;
+    }
+    if (name === 'e2e_v2_agent_variable_noreason.md') {
+      return AGENT_PROMPT_VARIABLE_NOREASON_FILE;
+    }
+    return '';
+  }
+
+  private static readModelPrompt(path: string): string {
+    let file: fs.File | null = null;
+    try {
+      if (!fs.accessSync(path)) {
+        return '';
+      }
+      let stat = fs.statSync(path);
+      if (stat.size <= 0) {
+        return '';
+      }
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      return util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+    } catch (e) {
+      return '';
+    } finally {
+      if (file !== null) {
+        try { fs.closeSync(file); } catch (e) {}
+      }
+    }
   }
 
   private static normalize(text: string): string {

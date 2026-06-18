@@ -24,6 +24,7 @@ const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
+  private modelDirPath: string;
   private localApi: AgentLoopNativeApi;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: CloudConfigProvider;
@@ -41,6 +42,7 @@ export class AgentLoopRunner {
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
     filesDir: string,
+    modelDir: string,
     hdcServerIp: string,
     localApi: AgentLoopNativeApi,
     cloudClient: CloudModelClient,
@@ -51,6 +53,7 @@ export class AgentLoopRunner {
     cloudApprovalHandler: ApprovalHandler
   ) {
     this.filesDir = filesDir;
+    this.modelDirPath = modelDir;
     this.localApi = localApi;
     this.cloudClient = cloudClient;
     this.cloudConfigProvider = cloudConfigProvider;
@@ -225,7 +228,7 @@ export class AgentLoopRunner {
   private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
     this.checkCancellation();
     let prefixFile = this.noReasonMode ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
-    let prefixTemplate = AgentPromptTemplates.load(prefixFile);
+    let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] prefix template missing, fallback to full prompt mode.');
       await this.runFullPromptMode(task, mode);
@@ -243,7 +246,7 @@ export class AgentLoopRunner {
     let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
     let variableFile = this.noReasonMode ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
-    let variableTemplate = AgentPromptTemplates.load(variableFile);
+    let variableTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, variableFile);
     if (variableTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] variable template missing, fallback to full prompt mode.');
       if (mode === 'local') {

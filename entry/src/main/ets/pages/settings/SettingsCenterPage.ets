@@ -51,6 +51,15 @@ import {
 
 registerGallerySettingsDefaults();
 
+interface DownloadedModelItem {
+  id: string;
+  label: string;
+  path: string;
+  repo: string;
+  sizeText: string;
+  ready: boolean;
+}
+
 @Component
 export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
@@ -74,6 +83,8 @@ export struct SettingsCenterPage {
   @Prop hdcAutoConnecting: boolean = false;
   @Prop hdcManualPairing: boolean = false;
   @Prop selectedModelVariant: string = '';
+  @Prop downloadedModels: DownloadedModelItem[] = [];
+  @Prop selectedModelId: string = '';
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
@@ -134,6 +145,8 @@ export struct SettingsCenterPage {
   onClearScreenshots: () => void = () => {};
   onDeleteDebugOutputs: () => void = () => {};
   onSwitchModelVariant: (variant: string) => void = (variant: string) => {};
+  onSwitchDownloadedModel: (modelId: string) => void = (modelId: string) => {};
+  onRefreshDownloadedModels: () => void = () => {};
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
@@ -241,6 +254,67 @@ export struct SettingsCenterPage {
       .borderRadius(12)
       .padding({ left: 12, right: 12 })
       .onChange((val: string) => { onValueChange(val); })
+  }
+
+  @Builder DownloadedModelList() {
+    this.FieldLabel('已下载模型')
+    Row() {
+      Text(this.downloadedModels.length > 0 ? '点击模型切换后续本地加载路径' : '未扫描到已下载模型')
+        .fontSize(12)
+        .fontColor('#7B8290')
+        .layoutWeight(1)
+        .maxLines(2)
+      Button('刷新')
+        .height(32)
+        .width(72)
+        .fontSize(12)
+        .backgroundColor('#607D8B')
+        .borderRadius(10)
+        .onClick(() => { this.onRefreshDownloadedModels(); })
+    }
+    .width('100%')
+    .margin({ bottom: 8 })
+
+    if (this.downloadedModels.length > 0) {
+      Column() {
+        ForEach(this.downloadedModels, (item: DownloadedModelItem) => {
+          Row() {
+            Column() {
+              Text(item.label)
+                .fontSize(13)
+                .fontWeight(this.selectedModelId === item.id ? FontWeight.Bold : FontWeight.Regular)
+                .fontColor(this.selectedModelId === item.id ? '#4F68FF' : '#11182F')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+              Text((item.ready ? '可加载' : '缺少 config.json') + ' · ' + item.sizeText)
+                .fontSize(11)
+                .fontColor(item.ready ? '#2D9B73' : '#D26B31')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            Button(this.selectedModelId === item.id ? '当前' : '切换')
+              .height(32)
+              .width(64)
+              .fontSize(12)
+              .backgroundColor(this.selectedModelId === item.id ? '#A9B0BE' : '#4F68FF')
+              .borderRadius(10)
+              .enabled(this.selectedModelId !== item.id)
+              .onClick(() => { this.onSwitchDownloadedModel(item.id); })
+          }
+          .width('100%')
+          .padding({ left: 10, right: 10, top: 9, bottom: 9 })
+          .backgroundColor(this.selectedModelId === item.id ? '#EEF4FF' : '#F7F9FC')
+          .borderRadius(12)
+          .border({ width: 1, color: this.selectedModelId === item.id ? '#BFD3FF' : '#E6EAF2' })
+          .margin({ bottom: 8 })
+        }, (item: DownloadedModelItem) => item.id)
+      }
+      .width('100%')
+    }
   }
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
@@ -639,7 +713,9 @@ export struct SettingsCenterPage {
       this.SettingInput('模型下载服务', this.serverIp, '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
         (value: string) => { this.serverIp = value; })
 
-      this.FieldLabel('模型变体')
+      this.DownloadedModelList()
+
+      this.FieldLabel('旧模型目录快捷切换')
       Flex({ wrap: FlexWrap.Wrap }) {
         this.VariantButton('默认', '')
         this.VariantButton('modelv2', 'modelv2')

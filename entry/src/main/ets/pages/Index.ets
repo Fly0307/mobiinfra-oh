@@ -155,6 +155,18 @@ interface CloudAgentTaskSubmitResult {
   error: string;
 }
 
+interface DownloadedModelItem {
+  id: string;
+  label: string;
+  path: string;
+  repo: string;
+  sizeText: string;
+  ready: boolean;
+}
+
+const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
+const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
+
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
@@ -221,6 +233,8 @@ struct Index {
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
+  @State downloadedModels: DownloadedModelItem[] = [];
+  @State selectedModelId: string = 'legacy:model';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -1211,6 +1225,7 @@ struct Index {
     }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
+    this.refreshDownloadedModels();
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
@@ -1366,26 +1381,162 @@ struct Index {
     }
   }
 
+  private legacyModelId(name: string): string {
+    return 'legacy:' + name;
+  }
+
+  private modelScopeModelId(owner: string, repo: string): string {
+    return 'modelscope:' + owner + '/' + repo;
+  }
+
+  private modelScopeRootDir(): string {
+    return this.filesDir + '/' + MODEL_SCOPE_ROOT_DIR_NAME;
+  }
+
+  private encodeModelScopeRepoDir(owner: string, repo: string): string {
+    return owner + '__' + repo;
+  }
+
+  private decodeModelScopeRepoDir(dir: string): string {
+    let sep = dir.indexOf('__');
+    if (sep <= 0 || sep + 2 >= dir.length) {
+      return dir;
+    }
+    return dir.substring(0, sep) + '/' + dir.substring(sep + 2);
+  }
+
+  private modelScopeRepoDir(owner: string, repo: string): string {
+    return this.modelScopeRootDir() + '/' + this.encodeModelScopeRepoDir(owner, repo);
+  }
+
   private getCurrentModelFolderName(): string {
-    return this.selectedModelVariant.length > 0 ? this.selectedModelVariant : 'model';
+    if (this.modelDir.length > 0) {
+      let index = this.modelDir.lastIndexOf('/');
+      return index >= 0 ? this.modelDir.substring(index + 1) : this.modelDir;
+    }
+    return 'model';
   }
 
   private syncModelDir(): void {
-    this.modelDir = `${this.filesDir}/${this.getCurrentModelFolderName()}`;
+    if (this.selectedModelId.startsWith('modelscope:')) {
+      let repo = this.selectedModelId.substring('modelscope:'.length);
+      let parts = repo.split('/');
+      if (parts.length === 2) {
+        this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+        return;
+      }
+    }
+    let legacyName = 'model';
+    if (this.selectedModelId.startsWith('legacy:')) {
+      legacyName = this.selectedModelId.substring('legacy:'.length);
+    } else if (this.selectedModelVariant.length > 0) {
+      legacyName = this.selectedModelVariant;
+    }
+    this.selectedModelVariant = legacyName === 'model' ? '' : legacyName;
+    this.selectedModelId = this.legacyModelId(legacyName);
+    this.modelDir = this.filesDir + '/' + legacyName;
   }
 
   private switchModelVariant(variant: string): void {
-    let nextVariant = '';
-    if (variant === 'modelv2' || variant === 'modelv3' || variant === 'modelv4' || variant === 'model_omc') {
-      nextVariant = variant;
+    let legacyName = variant.length > 0 ? variant : 'model';
+    if (LEGACY_MODEL_DIRS.indexOf(legacyName) < 0) {
+      legacyName = 'model';
     }
-    if (this.selectedModelVariant === nextVariant) {
+    this.switchDownloadedModel(this.legacyModelId(legacyName));
+  }
+
+  private switchDownloadedModel(modelId: string): void {
+    if (this.blockModelFileMutationIfBusy('切换模型')) {
       return;
     }
-    this.selectedModelVariant = nextVariant;
-    this.syncModelDir();
+    let target: DownloadedModelItem | null = null;
+    for (let i = 0; i < this.downloadedModels.length; i++) {
+      if (this.downloadedModels[i].id === modelId) {
+        target = this.downloadedModels[i];
+        break;
+      }
+    }
+    if (target === null) {
+      this.output = '模型不存在或尚未扫描到: ' + modelId;
+      return;
+    }
+    if (this.selectedModelId === target.id && this.modelDir === target.path) {
+      return;
+    }
+    this.unloadLocalModelForFileMutation();
+    this.selectedModelId = target.id;
+    this.selectedModelVariant = target.id.startsWith('legacy:') && target.id !== this.legacyModelId('model') ? target.label : '';
+    this.modelDir = target.path;
     this.modelLoaded = false;
-    this.output = `模型路径已切换至: ${this.getCurrentModelFolderName()}`;
+    this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
+  }
+
+  private refreshDownloadedModels(): void {
+    let items: DownloadedModelItem[] = [];
+    for (let i = 0; i < LEGACY_MODEL_DIRS.length; i++) {
+      let name = LEGACY_MODEL_DIRS[i];
+      let path = this.filesDir + '/' + name;
+      if (this.modelDirectoryExists(path)) {
+        items.push(this.buildDownloadedModelItem(this.legacyModelId(name), name === 'model' ? '默认 model' : name, path, 'legacy'));
+      }
+    }
+    try {
+      let root = this.modelScopeRootDir();
+      if (fs.accessSync(root)) {
+        let dirs = fs.listFileSync(root);
+        dirs.sort();
+        for (let dir of dirs) {
+          let path = root + '/' + dir;
+          if (!this.modelDirectoryExists(path)) {
+            continue;
+          }
+          let repo = this.decodeModelScopeRepoDir(dir);
+          let parts = repo.split('/');
+          let id = parts.length === 2 ? this.modelScopeModelId(parts[0], parts[1]) : 'modelscope:' + dir;
+          items.push(this.buildDownloadedModelItem(id, repo, path, repo));
+        }
+      }
+    } catch (e) {
+    }
+    this.downloadedModels = items;
+    let foundSelected = false;
+    for (let item of items) {
+      if (item.id === this.selectedModelId) {
+        foundSelected = true;
+        this.modelDir = item.path;
+        break;
+      }
+    }
+    if (!foundSelected) {
+      this.selectedModelId = this.legacyModelId('model');
+      this.selectedModelVariant = '';
+      this.syncModelDir();
+    }
+  }
+
+  private modelDirectoryExists(path: string): boolean {
+    try {
+      if (!fs.accessSync(path)) {
+        return false;
+      }
+      fs.listFileSync(path);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
+    let ready = false;
+    try { ready = fs.accessSync(path + '/config.json'); } catch (e) { ready = false; }
+    return {
+      id: id,
+      label: label,
+      path: path,
+      repo: repo,
+      sizeText: this.formatSize(this.calcPathSize(path)),
+      ready: ready
+    };
   }
 
   formatSize(bytes: number): string {
@@ -1523,6 +1674,7 @@ struct Index {
       }
       let deletedCount = this.deletePathRecursively(this.modelDir);
       this.modelLoaded = false;
+      this.refreshDownloadedModels();
       this.output = `模型删除成功\n已删除 ${this.getCurrentModelFolderName()} 目录及其内容（共 ${deletedCount} 项）。`;
     } catch (e) {
       this.output = `模型删除失败: ${e}`;
@@ -1545,6 +1697,7 @@ struct Index {
         return;
       }
       fs.unlinkSync(cfgPath);
+      this.refreshDownloadedModels();
       this.modelLoaded = false;
       this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载补齐 config.json。`;
     } catch (e) {
@@ -2001,7 +2154,7 @@ struct Index {
       return;
     }
     this.downloading = true;
-    try { fs.mkdirSync(this.modelDir); } catch {}
+    this.ensureDirectoryRecursive(this.modelDir);
     this.beginModelDownloadProgress('模型下载进度', this.totalBytesAll);
 
     let completedBytes = 0;
@@ -2023,6 +2176,7 @@ struct Index {
       this.updateModelDownloadProgress(completedBytes, this.totalBytesAll,
         failed.length.toString() + ' 个失败，再次点击可继续');
     }
+    this.refreshDownloadedModels();
     this.downloading = false;
   }
 
@@ -2482,8 +2636,12 @@ struct Index {
       AppLogger.warn('ModelDownload', message);
       return;
     }
+    let nextModelId = this.modelScopeModelId(parts[0], parts[1]);
+    this.selectedModelId = nextModelId;
+    this.selectedModelVariant = '';
+    this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
-    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo);
+    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
     this.modelScopeDownloading = true;
     this.modelScopePauseRequested = false;
@@ -2535,6 +2693,7 @@ struct Index {
         }
       }
       this.disableModelThinkingByDefault();
+      this.refreshDownloadedModels();
       if (failed.length === 0) {
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
@@ -2550,6 +2709,7 @@ struct Index {
       AppLogger.error('ModelDownload', message);
     } finally {
       this.modelScopeActiveHttpReq = null;
+      this.refreshDownloadedModels();
       this.modelScopeDownloading = false;
       this.downloading = false;
     }
@@ -3238,6 +3398,7 @@ struct Index {
   private createAgentLoopRunner(): AgentLoopRunner {
     return new AgentLoopRunner(
       this.filesDir,
+      this.modelDir,
       this.hdcServerIp,
       mnnllm,
       this.cloudClient,
@@ -3662,6 +3823,8 @@ struct Index {
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
             selectedModelVariant: this.selectedModelVariant,
+            downloadedModels: this.downloadedModels,
+            selectedModelId: this.selectedModelId,
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
@@ -3681,6 +3844,8 @@ struct Index {
             onClearScreenshots: () => { this.clearScreenshots(); },
             onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
             onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
+            onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+            onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },

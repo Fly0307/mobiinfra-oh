@@ -488,6 +488,26 @@ struct Index {
     }
   }
 
+  private reportLocalAgentStartupStatus(message: string, appendTrace: boolean = true,
+    appendVisibleMessage: boolean = false): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.updateFloatText(message);
+    }
+    if (this.localTaskSessionId.length === 0) {
+      return;
+    }
+    if (appendTrace) {
+      this.appendTaskTraceLineForSession(this.localTaskSessionId, message);
+    }
+    if (appendVisibleMessage) {
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-status'), 'task', CHAT_MESSAGE_KIND_TASK_RESULT,
+          message, new Date().getTime()));
+    }
+  }
+
   private handleCloudAgentLog(message: string): void {
     this.appendCloudLog(message);
     let imagePath = this.snapshotImagePathFromLog(message);
@@ -2931,41 +2951,53 @@ struct Index {
   private async ensureLocalModelLoaded(): Promise<boolean> {
     // 本地 Agent 启动前自动加载模型，减少用户遗漏“加载大模型”按钮导致的失败。
     if (this.modelLoaded) {
+      this.reportLocalAgentStartupStatus('本地模型已加载，继续准备 Agent。');
       return true;
     }
 
     let cfg = this.modelDir + '/config.json';
     if (!this.prepareCustomOpp()) {
+      let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
+      this.reportLocalAgentStartupStatus(reason, true, true);
       return false;
     }
 
-    this.output = '未检测到已加载模型，正在自动加载大模型...';
+    this.reportLocalAgentStartupStatus('正在加载本地模型，首次加载可能需要较长时间，请稍候...', true, true);
+    await this.sleep(80);
     try {
       let loadResult: string = await mnnllm.loadModel(cfg);
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
-        this.output = `自动加载模型失败: ${this.output}`;
+        this.reportLocalAgentStartupStatus(`自动加载模型失败: ${this.output}`, true, true);
+      } else {
+        this.reportLocalAgentStartupStatus('本地模型加载完成，正在启动本地 Agent。', true, true);
+        await this.sleep(30);
       }
       return this.modelLoaded;
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.output = '自动加载模型失败: ' + message;
+      this.reportLocalAgentStartupStatus('自动加载模型失败: ' + message, true, true);
       return false;
     }
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
+    this.reportLocalAgentStartupStatus('正在检查本地模型状态...');
     if (!await this.ensureLocalModelLoaded()) {
       return false;
     }
+    this.reportLocalAgentStartupStatus('本地模型已就绪，正在连接 HDC Server...');
     if (!await this.ensureHdcServerReadyForTask(false)) {
+      let reason = this.output.trim().length > 0 ? this.output : 'HDC Server 连接失败，无法执行本地 Agent。';
+      this.reportLocalAgentStartupStatus(reason, true, true);
       return false;
     }
     if (this.hdcServerIp.trim().length === 0) {
-      this.output = 'HDC Server 未配置，无法执行本地 Agent。';
+      this.reportLocalAgentStartupStatus('HDC Server 未配置，无法执行本地 Agent。', true, true);
       return false;
     }
+    this.reportLocalAgentStartupStatus('HDC Server 已就绪，准备启动本地 Agent。');
     return true;
   }
 
@@ -2974,6 +3006,8 @@ struct Index {
       this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机';
       return;
     }
+    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。', false, false);
+    await this.sleep(50);
     if (!await this.ensureLocalAgentReady()) {
       return;
     }
@@ -3139,24 +3173,35 @@ struct Index {
     if (this.isThinking) {
       return;
     }
-    if (!await this.ensureLocalAgentReady()) {
-      return;
-    }
     this.ensureActiveChatSession();
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       task, new Date().getTime()));
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
-      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(), []));
+      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(),
+      ['任务已下发，正在准备本地 Agent。']));
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-      CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 已开始执行。', new Date().getTime()));
+      CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，正在准备本地 Agent。', new Date().getTime()));
     this.localTaskSessionId = this.activeChatSessionId;
     this.debugImagePath = '';
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.isThinking = true;
-    let runner = this.createAgentLoopRunner();
-    this.activeAgentRunner = runner;
-    this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+    AgentExecutionController.beginExecution('本地 Agent 准备中...');
+    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。');
+    await this.sleep(50);
     try {
+      if (!await this.ensureLocalAgentReady()) {
+        let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
+        this.appendChatMessageForSession(this.localTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
+        AgentExecutionController.finishExecution('本地 Agent 启动失败');
+        return;
+      }
+      this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
+      await this.sleep(30);
+      let runner = this.createAgentLoopRunner();
+      this.activeAgentRunner = runner;
+      this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
       await runner.runLocalTask(task);
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',

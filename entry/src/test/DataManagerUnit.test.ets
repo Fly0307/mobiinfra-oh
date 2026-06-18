@@ -807,6 +807,39 @@ export default function dataManagerUnitTest() {
       expect(xhsNames[0]).assertEqual('小红书');
     });
 
+    it('eventSourceNamesSkipsCollectorRunIdAndGalleryCategoryContext', 0, () => {
+      let wechatAutoNames = eventSourceNames(
+        ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'],
+        '2026-06/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md.state.json'
+      );
+      expect(wechatAutoNames.length).assertEqual(1);
+      expect(wechatAutoNames[0]).assertEqual('微信');
+
+      let galleryNames = eventSourceNames(
+        ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#574201189'],
+        '2026-06/com.huawei.photos__gallery-analysis__聊天.md.state.json'
+      );
+      expect(galleryNames.length).assertEqual(1);
+      expect(galleryNames[0]).assertEqual('图库');
+    });
+
+    it('eventSourceNamesUsesBusinessPackageDisplayNames', 0, () => {
+      let names = eventSourceNames([
+        '2026-06-04/com.jd.harmony__basic-gui-task.md#1',
+        '2026-06-06/com.ctrip.harmony__basic-gui-task.md#1',
+        '2026-06-04/com.sankuai.meituan__basic-gui-task.md#1',
+        '2026-06-07/com.meituan.waimai__basic-gui-task.md#1',
+        '2026-06-10/tv.danmaku.bili__basic-gui-task.md#1'
+      ], '');
+      expect(names.indexOf('京东') >= 0).assertTrue();
+      expect(names.indexOf('携程') >= 0).assertTrue();
+      expect(names.indexOf('美团') >= 0).assertTrue();
+      expect(names.indexOf('美团外卖') >= 0).assertTrue();
+      expect(names.indexOf('哔哩哔哩') >= 0).assertTrue();
+      expect(names.indexOf('harmony') < 0).assertTrue();
+      expect(names.indexOf('meituan') < 0).assertTrue();
+    });
+
     it('indexTerms', 0, () => {
       let terms = indexTerms('高德顺风车订单');
       expect(terms.indexOf('顺风') >= 0).assertTrue();
@@ -1044,6 +1077,238 @@ export default function dataManagerUnitTest() {
       expect(groups[0].event_ids.length).assertEqual(2);
     });
 
+    it('heuristicChatGroupsPreferWechatAutoContactOverRunId', 0, () => {
+      let xz = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务及高德相关代码/信息', '微信', 'work', 'UI');
+      xz.sources = ['微信', 'wechat-20260618T105024'];
+      xz.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      xz.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      xz.entities = ['person:小赵'];
+      let xm = demoIndexedEvent('e2', '用户于2026-06-16与联系人小铭讨论图片标签解析异常和模型参数配置', '微信', 'work', '模型');
+      xm.sources = ['微信', 'wechat-20260618T105024'];
+      xm.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#2'];
+      xm.entity_mentions = [{ type: 'person', name: '小铭', aliases: [] }];
+      xm.entities = ['person:小铭'];
+      let transfer = demoIndexedEvent('e3', '## 微信联系人「文件传输助手」当前可见页面消息采集 - 联系人：文件传输助手 - 会话标题：文件传输助手 - 消息数：0', '微信', 'other', '文件传输助手');
+      transfer.sources = ['微信', 'wechat-20260618T105024'];
+      transfer.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#4'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [xz, xm, transfer]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(groups.length).assertEqual(3);
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-UI') >= 0 || titles.indexOf('小赵-工作UI优化任务') >= 0).assertTrue();
+      expect(titles.indexOf('小铭-模型') >= 0 || titles.indexOf('小铭-图片标签解析异常') >= 0).assertTrue();
+      expect(titles.indexOf('文件传输助手-微信联系人') >= 0 || titles.indexOf('文件传输助手-聊天记录') >= 0).assertTrue();
+    });
+
+    it('normalizesChatGroupTitlesToConversationAndTopic', 0, () => {
+      let bug = demoIndexedEvent('e101', '小赵要求明天下午两点前修复bug并提交PR', '微信', 'work', 'bug');
+      bug.sources = ['微信', '小赵'];
+      bug.source_refs = ['2026-06-11/com.tencent.wechat__basic-gui-task__小赵.md#6'];
+      bug.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      bug.entities = ['person:小赵'];
+      let register = demoIndexedEvent('e102', '小赵提醒明天上午领取注册条', '微信', 'work', '领取注册条');
+      register.sources = ['微信', '小赵'];
+      register.source_refs = ['2026-06-11/com.tencent.wechat__basic-gui-task__小赵.md#7'];
+      register.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      register.entities = ['person:小赵'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [bug, register], [
+        demoCollectionGroupState('g-bug', 'Bug修复与PR', [bug]),
+        demoCollectionGroupState('g-register', '领取注册条', [register])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('小赵-Bug修复与PR') >= 0).assertTrue();
+      expect(titles.indexOf('小赵-领取注册条') >= 0).assertTrue();
+      expect(titles.indexOf('与小赵的对话') < 0).assertTrue();
+    });
+
+    it('normalizesChatTitlesWithoutUsingPlaceOrMerchantAsConversation', 0, () => {
+      let travel = demoIndexedEvent('e103', '小赵计划周末去苏州看展', '微信', 'travel', '苏州看展');
+      travel.sources = ['微信', '小赵'];
+      travel.source_refs = ['2026-06-02/com.tencent.wechat__basic-gui-task__小赵.md#3'];
+      travel.entity_mentions = [{ type: 'place', name: '苏州', aliases: [] }];
+      travel.entities = ['place:苏州'];
+      let takeout = demoIndexedEvent('e104', '小赵提及上周饿了么订单需补充发票抬头', '微信', 'other', '发票需求');
+      takeout.sources = ['微信', '小赵'];
+      takeout.source_refs = ['2026-06-02/com.tencent.wechat__basic-gui-task__小赵.md#2'];
+      takeout.entity_mentions = [{ type: 'merchant', name: '饿了么', aliases: ['饿了么订单'] }];
+      takeout.entities = ['merchant:饿了么'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [travel, takeout], [
+        demoCollectionGroupState('g-travel', '与苏州的对话', [travel]),
+        demoCollectionGroupState('g-takeout', '与饿了么的对话', [takeout])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('小赵-苏州看展') >= 0).assertTrue();
+      expect(titles.indexOf('小赵-发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('与苏州的对话') < 0).assertTrue();
+      expect(titles.indexOf('与饿了么的对话') < 0).assertTrue();
+    });
+
+    it('normalizesGroupChatTitlesToGroupAndTopic', 0, () => {
+      let hdc = demoIndexedEvent('e105', '群成员讨论HDC导入脚本，建议默认使用bundle alias路径', '微信', 'other', 'HDC脚本优化');
+      hdc.sources = ['微信', '产品群'];
+      hdc.source_refs = ['2026-06-05/com.tencent.wechat__basic-gui-task__产品群.md#4'];
+      hdc.entity_mentions = [{ type: 'place', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      hdc.entities = ['place:HDC导入脚本'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [hdc], [
+        demoCollectionGroupState('g-hdc', '与HDC导入脚本的对话', [hdc])
+      ]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title).assertEqual('产品群-HDC脚本优化');
+    });
+
+    it('normalizesChatTitlesRejectsObjectLikeSourceDetailAndGenericContact', 0, () => {
+      let sourceObject = demoIndexedEvent('e109', '当前页面显示群成员在讨论 HDC 导入脚本，建议默认使用 bundle alias 路径。', '微信', 'other', 'HDC脚本优化');
+      sourceObject.sources = ['微信', 'HDC导入脚本'];
+      sourceObject.source_refs = ['2026-06-05/com.tencent.wechat__basic-gui-task__产品群.md#4'];
+      sourceObject.entity_mentions = [{ type: 'place', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      sourceObject.entities = ['place:HDC导入脚本'];
+      let genericMerchant = demoIndexedEvent('e110', '用户与饿了么沟通上周订单发票抬头。', '微信', 'other', '发票需求');
+      genericMerchant.sources = ['微信'];
+      genericMerchant.entity_mentions = [{ type: 'merchant', name: '饿了么', aliases: ['饿了么订单'] }];
+      genericMerchant.entities = ['merchant:饿了么'];
+      let sourcePlaceWithoutEntity = demoIndexedEvent('e111', '用户讨论苏州周末路线。', '微信', 'travel', '周末路线');
+      sourcePlaceWithoutEntity.sources = ['微信', '苏州'];
+      let sourceMerchantWithoutEntity = demoIndexedEvent('e112', '用户讨论饿了么订单发票。', '微信', 'other', '发票需求');
+      sourceMerchantWithoutEntity.sources = ['微信', '饿了么'];
+      let directMetadataObject = demoIndexedEvent('e117',
+        '微信联系人「HDC导入脚本」当前页面显示 HDC 导入脚本配置 - 联系人：HDC导入脚本 - 会话标题：HDC导入脚本',
+        '微信', 'other', '脚本配置优化');
+      directMetadataObject.sources = ['微信'];
+      directMetadataObject.entity_mentions = [{ type: 'tool', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      directMetadataObject.entities = ['tool:HDC导入脚本'];
+      let legacySourcePlaceGroup = demoCollectionGroupState('g-source-place', '周末路线', [sourcePlaceWithoutEntity]);
+      legacySourcePlaceGroup.source = '苏州';
+      let legacySourceMerchantGroup = demoCollectionGroupState('g-source-merchant', '发票需求', [sourceMerchantWithoutEntity]);
+      legacySourceMerchantGroup.source = '饿了么';
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录',
+        [sourceObject, genericMerchant, sourcePlaceWithoutEntity, sourceMerchantWithoutEntity, directMetadataObject], [
+        demoCollectionGroupState('g-source-object', 'HDC脚本优化', [sourceObject]),
+        demoCollectionGroupState('g-merchant', '发票需求', [genericMerchant]),
+        legacySourcePlaceGroup,
+        legacySourceMerchantGroup,
+        demoCollectionGroupState('g-direct-object', '脚本配置优化', [directMetadataObject])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('HDC导入脚本-HDC脚本优化') < 0).assertTrue();
+      expect(titles.indexOf('HDC导入脚本-脚本配置优化') < 0).assertTrue();
+      expect(titles.indexOf('饿了么-发票需求') < 0).assertTrue();
+      expect(titles.indexOf('苏州-周末路线') < 0).assertTrue();
+      expect(titles.indexOf('微信-HDC脚本优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信-脚本配置优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信-发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('微信-周末路线') >= 0).assertTrue();
+    });
+
+    it('normalizesBusinessTabTitlesToSourceAndTopic', 0, () => {
+      let shoe = demoIndexedEvent('e106', '浏览耐克官方店铺Air Zoom Pegasus跑鞋详情', 'taobao', 'wear', '耐克跑鞋浏览');
+      shoe.sources = ['taobao'];
+      shoe.entity_mentions = [{ type: 'merchant', name: '耐克', aliases: ['Nike Official Store'] }];
+      shoe.entities = ['merchant:耐克'];
+      let takeout = demoIndexedEvent('e107', '中午在美团外卖下单黄焖鸡米饭', 'waimai', 'eat', '黄焖鸡');
+      takeout.sources = ['waimai', 'llm-takeout-美团外卖'];
+      takeout.entity_mentions = [{ type: 'merchant', name: '美团外卖', aliases: [] }];
+      takeout.entities = ['merchant:美团外卖'];
+      let video = demoIndexedEvent('e108', '浏览苏州旅行 Vlog', 'bili', 'travel', '苏州旅行Vlog');
+      video.sources = ['bili'];
+
+      let shoppingGroups = normalizeCollectionGroups('shopping', '购物记录', [shoe], [
+        demoCollectionGroupState('g-shoe', '耐克跑鞋浏览', [shoe])
+      ]);
+      let takeoutGroups = normalizeCollectionGroups('takeout', '外卖记录', [takeout], [
+        demoCollectionGroupState('g-chicken', '黄焖鸡', [takeout])
+      ]);
+      let entertainmentGroups = normalizeCollectionGroups('entertainment', '娱乐记录', [video], [
+        demoCollectionGroupState('g-vlog', '苏州旅行 Vlog', [video])
+      ]);
+
+      expect(shoppingGroups[0].title).assertEqual('淘宝-耐克跑鞋浏览');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行Vlog');
+    });
+
+    it('normalizesBusinessTabTitlesUsingSourceStatePackageContext', 0, () => {
+      let jd = demoIndexedEvent('e113', '京东键盘退换货', 'raw-source', 'other', '键盘退换货');
+      jd.sources = ['raw-source'];
+      jd.source_state_file = '2026-06/raw-source.md.state.json';
+      jd.source_refs = ['2026-06-04/com.jd.harmony__basic-gui-task.md#1'];
+      let ctrip = demoIndexedEvent('e114', '携程显示上海至苏州高铁票订单', 'raw-source', 'travel', '上海至苏州高铁');
+      ctrip.sources = ['raw-source'];
+      ctrip.source_state_file = '2026-06/raw-source.md.state.json';
+      ctrip.source_refs = ['2026-06-06/com.ctrip.harmony__basic-gui-task.md#1'];
+      let meituanLife = demoIndexedEvent('e115', '美团生活服务页面显示理发店和按摩店收藏', 'raw-source', 'live', '生活服务');
+      meituanLife.sources = ['raw-source'];
+      meituanLife.source_state_file = '2026-06/raw-source.md.state.json';
+      meituanLife.source_refs = ['2026-06-04/com.sankuai.meituan__basic-gui-task.md#1'];
+      let meituanTakeout = demoIndexedEvent('e116', '美团外卖订单 #88291045 已送达', 'raw-source', 'eat', '黄焖鸡');
+      meituanTakeout.sources = ['raw-source'];
+      meituanTakeout.source_state_file = '2026-06/raw-source.md.state.json';
+      meituanTakeout.source_refs = ['2026-06-07/com.sankuai.meituan__basic-gui-task__llm-takeout-Meituan.md#1'];
+
+      let shoppingGroups = normalizeCollectionGroups('shopping', '购物记录', [jd], [
+        demoCollectionGroupState('g-jd', '键盘退换货', [jd])
+      ]);
+      let travelGroups = normalizeCollectionGroups('travel', '差旅记录', [ctrip], [
+        demoCollectionGroupState('g-ctrip', '上海至苏州高铁', [ctrip])
+      ]);
+      let lifeGroups = normalizeCollectionGroups('life', '生活记录', [meituanLife], [
+        demoCollectionGroupState('g-life', '生活服务', [meituanLife])
+      ]);
+      let takeoutGroups = normalizeCollectionGroups('takeout', '外卖记录', [meituanTakeout], [
+        demoCollectionGroupState('g-takeout', '黄焖鸡', [meituanTakeout])
+      ]);
+
+      expect(shoppingGroups[0].title).assertEqual('京东-键盘退换货');
+      expect(travelGroups[0].title).assertEqual('携程-上海至苏州高铁');
+      expect(lifeGroups[0].title).assertEqual('美团-生活服务');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
+    });
+
+    it('heuristicChatGroupsDescribeGalleryChatImagesWithoutFakeContact', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 手机桌面生活记忆记录：手机屏幕显示生活记忆，包含多个应用图标和文字信息。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('heuristicChatGroupsKeepGalleryChatAsScreenshotWhenPersonDetected', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 与联系人小赵沟通当前修复进度的微信截图。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      galleryEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      galleryEvent.entities = ['person:小赵'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('collectionGroupFingerprintIncludesTitleSourceSignals', 0, () => {
+      let base = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      let sourceRefChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      sourceRefChanged.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let stateFileChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      stateFileChanged.source_state_file = '2026-06/com.huawei.photos__gallery-analysis__聊天.md.state.json';
+      let entityMentionChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      entityMentionChanged.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+
+      let baseHash = collectionGroupEventInputFingerprint(base);
+      expect(collectionGroupEventInputFingerprint(sourceRefChanged) !== baseHash).assertTrue();
+      expect(collectionGroupEventInputFingerprint(stateFileChanged) !== baseHash).assertTrue();
+      expect(collectionGroupEventInputFingerprint(entityMentionChanged) !== baseHash).assertTrue();
+    });
+
     it('normalizeChatGroupsUsesGenericFallbackForLowInformationTitles', 0, () => {
       let events = [
         demoIndexedEvent('e1', '联系人甲讨论一个待处理事项，后续需要继续确认。', '联系人甲', 'work', '12'),
@@ -1060,9 +1325,72 @@ export default function dataManagerUnitTest() {
       expect(titles.indexOf('12讨论') < 0).assertTrue();
       expect(titles.indexOf('截图讨论') < 0).assertTrue();
       expect(titles.indexOf('API讨论') < 0).assertTrue();
-      expect(titles.indexOf('与联系人甲的对话') >= 0).assertTrue();
-      expect(titles.indexOf('与联系人乙的对话') >= 0).assertTrue();
-      expect(titles.indexOf('与联系人丙的对话') >= 0).assertTrue();
+      expect(titles.indexOf('联系人甲-') >= 0).assertTrue();
+      expect(titles.indexOf('联系人乙-') >= 0).assertTrue();
+      expect(titles.indexOf('联系人丙-') >= 0).assertTrue();
+    });
+
+    it('normalizeChatGroupsRefreshesLegacyRunIdAndCategoryTitles', 0, () => {
+      let wechatEvent = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务', '微信', 'work', 'UI');
+      wechatEvent.sources = ['微信', 'wechat-20260618T105024'];
+      wechatEvent.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      wechatEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      wechatEvent.entities = ['person:小赵'];
+      let galleryEvent = demoIndexedEvent('e2', '[gallery-item:gallery_438498275] 手机桌面生活记忆记录。', 'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let candidates: CollectionGroupState[] = [
+        { group_id: 'legacy-wechat', title: '与wechat-20260618T105024的对话', source: '微信', time: '', meta: '', status: '', domain: 'work', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() },
+        { group_id: 'legacy-gallery', title: '与聊天的对话', source: 'photos', time: '', meta: '', status: '', domain: 'other', event_ids: ['e2'], source_input_hash: '', event_input_hashes: createStringMap() }
+      ];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [wechatEvent, galleryEvent], candidates);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
+    });
+
+    it('normalizeChatGroupsOverridesGalleryChatContactTitle', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 与联系人小赵沟通当前修复进度的微信截图。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      galleryEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      galleryEvent.entities = ['person:小赵'];
+      let candidates: CollectionGroupState[] = [
+        { group_id: 'gallery-contact', title: '与小赵的对话', source: 'photos', time: '', meta: '', status: '', domain: 'other', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() }
+      ];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [galleryEvent], candidates);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('incrementalChatGroupsRefreshLegacyRunIdAndCategoryTitles', 0, () => {
+      let wechatEvent = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务', '微信', 'work', 'UI');
+      wechatEvent.sources = ['微信', 'wechat-20260618T105024'];
+      wechatEvent.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      wechatEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      wechatEvent.entities = ['person:小赵'];
+      let galleryEvent = demoIndexedEvent('e2', '[gallery-item:gallery_438498275] 手机桌面生活记忆记录。', 'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let previous = [
+        demoCollectionGroupState('legacy-wechat', '与wechat-20260618T105024的对话', [wechatEvent]),
+        demoCollectionGroupState('legacy-gallery', '与聊天的对话', [galleryEvent])
+      ];
+
+      let plan = prepareIncrementalCollectionGroups('chat', '聊天记录', [wechatEvent, galleryEvent], previous);
+      let groups = applyIncrementalCollectionGroupAssignments('chat', '聊天记录', [wechatEvent, galleryEvent],
+        plan.reusedGroups, plan.pendingEvents, []);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
     });
 
     it('incrementalCollectionGroupsReusesOldGroupAndFallsBackForUnrelatedNewEvent', 0, () => {
@@ -1078,7 +1406,7 @@ export default function dataManagerUnitTest() {
 
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2, e3], plan.reusedGroups, plan.pendingEvents, []);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('晚餐计划');
+      expect(oldGroup.title).assertEqual('微信-晚餐计划');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
@@ -1131,7 +1459,7 @@ export default function dataManagerUnitTest() {
       }];
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2], plan.reusedGroups, plan.pendingEvents, assignments);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('稳定晚餐标题');
+      expect(oldGroup.title).assertEqual('微信-稳定晚餐标题');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();

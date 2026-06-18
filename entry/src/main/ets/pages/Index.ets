@@ -46,14 +46,15 @@ import {
   AvatarGenerationMode,
   AvatarHomeViewModel,
   AvatarProviderConfig,
-  AvatarVersionViewModel
+  AvatarVersionViewModel,
+  avatarErrorMessage
 } from '../datamanager/avatar/AvatarTypes';
 import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanager/DataManagerLog';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
-import { WorkflowStorage } from '../utils/WorkflowStorage';
+import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
@@ -233,6 +234,8 @@ struct Index {
   private modelScopeActiveHttpReq: http.HttpRequest | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
+  private avatarForegroundEnsuring: boolean = false;
+  private avatarForegroundAttemptedVersionId: string = '';
   private homeRecommendationDateTimerId: number = -1;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
@@ -683,6 +686,7 @@ struct Index {
   private mergeHomeAvatarView(avatar: AvatarHomeViewModel): void {
     this.homeProfile = {
       avatarUri: avatar.avatarUri,
+      avatarForegroundUri: avatar.avatarForegroundUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -694,6 +698,34 @@ struct Index {
       recommendations: this.homeProfile.recommendations,
       empty: this.homeProfile.empty
     };
+  }
+
+  private ensureCurrentAvatarForegroundCache(): void {
+    let versionId = this.homeProfile.avatarVersionId;
+    if (this.dataManagerFacade === null || this.avatarForegroundEnsuring ||
+      versionId.length === 0 || this.homeProfile.avatarForegroundUri.length > 0 ||
+      this.avatarForegroundAttemptedVersionId === versionId) {
+      return;
+    }
+    let facade = this.dataManagerFacade;
+    this.avatarForegroundEnsuring = true;
+    facade.ensureCurrentAvatarForeground().then((avatar: AvatarHomeViewModel) => {
+      if (this.dataManagerFacade !== facade || this.homeProfile.avatarVersionId !== versionId ||
+        avatar.avatarVersionId !== versionId) {
+        this.avatarForegroundEnsuring = false;
+        return;
+      }
+      if (avatar.avatarForegroundUri.length > 0) {
+        this.avatarForegroundAttemptedVersionId = versionId;
+      }
+      this.mergeHomeAvatarView(avatar);
+      this.avatarVersions = facade.listAvatarVersions();
+      this.avatarForegroundEnsuring = false;
+    }).catch((err: Error | Object | string | number | boolean | null | undefined) => {
+      dataManagerWarn('ensureCurrentAvatarForegroundCache failed: ' +
+        avatarErrorMessage(err, 'unknown foreground error'));
+      this.avatarForegroundEnsuring = false;
+    });
   }
 
   private async confirmUnchangedAvatarRegeneration(): Promise<boolean> {
@@ -804,12 +836,13 @@ struct Index {
       showToastSafely('数字分身已生成', 1500);
       dataManagerInfo(`generateHomeAvatar success: version=${avatar.avatarVersionId}`);
     } catch (e) {
-      let err = e as Error;
+      let message = avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+        '未知错误');
       this.reloadDataManagerViewModels();
-      dataManagerError('generateHomeAvatar failed: ' + err.message);
-      this.appendCloudLog('Avatar generation failed: ' + err.message);
-      showToastSafely('数字分身生成失败：' + err.message, 2200);
-      throw err;
+      dataManagerError('generateHomeAvatar failed: ' + message);
+      this.appendCloudLog('Avatar generation failed: ' + message);
+      showToastSafely('数字分身生成失败：' + message, 2200);
+      throw new Error(message);
     }
   }
 
@@ -834,6 +867,7 @@ struct Index {
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
     this.homeRecommendationViewDateKey = this.currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
+    this.ensureCurrentAvatarForegroundCache();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
@@ -937,6 +971,11 @@ struct Index {
     }
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    try {
+      WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
+    } catch (e) {
+      AppLogger.errorCause('WorkflowStorage', 'install default workflow resources failed', e as Error);
+    }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
     try {
@@ -3116,20 +3155,41 @@ struct Index {
     this.debugImagePath = '';
   }
 
+  // 将 ASCII tab 资源名映射到静态 $r 引用，避免直接引用中文资源文件名。
+  private tabIconResource(icon: string): Resource {
+    if (icon === 'tab_home') {
+      return $r('app.media.tab_home');
+    }
+    if (icon === 'tab_summary') {
+      return $r('app.media.tab_summary');
+    }
+    if (icon === 'tab_chat') {
+      return $r('app.media.tab_chat');
+    }
+    if (icon === 'tab_task') {
+      return $r('app.media.tab_task');
+    }
+    if (icon === 'tab_settings') {
+      return $r('app.media.tab_settings');
+    }
+    return $r('app.media.tab_home');
+  }
+
   @Builder TabItem(icon: string, label: string, index: number) {
     Column() {
-      Text(icon)
-        .fontSize(13)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.currentTab === index ? Color.White : '#747B87')
+      Stack({ alignContent: Alignment.Center }) {
+        Image(this.tabIconResource(icon))
+          .width(21)
+          .height(21)
+          .objectFit(ImageFit.Contain)
+      }
         .width(32)
         .height(32)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(this.currentTab === index ? '#4F68FF' : '#00FFFFFF')
+        .backgroundColor(this.currentTab === index ? '#EEF0FF' : '#00FFFFFF')
         .borderRadius(16)
       Text(label)
         .fontSize(13)
-        .fontColor(this.currentTab === index ? '#4F68FF' : '#747B87')
+        .fontColor(this.currentTab === index ? '#5B5CE2' : '#747B87')
         .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Regular)
         .margin({ top: 2 })
         .maxLines(1)
@@ -3219,6 +3279,7 @@ struct Index {
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
             messages: this.activeChatMessages,
+            avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },

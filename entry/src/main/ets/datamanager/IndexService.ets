@@ -98,10 +98,30 @@ interface IndexManifest {
   sources: SourceManifestMap;
 }
 
+interface IndexSourceBuildResult {
+  relativePath: string;
+  sourceEntry: SourceManifestEntry;
+  events: EventMap;
+  reusedEvents: number;
+  enrichedEvents: number;
+}
+
+interface IndexSourceCursor {
+  nextIndex: number;
+}
+
+interface IndexBuildCounters {
+  completedSources: number;
+  reusedEvents: number;
+  enrichedEvents: number;
+}
+
 type EventGroupMap = Record<string, IndexedEvent[]>;
 type TemporalDayMap = Record<string, TemporalDayNode[]>;
 type TemporalDocumentMap = Record<string, TemporalDocument>;
 type ProfileDomainMap = Record<string, ProfileDomainState>;
+
+const DEFAULT_INDEX_SOURCE_CONCURRENCY: number = 4;
 
 interface InvertedDocument {
   postings: StringArrayMap;
@@ -303,69 +323,13 @@ export class IndexService {
     let imageReferences = this.buildImageReferenceMap();
     let events: EventMap = {};
     let sources: SourceManifestMap = {};
-    let reusedEvents = 0;
-    let enrichedEventsCount = 0;
-    let stateIndex = 0;
-    for (let statePath of statePaths) {
-      let relativePath = this.storage.relativePath(this.paths.outputsRoot, statePath);
-      let content = this.storage.readText(statePath, '');
-      let digest = this.storage.sha256Text(content);
-      let indexPercent = 62 + Math.round(stateIndex * 22 / Math.max(1, statePaths.length));
-      this.emitProgress(progress, '索引增强', `批量增强 ${relativePath}`, stateIndex, statePaths.length, indexPercent);
-      let eventIds: string[] = [];
-      let eventInputHashes: StringMap = createStringMap();
-      let previousSource = previousManifest.sources ? previousManifest.sources[relativePath] : undefined;
-      let canReuseSource = this.canReuseSource(previousSource, digest, previousEvents);
-      if (reuseAllowed && canReuseSource && previousSource) {
-        for (let eventId of previousSource.event_ids) {
-          let reused = this.copyReusableEvent(previousEvents[eventId], relativePath, imageReferences);
-          events[reused.event_id] = reused;
-          eventIds.push(reused.event_id);
-          eventInputHashes[reused.event_id] = this.eventEnrichInputHash(reused);
-        }
-        reusedEvents += eventIds.length;
-        dataManagerInfo(`Index source reused: relative=${relativePath}, events=${eventIds.length}`);
-      } else {
-        let baseEvents = this.baseEventsFromState(statePath, relativePath, imageReferences);
-        dataManagerInfo(`Index source state: relative=${relativePath}, baseEvents=${baseEvents.length}`);
-        let eventsById: EventMap = {};
-        let eventsToEnrich: IndexedEvent[] = [];
-        baseEvents.forEach((event: IndexedEvent) => {
-          let inputHash = this.eventEnrichInputHash(event);
-          eventInputHashes[event.event_id] = inputHash;
-          if (reuseAllowed && this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents)) {
-            eventsById[event.event_id] = this.copyReusableEvent(previousEvents[event.event_id], relativePath, imageReferences);
-            reusedEvents++;
-          } else {
-            eventsToEnrich.push(event);
-          }
-        });
-        let enrichedEvents = await this.modelClient.enrichEvents(eventsToEnrich, modelConfig);
-        for (let enriched of enrichedEvents) {
-          enriched.profile_domains = deriveProfileDomains(enriched);
-          eventsById[enriched.event_id] = enriched;
-        }
-        baseEvents.forEach((event: IndexedEvent) => {
-          let current = eventsById[event.event_id];
-          if (!current) {
-            return;
-          }
-          events[current.event_id] = current;
-          eventIds.push(current.event_id);
-        });
-        if (eventsToEnrich.length > 0 || baseEvents.length > 0) {
-          dataManagerInfo(`Index source event reuse: relative=${relativePath}, reused=${baseEvents.length - eventsToEnrich.length}, enriched=${eventsToEnrich.length}`);
-        }
-        enrichedEventsCount += enrichedEvents.length;
-      }
-      let sourceEntry: SourceManifestEntry = {
-        sha256: digest,
-        event_ids: eventIds,
-        event_input_hashes: eventInputHashes
-      };
-      sources[relativePath] = sourceEntry;
-      stateIndex++;
-    }
+    let counters: IndexBuildCounters = {
+      completedSources: 0,
+      reusedEvents: 0,
+      enrichedEvents: 0
+    };
+    await this.buildSourcesConcurrently(statePaths, previousManifest, previousEvents, reuseAllowed, imageReferences,
+      modelConfig, events, sources, counters, progress);
 
     this.emitProgress(progress, '写入索引', '正在写入事件索引', 85, 100, 85);
     this.writeEventPartitions(events);
@@ -379,7 +343,7 @@ export class IndexService {
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
     let currentIds = Object.keys(events).sort();
     let previousIds = Object.keys(previousEvents).sort();
-    let entityDocument = reuseAllowed && enrichedEventsCount === 0 && this.sameStringArrays(currentIds, previousIds) &&
+    let entityDocument = reuseAllowed && counters.enrichedEvents === 0 && this.sameStringArrays(currentIds, previousIds) &&
       this.hasEntityIndexData(previousEntity) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
     await this.writeTemporalDocuments(events, modelConfig, reuseAllowed);
@@ -396,16 +360,147 @@ export class IndexService {
       run_root: 'workflows/runs',
       enrichment: enrichment,
       entity_types: ENTITY_TYPE_KEYS,
-      sources: sources
+      sources: this.orderedSourcesByStatePaths(sources, statePaths)
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
-    dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${reusedEvents}, enriched=${enrichedEventsCount}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
+    dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${counters.reusedEvents}, enriched=${counters.enrichedEvents}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
     this.emitProgress(progress, '写入索引', '索引写入完成', 98, 100, 98);
     return {
       sourceFiles: statePaths.length,
       eventCount: Object.keys(events).length,
       profileClaimCount: profile.claim_count,
       updatedAt: profile.generated_at
+    };
+  }
+
+  private async buildSourcesConcurrently(statePaths: string[], previousManifest: IndexManifest,
+    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
+    modelConfig: DataManagerModelConfig, events: EventMap, sources: SourceManifestMap, counters: IndexBuildCounters,
+    progress?: DataManagerProgressCallback): Promise<void> {
+    if (statePaths.length === 0) {
+      return;
+    }
+    let cursor: IndexSourceCursor = {
+      nextIndex: 0
+    };
+    let workerCount = Math.max(1, Math.min(DEFAULT_INDEX_SOURCE_CONCURRENCY, statePaths.length));
+    let workers: Promise<void>[] = [];
+    for (let index = 0; index < workerCount; index++) {
+      workers.push(this.runSourceIndexWorker(cursor, statePaths, previousManifest, previousEvents, reuseAllowed,
+        imageReferences, modelConfig, events, sources, counters, progress));
+    }
+    await Promise.all(workers);
+  }
+
+  private async runSourceIndexWorker(cursor: IndexSourceCursor, statePaths: string[], previousManifest: IndexManifest,
+    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
+    modelConfig: DataManagerModelConfig, events: EventMap, sources: SourceManifestMap, counters: IndexBuildCounters,
+    progress?: DataManagerProgressCallback): Promise<void> {
+    while (true) {
+      let sourceIndex = cursor.nextIndex;
+      cursor.nextIndex++;
+      if (sourceIndex >= statePaths.length) {
+        return;
+      }
+      let statePath = statePaths[sourceIndex];
+      let relativePath = this.storage.relativePath(this.paths.outputsRoot, statePath);
+      let indexPercent = 62 + Math.round(counters.completedSources * 22 / Math.max(1, statePaths.length));
+      this.emitProgress(progress, '索引增强', `批量增强 ${relativePath}`, counters.completedSources, statePaths.length,
+        indexPercent);
+      let result = await this.buildSourceIndex(statePath, relativePath, previousManifest, previousEvents, reuseAllowed,
+        imageReferences, modelConfig);
+      this.mergeSourceIndexResult(result, events, sources, counters);
+      counters.completedSources++;
+      this.emitProgress(progress, '索引增强', `已增强 ${counters.completedSources}/${statePaths.length} 个整理文件`,
+        counters.completedSources, statePaths.length,
+        62 + Math.round(counters.completedSources * 22 / Math.max(1, statePaths.length)));
+    }
+  }
+
+  private mergeSourceIndexResult(result: IndexSourceBuildResult, events: EventMap, sources: SourceManifestMap,
+    counters: IndexBuildCounters): void {
+    Object.keys(result.events).forEach((eventId: string) => events[eventId] = result.events[eventId]);
+    sources[result.relativePath] = result.sourceEntry;
+    counters.reusedEvents += result.reusedEvents;
+    counters.enrichedEvents += result.enrichedEvents;
+  }
+
+  private orderedSourcesByStatePaths(sources: SourceManifestMap, statePaths: string[]): SourceManifestMap {
+    let ordered: SourceManifestMap = {};
+    statePaths.forEach((statePath: string) => {
+      let relativePath = this.storage.relativePath(this.paths.outputsRoot, statePath);
+      if (sources[relativePath]) {
+        ordered[relativePath] = sources[relativePath];
+      }
+    });
+    return ordered;
+  }
+
+  private async buildSourceIndex(statePath: string, relativePath: string, previousManifest: IndexManifest,
+    previousEvents: EventMap, reuseAllowed: boolean, imageReferences: StringArrayMap,
+    modelConfig: DataManagerModelConfig): Promise<IndexSourceBuildResult> {
+    let content = this.storage.readText(statePath, '');
+    let digest = this.storage.sha256Text(content);
+    let eventIds: string[] = [];
+    let eventInputHashes: StringMap = createStringMap();
+    let sourceEvents: EventMap = {};
+    let reusedEvents = 0;
+    let enrichedEventsCount = 0;
+    let previousSource = previousManifest.sources ? previousManifest.sources[relativePath] : undefined;
+    let canReuseSource = this.canReuseSource(previousSource, digest, previousEvents);
+    if (reuseAllowed && canReuseSource && previousSource) {
+      for (let eventId of previousSource.event_ids) {
+        let reused = this.copyReusableEvent(previousEvents[eventId], relativePath, imageReferences);
+        sourceEvents[reused.event_id] = reused;
+        eventIds.push(reused.event_id);
+        eventInputHashes[reused.event_id] = this.eventEnrichInputHash(reused);
+      }
+      reusedEvents += eventIds.length;
+      dataManagerInfo(`Index source reused: relative=${relativePath}, events=${eventIds.length}`);
+    } else {
+      let baseEvents = this.baseEventsFromState(statePath, relativePath, imageReferences);
+      dataManagerInfo(`Index source state: relative=${relativePath}, baseEvents=${baseEvents.length}`);
+      let eventsById: EventMap = {};
+      let eventsToEnrich: IndexedEvent[] = [];
+      baseEvents.forEach((event: IndexedEvent) => {
+        let inputHash = this.eventEnrichInputHash(event);
+        eventInputHashes[event.event_id] = inputHash;
+        if (reuseAllowed && this.canReuseEvent(previousSource, event.event_id, inputHash, previousEvents)) {
+          eventsById[event.event_id] = this.copyReusableEvent(previousEvents[event.event_id], relativePath, imageReferences);
+          reusedEvents++;
+        } else {
+          eventsToEnrich.push(event);
+        }
+      });
+      let enrichedEvents = await this.modelClient.enrichEvents(eventsToEnrich, modelConfig);
+      for (let enriched of enrichedEvents) {
+        enriched.profile_domains = deriveProfileDomains(enriched);
+        eventsById[enriched.event_id] = enriched;
+      }
+      baseEvents.forEach((event: IndexedEvent) => {
+        let current = eventsById[event.event_id];
+        if (!current) {
+          return;
+        }
+        sourceEvents[current.event_id] = current;
+        eventIds.push(current.event_id);
+      });
+      if (eventsToEnrich.length > 0 || baseEvents.length > 0) {
+        dataManagerInfo(`Index source event reuse: relative=${relativePath}, reused=${baseEvents.length - eventsToEnrich.length}, enriched=${eventsToEnrich.length}`);
+      }
+      enrichedEventsCount += enrichedEvents.length;
+    }
+    let sourceEntry: SourceManifestEntry = {
+      sha256: digest,
+      event_ids: eventIds,
+      event_input_hashes: eventInputHashes
+    };
+    return {
+      relativePath: relativePath,
+      sourceEntry: sourceEntry,
+      events: sourceEvents,
+      reusedEvents: reusedEvents,
+      enrichedEvents: enrichedEventsCount
     };
   }
 
@@ -1352,7 +1447,7 @@ export class IndexService {
   private buildDomainDocument(events: EventMap): DomainDocument {
     let postings: StringArrayMap = {};
     DOMAIN_KEYS.forEach((domain: string) => postings[domain] = []);
-    Object.keys(events).sort().forEach((eventId: string) => {
+    Object.keys(events).forEach((eventId: string) => {
       let domains = normalizeDomains(events[eventId].domains || []);
       if (domains.length === 0) {
         domains = ['other'];
@@ -1397,7 +1492,7 @@ export class IndexService {
   private async buildEntityDocument(events: EventMap, modelConfig: DataManagerModelConfig): Promise<EntityDocument> {
     let mentionsByType: Record<string, Record<string, EntityMention>> = {};
     ENTITY_TYPE_KEYS.forEach((type: string) => mentionsByType[type] = new Object() as Record<string, EntityMention>);
-    Object.keys(events).forEach((eventId: string) => {
+    Object.keys(events).sort().forEach((eventId: string) => {
       let event = events[eventId];
       let mentions = normalizeEntityMentions(event.entity_mentions || []);
       event.entity_mentions = mentions;
@@ -2197,7 +2292,7 @@ export class IndexService {
         total_records: 0,
         month: '',
         recent_match_days: 7,
-        recent_match_max_records: 100
+        recent_match_max_records: 0
       },
       records: []
     };

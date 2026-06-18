@@ -1,8 +1,21 @@
+import { util } from '@kit.ArkTS';
+
 export function encodeUtf8Compat(value: string): Uint8Array {
+  // 优先使用系统 UTF-8 编码；本地 Previewer 单测环境中该接口可能不可调用，失败时降级到手写实现。
+  try {
+    let encoded = util.TextEncoder.create('utf-8').encodeInto(value);
+    return exactUint8Array(encoded);
+  } catch (e) {
+  }
   return encodeUtf8Manually(value);
 }
 
 export function decodeUtf8Compat(bytes: Uint8Array): string {
+  // 解码同样保留系统实现优先，避免真机可用能力被本地单测兼容逻辑绕过。
+  try {
+    return util.TextDecoder.create('utf-8').decodeWithStream(bytes);
+  } catch (e) {
+  }
   let output: string[] = [];
   let index = 0;
   while (index < bytes.length) {
@@ -64,6 +77,17 @@ function encodeUtf8Manually(value: string): Uint8Array {
     appendUtf8CodePoint(bytes, codePoint);
   }
   return new Uint8Array(bytes);
+}
+
+function exactUint8Array(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes;
+  }
+  let output = new Uint8Array(bytes.byteLength);
+  for (let index = 0; index < bytes.byteLength; index++) {
+    output[index] = bytes[index];
+  }
+  return output;
 }
 
 function appendUtf8CodePoint(bytes: number[], codePoint: number): void {

@@ -34,29 +34,52 @@ export struct HomePage {
   @State selectedAvatarVersionId: string = '';
   @State selectedAvatarPhotoUri: string = '';
 
-  @Builder FeaturePill(icon: string, title: string, desc: string) {
-    // 顶部四个能力点胶囊，作为数字分身价值点的轻量入口。
+  @Builder FeatureIcon(kind: string) {
+    // 首页能力卡使用语义图标，减少字母徽标带来的抽象感。
+    Stack({ alignContent: Alignment.Center }) {
+      if (kind === 'understand') {
+        Image($r('app.media.home_feature_understand'))
+          .width(30)
+          .height(30)
+          .objectFit(ImageFit.Contain)
+      } else if (kind === 'protect') {
+        Image($r('app.media.home_feature_protect'))
+          .width(30)
+          .height(30)
+          .objectFit(ImageFit.Contain)
+      } else if (kind === 'companion') {
+        Image($r('app.media.home_feature_companion'))
+          .width(30)
+          .height(30)
+          .objectFit(ImageFit.Contain)
+      } else {
+        Image($r('app.media.home_feature_growth'))
+          .width(30)
+          .height(30)
+          .objectFit(ImageFit.Contain)
+      }
+    }
+    .width(42)
+    .height(42)
+    .backgroundColor('#F2F6FF')
+    .borderRadius(14)
+  }
+
+  @Builder FeaturePill(kind: string, title: string, desc: string) {
+    // 顶部四个能力点卡片，作为数字分身价值点的轻量入口。
     Row() {
-      Text(icon)
-        .fontSize(13)
-        .fontColor(Color.White)
-        .fontWeight(FontWeight.Bold)
-        .width(28)
-        .height(28)
-        .textAlign(TextAlign.Center)
-        .backgroundColor('#6A67FF')
-        .borderRadius(14)
+      this.FeatureIcon(kind)
       Column() {
-        Text(title).fontSize(14).fontColor('#172033').fontWeight(FontWeight.Medium).maxLines(1)
-        Text(desc).fontSize(11).fontColor('#6F7684').margin({ top: 2 }).maxLines(1)
-      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ left: 8 })
+        Text(title).fontSize(15).fontColor('#172033').fontWeight(FontWeight.Bold).maxLines(1)
+        Text(desc).fontSize(12).fontColor('#6F7684').margin({ top: 3 }).maxLines(1)
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ left: 12 })
     }
     .width('48%')
-    .height(54)
-    .padding({ left: 10, right: 8 })
-    .backgroundColor('#F8FBFF')
-    .borderRadius(18)
-    .border({ width: 1, color: '#E8EEFA' })
+    .height(66)
+    .padding({ left: 14, right: 10 })
+    .backgroundColor(Color.White)
+    .borderRadius(16)
+    .shadow({ radius: 10, color: '#10000000', offsetX: 0, offsetY: 4 })
   }
 
   private profileDetailMessage(item: HomeDomainViewModel): string {
@@ -116,6 +139,15 @@ export struct HomePage {
       return this.profile.avatarUpdatedLabel;
     }
     return this.profile.updatedLabel;
+  }
+
+  private avatarUpdatedCompactLabel(): string {
+    let label = this.avatarUpdatedLabel();
+    let timeSeparator = label.indexOf('T');
+    if (timeSeparator > 0 && label.length >= 16) {
+      return label.substring(0, 16).replace('T', ' ');
+    }
+    return label;
   }
 
   private async submitAvatarGeneration(): Promise<void> {
@@ -1106,28 +1138,46 @@ export struct HomePage {
           this.AvatarImage()
 
           Row() {
-            this.FeaturePill('I', '理解你', '更懂你的偏好')
+            this.FeaturePill('understand', '理解你', '更懂你的偏好')
             Blank().layoutWeight(1)
-            this.FeaturePill('P', '守护你', '隐私安全可靠')
+            this.FeaturePill('protect', '守护你', '隐私安全可靠')
           }.width('92%').margin({ top: 8 })
 
           Row() {
-            this.FeaturePill('L', '陪伴你', '服务你的生活')
+            this.FeaturePill('companion', '陪伴你', '服务你的生活')
             Blank().layoutWeight(1)
-            this.FeaturePill('G', '成就你', '助力你的成长')
-          }.width('92%').margin({ top: 8 })
+            this.FeaturePill('growth', '成就你', '助力你的成长')
+          }.width('92%').margin({ top: 10 })
 
           Row() {
             Row().width(8).height(8).backgroundColor('#7669FF').borderRadius(4)
-            Text(this.avatarStatusLabel()).fontSize(16).fontColor('#1B2030').margin({ left: 8 }).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(this.avatarUpdatedLabel() + ' >').fontSize(13).fontColor('#7B8190').margin({ left: 8 }).width(88).textAlign(TextAlign.End).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.avatarStatusLabel())
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#1B2030')
+              .margin({ left: 10 })
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.avatarUpdatedCompactLabel())
+              .fontSize(12)
+              .fontColor('#7B8190')
+              .margin({ left: 10 })
+              .width(124)
+              .textAlign(TextAlign.End)
+              .maxLines(1)
+            Text('>')
+              .fontSize(17)
+              .fontColor('#8B909A')
+              .margin({ left: 6 })
           }
-          .width('82%')
-          .height(42)
-          .padding({ left: 18, right: 18 })
+          .width('92%')
+          .height(48)
+          .padding({ left: 18, right: 14 })
           .backgroundColor(Color.White)
-          .borderRadius(21)
-          .margin({ top: 12, bottom: 16 })
+          .borderRadius(24)
+          .shadow({ radius: 10, color: '#10000000', offsetX: 0, offsetY: 4 })
+          .margin({ top: 16, bottom: 16 })
           .onClick(() => {
             this.avatarGenerationOpen = true;
           })
@@ -1136,21 +1186,22 @@ export struct HomePage {
         .backgroundColor('#EDF5FF')
 
         Row() {
-          Text('画像完整度').fontSize(15).fontColor('#272C38').width(82)
+          Text('画像完整度').fontSize(16).fontColor('#272C38').width(88)
           Progress({ value: this.profile.completeness, total: 100, type: ProgressType.Linear })
             .layoutWeight(1)
             .height(6)
             .color('#8066FF')
             .backgroundColor('#E6E8F3')
             .margin({ left: 12, right: 14 })
-          Text(this.profile.completeness + '%').fontSize(24).fontWeight(FontWeight.Bold).fontColor('#9D6BFF').width(78).textAlign(TextAlign.End).maxLines(1)
+          Text(this.profile.completeness + '%').fontSize(28).fontWeight(FontWeight.Bold).fontColor('#8066FF').width(86).textAlign(TextAlign.End).maxLines(1)
           Text('>').fontSize(20).fontColor('#7A808C').margin({ left: 8 })
         }
         .width('92%')
-        .height(70)
-        .padding({ left: 18, right: 18 })
+        .height(76)
+        .padding({ left: 20, right: 18 })
         .backgroundColor(Color.White)
         .borderRadius(18)
+        .shadow({ radius: 12, color: '#10000000', offsetX: 0, offsetY: 5 })
         .margin({ top: 16 })
 
         Row() {
@@ -1169,11 +1220,11 @@ export struct HomePage {
         .margin({ top: 14 })
 
           Row() {
-            Text('为你推荐').fontSize(22).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+            Text('为你推荐').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
             this.RecommendationFilterButton('未完成', false)
             Blank().width(8)
             this.RecommendationFilterButton('全部', true)
-          }.width('92%').margin({ top: 24 })
+          }.width('92%').margin({ top: 22 })
 
           if (this.visibleRecommendations().length === 0) {
             this.EmptyRecommendationCard()

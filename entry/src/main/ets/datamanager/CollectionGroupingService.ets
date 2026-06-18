@@ -713,6 +713,7 @@ function cleanGroupTopic(value: string, prefix: string): string {
     .replace(/^图库分析/g, '')
     .replace(/^当前页面显示的是?/g, '')
     .replace(/^相关/g, '')
+    .replace(/^[\-：:]+/g, '')
     .replace(/[，。；;：:]+$/g, '')
     .trim();
   if (isInvalidGroupTopic(topic, prefix)) {

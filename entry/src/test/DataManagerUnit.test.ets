@@ -1231,6 +1231,27 @@ export default function dataManagerUnitTest() {
       expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行Vlog');
     });
 
+    it('normalizesGroupTitleSeparatorsAfterSourcePrefixRemoval', 0, () => {
+      let video = demoIndexedEvent('e117', '浏览苏州旅行与咖啡测评视频', 'bili', 'travel', '苏州旅行与咖啡测评');
+      video.sources = ['bili'];
+      let chat = demoIndexedEvent('e118', '小赵讨论注册条领取安排', '微信', 'work', '注册条领取安排');
+      chat.sources = ['微信', '小赵'];
+      chat.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      chat.entities = ['person:小赵'];
+
+      let entertainmentGroups = normalizeCollectionGroups('entertainment', '娱乐记录', [video], [
+        demoCollectionGroupState('g-video', '哔哩哔哩：苏州旅行与咖啡测评', [video])
+      ]);
+      let chatGroups = normalizeCollectionGroups('chat', '聊天记录', [chat], [
+        demoCollectionGroupState('g-chat', '小赵：注册条领取安排', [chat])
+      ]);
+
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行与咖啡测评');
+      expect(chatGroups[0].title).assertEqual('小赵-注册条领取安排');
+      expect(entertainmentGroups[0].title.indexOf('-：') < 0).assertTrue();
+      expect(chatGroups[0].title.indexOf('-：') < 0).assertTrue();
+    });
+
     it('normalizesBusinessTabTitlesUsingSourceStatePackageContext', 0, () => {
       let jd = demoIndexedEvent('e113', '京东键盘退换货', 'raw-source', 'other', '键盘退换货');
       jd.sources = ['raw-source'];

@@ -32,3 +32,4 @@ build-profile.json5*
 /docs/superpowers/
 /mobile_file_example/
 /.agents/
+.agents

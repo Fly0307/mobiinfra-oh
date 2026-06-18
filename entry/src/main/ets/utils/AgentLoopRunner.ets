@@ -93,7 +93,9 @@ export class AgentLoopRunner {
       AgentExecutionController.finishExecution('本地 Agent 已完成');
     } catch (e) {
       let err = e as Error;
-      await this.returnToHostApp('local');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('local');
+      }
       AgentExecutionController.finishExecution('本地 Agent 结束');
       throw err;
     } finally {
@@ -119,7 +121,9 @@ export class AgentLoopRunner {
     } catch (e) {
       let err = e as Error;
       this.cloudClient.cancelActiveRequests();
-      await this.returnToHostApp('cloud');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('cloud');
+      }
       AgentExecutionController.finishExecution('云端 Agent 结束');
       throw err;
     } finally {

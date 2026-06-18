@@ -200,6 +200,7 @@ struct Index {
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
   @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
   @State isThinking: boolean = false;
+  @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudDebugImagePath: string = '';
@@ -265,7 +266,7 @@ struct Index {
   }
 
   private isLocalNativeBusy(): boolean {
-    if (this.isThinking || this.restoringLocalSession) {
+    if (this.isThinking || this.localAgentCleaningUp || this.restoringLocalSession) {
       return true;
     }
     if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
@@ -506,6 +507,33 @@ struct Index {
         createChatMessage(this.nextChatMessageId('task-status'), 'task', CHAT_MESSAGE_KIND_TASK_RESULT,
           message, new Date().getTime()));
     }
+  }
+
+  private reportLocalAgentCleanupStatus(message: string): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    showToastSafely(message, 1800);
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.updateFloatText(message);
+    }
+    if (this.localTaskSessionId.length > 0) {
+      this.appendTaskTraceLineForSession(this.localTaskSessionId, message);
+    }
+  }
+
+  private abortLocalAgentStartupIfCancelled(): boolean {
+    if (!this.localAgentCleaningUp && !AgentExecutionController.isCancelRequested()) {
+      return false;
+    }
+    let message = '任务已终止，正在等待本地 Agent 收尾完成。';
+    this.output = message;
+    if (this.localTaskSessionId.length > 0) {
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, message, new Date().getTime()));
+    }
+    AgentExecutionController.finishExecution('本地 Agent 已终止');
+    return true;
   }
 
   private handleCloudAgentLog(message: string): void {
@@ -1082,15 +1110,23 @@ struct Index {
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
+        this.localAgentCleaningUp = true;
+        this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
         await this.activeAgentRunner.requestCancellation();
-        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+        this.output = '用户已通过悬浮窗终止本地 Agent 任务，正在等待收尾完成。';
         return;
       }
       if (this.agentRouter.getRouteMode() !== 'local') {
         return;
       }
-      await this.agentRouter.requestTaskCancellation();
-      this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+      this.localAgentCleaningUp = true;
+      this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
+      try {
+        await this.agentRouter.requestTaskCancellation();
+        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+      } finally {
+        this.localAgentCleaningUp = false;
+      }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
@@ -3170,7 +3206,13 @@ struct Index {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
       return;
     }
+    if (this.localAgentCleaningUp ||
+      (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local')) {
+      this.reportLocalAgentCleanupStatus('上一轮本地 Agent 正在终止/收尾，请稍后再下发任务。');
+      return;
+    }
     if (this.isThinking) {
+      this.reportLocalAgentCleanupStatus('本地 Agent 正在处理上一轮任务，请稍后再试。');
       return;
     }
     this.ensureActiveChatSession();
@@ -3189,12 +3231,18 @@ struct Index {
     this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。');
     await this.sleep(50);
     try {
+      if (this.abortLocalAgentStartupIfCancelled()) {
+        return;
+      }
       if (!await this.ensureLocalAgentReady()) {
         let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
         this.appendChatMessageForSession(this.localTaskSessionId,
           createChatMessage(this.nextChatMessageId('task-result'), 'task',
             CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
         AgentExecutionController.finishExecution('本地 Agent 启动失败');
+        return;
+      }
+      if (this.abortLocalAgentStartupIfCancelled()) {
         return;
       }
       this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
@@ -3211,13 +3259,19 @@ struct Index {
       }
     } catch (e) {
       let err = e as Error;
+      let resultText = this.localAgentCleaningUp ? '任务已终止，正在等待本地 Agent 收尾完成。' :
+        '任务执行失败：' + err.message;
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
-          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行失败：' + err.message, new Date().getTime()));
+          CHAT_MESSAGE_KIND_TASK_RESULT, resultText, new Date().getTime()));
     } finally {
+      if (this.localAgentCleaningUp && this.activeAgentRunner !== null) {
+        this.reportLocalAgentStartupStatus('本地 Agent 收尾完成，可以重新下发任务。', true, true);
+      }
       this.activeAgentRunner = null;
       this.localTaskSessionId = '';
       this.isThinking = false;
+      this.localAgentCleaningUp = false;
     }
   }
 
@@ -3386,7 +3440,7 @@ struct Index {
             localOutput: this.output,
             localDebugImagePath: this.debugImagePath,
             chatHistory: this.chatHistory,
-            localThinking: this.isThinking,
+            localThinking: this.isThinking || this.localAgentCleaningUp,
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,

@@ -101,7 +101,7 @@ export function createQueryEventsTool(hasBuiltIndexes: QueryEventsIndexAvailabil
 export function queryEventsToolParameters(): Object {
   let properties = createSchemaMap();
   properties['keywords'] = stringArraySchema('关键词过滤。传入用户想查找的词或短语，例如“咖啡”“酒店订单”，根据关键词匹配事件内容。' +
-    '多个关键词之间是 AND 关系，如无必要，请使用最重要的一个keyword，避免同时使用多个keyword，否则可能导致召回条目数过少。') as Object;
+    '关键词召回基于精确匹配，所以尽量使用具体而非抽象的词汇作为关键词。多个关键词之间是 AND 关系，避免使用过多keyword，否则召回条目数可能过少。') as Object;
   properties['domains'] = enumArraySchema('领域过滤。可选值：eat 吃、wear 穿、live 住、travel 行、work 办公、other 其他。' +
     '多个领域之间是 OR 关系，并会与其他过滤条件取 AND。', DOMAIN_KEYS) as Object;
   properties['entities'] = entitiesArraySchema() as Object;

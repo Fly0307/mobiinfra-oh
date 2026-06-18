@@ -39,6 +39,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"generate", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"unloadModel", nullptr, Ok, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentPrefill", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentStep", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset", nullptr, DisabledAsync, nullptr, nullptr, nullptr, napi_default, nullptr},

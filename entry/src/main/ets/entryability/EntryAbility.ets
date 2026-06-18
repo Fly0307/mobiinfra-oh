@@ -60,14 +60,18 @@ export default class EntryAbility extends UIAbility {
     AgentExecutionController.setCaptureOverlayHandler(async (hidden: boolean): Promise<boolean> => {
       return await this.handleCaptureOverlayVisibility(hidden);
     });
-    AgentExecutionController.setReturnToAppHandler(() => {
+    AgentExecutionController.setReturnToAppHandler(async () => {
       let wantInfo: Want = {
         bundleName: 'com.example.mnnllmchat',
         abilityName: 'EntryAbility'
       };
-      this.context.startAbility(wantInfo).catch((err: Error) => {
-        AppLogger.error('Ability', 'Failed to bring app to foreground. Cause: ' + JSON.stringify(err));
-      });
+      try {
+        await this.context.startAbility(wantInfo);
+      } catch (err) {
+        let error = err as Error;
+        AppLogger.error('Ability', 'Failed to bring app to foreground. Cause: ' + JSON.stringify(error));
+        throw error;
+      }
     });
     AppLogger.info('Ability', 'Ability onCreate');
   }

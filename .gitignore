@@ -33,3 +33,4 @@ build-profile.json5*
 /.superpowers/brainstorm/
 /mobile_file_example/
 /.agents/
+.agents

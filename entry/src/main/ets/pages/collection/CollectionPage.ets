@@ -4,9 +4,9 @@ import {
   CollectionGroupViewModel,
   CollectionViewModel
 } from '../../datamanager/DataManagerTypes';
-import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
+import { collectionViewModelByTabIndex, createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
-import { memorySceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
@@ -67,10 +67,7 @@ export struct CollectionPage {
     async (request: WechatAutoSummaryRequest) => {};
 
   private currentView(): CollectionViewModel {
-    if (this.viewModels.length > this.collectionModule) {
-      return this.viewModels[this.collectionModule];
-    }
-    return createEmptyCollectionViewModels()[this.collectionModule];
+    return collectionViewModelByTabIndex(this.viewModels, this.collectionModule);
   }
 
   private getCollectionTitle(): string {
@@ -117,6 +114,10 @@ export struct CollectionPage {
 
   private shouldShowGroupPagination(): boolean {
     return this.groupCount() > COLLECTION_GROUPS_PER_PAGE;
+  }
+
+  private isActiveCollectionScene(scene: WorkflowSceneConfig): boolean {
+    return normalizeMemorySceneId(this.collectionModule) === scene.sceneId;
   }
 
   private wechatInputOrDefault(input: string, fallback: string): string {
@@ -288,12 +289,12 @@ export struct CollectionPage {
     // 顶部分段控制器，切换后所有统计卡片和列表内容通过 collectionModule 派生。
     Text(scene.label)
       .fontSize(13)
-      .fontWeight(this.collectionModule === scene.sceneId ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(this.collectionModule === scene.sceneId ? Color.White : '#6D7481')
+      .fontWeight(this.isActiveCollectionScene(scene) ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.isActiveCollectionScene(scene) ? Color.White : '#6D7481')
       .height(38)
       .padding({ left: 16, right: 16 })
       .textAlign(TextAlign.Center)
-      .backgroundColor(this.collectionModule === scene.sceneId ? scene.color : Color.White)
+      .backgroundColor(this.isActiveCollectionScene(scene) ? scene.color : Color.White)
       .borderRadius(10)
       .margin({ left: scene.sceneId === 0 ? 0 : 10 })
       .onClick(() => {

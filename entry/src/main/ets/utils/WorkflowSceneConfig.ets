@@ -16,8 +16,8 @@ const WORKFLOW_SCENES: WorkflowSceneConfig[] = [
 ];
 
 // DataManager 记忆层需要接纳图库分析补充场景，但工作流任务页仍只展示原 7 类采集场景。
+// 图库“餐饮”与既有“外卖”消费场景合并，避免汇总页出现重复页签。
 const MEMORY_EXTRA_SCENES: WorkflowSceneConfig[] = [
-  { sceneId: 7, tabId: 'gallery-food', label: '餐饮', color: '#F97316' },
   { sceneId: 8, tabId: 'gallery-document', label: '文档', color: '#64748B' },
   { sceneId: 9, tabId: 'gallery-health', label: '健康', color: '#10B981' },
   { sceneId: 10, tabId: 'gallery-work', label: '办公', color: '#2563EB' },
@@ -30,6 +30,25 @@ export function workflowSceneConfigs(): WorkflowSceneConfig[] {
 
 export function memorySceneConfigs(): WorkflowSceneConfig[] {
   return WORKFLOW_SCENES.concat(MEMORY_EXTRA_SCENES);
+}
+
+export function normalizeMemorySceneId(sceneId: number): number {
+  // 早期图库接入曾使用 7 表示“餐饮”；该场景与既有“外卖”(1) 重复，统一迁移到外卖。
+  if (sceneId === 7) {
+    return 1;
+  }
+  return sceneId;
+}
+
+export function normalizeMemorySceneIds(sceneIds: number[]): number[] {
+  let output: number[] = [];
+  sceneIds.forEach((sceneId: number) => {
+    let normalized = normalizeMemorySceneId(sceneId);
+    if (!isNaN(normalized) && normalized >= 0 && output.indexOf(normalized) < 0) {
+      output.push(normalized);
+    }
+  });
+  return output.sort((left: number, right: number) => left - right);
 }
 
 export function workflowSceneById(sceneId: number): WorkflowSceneConfig {
@@ -53,11 +72,12 @@ export function workflowSceneLabel(sceneId: number): string {
 }
 
 export function memorySceneLabel(sceneId: number): string {
+  let normalizedSceneId = normalizeMemorySceneId(sceneId);
   let scenes = memorySceneConfigs();
   for (let scene of scenes) {
-    if (scene.sceneId === sceneId) {
+    if (scene.sceneId === normalizedSceneId) {
       return scene.label;
     }
   }
-  return workflowSceneLabel(sceneId);
+  return workflowSceneLabel(normalizedSceneId);
 }

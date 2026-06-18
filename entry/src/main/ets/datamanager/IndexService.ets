@@ -57,7 +57,13 @@ import {
   stableUniqueNumbers,
   summarizeText
 } from './DataManagerUtils';
-import { memorySceneConfigs, workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import {
+  memorySceneConfigs,
+  normalizeMemorySceneId,
+  normalizeMemorySceneIds,
+  workflowSceneConfigs,
+  WorkflowSceneConfig
+} from '../utils/WorkflowSceneConfig';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 
 export interface IndexBuildResult {
@@ -582,12 +588,12 @@ export class IndexService {
       ids.forEach((id: string) => matching[id] = matching[id] && domainIds[id] === true);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let selectedScenes = this.setFromNumbers(workflowSceneIds);
       ids.forEach((id: string) => {
         let sceneMatch = false;
-        (events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
+        normalizeMemorySceneIds(events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
           if (selectedScenes[String(sceneId)] === true) {
             sceneMatch = true;
           }
@@ -630,7 +636,7 @@ export class IndexService {
         let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
         if (partition && Array.isArray(partition.events)) {
           partition.events.forEach((event: IndexedEvent) => {
-            result[event.event_id] = event;
+            result[event.event_id] = this.copyEvent(event);
           });
         }
       });
@@ -728,13 +734,18 @@ export class IndexService {
       candidate = this.intersectCandidate(candidate, domainIds);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let sceneDocument = this.storage.readJson<WorkflowSceneDocument>(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.emptyWorkflowSceneDocument());
       let postings = sceneDocument.postings || {};
+      let selectedScenes = this.setFromNumbers(workflowSceneIds);
       let sceneIds: BooleanMap = {};
-      workflowSceneIds.forEach((sceneId: number) => {
-        (postings[String(sceneId)] || []).forEach((id: string) => sceneIds[id] = true);
+      Object.keys(postings).forEach((sceneKey: string) => {
+        let numericSceneId = Number(sceneKey);
+        if (isNaN(numericSceneId) || selectedScenes[String(normalizeMemorySceneId(numericSceneId))] !== true) {
+          return;
+        }
+        (postings[sceneKey] || []).forEach((id: string) => sceneIds[id] = true);
       });
       candidate = this.intersectCandidate(candidate, sceneIds);
     }
@@ -874,7 +885,7 @@ export class IndexService {
     }
     partition.events.forEach((event: IndexedEvent) => {
       if (wanted[event.event_id] === true) {
-        out[event.event_id] = event;
+        out[event.event_id] = this.copyEvent(event);
       }
     });
   }
@@ -992,9 +1003,9 @@ export class IndexService {
       tags: (event.tags || []).slice(),
       source_refs: (event.source_refs || []).slice(),
       sources: (event.sources || []).slice(),
-      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
+      workflow_scene_ids: normalizeMemorySceneIds(event.workflow_scene_ids || []),
       image_paths: (event.image_paths || []).slice(),
-      todo: this.copyTodo(event.todo),
+      todo: this.copyTodo(event.todo || this.emptyTodo()),
       keywords: (event.keywords || []).slice(),
       domains: (event.domains || []).slice(),
       entity_mentions: (event.entity_mentions || []).slice(),
@@ -1070,7 +1081,7 @@ export class IndexService {
         tags: stableUnique(record.tags || []),
         source_refs: stableUnique(record.source_refs || []),
         sources: eventSourceNames(record.source_refs || [], relativePath),
-        workflow_scene_ids: stableUniqueNumbers(record.workflow_scene_ids || []),
+        workflow_scene_ids: normalizeMemorySceneIds(stableUniqueNumbers(record.workflow_scene_ids || [])),
         image_paths: this.imagePathsForSourceRefs(record.source_refs || [], imageReferences),
         todo: this.emptyTodo(),
         keywords: [],
@@ -1529,7 +1540,7 @@ export class IndexService {
       postings[key] = [];
     });
     Object.keys(events).sort().forEach((eventId: string) => {
-      let sceneIds = stableUniqueNumbers(events[eventId].workflow_scene_ids || []);
+      let sceneIds = normalizeMemorySceneIds(stableUniqueNumbers(events[eventId].workflow_scene_ids || []));
       sceneIds.forEach((sceneId: number) => {
         let key = String(sceneId);
         if (!postings[key]) {

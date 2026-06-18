@@ -78,7 +78,7 @@ export function galleryMemorySceneIdForCategory(category: string): number {
     return 6;
   }
   if (normalized === '餐饮') {
-    return 7;
+    return 1;
   }
   if (normalized === '文档') {
     return 8;

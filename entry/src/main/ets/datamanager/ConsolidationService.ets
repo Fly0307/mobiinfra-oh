@@ -39,6 +39,7 @@ import {
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { normalizeMemorySceneIds } from '../utils/WorkflowSceneConfig';
 
 export interface ConsolidationResult {
   sourceEntries: number;
@@ -72,6 +73,10 @@ interface ConsolidationOutputStateIndex {
 
 const DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY: number = 4;
 const OUTPUT_STATE_INDEX_FILE_NAME: string = 'state-index.json';
+
+export function sourceEntryProcessingHash(storage: DataManagerStorage, entry: SourceEntry): string {
+  return storage.sha256Text(normalizeFreeText(entry.entry_text) + '\u001f' + String(entry.workflow_scene_id));
+}
 
 export class ConsolidationService {
   private paths: DataManagerPaths;
@@ -353,7 +358,7 @@ export class ConsolidationService {
       item.dedup_text = normalizeDedupText(item.dedup_text || item.normalized_fact || '');
       item.source_refs = Array.isArray(item.source_refs) ? item.source_refs : [];
       item.source_dates = Array.isArray(item.source_dates) ? item.source_dates : [];
-      item.workflow_scene_ids = Array.isArray(item.workflow_scene_ids) ? stableUniqueNumbers(item.workflow_scene_ids) : [];
+      item.workflow_scene_ids = Array.isArray(item.workflow_scene_ids) ? normalizeMemorySceneIds(stableUniqueNumbers(item.workflow_scene_ids)) : [];
       item.raw_excerpts = Array.isArray(item.raw_excerpts) ? item.raw_excerpts : [];
       item.tags = Array.isArray(item.tags) ? item.tags : [];
       item.model_notes = Array.isArray(item.model_notes) ? item.model_notes : [];
@@ -379,7 +384,7 @@ export class ConsolidationService {
       (record.source_refs || []).forEach((ref: string) => processedRefs[ref] = true);
     });
     return entries.filter((entry: SourceEntry) => {
-      let currentHash = this.storage.sha256Text(entry.entry_text);
+      let currentHash = sourceEntryProcessingHash(this.storage, entry);
       let previousHash = processedByHash[entry.source_ref] || '';
       if (previousHash.length > 0) {
         return previousHash !== currentHash;
@@ -422,7 +427,7 @@ export class ConsolidationService {
     dateRange['end_date'] = dates.length > 0 ? dates[dates.length - 1] : '';
     let entryHashes: StringMap = createStringMap();
     group.entries.forEach((entry: SourceEntry) => {
-      entryHashes[entry.source_ref] = this.storage.sha256Text(entry.entry_text);
+      entryHashes[entry.source_ref] = sourceEntryProcessingHash(this.storage, entry);
     });
     let metadata: ConsolidatedMetadata = {
       source_date_range: dateRange,

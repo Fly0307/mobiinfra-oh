@@ -32,7 +32,7 @@ import {
   stableUnique,
   summarizeText
 } from './DataManagerUtils';
-import { memorySceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, normalizeMemorySceneId, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
 
 export interface CollectionGroupingBuildResult {
   tabCount: number;
@@ -85,13 +85,11 @@ export function collectionTabSpecs(): CollectionTabSpec[] {
 
 export function collectionTabSpecByIndex(index: number): CollectionTabSpec {
   let specs = collectionTabSpecs();
+  let normalizedIndex = normalizeMemorySceneId(index);
   for (let spec of specs) {
-    if (spec.tabIndex === index) {
+    if (spec.tabIndex === normalizedIndex) {
       return spec;
     }
-  }
-  if (index >= 0 && index < specs.length) {
-    return specs[index];
   }
   return specs[0];
 }

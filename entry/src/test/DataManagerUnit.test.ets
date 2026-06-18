@@ -18,6 +18,8 @@ import {
   applyIncrementalCollectionGroupAssignments,
   collectionGroupEventInputFingerprint,
   collectionGroupSourceInputFingerprint,
+  CollectionTabSpec,
+  collectionTabSpecs,
   collectionTabSpecByIndex,
   heuristicCollectionGroups,
   normalizeCollectionGroups,
@@ -37,6 +39,7 @@ import {
   isHomeTodoIndexCandidate,
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
+  IndexService,
   resolveQueryLimit,
   buildProfileDomainStateFromPayload,
   isProfileDomainStateReusable
@@ -48,6 +51,8 @@ import {
   shouldKeepTodoAgentTask
 } from '../main/ets/datamanager/DataPipelineModelClient';
 import {
+  collectionViewModelByTabIndex,
+  createEmptyCollectionViewModels,
   homeProfileCompleteness,
   homeProfileDomainDescription,
   homeProfileDomainFullDescription,
@@ -73,18 +78,27 @@ import {
   HomeRecommendationPlannerEvent,
   DataManagerModelConfig,
   CollectionGalleryDetailViewModel,
+  EventPartition,
   JsonMap,
   ProfileClaim,
   ProfileDomainState,
   ProfileModelPayload,
   ProfileState,
+  QueryResult,
   NumberedEntry,
   SourceEntry,
+  StringArrayMap,
   createJsonMap,
   createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
 import { GalleryAnalysisResult } from '../main/ets/utils/gallery/GalleryTypes';
-import { memorySceneConfigs, workflowSceneConfigs, WorkflowSceneConfig } from '../main/ets/utils/WorkflowSceneConfig';
+import {
+  memorySceneConfigs,
+  memorySceneLabel,
+  normalizeMemorySceneIds,
+  workflowSceneConfigs,
+  WorkflowSceneConfig
+} from '../main/ets/utils/WorkflowSceneConfig';
 import { parseJsonCompat, stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
 import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
 import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
@@ -102,6 +116,7 @@ import {
 import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
+import { sourceEntryProcessingHash } from '../main/ets/datamanager/ConsolidationService';
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
   return {
@@ -271,6 +286,16 @@ let galleryMemoryRootCounter: number = 0;
 
 interface GalleryMemoryItemsIndexDocument {
   items: string[];
+}
+
+interface TestWorkflowSceneDocument {
+  postings: StringArrayMap;
+}
+
+interface TestEventPartitionIndex {
+  schema: string;
+  generated_at: string;
+  partition_files: string[];
 }
 
 function nextGalleryMemoryRoot(name: string): string {
@@ -551,7 +576,7 @@ export default function dataManagerUnitTest() {
       expect(galleryMemorySceneIdForCategory('聊天')).assertEqual(3);
       expect(galleryMemorySceneIdForCategory('购物')).assertEqual(0);
       expect(galleryMemorySceneIdForCategory('出行')).assertEqual(6);
-      expect(galleryMemorySceneIdForCategory('餐饮')).assertEqual(7);
+      expect(galleryMemorySceneIdForCategory('餐饮')).assertEqual(1);
       expect(galleryMemorySceneIdForCategory('文档')).assertEqual(8);
       expect(galleryMemorySceneIdForCategory('健康')).assertEqual(9);
       expect(galleryMemorySceneIdForCategory('工作')).assertEqual(10);
@@ -560,11 +585,103 @@ export default function dataManagerUnitTest() {
       expect(workflowSceneConfigs().length).assertEqual(7);
       let memoryScenes: WorkflowSceneConfig[] = memorySceneConfigs();
       expect(memoryScenes.length > workflowSceneConfigs().length).assertTrue();
-      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '餐饮').length).assertEqual(1);
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '餐饮').length).assertEqual(0);
+      expect(collectionTabSpecs().filter((spec: CollectionTabSpec): boolean => spec.title === '餐饮记录').length).assertEqual(0);
       expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '图库').length).assertEqual(1);
       let foodSpec = collectionTabSpecByIndex(galleryMemorySceneIdForCategory('餐饮'));
-      expect(foodSpec.title).assertEqual('餐饮记录');
-      expect(foodSpec.query.workflowSceneIds[0]).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+      expect(foodSpec.title).assertEqual('外卖记录');
+      expect(foodSpec.query.workflowSceneIds[0]).assertEqual(1);
+      expect(collectionTabSpecByIndex(7).title).assertEqual('外卖记录');
+      expect(memorySceneLabel(7)).assertEqual('外卖');
+      let normalizedLegacyScenes = normalizeMemorySceneIds([7, 1]);
+      expect(normalizedLegacyScenes.length).assertEqual(1);
+      expect(normalizedLegacyScenes[0]).assertEqual(1);
+    });
+
+    it('collectionViewModelByTabIndexUsesSceneIdInsteadOfArrayOffset', 0, () => {
+      let emptyViews: CollectionViewModel[] = createEmptyCollectionViewModels();
+
+      expect(collectionViewModelByTabIndex(emptyViews, 8).title).assertEqual('文档记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 9).title).assertEqual('健康记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 10).title).assertEqual('办公记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 11).title).assertEqual('图库记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 7).title).assertEqual('外卖记录');
+    });
+
+    it('indexQueryMatchesLegacyGalleryFoodSceneSeven', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('legacy-scene-query');
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      paths.ensureBaseDirs();
+      let service = new IndexService(paths, storage, new DataPipelineModelClient());
+      let legacyEvent: IndexedEvent = demoIndexedEvent('e7', '图库餐饮记录', 'photos', 'eat', '餐饮');
+      legacyEvent.event_date = '2026-06-01';
+      legacyEvent.last_seen_date = '2026-06-01';
+      legacyEvent.workflow_scene_ids = [7];
+      let partition: EventPartition = {
+        month: '2026-06',
+        events: [legacyEvent]
+      };
+      let partitionIndex: TestEventPartitionIndex = {
+        schema: 'datamanager-event-partition-index-v1',
+        generated_at: '2026-06-18T21:07:00',
+        partition_files: ['2026-06.json']
+      };
+      let postings: StringArrayMap = {};
+      postings['7'] = ['e7'];
+      let workflowSceneDocument: TestWorkflowSceneDocument = {
+        postings: postings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'events', '2026-06.json'), partition as Object);
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'events', 'partition-index.json'), partitionIndex as Object);
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'workflow-scene', 'index.json'), workflowSceneDocument as Object);
+
+      let foodQuery: QueryResult = service.query({
+        keywords: [],
+        domains: [],
+        entities: [],
+        date: '',
+        month: '',
+        startDate: '',
+        endDate: '',
+        workflowSceneIds: [1],
+        limit: 0
+      });
+      let legacyQuery: QueryResult = service.query({
+        keywords: [],
+        domains: [],
+        entities: [],
+        date: '',
+        month: '',
+        startDate: '',
+        endDate: '',
+        workflowSceneIds: [7],
+        limit: 0
+      });
+
+      expect(foodQuery.total_events).assertEqual(1);
+      expect(foodQuery.events[0].workflow_scene_ids[0]).assertEqual(1);
+      expect(legacyQuery.total_events).assertEqual(1);
+      storage.removeTree(root);
+    });
+
+    it('sourceEntryProcessingHashChangesWhenWorkflowSceneChanges', 0, () => {
+      let storage = galleryMemoryStorage();
+      let entry: SourceEntry = {
+        source_date: '2026-06-01',
+        file_name: 'com.huawei.photos__gallery-analysis__餐饮.md',
+        entry_index: 1,
+        entry_text: '同一张餐饮图片的分析结果',
+        workflow_metadata: createJsonMap(),
+        workflow_scene_id: 7,
+        source_ref: '2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md#1'
+      };
+      let oldHash = sourceEntryProcessingHash(storage, entry);
+      entry.workflow_scene_id = galleryMemorySceneIdForCategory('餐饮');
+      let nextHash = sourceEntryProcessingHash(storage, entry);
+
+      expect(oldHash === nextHash).assertFalse();
     });
 
     it('galleryMemorySyncKeepsEntryIndexStableWhenNewItemsArrive', 0, () => {
@@ -1285,7 +1402,8 @@ export default function dataManagerUnitTest() {
       expect(preview.systemPrompt.indexOf('source_date：daily-log 文件日期') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('workflow_scene_label：采集场景提示') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('餐饮、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、餐饮、文档') < 0).assertTrue();
       expect(preview.systemPrompt.indexOf('entry_text：原始日志条目正文') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"items"') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"facts"') >= 0).assertTrue();
@@ -1310,7 +1428,8 @@ export default function dataManagerUnitTest() {
       expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('workflow_scene_labels：采集场景提示') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('餐饮、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、餐饮、文档') < 0).assertTrue();
       expect(preview.systemPrompt.indexOf('keywords 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('domains 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('eat|wear|live|travel|work|other') >= 0).assertTrue();

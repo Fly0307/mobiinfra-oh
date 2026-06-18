@@ -256,7 +256,7 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '输入字段说明：\n' +
   'source_ref：输入 entry 的唯一引用标识，只需要在输出 item 中原样返回，用于把 facts 归还给对应 entry。\n' +
   'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
-  'workflow_scene_label：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、餐饮、文档、健康、办公、图库；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
+  'workflow_scene_label：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
   'entry_text：原始日志条目正文，是拆分事实的主要依据。\n\n' +
   '返回严格 JSON，格式为：\n' +
   '{\n' +
@@ -346,7 +346,7 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\nevent_id：事件唯一标识，只需要在输出中原样返回。' +
   '\nevent_date：事件发生日期，格式为 YYYY-MM-DD。' +
   '\nevent_weekday：event_date 对应的星期，用于把“这周六”“下周一”“周末”等相对日期换算为绝对日期。' +
-  '\nworkflow_scene_labels：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、餐饮、文档、健康、办公、图库；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
+  '\nworkflow_scene_labels：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
   '\nsummary：事件短摘要，用于快速理解事件。' +
   '\nnormalized_fact：整理后的完整事实描述，通常比 summary 包含更多商户、商品、人物、地点、金额、状态或行动细节；抽取关键词、领域、实体和待办时优先参考它。' +
   '\n\n输出必须是严格 JSON，不要输出 markdown 或解释：' +

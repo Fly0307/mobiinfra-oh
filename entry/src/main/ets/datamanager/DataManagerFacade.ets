@@ -1,7 +1,7 @@
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
-import { ConsolidationService } from './ConsolidationService';
+import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
 import { IndexService } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
@@ -55,7 +55,8 @@ import {
   sourceRef,
   stableUnique,
   addDays,
-  isIsoDate
+  isIsoDate,
+  workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -107,6 +108,27 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
 
 export function createEmptyCollectionViewModels(): CollectionViewModel[] {
   return collectionTabSpecs().map((spec) => emptyCollectionViewModel(spec.tabIndex));
+}
+
+// 汇总页的 tabIndex 是稳定 sceneId，不保证从 0 连续递增；这里统一把 sceneId 映射到 viewModels 数组位置。
+export function collectionViewModelByTabIndex(viewModels: CollectionViewModel[], tabIndex: number): CollectionViewModel {
+  let specs = collectionTabSpecs();
+  let targetSpec = collectionTabSpecByIndex(tabIndex);
+  let targetIndex = 0;
+  for (let index = 0; index < specs.length; index++) {
+    if (specs[index].tabIndex === targetSpec.tabIndex) {
+      targetIndex = index;
+      break;
+    }
+  }
+  if (targetIndex < viewModels.length) {
+    return viewModels[targetIndex];
+  }
+  let emptyViews = createEmptyCollectionViewModels();
+  if (targetIndex < emptyViews.length) {
+    return emptyViews[targetIndex];
+  }
+  return emptyViews[0];
 }
 
 function defaultHomeDomains(): HomeDomainViewModel[] {
@@ -496,7 +518,16 @@ export class DataManagerFacade {
             continue;
           }
           let ref = sourceRef(day, fileName, index);
-          let currentHash = this.storage.sha256Text(text);
+          let metadata = document.workflow_metadata;
+          let currentHash = sourceEntryProcessingHash(this.storage, {
+            source_date: day,
+            file_name: fileName,
+            entry_index: index,
+            entry_text: text,
+            workflow_metadata: metadata,
+            workflow_scene_id: workflowSceneIdFromMetadata(metadata),
+            source_ref: ref
+          });
           let previousHash = processed[ref] || '';
           let covered = previousHash.length > 0 ? previousHash === currentHash : processedRefs[ref] === true;
           if (!covered) {

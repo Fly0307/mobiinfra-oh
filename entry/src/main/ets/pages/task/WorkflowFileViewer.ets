@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
+import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -18,6 +19,7 @@ struct WorkflowFileViewer {
   @State currentInfoExpanded: boolean = true;
   @State manageMode: boolean = false;
   @State selectedDeletePaths: string[] = [];
+  @State previewMode: boolean = true;
 
   private filesDir: string = '';
 
@@ -84,12 +86,14 @@ struct WorkflowFileViewer {
       this.selectedPath = '';
       this.selectedName = '';
       this.fileText = this.emptyText(this.category);
+      this.previewMode = false;
     }
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
     this.selectedPath = file.path;
     this.selectedName = file.name;
+    this.previewMode = this.defaultPreviewMode(file);
     try {
       this.fileText = WorkflowStorage.readText(file.path);
     } catch (e) {
@@ -116,6 +120,19 @@ struct WorkflowFileViewer {
       return '暂无运行文件';
     }
     return '暂无 daily-log 文件';
+  }
+
+  private defaultPreviewMode(file: WorkflowManagedFile): boolean {
+    // daily-log 与 Markdown 文件优先给用户可读预览；配置 JSON 和运行输出保持原文优先，避免隐藏结构化字段。
+    let lowerName = file.name.toLowerCase();
+    if (this.category === 'daily') {
+      return true;
+    }
+    return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  }
+
+  private setPreviewMode(enabled: boolean): void {
+    this.previewMode = enabled;
   }
 
   private fileDisplayTitle(file: WorkflowManagedFile): string {
@@ -498,6 +515,26 @@ struct WorkflowFileViewer {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.selectedName.length > 0) {
+            Button('预览')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(true); })
+            Button('原文')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(!this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(!this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(false); })
+          }
           Button(this.currentInfoExpanded ? '收起' : '展开')
             .width(58)
             .height(30)
@@ -519,11 +556,15 @@ struct WorkflowFileViewer {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         Scroll() {
-          Text(this.fileText)
-            .fontSize(11)
-            .fontFamily('monospace')
-            .fontColor('#2F3645')
-            .width('100%')
+          if (this.previewMode && this.selectedName.length > 0) {
+            MarkdownView({ text: this.fileText, variant: 'file_preview' })
+          } else {
+            Text(this.fileText)
+              .fontSize(11)
+              .fontFamily('monospace')
+              .fontColor('#2F3645')
+              .width('100%')
+          }
         }
         .width('100%')
         .layoutWeight(1)

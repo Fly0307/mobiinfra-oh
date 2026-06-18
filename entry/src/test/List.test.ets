@@ -9,6 +9,7 @@ import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
+import markdownParserUnitTest from './MarkdownParserUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -22,4 +23,5 @@ export default function testsuite() {
   appLoggerUnitTest();
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
+  markdownParserUnitTest();
 }

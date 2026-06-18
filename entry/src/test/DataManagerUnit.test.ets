@@ -37,6 +37,7 @@ import {
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
   monthLastDateForTemporalIndex,
+  normalizeQueryKeywordOperator,
   resolveQueryLimit,
   buildProfileDomainStateFromPayload,
   isProfileDomainStateReusable
@@ -385,6 +386,14 @@ export default function dataManagerUnitTest() {
       expect(monthLastDateForTemporalIndex('2026-05')).assertEqual('2026-05-31');
       expect(monthLastDateForTemporalIndex('2026-06')).assertEqual('2026-06-30');
       expect(monthLastDateForTemporalIndex('2024-02')).assertEqual('2024-02-29');
+    });
+
+    it('normalizeQueryKeywordOperator', 0, () => {
+      expect(normalizeQueryKeywordOperator()).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('AND')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('OR')).assertEqual('or');
+      expect(normalizeQueryKeywordOperator('xor')).assertEqual('and');
     });
 
     it('profileShortSummaryNormalization', 0, () => {

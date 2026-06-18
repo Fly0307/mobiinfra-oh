@@ -126,6 +126,14 @@ function userMessage(content: string): CloudChatMessage {
   };
 }
 
+function repeatedToolResponses(count: number): CloudChatCompletionResult[] {
+  let responses: CloudChatCompletionResult[] = [];
+  for (let i = 0; i < count; i++) {
+    responses.push(completion('', [toolCall('call-' + String(i + 1), 'lookup_note', '{}')]));
+  }
+  return responses;
+}
+
 function fakeLookupTool(output: string): ChatTool {
   return {
     name: 'lookup_note',
@@ -247,6 +255,19 @@ export default function chatReactAgentUnitTest() {
       expect(result.toolCallCount).assertEqual(2);
       expect(result.content).assertEqual('工具调用轮数已达到上限，未生成最终答案。');
       expect(client.callMessages.length).assertEqual(2);
+    });
+
+    it('defaultsToThirtyIterations', 0, async () => {
+      let client = new FakeReactModelClient(repeatedToolResponses(30));
+      let registry = new ChatToolRegistry();
+      registry.registerTool(fakeLookupTool('{"ok":true}'));
+      let agent = new ChatReactAgent(client, registry);
+
+      let result = await agent.run([userMessage('默认上限')], testConfig());
+
+      expect(result.reachedLimit).assertTrue();
+      expect(result.toolCallCount).assertEqual(30);
+      expect(client.callMessages.length).assertEqual(30);
     });
 
     it('executesMultipleToolCallsSequentially', 0, async () => {

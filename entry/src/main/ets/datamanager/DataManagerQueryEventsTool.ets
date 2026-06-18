@@ -14,9 +14,11 @@ import {
 
 export const QUERY_EVENTS_TOOL_NAME: string = 'query_events';
 const DEFAULT_QUERY_EVENTS_LIMIT: number = 20;
+const DEFAULT_KEYWORD_OPERATOR: string = 'and';
 const QUERY_EVENTS_TOOL_DESCRIPTION: string =
   '如果根据用户请求，你需要根据关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时（例如用户询问“帮我查一下我上周做了什么”时），调用该工具。未注明年份的日期必须根据系统消息中的当前日期补全年份后再调用。';
 const ENTITY_TYPES: string[] = ['person', 'place', 'merchant'];
+const KEYWORD_OPERATORS: string[] = ['and', 'or'];
 
 type QueryEventsJsonValue = Object | string | number | boolean | null;
 type QueryEventsJsonMap = Record<string, QueryEventsJsonValue>;
@@ -32,6 +34,7 @@ export interface QueryEventsEntityInput {
 
 export interface QueryEventsPublicQuery {
   keywords: string[];
+  keyword_operator: string;
   domains: string[];
   entities: QueryEventsEntityInput[];
   date: string;
@@ -101,9 +104,12 @@ export function createQueryEventsTool(hasBuiltIndexes: QueryEventsIndexAvailabil
 export function queryEventsToolParameters(): Object {
   let properties = createSchemaMap();
   properties['keywords'] = stringArraySchema('关键词过滤。传入用户想查找的词或短语，例如“咖啡”“酒店订单”，根据关键词匹配事件内容。' +
-    '关键词召回基于精确匹配，所以尽量使用具体而非抽象的词汇作为关键词。多个关键词之间是 AND 关系，避免使用过多keyword，否则召回条目数可能过少。') as Object;
+    '关键词召回基于精确匹配，所以你需要使用具体而不是较抽象的关键词参与检索。' +
+    '尽可能只使用一个最重要的关键词，如果你指定了多个关键词，它们的逻辑组合方式由 keyword_operator 决定，默认为 and；优先使用 and 组合，若检索结果为空，你需要考虑改用 or 组合，或者对关键词的数量或表述进行精简，并重试最多3次；不能未经重试直接回答没有相关记录') as Object;
+  properties['keyword_operator'] = enumStringSchema('多个 keywords 之间的组合方式。and 表示必须同时匹配全部关键词；or 表示匹配任一关键词即可。省略时默认 and。',
+    KEYWORD_OPERATORS) as Object;
   properties['domains'] = enumArraySchema('领域过滤。可选值：eat 吃、wear 穿、live 住、travel 行、work 办公、other 其他。' +
-    '多个领域之间是 OR 关系，并会与其他过滤条件取 AND。', DOMAIN_KEYS) as Object;
+    '多个领域之间用 or 组合，并会与其他过滤条件用 and 组合。', DOMAIN_KEYS) as Object;
   properties['entities'] = entitiesArraySchema() as Object;
   properties['date'] = stringSchema('精确日期过滤，格式 YYYY-MM-DD，例如 2026-06-18。不能和 month、start_date、end_date 同时使用。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
   properties['month'] = stringSchema('月份过滤，格式 YYYY-MM，例如 2026-06。不能和 date、start_date、end_date 同时使用。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
@@ -129,6 +135,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
     assertAllowedFields(args);
 
     let keywords = readStringArray(args, 'keywords');
+    let keywordOperator = readKeywordOperator(args);
     let domains = readDomains(args);
     let entities = readEntities(args);
     let date = readDateField(args, 'date');
@@ -140,6 +147,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
 
     let options: QueryOptions = {
       keywords: keywords,
+      keywordOperator: keywordOperator,
       domains: domains,
       entities: entities.map((entity: QueryEventsEntityInput): string => entity.type + ':' + entity.name),
       date: date,
@@ -151,6 +159,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
     };
     let publicQuery: QueryEventsPublicQuery = {
       keywords: keywords.slice(),
+      keyword_operator: keywordOperator,
       domains: domains.slice(),
       entities: entities,
       date: date,
@@ -177,7 +186,8 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
 }
 
 function assertAllowedFields(args: QueryEventsJsonMap): void {
-  let allowed: string[] = ['keywords', 'domains', 'entities', 'date', 'month', 'start_date', 'end_date', 'limit'];
+  let allowed: string[] = ['keywords', 'keyword_operator', 'domains', 'entities', 'date', 'month', 'start_date',
+    'end_date', 'limit'];
   Object.keys(args).forEach((key: string) => {
     if (allowed.indexOf(key) < 0) {
       throw new Error('Unsupported query_events argument: ' + key);
@@ -206,6 +216,18 @@ function readStringArray(args: QueryEventsJsonMap, key: string): string[] {
     }
   }
   return stableUnique(result);
+}
+
+function readKeywordOperator(args: QueryEventsJsonMap): string {
+  let value = readOptionalString(args, 'keyword_operator');
+  if (value.length === 0) {
+    return DEFAULT_KEYWORD_OPERATOR;
+  }
+  let normalized = value.toLowerCase();
+  if (KEYWORD_OPERATORS.indexOf(normalized) < 0) {
+    throw new Error('keyword_operator must be "and" or "or".');
+  }
+  return normalized;
 }
 
 function readDomains(args: QueryEventsJsonMap): string[] {
@@ -378,6 +400,7 @@ function queryEventsToolErrorPayload(error: string): string {
 function emptyQueryOptions(): QueryOptions {
   return {
     keywords: [],
+    keywordOperator: DEFAULT_KEYWORD_OPERATOR,
     domains: [],
     entities: [],
     date: '',
@@ -392,6 +415,7 @@ function emptyQueryOptions(): QueryOptions {
 function emptyPublicQuery(): QueryEventsPublicQuery {
   return {
     keywords: [],
+    keyword_operator: DEFAULT_KEYWORD_OPERATOR,
     domains: [],
     entities: [],
     date: '',
@@ -426,6 +450,12 @@ function stringSchema(description: string): QueryEventsSchemaMap {
   let schema = createSchemaMap();
   schema['type'] = 'string';
   schema['description'] = description;
+  return schema;
+}
+
+function enumStringSchema(description: string, values: string[]): QueryEventsSchemaMap {
+  let schema = stringSchema(description);
+  schema['enum'] = values as Object;
   return schema;
 }
 

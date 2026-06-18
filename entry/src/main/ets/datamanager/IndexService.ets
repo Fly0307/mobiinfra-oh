@@ -236,6 +236,11 @@ export function monthLastDateForTemporalIndex(month: string): string {
   return new Date(Date.UTC(year, monthNumber, 0)).toISOString().substring(0, 10);
 }
 
+export function normalizeQueryKeywordOperator(value?: string): string {
+  let normalized = normalizeFreeText(value === undefined ? '' : value).toLowerCase();
+  return normalized === 'or' ? 'or' : 'and';
+}
+
 function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
   for (let sceneId of selectedSceneIds) {
     if (eventSceneIds.indexOf(sceneId) >= 0) {
@@ -524,7 +529,8 @@ export class IndexService {
 
   queryWithEvents(options: QueryOptions, events: Record<string, IndexedEvent>): QueryResult {
     let ids = Object.keys(events);
-    dataManagerInfo(`Index query: events=${ids.length}, keywords=${options.keywords.join(',')}, domains=${options.domains.join(',')}, limit=${options.limit}`);
+    let keywordOperator = normalizeQueryKeywordOperator(options.keywordOperator);
+    dataManagerInfo(`Index query: events=${ids.length}, keywords=${options.keywords.join(',')}, keywordOperator=${keywordOperator}, domains=${options.domains.join(',')}, limit=${options.limit}`);
     let matching: BooleanMap = {};
     ids.forEach((id: string) => matching[id] = true);
 
@@ -543,11 +549,23 @@ export class IndexService {
       let sourceDocument = this.storage.readJson<SourceDocument>(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.emptySourceDocument());
       let invertedPostings = inverted.postings || {};
       let sourcePostings = sourceDocument.postings || {};
+      let keywordMatches: BooleanMap = {};
+      if (keywordOperator === 'and') {
+        ids.forEach((id: string) => keywordMatches[id] = true);
+      }
       for (let keyword of options.keywords) {
         let contentIds = this.indexedTextMatchIds(keyword, events, invertedPostings, eventSearchText);
         let sourceIds = this.indexedTextMatchIds(keyword, events, sourcePostings, sourceSearchText);
-        ids.forEach((id: string) => matching[id] = matching[id] && (contentIds[id] === true || sourceIds[id] === true));
+        ids.forEach((id: string) => {
+          let matched = contentIds[id] === true || sourceIds[id] === true;
+          if (keywordOperator === 'or') {
+            keywordMatches[id] = keywordMatches[id] === true || matched;
+          } else {
+            keywordMatches[id] = keywordMatches[id] === true && matched;
+          }
+        });
       }
+      ids.forEach((id: string) => matching[id] = matching[id] && keywordMatches[id] === true);
     }
 
     if (options.domains.length > 0) {
@@ -674,11 +692,20 @@ export class IndexService {
       let sourceDocument = this.storage.readJson<SourceDocument>(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.emptySourceDocument());
       let invertedPostings = inverted.postings || {};
       let sourcePostings = sourceDocument.postings || {};
+      let keywordOperator = normalizeQueryKeywordOperator(options.keywordOperator);
+      let keywordCandidate: BooleanMap | null = null;
       for (let keyword of options.keywords) {
         let keywordIds = this.keywordCandidateIds(keyword, invertedPostings, sourcePostings);
         if (keywordIds !== null) {
-          candidate = this.intersectCandidate(candidate, keywordIds);
+          if (keywordOperator === 'or') {
+            keywordCandidate = this.unionCandidates(keywordCandidate, keywordIds);
+          } else {
+            keywordCandidate = this.intersectCandidate(keywordCandidate, keywordIds);
+          }
         }
+      }
+      if (keywordCandidate !== null) {
+        candidate = this.intersectCandidate(candidate, keywordCandidate);
       }
     }
 

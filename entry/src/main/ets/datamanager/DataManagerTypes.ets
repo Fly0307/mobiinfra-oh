@@ -268,6 +268,7 @@ export interface ProfileState {
 
 export interface QueryOptions {
   keywords: string[];
+  keywordOperator?: string;
   domains: string[];
   entities: string[];
   date: string;

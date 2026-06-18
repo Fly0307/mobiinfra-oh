@@ -71,7 +71,8 @@ export default function dataManagerQueryEventsToolUnitTest() {
     it('schemaDescribesAllExposedFieldsAndHidesWorkflowSceneIds', 0, () => {
       let parameters = queryEventsToolParameters() as TestJsonMap;
       let properties = parameters['properties'] as TestJsonMap;
-      let fields = ['keywords', 'domains', 'entities', 'date', 'month', 'start_date', 'end_date', 'limit'];
+      let fields = ['keywords', 'keyword_operator', 'domains', 'entities', 'date', 'month', 'start_date',
+        'end_date', 'limit'];
       for (let field of fields) {
         expect(fieldHasDescription(properties, field)).assertTrue();
       }
@@ -92,11 +93,24 @@ export default function dataManagerQueryEventsToolUnitTest() {
       expect(validation.ok).assertTrue();
       expect(validation.options.keywords.length).assertEqual(1);
       expect(validation.options.keywords[0]).assertEqual('咖啡');
+      expect(validation.options.keywordOperator).assertEqual('and');
       expect(validation.options.domains[0]).assertEqual('eat');
       expect(validation.options.entities[0]).assertEqual('merchant:星巴克');
       expect(validation.options.date).assertEqual('2026-06-18');
       expect(validation.options.workflowSceneIds.length).assertEqual(0);
       expect(validation.options.limit).assertEqual(20);
+    });
+
+    it('normalizesKeywordOperator', 0, () => {
+      let defaultValidation = normalizeQueryEventsToolArguments('{"keywords":["咖啡","奶茶"]}');
+      expect(defaultValidation.ok).assertTrue();
+      expect(defaultValidation.options.keywordOperator).assertEqual('and');
+      expect(defaultValidation.publicQuery.keyword_operator).assertEqual('and');
+
+      let orValidation = normalizeQueryEventsToolArguments('{"keywords":["咖啡","奶茶"],"keyword_operator":"OR"}');
+      expect(orValidation.ok).assertTrue();
+      expect(orValidation.options.keywordOperator).assertEqual('or');
+      expect(orValidation.publicQuery.keyword_operator).assertEqual('or');
     });
 
     it('normalizesMonthRangeDefaultLimitAndUnlimitedLimit', 0, () => {
@@ -118,6 +132,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
     it('rejectsInvalidArguments', 0, () => {
       let invalidArgs = [
         '{"workflow_scene_ids":[3]}',
+        '{"keyword_operator":"xor"}',
         '{"domains":["unknown"]}',
         '{"entities":[{"type":"app","name":"微信"}]}',
         '{"date":"2026-02-30"}',
@@ -150,6 +165,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
     it('executesQueryAndReturnsCompactEvents', 0, async () => {
       let captured: QueryOptions = {
         keywords: [],
+        keywordOperator: 'and',
         domains: [],
         entities: [],
         date: '',
@@ -171,15 +187,18 @@ export default function dataManagerQueryEventsToolUnitTest() {
         return queryResult;
       });
 
-      let output = await tool.execute('{"keywords":["咖啡"],"limit":1}', toolContext());
+      let output = await tool.execute('{"keywords":["咖啡"],"keyword_operator":"or","limit":1}', toolContext());
       let payload = ArkJSON.parse(output) as TestJsonMap;
+      let query = payload['query'] as TestJsonMap;
       let events = payload['events'] as TestJsonValue[];
 
       expect(called).assertTrue();
       expect(captured.keywords[0]).assertEqual('咖啡');
+      expect(captured.keywordOperator).assertEqual('or');
       expect(captured.workflowSceneIds.length).assertEqual(0);
       expect(captured.limit).assertEqual(1);
       expect(payload['ok'] as boolean).assertTrue();
+      expect(query['keyword_operator'] as string).assertEqual('or');
       expect(payload['total_events'] as number).assertEqual(1);
       expect(payload['returned_events'] as number).assertEqual(1);
       expect(events.length).assertEqual(1);

@@ -28,7 +28,8 @@ export interface ChatReactAgentResult {
   reachedLimit: boolean;
 }
 
-const DEFAULT_MAX_REACT_ITERATIONS: number = 6;
+const DEFAULT_MAX_REACT_ITERATIONS: number = 30;
+const ITERATION_LIMIT_MESSAGE: string = '工具调用轮数已达到上限，未生成最终答案。';
 
 export class ChatReactAgent {
   private client: CloudModelClient;
@@ -80,12 +81,7 @@ export class ChatReactAgent {
       }
     }
 
-    return {
-      content: '工具调用轮数已达到上限，未生成最终答案。',
-      iterations: maxIterations,
-      toolCallCount: toolCallCount,
-      reachedLimit: true
-    };
+    return this.limitResult(maxIterations, toolCallCount);
   }
 
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,
@@ -111,5 +107,14 @@ export class ChatReactAgent {
       return DEFAULT_MAX_REACT_ITERATIONS;
     }
     return Math.floor(maxIterations);
+  }
+
+  private limitResult(iterations: number, toolCallCount: number): ChatReactAgentResult {
+    return {
+      content: ITERATION_LIMIT_MESSAGE,
+      iterations: iterations,
+      toolCallCount: toolCallCount,
+      reachedLimit: true
+    };
   }
 }

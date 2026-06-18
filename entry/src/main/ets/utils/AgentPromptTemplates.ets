@@ -276,6 +276,14 @@ export class AgentPromptTemplates {
     return AgentPromptTemplates.load(name);
   }
 
+  static hasModelPrompt(modelDir: string, name: string): boolean {
+    let fileName = AgentPromptTemplates.modelPromptFileName(name);
+    if (modelDir.length === 0 || fileName.length === 0) {
+      return false;
+    }
+    return AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName).trim().length > 0;
+  }
+
   static load(name: string): string {
     if (name === 'planner_oneshot_harmony.md') {
       return AgentPromptTemplates.normalize(PLANNER_ONESHOT_HARMONY_PROMPT);

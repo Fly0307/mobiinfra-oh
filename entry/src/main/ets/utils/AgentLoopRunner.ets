@@ -227,7 +227,9 @@ export class AgentLoopRunner {
 
   private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
     this.checkCancellation();
-    let prefixFile = this.noReasonMode ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
+    let useNoReasonPrompt = this.resolveAgentNoReasonMode();
+    let prefixFile = useNoReasonPrompt ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
+    this.log(mode, '>> [Agent] prompt mode=' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
     let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] prefix template missing, fallback to full prompt mode.');
@@ -245,7 +247,7 @@ export class AgentLoopRunner {
 
     let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
-    let variableFile = this.noReasonMode ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
+    let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
     let variableTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, variableFile);
     if (variableTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] variable template missing, fallback to full prompt mode.');
@@ -305,6 +307,24 @@ export class AgentLoopRunner {
         await this.localAgentReset();
       }
     }
+  }
+
+  private resolveAgentNoReasonMode(): boolean {
+    let hasReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix.md', 'e2e_v2_agent_variable.md');
+    if (hasReasonPrompts) {
+      return false;
+    }
+    let hasNoReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix_noreason.md',
+      'e2e_v2_agent_variable_noreason.md');
+    if (hasNoReasonPrompts) {
+      return true;
+    }
+    return this.noReasonMode;
+  }
+
+  private hasAgentPromptPair(prefixFile: string, variableFile: string): boolean {
+    return AgentPromptTemplates.hasModelPrompt(this.modelDirPath, prefixFile) &&
+      AgentPromptTemplates.hasModelPrompt(this.modelDirPath, variableFile);
   }
 
   private async runFullPromptMode(task: string, mode: AgentLoopMode): Promise<void> {

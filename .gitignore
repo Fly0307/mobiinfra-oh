@@ -31,3 +31,5 @@ build-profile.json5*
 /.codex
 /docs/superpowers/
 /.superpowers/brainstorm/
+/mobile_file_example/
+/.agents/

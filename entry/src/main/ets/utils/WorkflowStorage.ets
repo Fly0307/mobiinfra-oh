@@ -3,6 +3,7 @@ import fs from '@ohos.file.fs';
 import resourceManager from '@ohos.resourceManager';
 import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
+import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
   WorkflowCondition,
   WorkflowDefaults,
@@ -194,7 +195,7 @@ export class WorkflowStorage {
         let stat = fs.statSync(path);
         let buf = new ArrayBuffer(stat.size);
         fs.readSync(file.fd, buf);
-        return util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+        return decodeUtf8Compat(new Uint8Array(buf));
       } finally {
         fs.closeSync(file);
       }
@@ -206,7 +207,7 @@ export class WorkflowStorage {
 
   static writeText(path: string, content: string): void {
     try {
-      let byteStr = util.TextEncoder.create('utf-8').encodeInto(content);
+      let byteStr = encodeUtf8Compat(content);
       let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
       try {
         fs.writeSync(file.fd, byteStr.buffer);
@@ -264,7 +265,7 @@ export class WorkflowStorage {
 
   private static readRawFileText(manager: RawWorkflowResourceReader, path: string): string {
     let bytes = manager.getRawFileContentSync(path);
-    return util.TextDecoder.create('utf-8').decodeWithStream(bytes);
+    return decodeUtf8Compat(bytes);
   }
 
   static readBytes(path: string): ArrayBuffer {

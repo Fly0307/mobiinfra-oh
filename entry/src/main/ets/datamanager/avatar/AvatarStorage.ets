@@ -63,6 +63,31 @@ export class AvatarStorage {
     return 'assets/' + versionId + this.avatarAssetExtension(outputFormat);
   }
 
+  foregroundAssetPath(versionId: string): string {
+    return this.storage.join(this.paths.avatarAssetsRoot, versionId + '-foreground.png');
+  }
+
+  relativeAvatarForegroundPath(versionId: string): string {
+    return 'assets/' + versionId + '-foreground.png';
+  }
+
+  foregroundDisplayUri(versionId: string): string {
+    return this.displayUri(this.relativeAvatarForegroundPath(versionId));
+  }
+
+  foregroundExists(versionId: string): boolean {
+    if (versionId.length === 0) {
+      return false;
+    }
+    return this.storage.exists(this.foregroundAssetPath(versionId));
+  }
+
+  saveForegroundPng(versionId: string, bytes: Uint8Array): string {
+    this.ensureReady();
+    this.storage.writeBytesAtomic(this.foregroundAssetPath(versionId), bytes);
+    return this.relativeAvatarForegroundPath(versionId);
+  }
+
   saveAssetBase64(versionId: string, base64Text: string, outputFormat?: string): string {
     let helper = new util.Base64Helper();
     let bytes = helper.decodeSync(base64Text);
@@ -122,6 +147,9 @@ export class AvatarStorage {
     view.avatarActionLabel = this.actionLabel(state.status);
     if (currentVersion !== null && currentVersion.image_path.length > 0) {
       view.avatarUri = this.displayUri(currentVersion.image_path);
+      if (this.foregroundExists(currentVersion.version_id)) {
+        view.avatarForegroundUri = this.foregroundDisplayUri(currentVersion.version_id);
+      }
     }
     return view;
   }

@@ -1,6 +1,10 @@
 export const CHAT_MODE_CLOUD_AGENT: string = 'cloud_agent';
 export const CHAT_MODE_LOCAL_INFERENCE: string = 'local_inference';
 export const CLOUD_AGENT_DEFAULT_OUTPUT: string = '请先配置 Planner 和 Decider 云端服务';
+export const CHAT_COMPOSER_MIN_HEIGHT: number = 58;
+export const CHAT_COMPOSER_LINE_HEIGHT: number = 22;
+export const CHAT_COMPOSER_MAX_LINES: number = 4;
+export const CHAT_COMPOSER_CHARS_PER_LINE: number = 12;
 
 export function isSupportedChatMode(mode: string): boolean {
   return mode === CHAT_MODE_CLOUD_AGENT || mode === CHAT_MODE_LOCAL_INFERENCE;
@@ -29,6 +33,54 @@ export function chatModeActionLabel(mode: string): string {
 
 export function chatInputAfterAcceptedSend(currentInput: string, accepted: boolean): string {
   return accepted ? '' : currentInput;
+}
+
+export function chatTimeGreeting(hour: number): string {
+  if (hour >= 6 && hour < 11) {
+    return '早上好';
+  }
+  if (hour >= 11 && hour < 14) {
+    return '中午好';
+  }
+  if (hour >= 14 && hour < 18) {
+    return '下午好';
+  }
+  if (hour >= 18 && hour < 24) {
+    return '晚上好';
+  }
+  return '夜深了';
+}
+
+function chatComposerSegmentLineCount(segment: string, charsPerLine: number): number {
+  if (segment.length <= 0) {
+    return 1;
+  }
+  return Math.ceil(segment.length / charsPerLine);
+}
+
+// 聊天输入栏高度由草稿内容派生：短文本保持单行，长文本/换行扩展到最多 4 行，避免遮挡页面主体。
+export function chatComposerLineCount(text: string, charsPerLine: number = CHAT_COMPOSER_CHARS_PER_LINE,
+  maxLines: number = CHAT_COMPOSER_MAX_LINES): number {
+  let normalizedCharsPerLine = Math.max(1, charsPerLine);
+  let normalizedMaxLines = Math.max(1, maxLines);
+  let lines = 0;
+  let segmentStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || text.charAt(i) === '\n') {
+      let segment = text.substring(segmentStart, i);
+      lines += chatComposerSegmentLineCount(segment, normalizedCharsPerLine);
+      segmentStart = i + 1;
+    }
+  }
+  return Math.min(lines, normalizedMaxLines);
+}
+
+export function chatComposerBarHeight(text: string): number {
+  return CHAT_COMPOSER_MIN_HEIGHT + (chatComposerLineCount(text) - 1) * CHAT_COMPOSER_LINE_HEIGHT;
+}
+
+export function chatComposerTextAreaHeight(text: string): number {
+  return chatComposerBarHeight(text) - 12;
 }
 
 export function chatModeSwitcherVisibleAfterScroll(currentVisible: boolean, yOffset: number,

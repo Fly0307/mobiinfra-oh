@@ -16,11 +16,13 @@ from wechat_collect.collector import (
     build_chat_payload_from_snapshots,
     collect_visible_chats,
     compute_history_swipe,
+    cutoff_for_days,
     extract_chat_messages,
     extract_chat_title,
     extract_contacts,
     parse_chat_time,
     render_markdown,
+    snapshot_reaches_cutoff,
 )
 from wechat_collect import (
     collect_recent_contacts_from_dumps,
@@ -112,6 +114,199 @@ class WechatCollectParserTests(unittest.TestCase):
         for malformed in ["6月31号", "13/01 下午 01:00", "上午 25:00"]:
             with self.subTest(malformed=malformed):
                 self.assertIsNone(parse_chat_time(malformed, reference))
+
+    def test_cutoff_for_days_includes_today_as_first_day(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+
+        self.assertEqual(cutoff_for_days(1, reference), datetime(2026, 6, 18, 0, 0))
+        self.assertEqual(cutoff_for_days(2, reference), datetime(2026, 6, 17, 0, 0))
+        self.assertEqual(cutoff_for_days(3, reference), datetime(2026, 6, 16, 0, 0))
+
+    def test_snapshot_reaches_cutoff_on_first_day_before_requested_range(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        cases = [
+            (1, "昨天 下午 04:21"),
+            (2, "星期二 下午 03:28"),
+            (3, "星期一 下午 06:10"),
+        ]
+
+        for days, label in cases:
+            with self.subTest(days=days, label=label):
+                root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+                    ui_node("List", bounds="[0,126][1256,2465]", children=[
+                        ui_node("ListItem", bounds="[0,220][1256,300]", children=[
+                            ui_node("Text", text=label, bounds="[490,230][766,280]"),
+                        ]),
+                        ui_node("ListItem", bounds="[0,320][1256,430]", children=[
+                            ui_node("Text", text="边界当天消息", bounds="[200,340][700,410]"),
+                        ]),
+                    ]),
+                ])
+
+                self.assertTrue(snapshot_reaches_cutoff(root, cutoff_for_days(days, reference), reference))
+
+    def test_snapshot_does_not_stop_on_included_boundary_day(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        cases = [
+            (1, "上午 09:12"),
+            (2, "昨天 下午 04:21"),
+            (3, "星期二 下午 03:28"),
+        ]
+
+        for days, label in cases:
+            with self.subTest(days=days, label=label):
+                root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+                    ui_node("List", bounds="[0,126][1256,2465]", children=[
+                        ui_node("ListItem", bounds="[0,220][1256,300]", children=[
+                            ui_node("Text", text=label, bounds="[490,230][766,280]"),
+                        ]),
+                    ]),
+                ])
+
+                self.assertFalse(snapshot_reaches_cutoff(root, cutoff_for_days(days, reference), reference))
+
+    def test_snapshot_payload_keeps_requested_calendar_days_only(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,220][1256,300]", children=[
+                    ui_node("Text", text="星期二 下午 03:28", bounds="[490,230][766,280]"),
+                ]),
+                ui_node("ListItem", bounds="[0,320][1256,430]", children=[
+                    ui_node("Text", text="不应收集的周二消息", bounds="[160,340][560,410]"),
+                ]),
+                ui_node("ListItem", bounds="[0,460][1256,540]", children=[
+                    ui_node("Text", text="昨天 下午 04:21", bounds="[490,470][766,520]"),
+                ]),
+                ui_node("ListItem", bounds="[0,560][1256,670]", children=[
+                    ui_node("Text", text="昨天消息", bounds="[160,580][560,650]"),
+                ]),
+                ui_node("ListItem", bounds="[0,700][1256,780]", children=[
+                    ui_node("Text", text="上午 09:12", bounds="[510,710][746,760]"),
+                ]),
+                ui_node("ListItem", bounds="[0,800][1256,910]", children=[
+                    ui_node("Text", text="今天消息", bounds="[160,820][560,890]"),
+                ]),
+            ]),
+        ])
+
+        payload = build_chat_payload_from_snapshots([root], days=2, reference_now=reference)
+        texts = [message["text"] for message in payload["messages"]]
+
+        self.assertNotIn("星期二 下午 03:28", texts)
+        self.assertNotIn("不应收集的周二消息", texts)
+        self.assertIn("昨天 下午 04:21", texts)
+        self.assertIn("昨天消息", texts)
+        self.assertIn("上午 09:12", texts)
+        self.assertIn("今天消息", texts)
+
+    def test_boundary_day_first_time_separator_is_earliest_message(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,180][1256,290]", children=[
+                    ui_node("Text", text="边界日前可见残留消息", bounds="[160,200][620,270]"),
+                ]),
+                ui_node("ListItem", bounds="[0,320][1256,400]", children=[
+                    ui_node("Text", text="星期二 下午 03:28", bounds="[490,330][766,380]"),
+                ]),
+                ui_node("ListItem", bounds="[0,430][1256,540]", children=[
+                    ui_node("Text", text="边界日第一条消息", bounds="[160,450][620,520]"),
+                ]),
+                ui_node("ListItem", bounds="[0,570][1256,650]", children=[
+                    ui_node("Text", text="昨天 下午 04:21", bounds="[490,580][766,630]"),
+                ]),
+                ui_node("ListItem", bounds="[0,680][1256,790]", children=[
+                    ui_node("Text", text="昨天消息", bounds="[160,700][560,770]"),
+                ]),
+            ]),
+        ])
+
+        payload = build_chat_payload_from_snapshots([root], days=3, reference_now=reference)
+        texts = [message["text"] for message in payload["messages"]]
+
+        self.assertEqual(texts[0], "星期二 下午 03:28")
+        self.assertNotIn("边界日前可见残留消息", texts)
+        self.assertIn("边界日第一条消息", texts)
+        self.assertIn("昨天 下午 04:21", texts)
+        self.assertIn("昨天消息", texts)
+
+    def test_filtered_bottom_overlap_does_not_reenter_from_next_snapshot_top(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        older_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,1608][1256,1790]", children=[
+                    ui_node("Text", text="6/11 下午 05:17", bounds="[438,1658][818,1741]"),
+                ]),
+                ui_node("ListItem", bounds="[0,1790][1256,2313]", children=[
+                    ui_node("Text", text="边界日前重叠消息", bounds="[187,1853][956,2019]"),
+                    ui_node("Image", bounds="[1070,1853][1170,1953]"),
+                ]),
+                ui_node("ListItem", bounds="[0,2313][1256,2495]", children=[
+                    ui_node("Text", text="星期一 下午 02:12", bounds="[416,2363][840,2446]"),
+                ]),
+            ]),
+        ])
+        newer_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,126][1256,433]", children=[
+                    ui_node("Text", text="边界日前重叠消息", bounds="[187,180][956,360]"),
+                    ui_node("Image", bounds="[1070,180][1170,280]"),
+                ]),
+                ui_node("ListItem", bounds="[0,433][1256,615]", children=[
+                    ui_node("Text", text="星期一 下午 02:12", bounds="[416,483][840,566]"),
+                ]),
+                ui_node("ListItem", bounds="[0,615][1256,824]", children=[
+                    ui_node("Text", text="边界日第一条消息", bounds="[187,650][956,780]"),
+                    ui_node("Image", bounds="[1070,650][1170,750]"),
+                ]),
+            ]),
+        ])
+
+        payload = build_chat_payload_from_snapshots([newer_root, older_root], days=4, reference_now=reference)
+        texts = [message["text"] for message in payload["messages"]]
+
+        self.assertNotIn("边界日前重叠消息", texts)
+        self.assertEqual(texts, ["星期一 下午 02:12", "边界日第一条消息"])
+
+    def test_message_above_first_anchor_uses_previous_anchor_context(self):
+        reference = datetime(2026, 6, 18, 12, 0)
+        older_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,1608][1256,1790]", children=[
+                    ui_node("Text", text="6/11 下午 05:17", bounds="[438,1658][818,1741]"),
+                ]),
+                ui_node("ListItem", bounds="[0,1790][1256,2313]", children=[
+                    ui_node("Text", text="边界日前普通消息", bounds="[187,1853][956,2019]"),
+                    ui_node("Image", bounds="[1070,1853][1170,1953]"),
+                ]),
+                ui_node("ListItem", bounds="[0,2313][1256,2495]", children=[
+                    ui_node("Text", text="星期一 下午 02:12", bounds="[416,2363][840,2446]"),
+                ]),
+            ]),
+        ])
+        newer_root = ui_node("Root", bounds="[0,0][1256,2760]", children=[
+            ui_node("List", bounds="[0,126][1256,2465]", children=[
+                ui_node("ListItem", bounds="[0,126][1256,433]", children=[
+                    ui_node("Text", text="边界日前非重叠消息", bounds="[187,180][956,360]"),
+                    ui_node("Image", bounds="[1070,180][1170,280]"),
+                ]),
+                ui_node("ListItem", bounds="[0,433][1256,615]", children=[
+                    ui_node("Text", text="星期一 下午 02:12", bounds="[416,483][840,566]"),
+                ]),
+                ui_node("ListItem", bounds="[0,615][1256,824]", children=[
+                    ui_node("Text", text="边界日第一条消息", bounds="[187,650][956,780]"),
+                    ui_node("Image", bounds="[1070,650][1170,750]"),
+                ]),
+            ]),
+        ])
+
+        payload = build_chat_payload_from_snapshots([newer_root, older_root], days=4, reference_now=reference)
+        texts = [message["text"] for message in payload["messages"]]
+
+        self.assertNotIn("边界日前普通消息", texts)
+        self.assertNotIn("边界日前非重叠消息", texts)
+        self.assertEqual(texts, ["星期一 下午 02:12", "边界日第一条消息"])
 
     def test_snapshot_merge_deduplicates_boundary_overlap(self):
         payload = build_chat_payload_from_snapshots(

@@ -366,7 +366,11 @@ def collect_history_snapshots(
 
 
 def snapshot_reaches_cutoff(root: dict[str, Any], cutoff: datetime, reference_now: datetime) -> bool:
-    """判断快照内最早可解析时间是否已经早于采集起点。"""
+    """判断快照内是否已经出现早于采集起始日期的时间分隔符。
+
+    微信近几天的时间分隔符常显示为“昨天”或“星期X”。采集时需要滑过完整
+    目标日期范围，所以只有出现比 cutoff 更早的日期时才停止。
+    """
 
     times = [
         parsed_time
@@ -375,7 +379,10 @@ def snapshot_reaches_cutoff(root: dict[str, Any], cutoff: datetime, reference_no
         for parsed_time in [parse_chat_time(entry.text, reference_now)]
         if parsed_time is not None
     ]
-    return bool(times and min(times) < cutoff)
+    if not times:
+        return False
+    earliest_time = min(times)
+    return earliest_time < cutoff
 
 
 def page_fingerprint(root: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:

@@ -426,28 +426,59 @@ def merge_snapshot_messages(
     seen = set()
     previous_bottom_overlap_keys: set[tuple[Any, ...]] = set()
     current_time: datetime | None = None
+    time_before_current_time: datetime | None = None
 
     for root in reversed(roots):
         viewport_bounds = snapshot_viewport_bounds(root)
         current_bottom_overlap_keys: set[tuple[Any, ...]] = set()
+        entries_with_times = [
+            (entry, parse_chat_time(entry.text, reference) if entry.kind == "time" else None)
+            for entry in extract_chat_messages(root)
+        ]
+        first_root_time = next((entry_time for _, entry_time in entries_with_times if entry_time is not None), None)
+        incoming_time = current_time
+        incoming_time_before_anchor = time_before_current_time
+        # 时间锚点只向页面下方绑定消息；首个锚点上方的消息只能使用
+        # 上一页中该锚点之前的时间上下文，不能反向继承本页后续锚点。
+        prefix_time = None
+        if first_root_time is None:
+            prefix_time = incoming_time
+        elif incoming_time is not None and incoming_time < first_root_time:
+            prefix_time = incoming_time
+        elif incoming_time is not None and incoming_time == first_root_time:
+            prefix_time = incoming_time_before_anchor
+        # 最老快照顶部可能残留边界日前的消息；当本页第一个时间标志已触达
+        # cutoff 日期时，把该时间标志视为边界日的最早消息。
+        skip_unanchored_until_first_time = (
+            cutoff is not None
+            and prefix_time is None
+            and first_root_time is not None
+            and first_root_time.date() <= cutoff.date()
+        )
+        has_seen_root_time = False
 
-        for entry in extract_chat_messages(root):
-            entry_time = parse_chat_time(entry.text, reference) if entry.kind == "time" else None
+        for entry, entry_time in entries_with_times:
+            if skip_unanchored_until_first_time and not has_seen_root_time and entry_time is None:
+                continue
             if entry_time is not None:
+                time_before_current_time = current_time
                 current_time = entry_time
-
-            if cutoff is not None:
-                effective_time = entry_time if entry.kind == "time" else current_time
-                if effective_time is not None and effective_time < cutoff:
-                    continue
+                has_seen_root_time = True
+            effective_time = entry_time if entry.kind == "time" else (current_time if has_seen_root_time else prefix_time)
 
             item = asdict(entry)
             if item["sender"] == "other" and other_sender:
                 item["sender"] = other_sender
+            overlap_key = boundary_overlap_fingerprint(item)
+
+            if cutoff is not None:
+                if effective_time is not None and effective_time < cutoff:
+                    if overlap_key is not None and is_bottom_boundary_message(item, viewport_bounds):
+                        current_bottom_overlap_keys.add(overlap_key)
+                    continue
 
             # 相邻 dump 的可视区域会重叠：上一页底部的消息可能又出现在下一页顶部。
             # 这类残留消息可能继承到不同的时间上下文，因此需要在完整指纹外再做边界去重。
-            overlap_key = boundary_overlap_fingerprint(item)
             if (
                 overlap_key is not None
                 and is_top_boundary_message(item, viewport_bounds)
@@ -455,7 +486,7 @@ def merge_snapshot_messages(
             ):
                 continue
 
-            key = message_fingerprint(item, current_time)
+            key = message_fingerprint(item, effective_time)
             if key in seen:
                 continue
             seen.add(key)
@@ -547,12 +578,13 @@ def is_boundary_message(item: dict[str, Any], viewport_bounds: Bounds | None, *,
 def cutoff_for_days(days: int, reference_now: datetime) -> datetime:
     """计算最近 N 天采集窗口的起始时间。
 
-    例如 reference_now 为 2026-06-11 12:00，days=7 时返回 2026-06-04 00:00。
+    今天计入最近 N 天的第一天；例如 reference_now 为 2026-06-18 12:00，
+    days=1 时返回 2026-06-18 00:00，days=3 时返回 2026-06-16 00:00。
     """
 
     if days < 0:
         raise ValueError("--days must be greater than or equal to 0")
-    cutoff_date = reference_now.date() - timedelta(days=days)
+    cutoff_date = reference_now.date() - timedelta(days=max(days - 1, 0))
     return datetime.combine(cutoff_date, datetime_time.min)
 
 

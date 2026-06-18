@@ -34,7 +34,6 @@ interface ChatToolArgumentValidation {
 }
 
 const MAX_TOOL_RESULT_LENGTH: number = 4000;
-const MAX_TRACE_TEXT_LENGTH: number = 220;
 
 export class ChatToolRegistry {
   private tools: ChatTool[] = [];
@@ -86,7 +85,7 @@ export class ChatToolRegistry {
         toolCallId: toolCall.id,
         argumentsText: normalized.normalizedArgs,
         content: content,
-        traceLine: this.buildTraceLine(toolName, normalized.normalizedArgs, content),
+        traceLine: this.buildTraceLine(toolName, normalized.normalizedArgs, rawContent),
         success: true
       };
     } catch (e) {
@@ -158,16 +157,8 @@ export class ChatToolRegistry {
     return text.substring(0, MAX_TOOL_RESULT_LENGTH) + '...';
   }
 
-  private compact(text: string, maxLength: number = MAX_TRACE_TEXT_LENGTH): string {
-    let compactText = text.trim().replace(/\s+/g, ' ');
-    if (compactText.length <= maxLength) {
-      return compactText;
-    }
-    return compactText.substring(0, maxLength) + '...';
-  }
-
   private buildTraceLine(toolName: string, argumentsText: string, content: string): string {
-    return '工具：' + toolName + '\n参数：' + this.compact(argumentsText) + '\n结果：' + this.compact(content);
+    return '工具：' + toolName + '\n参数：' + argumentsText + '\n结果：' + content;
   }
 }
 

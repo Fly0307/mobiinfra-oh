@@ -36,12 +36,12 @@ function demoIndexedEvent(): IndexedEvent {
     source_refs: ['workflows/daily-log/2026-06-18/demo.md#1'],
     sources: ['微信'],
     workflow_scene_ids: [3],
-    image_paths: [],
+    image_paths: ['workflows/runs/demo/screenshot.jpg'],
     todo: {
       type: 'buy',
       deadline: '',
       text: '购买咖啡豆',
-      agent_task: ''
+      agent_task: '在购物App购买咖啡豆'
     },
     keywords: ['咖啡豆'],
     domains: ['eat'],
@@ -77,6 +77,8 @@ export default function dataManagerQueryEventsToolUnitTest() {
         expect(fieldHasDescription(properties, field)).assertTrue();
       }
       expect(properties['workflow_scene_ids'] === undefined).assertTrue();
+      expect(properties['includeTodoDeadlineInTimeRange'] === undefined).assertTrue();
+      expect(properties['include_todo_deadline_in_time_range'] === undefined).assertTrue();
 
       let entities = properties['entities'] as TestJsonMap;
       let entityItems = entities['items'] as TestJsonMap;
@@ -94,6 +96,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
       expect(validation.options.keywords.length).assertEqual(1);
       expect(validation.options.keywords[0]).assertEqual('咖啡');
       expect(validation.options.keywordOperator).assertEqual('and');
+      expect(validation.options.includeTodoDeadlineInTimeRange).assertTrue();
       expect(validation.options.domains[0]).assertEqual('eat');
       expect(validation.options.entities[0]).assertEqual('merchant:星巴克');
       expect(validation.options.date).assertEqual('2026-06-18');
@@ -132,6 +135,8 @@ export default function dataManagerQueryEventsToolUnitTest() {
     it('rejectsInvalidArguments', 0, () => {
       let invalidArgs = [
         '{"workflow_scene_ids":[3]}',
+        '{"includeTodoDeadlineInTimeRange":true}',
+        '{"include_todo_deadline_in_time_range":true}',
         '{"keyword_operator":"xor"}',
         '{"domains":["unknown"]}',
         '{"entities":[{"type":"app","name":"微信"}]}',
@@ -166,6 +171,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
       let captured: QueryOptions = {
         keywords: [],
         keywordOperator: 'and',
+        includeTodoDeadlineInTimeRange: false,
         domains: [],
         entities: [],
         date: '',
@@ -176,9 +182,13 @@ export default function dataManagerQueryEventsToolUnitTest() {
         limit: 20
       };
       let called = false;
+      let secondEvent = demoIndexedEvent();
+      secondEvent.event_id = 'opaque-event-id-2';
+      secondEvent.summary = '第二条咖啡记录';
+      secondEvent.normalized_fact = '第二条咖啡记录';
       let queryResult: QueryResult = {
-        total_events: 1,
-        events: [demoIndexedEvent()],
+        total_events: 2,
+        events: [demoIndexedEvent(), secondEvent],
         events_truncated: false
       };
       let tool = createQueryEventsTool((): boolean => true, (options: QueryOptions): QueryResult => {
@@ -189,22 +199,57 @@ export default function dataManagerQueryEventsToolUnitTest() {
 
       let output = await tool.execute('{"keywords":["咖啡"],"keyword_operator":"or","limit":1}', toolContext());
       let payload = ArkJSON.parse(output) as TestJsonMap;
-      let query = payload['query'] as TestJsonMap;
       let events = payload['events'] as TestJsonValue[];
 
       expect(called).assertTrue();
       expect(captured.keywords[0]).assertEqual('咖啡');
       expect(captured.keywordOperator).assertEqual('or');
+      expect(captured.includeTodoDeadlineInTimeRange).assertTrue();
       expect(captured.workflowSceneIds.length).assertEqual(0);
       expect(captured.limit).assertEqual(1);
       expect(payload['ok'] as boolean).assertTrue();
-      expect(query['keyword_operator'] as string).assertEqual('or');
-      expect(payload['total_events'] as number).assertEqual(1);
-      expect(payload['returned_events'] as number).assertEqual(1);
-      expect(events.length).assertEqual(1);
+      expect(payload['query'] === undefined).assertTrue();
+      expect(payload['total_events'] === undefined).assertTrue();
+      expect(payload['returned_events'] === undefined).assertTrue();
+      expect(payload['events_truncated'] === undefined).assertTrue();
+      expect(events.length).assertEqual(2);
       let event = events[0] as TestJsonMap;
+      expect(event['event_id'] as number).assertEqual(0);
       expect(event['summary'] as string).assertEqual('微信里提到要买咖啡豆');
+      expect(event['detail'] as string).assertEqual('用户想购买咖啡豆');
+      expect(event['source_count'] === undefined).assertTrue();
       expect(event['workflow_scene_ids'] === undefined).assertTrue();
+      expect(event['last_seen_date'] === undefined).assertTrue();
+      expect(event['normalized_fact'] === undefined).assertTrue();
+      expect(event['keywords'] === undefined).assertTrue();
+      expect(event['source_refs'] === undefined).assertTrue();
+      expect(event['image_paths'] === undefined).assertTrue();
+      let todo = event['todo'] as TestJsonMap;
+      expect(todo['text'] as string).assertEqual('购买咖啡豆');
+      expect(todo['agent_task'] === undefined).assertTrue();
+      let secondPayload = events[1] as TestJsonMap;
+      expect(typeof secondPayload['event_id']).assertEqual('number');
+      expect(secondPayload['event_id'] as number).assertEqual(1);
+    });
+
+    it('omitsDetailWhenNormalizedFactMatchesSummary', 0, async () => {
+      let event = demoIndexedEvent();
+      event.normalized_fact = event.summary;
+      let queryResult: QueryResult = {
+        total_events: 1,
+        events: [event],
+        events_truncated: false
+      };
+      let tool = createQueryEventsTool((): boolean => true, (_options: QueryOptions): QueryResult => queryResult);
+
+      let output = await tool.execute('{"keywords":["咖啡"]}', toolContext());
+      let payload = ArkJSON.parse(output) as TestJsonMap;
+      let events = payload['events'] as TestJsonValue[];
+      let eventPayload = events[0] as TestJsonMap;
+
+      expect(eventPayload['summary'] as string).assertEqual('微信里提到要买咖啡豆');
+      expect(eventPayload['detail'] === undefined).assertTrue();
+      expect(eventPayload['normalized_fact'] === undefined).assertTrue();
     });
   });
 }

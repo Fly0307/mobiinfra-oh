@@ -63,6 +63,12 @@ import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
+import {
+  currentLocalDateKey,
+  formatLocalDateKey,
+  localWeekdayLabel,
+  weekRangeTextFromDate
+} from '../utils/DateUtils';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
@@ -1052,37 +1058,24 @@ struct Index {
     }
     this.homeProfile = this.dataManagerFacade.loadHomeViewModel();
     this.collectionViews = this.dataManagerFacade.loadCollectionViewModels();
-    this.homeRecommendationViewDateKey = this.currentLocalDateKey();
+    this.homeRecommendationViewDateKey = currentLocalDateKey();
     this.avatarVersions = this.dataManagerFacade.listAvatarVersions();
     this.ensureCurrentAvatarForegroundCache();
     dataManagerInfo(`reloadDataManagerViewModels done: homeEvents=${this.homeProfile.totalEvents}, domains=${this.homeProfile.domains.map((item: HomeDomainViewModel) => item.domain + ':' + item.desc).join('|')}, collectionTabs=${this.collectionViews.length}`);
   }
 
-  private padDatePart(value: number): string {
-    return value < 10 ? '0' + String(value) : String(value);
-  }
-
-  private currentLocalDateKey(): string {
-    let date = new Date();
-    return `${date.getFullYear()}-${this.padDatePart(date.getMonth() + 1)}-${this.padDatePart(date.getDate())}`;
-  }
-
-  private currentLocalWeekdayLabel(): string {
-    let weekdays: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-    let date = new Date();
-    return weekdays[date.getDay()];
-  }
-
   private cloudChatDateSystemMessage(): CloudChatMessage {
+    let now = new Date();
     return {
       role: 'system',
       content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。\n\n' + '' +
-        '当前日期: ' + this.currentLocalDateKey() + '，' + this.currentLocalWeekdayLabel()
+        '当前日期: ' + formatLocalDateKey(now) + '，' + localWeekdayLabel(now) +
+        '。本周范围（周一-周日）：' + weekRangeTextFromDate(now)
     };
   }
 
   private reloadHomeViewModelIfDateChanged(): void {
-    let today = this.currentLocalDateKey();
+    let today = currentLocalDateKey();
     if (this.homeRecommendationViewDateKey === today) {
       return;
     }
@@ -1196,7 +1189,7 @@ struct Index {
       }
 
       let runId = response.run_id !== undefined && response.run_id.trim().length > 0 ?
-        response.run_id : `${this.currentLocalDateKey()}-wechat`;
+        response.run_id : `${currentLocalDateKey()}-wechat`;
       let storage = new WechatAutoSummaryStorage(this.filesDir);
       storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(response as Object, 2));
       storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(response));
@@ -1208,7 +1201,7 @@ struct Index {
       let dailyLogEntries = wechatAutoSummaryDailyEntries(response);
       let dailyLogMode = response.mode !== undefined && response.mode.length > 0 ? response.mode : request.mode;
       let dailyLogDays = response.days !== undefined ? response.days : request.days;
-      storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, this.currentLocalDateKey(), dailyLogEntries);
+      storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, currentLocalDateKey(), dailyLogEntries);
 
       let contactCount = 0;
       if (response.conversations !== undefined) {

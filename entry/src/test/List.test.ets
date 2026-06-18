@@ -12,6 +12,7 @@ import appLoggerUnitTest from './AppLoggerUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
+import dateUtilsUnitTest from './DateUtilsUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -28,4 +29,5 @@ export default function testsuite() {
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
   markdownParserUnitTest();
+  dateUtilsUnitTest();
 }

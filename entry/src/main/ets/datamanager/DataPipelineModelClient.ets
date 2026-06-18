@@ -255,7 +255,7 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。\n\n' +
   '输入字段说明：\n' +
   'source_ref：输入 entry 的唯一引用标识，只需要在输出 item 中原样返回，用于把 facts 归还给对应 entry。\n' +
-  'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
+  'source_date：daily-log 文件生成的日期，格式为 YYYY-MM-DD；当原文出现“昨天”“前天”等相对日期时，以它作为换算基准。\n' +
   'workflow_scene_label：工作流采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
   'entry_text：原始日志条目正文，是拆分事实的主要依据。\n\n' +
   '返回严格 JSON，格式为：\n' +
@@ -267,7 +267,7 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '        {\n' +
   '          "summary": "一句话摘要",\n' +
   '          "normalized_fact": "适合长期画像沉淀的整理后表述",\n' +
-  '          "event_date": "YYYY-MM-DD 或空字符串",\n' +
+  '          "event_date": "事件发生的时间，YYYY-MM-DD 或空字符串。请注意，不是它关联的未来待办的时间，而是它本身发生的时间，只可能等于或早于source_date。",\n' +
   '          "tags": ["标签1", "标签2"],\n' +
   '          "model_notes": "简短说明这条事实是如何从原文拆出来的"\n' +
   '        }\n' +

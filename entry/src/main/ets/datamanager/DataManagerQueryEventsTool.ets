@@ -16,7 +16,10 @@ export const QUERY_EVENTS_TOOL_NAME: string = 'query_events';
 const DEFAULT_QUERY_EVENTS_LIMIT: number = 20;
 const DEFAULT_KEYWORD_OPERATOR: string = 'and';
 const QUERY_EVENTS_TOOL_DESCRIPTION: string =
-  '如果根据用户请求，你需要根据关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时（例如用户询问“帮我查一下我上周做了什么”时），调用该工具。未注明年份的日期必须根据系统消息中的当前日期补全年份后再调用。';
+  '如果根据用户请求，你需要根据关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时（例如用户询问“帮我查一下我上周做了什么”时），调用该工具。' +
+  '返回 ok 和 events；events 中 event_id 是本次查询结果内从0开始的编号，summary 是事件摘要，detail 是可选的补充事实，todo 是可选的待办及截止时间信息。' +
+  '请不要让查询结果中的历史日期/待办事项日期影响你对今天日期的判断，system prompt 是你判断今天的日期/今天星期几的**唯一依据**。' +
+  '如果一个事件有 todo.deadline，event_date 代表创建计划的时间（例如买票时间、聊天时间），实际完成这件事的时间则是 todo.deadline。';
 const ENTITY_TYPES: string[] = ['person', 'place', 'merchant'];
 const KEYWORD_OPERATORS: string[] = ['and', 'or'];
 
@@ -52,26 +55,24 @@ export interface QueryEventsArgumentValidation {
 }
 
 interface QueryEventsToolEvent {
-  event_id: string;
+  event_id: number;
   event_date: string;
-  last_seen_date: string;
   summary: string;
-  normalized_fact: string;
+  detail?: string;
   domains: string[];
-  keywords: string[];
   entities: string[];
   sources: string[];
-  source_refs: string[];
-  image_paths: string[];
-  todo: IndexedEventTodo;
+  todo?: QueryEventsToolTodo;
+}
+
+interface QueryEventsToolTodo {
+  type: string;
+  deadline: string;
+  text: string;
 }
 
 interface QueryEventsToolResponse {
   ok: boolean;
-  query: QueryEventsPublicQuery;
-  total_events: number;
-  returned_events: number;
-  events_truncated: boolean;
   events: QueryEventsToolEvent[];
 }
 
@@ -96,7 +97,7 @@ export function createQueryEventsTool(hasBuiltIndexes: QueryEventsIndexAvailabil
         return queryEventsToolErrorPayload('数据归家事件索引尚未构建，请先同步或刷新数据后再查询。');
       }
       let result = queryRunner(normalized.options);
-      return ArkJSON.stringify(queryEventsToolResponse(normalized.publicQuery, result) as Object);
+      return ArkJSON.stringify(queryEventsToolResponse(result) as Object);
     }
   };
 }
@@ -119,7 +120,7 @@ export function queryEventsToolParameters(): Object {
 
   let parameters = createSchemaMap();
   parameters['type'] = 'object';
-  parameters['description'] = '查询数据归家App已收集并汇总整理的事件索引。';
+  parameters['description'] = '查询数据归家App已收集并汇总整理的事件。';
   parameters['properties'] = properties as Object;
   parameters['additionalProperties'] = false;
   return parameters as Object;
@@ -148,6 +149,7 @@ export function normalizeQueryEventsToolArguments(argsText: string): QueryEvents
     let options: QueryOptions = {
       keywords: keywords,
       keywordOperator: keywordOperator,
+      includeTodoDeadlineInTimeRange: true,
       domains: domains,
       entities: entities.map((entity: QueryEventsEntityInput): string => entity.type + ':' + entity.name),
       date: date,
@@ -360,32 +362,56 @@ function readLimit(args: QueryEventsJsonMap): number {
   return value;
 }
 
-function queryEventsToolResponse(query: QueryEventsPublicQuery, result: QueryResult): QueryEventsToolResponse {
-  let events = result.events.map((event: IndexedEvent): QueryEventsToolEvent => publicToolEvent(event));
+function queryEventsToolResponse(result: QueryResult): QueryEventsToolResponse {
+  let events: QueryEventsToolEvent[] = [];
+  for (let index = 0; index < result.events.length; index++) {
+    events.push(publicToolEvent(result.events[index], index));
+  }
   return {
     ok: true,
-    query: query,
-    total_events: result.total_events,
-    returned_events: events.length,
-    events_truncated: result.events_truncated,
     events: events
   };
 }
 
-function publicToolEvent(event: IndexedEvent): QueryEventsToolEvent {
-  return {
-    event_id: event.event_id,
+function publicToolEvent(event: IndexedEvent, eventIndex: number): QueryEventsToolEvent {
+  let output: QueryEventsToolEvent = {
+    event_id: eventIndex,
     event_date: event.event_date,
-    last_seen_date: event.last_seen_date,
     summary: event.summary,
-    normalized_fact: event.normalized_fact,
     domains: (event.domains || []).slice(),
-    keywords: (event.keywords || []).slice(),
     entities: (event.entities || []).slice(),
-    sources: (event.sources || []).slice(),
-    source_refs: (event.source_refs || []).slice(),
-    image_paths: (event.image_paths || []).slice(),
-    todo: event.todo
+    sources: (event.sources || []).slice()
+  };
+  let detail = toolEventDetail(event.summary, event.normalized_fact);
+  if (detail.length > 0) {
+    output.detail = detail;
+  }
+  let todo = toolEventTodo(event.todo);
+  if (todo !== undefined) {
+    output.todo = todo;
+  }
+  return output;
+}
+
+function toolEventDetail(summary: string, normalizedFact: string): string {
+  let detail = normalizeFreeText(normalizedFact);
+  if (detail.length === 0 || detail === normalizeFreeText(summary)) {
+    return '';
+  }
+  return detail;
+}
+
+function toolEventTodo(todo: IndexedEventTodo): QueryEventsToolTodo | undefined {
+  let type = normalizeFreeText(todo.type);
+  let deadline = normalizeFreeText(todo.deadline);
+  let text = normalizeFreeText(todo.text);
+  if (type.length === 0 && deadline.length === 0 && text.length === 0) {
+    return undefined;
+  }
+  return {
+    type: type,
+    deadline: deadline,
+    text: text
   };
 }
 
@@ -401,6 +427,7 @@ function emptyQueryOptions(): QueryOptions {
   return {
     keywords: [],
     keywordOperator: DEFAULT_KEYWORD_OPERATOR,
+    includeTodoDeadlineInTimeRange: false,
     domains: [],
     entities: [],
     date: '',

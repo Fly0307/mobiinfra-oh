@@ -134,6 +134,14 @@ function repeatedToolResponses(count: number): CloudChatCompletionResult[] {
   return responses;
 }
 
+function repeatedText(unit: string, count: number): string {
+  let value = '';
+  for (let i = 0; i < count; i++) {
+    value += unit;
+  }
+  return value;
+}
+
 function fakeLookupTool(output: string): ChatTool {
   return {
     name: 'lookup_note',
@@ -186,6 +194,31 @@ export default function chatReactAgentUnitTest() {
       expect(client.callMessages[1][2].tool_call_id).assertEqual('call-1');
       expect(traces.length).assertEqual(1);
       expect(traces[0].indexOf('lookup_note') >= 0).assertTrue();
+    });
+
+    it('keepsFullToolTraceForChatSession', 0, async () => {
+      let longArgs = '{"query":"' + repeatedText('keyword-', 40) + 'TRACE_ARGUMENT_TAIL"}';
+      let longOutput = '{"ok":true,"text":"' + repeatedText('result-', 80) + 'TRACE_RESULT_TAIL"}';
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-long', 'lookup_note', longArgs)]),
+        completion('已读取完整工具结果。')
+      ]);
+      let registry = new ChatToolRegistry();
+      registry.registerTool(fakeLookupTool(longOutput));
+      let traces: string[] = [];
+      let agent = new ChatReactAgent(client, registry);
+
+      let result = await agent.run([userMessage('查长结果')], testConfig(), {
+        onTrace: (line: string) => {
+          traces.push(line);
+        }
+      });
+
+      expect(result.content).assertEqual('已读取完整工具结果。');
+      expect(result.toolCallCount).assertEqual(1);
+      expect(traces.length).assertEqual(1);
+      expect(traces[0].indexOf('TRACE_ARGUMENT_TAIL') >= 0).assertTrue();
+      expect(traces[0].indexOf('TRACE_RESULT_TAIL') >= 0).assertTrue();
     });
 
     it('returnsUnknownToolResultToModel', 0, async () => {

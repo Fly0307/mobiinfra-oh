@@ -145,6 +145,12 @@ interface HomeTodoDocument {
   type_postings: StringArrayMap;
 }
 
+interface QueryTimeScope {
+  hasTime: boolean;
+  lower: string;
+  upper: string;
+}
+
 interface EntityDefinition {
   type: string;
   name: string;
@@ -530,18 +536,16 @@ export class IndexService {
   queryWithEvents(options: QueryOptions, events: Record<string, IndexedEvent>): QueryResult {
     let ids = Object.keys(events);
     let keywordOperator = normalizeQueryKeywordOperator(options.keywordOperator);
+    let timeScope = this.queryTimeScope(options);
+    let includeTodoDeadline = this.includeTodoDeadlineInTimeRange(options, timeScope);
     dataManagerInfo(`Index query: events=${ids.length}, keywords=${options.keywords.join(',')}, keywordOperator=${keywordOperator}, domains=${options.domains.join(',')}, limit=${options.limit}`);
     let matching: BooleanMap = {};
     ids.forEach((id: string) => matching[id] = true);
 
-    if (options.date.length > 0) {
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date === options.date);
-    } else if (options.month.length > 0) {
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date.startsWith(options.month + '-'));
-    } else if (options.startDate.length > 0 || options.endDate.length > 0) {
-      let lower = options.startDate.length > 0 ? options.startDate : '0000-01-01';
-      let upper = options.endDate.length > 0 ? options.endDate : '9999-12-31';
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date >= lower && events[id].event_date <= upper);
+    if (timeScope.hasTime) {
+      ids.forEach((id: string) => {
+        matching[id] = matching[id] && this.eventMatchesTimeScope(events[id], timeScope, includeTodoDeadline);
+      });
     }
 
     if (options.keywords.length > 0) {
@@ -601,8 +605,10 @@ export class IndexService {
       .filter((id: string) => matching[id])
       .map((id: string) => events[id])
       .sort((left: IndexedEvent, right: IndexedEvent) => {
-        if (left.event_date !== right.event_date) {
-          return right.event_date.localeCompare(left.event_date);
+        let leftSortDate = this.querySortDate(left, includeTodoDeadline);
+        let rightSortDate = this.querySortDate(right, includeTodoDeadline);
+        if (leftSortDate !== rightSortDate) {
+          return rightSortDate.localeCompare(leftSortDate);
         }
         return right.event_id.localeCompare(left.event_id);
       });
@@ -682,9 +688,14 @@ export class IndexService {
 
   private queryCandidateIds(options: QueryOptions): string[] {
     let candidate: BooleanMap | null = null;
+    let timeScope = this.queryTimeScope(options);
     let temporalIds = this.temporalCandidateIds(options);
     if (temporalIds !== null) {
-      candidate = this.intersectCandidate(candidate, temporalIds);
+      let timeIds = temporalIds;
+      if (this.includeTodoDeadlineInTimeRange(options, timeScope)) {
+        timeIds = this.unionCandidates(timeIds, this.todoDeadlineCandidateIds(timeScope));
+      }
+      candidate = this.intersectCandidate(candidate, timeIds);
     }
 
     if (options.keywords.length > 0) {
@@ -766,7 +777,8 @@ export class IndexService {
   }
 
   private temporalCandidateIds(options: QueryOptions): BooleanMap | null {
-    if (options.date.length === 0 && options.month.length === 0 && options.startDate.length === 0 && options.endDate.length === 0) {
+    let scope = this.queryTimeScope(options);
+    if (!scope.hasTime) {
       return null;
     }
     let documents = this.loadTemporalDocuments();
@@ -780,25 +792,94 @@ export class IndexService {
       let document = documents[options.month];
       return this.setFromIds(document ? (document.event_ids || []) : []);
     }
-    let lower = options.startDate.length > 0 ? options.startDate : '0000-01-01';
-    let upper = options.endDate.length > 0 ? options.endDate : '9999-12-31';
     let ids: string[] = [];
     Object.keys(documents).sort().forEach((month: string) => {
       let document = documents[month];
       let days = this.temporalDays(document);
       if (days.length === 0) {
-        if (this.monthOverlapsRange(month, lower, upper)) {
+        if (this.monthOverlapsRange(month, scope.lower, scope.upper)) {
           ids = ids.concat(document.event_ids || []);
         }
         return;
       }
       days.forEach((day: TemporalDayNode) => {
-        if (day.date >= lower && day.date <= upper) {
+        if (day.date >= scope.lower && day.date <= scope.upper) {
           ids = ids.concat(day.event_ids || []);
         }
       });
     });
     return this.setFromIds(ids);
+  }
+
+  private queryTimeScope(options: QueryOptions): QueryTimeScope {
+    if (options.date.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.date,
+        upper: options.date
+      };
+    }
+    if (options.month.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.month + '-01',
+        upper: this.monthLastDate(options.month)
+      };
+    }
+    if (options.startDate.length > 0 || options.endDate.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.startDate.length > 0 ? options.startDate : '0000-01-01',
+        upper: options.endDate.length > 0 ? options.endDate : '9999-12-31'
+      };
+    }
+    return {
+      hasTime: false,
+      lower: '',
+      upper: ''
+    };
+  }
+
+  private includeTodoDeadlineInTimeRange(options: QueryOptions, scope: QueryTimeScope): boolean {
+    return options.includeTodoDeadlineInTimeRange === true && scope.hasTime;
+  }
+
+  private eventMatchesTimeScope(event: IndexedEvent, scope: QueryTimeScope, includeTodoDeadline: boolean): boolean {
+    if (!scope.hasTime) {
+      return true;
+    }
+    if (event.event_date >= scope.lower && event.event_date <= scope.upper) {
+      return true;
+    }
+    if (!includeTodoDeadline) {
+      return false;
+    }
+    let deadline = normalizeFreeText(event.todo.deadline);
+    return isIsoDate(deadline) && deadline >= scope.lower && deadline <= scope.upper;
+  }
+
+  private querySortDate(event: IndexedEvent, preferTodoDeadline: boolean): string {
+    let deadline = normalizeFreeText(event.todo.deadline);
+    if (preferTodoDeadline && isIsoDate(deadline)) {
+      return deadline;
+    }
+    return event.event_date;
+  }
+
+  private todoDeadlineCandidateIds(scope: QueryTimeScope): BooleanMap {
+    if (!scope.hasTime) {
+      return {};
+    }
+    let document = this.storage.readJson<HomeTodoDocument>(
+      this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
+    let ids: string[] = [];
+    let deadlinePostings = document.deadline_postings || {};
+    Object.keys(deadlinePostings).sort().forEach((deadline: string) => {
+      if (isIsoDate(deadline) && deadline >= scope.lower && deadline <= scope.upper) {
+        ids = ids.concat(deadlinePostings[deadline] || []);
+      }
+    });
+    return this.setFromIds(stableUnique(ids));
   }
 
   private eventIdsForDate(date: string, documents: TemporalDocumentMap): string[] {

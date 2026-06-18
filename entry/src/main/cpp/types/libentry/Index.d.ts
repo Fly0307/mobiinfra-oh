@@ -2,6 +2,7 @@
 export interface AgentLoopNativeApi {
   chat(userMessage: string): Promise<string>;
   reset(): string;
+  unloadModel(): string;
   agentPrefill(prefix: string): Promise<string>;
   agentStep(variablePart: string, onToken?: (token: string) => void): Promise<string>;
   agentReset(): Promise<string>;
@@ -35,6 +36,7 @@ export const loadModel: (configPath: string) => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
 export const chat: (userMessage: string) => Promise<string>;
 export const reset: () => string;
+export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;
 export const prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 

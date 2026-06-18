@@ -261,6 +261,48 @@ struct Index {
     this.chatMode = state.mode;
   }
 
+  private isLocalNativeBusy(): boolean {
+    if (this.isThinking || this.restoringLocalSession) {
+      return true;
+    }
+    if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
+      return true;
+    }
+    return AgentExecutionController.isExecutionActive() && this.agentRouter.getRouteMode() === 'local';
+  }
+
+  private blockChatSessionMutationIfBusy(action: string): boolean {
+    if (!this.cloudThinking && !this.isLocalNativeBusy()) {
+      return false;
+    }
+    let message = '当前会话正在处理，暂不能' + action + '。请等待任务结束后再试。';
+    this.output = message;
+    showToastSafely(message, 1800);
+    return true;
+  }
+
+  private blockModelFileMutationIfBusy(action: string): boolean {
+    if (!this.isLocalNativeBusy()) {
+      return false;
+    }
+    let message = '本地模型正在推理或收尾，暂不能' + action + '。请等待任务结束后再试。';
+    this.output = message;
+    showToastSafely(message, 1800);
+    return true;
+  }
+
+  private unloadLocalModelForFileMutation(): void {
+    try {
+      mnnllm.unloadModel();
+    } catch {
+      try {
+        mnnllm.reset();
+      } catch {
+      }
+    }
+    this.modelLoaded = false;
+  }
+
   private initChatSessions(): void {
     this.applyChatSessionViewState(ChatSessionController.init(this.filesDir, this.chatMode));
   }
@@ -452,6 +494,9 @@ struct Index {
   }
 
   private createChatSession(mode: string): void {
+    if (this.blockChatSessionMutationIfBusy('新建会话')) {
+      return;
+    }
     let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), mode);
     this.applyChatSessionViewState(state);
     this.chatSessionDrawerOpen = false;
@@ -467,6 +512,9 @@ struct Index {
   }
 
   private async selectChatSession(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('切换会话')) {
+      return;
+    }
     if (this.cloudThinking || this.isThinking || this.restoringLocalSession) {
       showToastSafely('当前会话处理中，稍后再切换', 1500);
       return;
@@ -485,6 +533,9 @@ struct Index {
 
   private async switchChatMode(mode: string): Promise<void> {
     if (this.chatMode === mode && this.activeChatSessionId.length > 0) {
+      return;
+    }
+    if (this.blockChatSessionMutationIfBusy('切换模式')) {
       return;
     }
     let state = ChatSessionController.switchMode(this.filesDir, this.currentChatSessionViewState(), mode);
@@ -522,6 +573,9 @@ struct Index {
   }
 
   private async deleteChatSession(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('删除会话')) {
+      return;
+    }
     let target: ChatSessionSummary | null = null;
     for (let i = 0; i < this.chatSessions.length; i++) {
       if (this.chatSessions[i].id === sessionId) {
@@ -970,6 +1024,7 @@ struct Index {
     }, async (response: string) => {
       return await this.approveCloudAgentResponse(response);
     });
+    this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
@@ -1207,7 +1262,11 @@ struct Index {
   }
 
   deleteModelFiles() {
+    if (this.blockModelFileMutationIfBusy('删除模型文件')) {
+      return;
+    }
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = '模型目录不存在，无需删除。';
         return;
@@ -1221,8 +1280,12 @@ struct Index {
   }
 
   deleteModelConfigJson() {
+    if (this.blockModelFileMutationIfBusy('删除 config.json')) {
+      return;
+    }
     let cfgPath = this.modelDir + '/config.json';
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = `模型文件夹不存在: ${this.modelDir}`;
         return;
@@ -1340,7 +1403,11 @@ struct Index {
   }
 
   deleteChunkVisionOmFiles() {
+    if (this.blockModelFileMutationIfBusy('删除 vision.om')) {
+      return;
+    }
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = `模型目录不存在: ${this.modelDir}`;
         return;

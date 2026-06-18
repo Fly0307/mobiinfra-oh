@@ -1,7 +1,8 @@
 import { AppLogger } from './AppLogger';
 
-type CancelHandler = () => Promise<void> | void;
+type CancelHandler = () => Promise<void>;
 type VoidHandler = () => void;
+type ReturnToAppHandler = () => Promise<void>;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
 type FloatPanelMoveHandler = (phase: string) => void;
 type CaptureOverlayHandler = (hidden: boolean) => Promise<boolean>;
@@ -12,6 +13,8 @@ const MAX_FLOAT_LOG_CHARS = 6000;
 const FLOAT_STREAM_INTERVAL_MS = 18;
 const FLOAT_STREAM_POST_STATUS_DELAY_MS = 500;
 const FLOAT_STREAM_IDLE_STATUS = 'AI Agent running...';
+const CANCEL_RETURN_TEARDOWN_DELAY_MS = 350;
+const CANCEL_RETURN_TEARDOWN_TIMEOUT_MS = 1200;
 
 export class AgentExecutionController {
   private static executionActive: boolean = false;
@@ -23,7 +26,7 @@ export class AgentExecutionController {
   private static floatWindowSyncHandler: VoidHandler | null = null;
   private static floatPanelLayoutHandler: FloatPanelLayoutHandler | null = null;
   private static floatPanelMoveHandler: FloatPanelMoveHandler | null = null;
-  private static returnToAppHandler: VoidHandler | null = null;
+  private static returnToAppHandler: ReturnToAppHandler | null = null;
   private static captureOverlayHandler: CaptureOverlayHandler | null = null;
   private static captureOverlayHideDepth: number = 0;
   private static captureOverlayHidden: boolean = false;
@@ -114,35 +117,22 @@ export class AgentExecutionController {
 
   static requestCancellation(): void {
     AgentExecutionController.cancelRequested = true;
-    AgentExecutionController.executionActive = false;
     AgentExecutionController.pauseRequested = false;
     AgentExecutionController.floatPanelExpanded = false;
     AgentExecutionController.captureOverlayHideDepth = 0;
     AgentExecutionController.captureOverlayHidden = false;
     AgentExecutionController.resetStreamDisplay();
     AppStorage.setOrCreate('agentCancelRequested', true);
-    AppStorage.setOrCreate('agentExecutionActive', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
-    AgentExecutionController.notifyFloatWindowSync();
+    AgentExecutionController.writeFloatText('正在终止任务并返回 App...', false, false);
 
-    try {
-      AgentExecutionController.localCancelHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('local cancel handler failed', e as Error);
-    }
+    AgentExecutionController.invokeCancelHandler(AgentExecutionController.localCancelHandler,
+      'local cancel handler failed');
+    AgentExecutionController.invokeCancelHandler(AgentExecutionController.cloudCancelHandler,
+      'cloud cancel handler failed');
 
-    try {
-      AgentExecutionController.cloudCancelHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('cloud cancel handler failed', e as Error);
-    }
-
-    try {
-      AgentExecutionController.returnToAppHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('return-to-app handler failed', e as Error);
-    }
+    AgentExecutionController.scheduleCancellationTeardown(AgentExecutionController.invokeReturnToAppHandler());
   }
 
   static togglePause(): void {
@@ -205,7 +195,7 @@ export class AgentExecutionController {
     AgentExecutionController.notifyFloatPanelMove('end');
   }
 
-  static setReturnToAppHandler(handler: VoidHandler | null): void {
+  static setReturnToAppHandler(handler: ReturnToAppHandler | null): void {
     AgentExecutionController.returnToAppHandler = handler;
   }
 
@@ -257,16 +247,69 @@ export class AgentExecutionController {
   }
 
   static returnToApp(): boolean {
-    if (!AgentExecutionController.returnToAppHandler) {
+    let handler = AgentExecutionController.returnToAppHandler;
+    if (!handler) {
       return false;
     }
     try {
-      AgentExecutionController.returnToAppHandler();
+      handler().catch((e: Error) => {
+        AgentExecutionController.warn('return-to-app handler failed', e);
+      });
       return true;
     } catch (e) {
       AgentExecutionController.warn('return-to-app handler failed', e as Error);
       return false;
     }
+  }
+
+  private static invokeReturnToAppHandler(): Promise<void> {
+    let handler = AgentExecutionController.returnToAppHandler;
+    if (!handler) {
+      return Promise.resolve();
+    }
+    try {
+      return handler();
+    } catch (e) {
+      AgentExecutionController.warn('return-to-app handler failed', e as Error);
+    }
+    return Promise.resolve();
+  }
+
+  private static invokeCancelHandler(handler: CancelHandler | null, warnMessage: string): void {
+    if (!handler) {
+      return;
+    }
+    try {
+      handler().catch((e: Error) => {
+        AgentExecutionController.warn(warnMessage, e);
+      });
+    } catch (e) {
+      AgentExecutionController.warn(warnMessage, e as Error);
+    }
+  }
+
+  private static scheduleCancellationTeardown(returnPromise: Promise<void>): void {
+    let completed = false;
+    let teardown = (): void => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      setTimeout(() => {
+        AgentExecutionController.executionActive = false;
+        AppStorage.setOrCreate('agentExecutionActive', false);
+        AgentExecutionController.notifyFloatWindowSync();
+      }, CANCEL_RETURN_TEARDOWN_DELAY_MS);
+    };
+    returnPromise.then(() => {
+      teardown();
+    }).catch((e: Error) => {
+      AgentExecutionController.warn('return-to-app handler failed', e);
+      teardown();
+    });
+    setTimeout(() => {
+      teardown();
+    }, CANCEL_RETURN_TEARDOWN_TIMEOUT_MS);
   }
 
   private static notifyFloatWindowSync(): void {

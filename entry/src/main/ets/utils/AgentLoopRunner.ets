@@ -66,12 +66,15 @@ export class AgentLoopRunner {
   }
 
   async requestCancellation(): Promise<void> {
+    let activeMode = this.mode;
     this.cancellationRequested = true;
-    if (this.mode === 'cloud') {
+    if (activeMode === 'cloud') {
       this.cloudClient.cancelActiveRequests();
-      return;
     }
-    await this.resetLocalContext();
+    await this.returnToHostApp(activeMode);
+    if (activeMode === 'local') {
+      await this.resetLocalContext();
+    }
   }
 
   async runLocalTask(task: string): Promise<void> {
@@ -90,7 +93,9 @@ export class AgentLoopRunner {
       AgentExecutionController.finishExecution('本地 Agent 已完成');
     } catch (e) {
       let err = e as Error;
-      await this.returnToHostApp('local');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('local');
+      }
       AgentExecutionController.finishExecution('本地 Agent 结束');
       throw err;
     } finally {
@@ -116,7 +121,9 @@ export class AgentLoopRunner {
     } catch (e) {
       let err = e as Error;
       this.cloudClient.cancelActiveRequests();
-      await this.returnToHostApp('cloud');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('cloud');
+      }
       AgentExecutionController.finishExecution('云端 Agent 结束');
       throw err;
     } finally {
@@ -395,7 +402,7 @@ export class AgentLoopRunner {
     let streamedText = '';
     let response = await agentStep(finalVariable, (token: string) => {
       if (this.isCancellationRequested()) {
-        throw new Error('__agent_cancelled__');
+        return;
       }
       streamedText += token;
       AgentExecutionController.replaceFloatText(streamedText);

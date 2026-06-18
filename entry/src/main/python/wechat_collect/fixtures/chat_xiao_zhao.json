@@ -1,0 +1,87 @@
+{
+  "attributes": {
+    "type": "WindowScene",
+    "origBounds": "[0,0][1256,2760]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "type": "Text",
+        "origBounds": "[585,128][671,184]",
+        "text": "小赵"
+      },
+      "children": []
+    },
+    {
+      "attributes": {
+        "type": "List",
+        "origBounds": "[0,360][1256,2760]",
+        "scrollable": "true"
+      },
+      "children": [
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,420][1256,500]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[500,436][756,476]",
+                "text": "星期一 下午 03:47"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,540][1256,690]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[1078,564][1158,644]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[610,576][1010,634]",
+                "text": "我想要买一个iPhone 17Pro"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,720][1256,870]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[98,744][178,824]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[230,756][820,814]",
+                "text": "需要给妹妹买一些少儿读物"
+              },
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

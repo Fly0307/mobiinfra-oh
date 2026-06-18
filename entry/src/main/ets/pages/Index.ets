@@ -26,6 +26,7 @@ import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionC
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
+import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
 import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
@@ -59,6 +60,38 @@ import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
+import { stringifyJsonCompat } from '../utils/JsonCompat';
+import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
+import {
+  renderWechatAutoSummaryMarkdown,
+  WechatAutoSummaryStorage,
+  wechatAutoSummaryDailyEntries
+} from '../utils/wechat/WechatAutoSummaryStorage';
+import {
+  DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS,
+  DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES,
+  DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+  DEFAULT_WECHAT_AUTO_SUMMARY_WAIT,
+  WECHAT_AUTO_SUMMARY_COLLECTION_DAYS_INPUT_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_MAX_CONTACTS_INPUT_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_MODE_KEY,
+  WECHAT_AUTO_SUMMARY_COLLECTION_TARGET_CONTACT_INPUT_KEY,
+  WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY,
+  WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY,
+  WECHAT_AUTO_SUMMARY_ENABLED_KEY,
+  WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY,
+  WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY,
+  WECHAT_AUTO_SUMMARY_MODE_RECENT,
+  WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY,
+  WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY,
+  WECHAT_AUTO_SUMMARY_WAIT_KEY,
+  WechatAutoSummaryRequest,
+  WechatAutoSummaryResponse
+} from '../utils/wechat/WechatAutoSummaryTypes';
 
 // 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
@@ -125,6 +158,9 @@ interface CloudAgentTaskSubmitResult {
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
+const WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.swipeSpeed';
+const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAutoSummaryDefault.historySwipeRatio';
+
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
@@ -152,6 +188,20 @@ PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_SWIPE_SPEED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_STABLE_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_WAIT_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_WAIT);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_MODE_KEY, WECHAT_AUTO_SUMMARY_MODE_RECENT);
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_DAYS_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_MAX_CONTACTS_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_COLLECTION_TARGET_CONTACT_INPUT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY, '');
+PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY, '');
 
 @Entry
 @Component
@@ -179,6 +229,7 @@ struct Index {
   @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
+  @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
@@ -199,7 +250,23 @@ struct Index {
   @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
   @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
+  @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
+  @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string = DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
+  @StorageLink('wechatAutoSummaryDefaultMaxContacts') wechatAutoSummaryDefaultMaxContacts: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS;
+  @StorageLink('wechatAutoSummarySwipeSpeed') wechatAutoSummarySwipeSpeed: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED;
+  @StorageLink('wechatAutoSummaryHistorySwipeRatio') wechatAutoSummaryHistorySwipeRatio: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO;
+  @StorageLink('wechatAutoSummaryStableSwipes') wechatAutoSummaryStableSwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_STABLE_SWIPES;
+  @StorageLink('wechatAutoSummaryMaxHistorySwipes') wechatAutoSummaryMaxHistorySwipes: string =
+    DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
+  @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
+  @State wechatAutoSummaryRunning: boolean = false;
+  @State wechatAutoSummaryStatus: string = '';
   @State isThinking: boolean = false;
+  @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudDebugImagePath: string = '';
@@ -262,6 +329,48 @@ struct Index {
     this.activeChatSessionId = state.activeSessionId;
     this.activeChatMessages = state.activeMessages;
     this.chatMode = state.mode;
+  }
+
+  private isLocalNativeBusy(): boolean {
+    if (this.isThinking || this.localAgentCleaningUp || this.restoringLocalSession) {
+      return true;
+    }
+    if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
+      return true;
+    }
+    return AgentExecutionController.isExecutionActive() && this.agentRouter.getRouteMode() === 'local';
+  }
+
+  private blockChatSessionMutationIfBusy(action: string): boolean {
+    if (!this.cloudThinking && !this.isLocalNativeBusy()) {
+      return false;
+    }
+    let message = '当前会话正在处理，暂不能' + action + '。请等待任务结束后再试。';
+    this.output = message;
+    showToastSafely(message, 1800);
+    return true;
+  }
+
+  private blockModelFileMutationIfBusy(action: string): boolean {
+    if (!this.isLocalNativeBusy()) {
+      return false;
+    }
+    let message = '本地模型正在推理或收尾，暂不能' + action + '。请等待任务结束后再试。';
+    this.output = message;
+    showToastSafely(message, 1800);
+    return true;
+  }
+
+  private unloadLocalModelForFileMutation(): void {
+    try {
+      mnnllm.unloadModel();
+    } catch {
+      try {
+        mnnllm.reset();
+      } catch {
+      }
+    }
+    this.modelLoaded = false;
   }
 
   private initChatSessions(): void {
@@ -446,6 +555,53 @@ struct Index {
     }
   }
 
+  private reportLocalAgentStartupStatus(message: string, appendTrace: boolean = true,
+    appendVisibleMessage: boolean = false): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.updateFloatText(message);
+    }
+    if (this.localTaskSessionId.length === 0) {
+      return;
+    }
+    if (appendTrace) {
+      this.appendTaskTraceLineForSession(this.localTaskSessionId, message);
+    }
+    if (appendVisibleMessage) {
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-status'), 'task', CHAT_MESSAGE_KIND_TASK_RESULT,
+          message, new Date().getTime()));
+    }
+  }
+
+  private reportLocalAgentCleanupStatus(message: string): void {
+    AppLogger.info('LocalAgent', message);
+    this.output = message;
+    showToastSafely(message, 1800);
+    if (AgentExecutionController.isExecutionActive()) {
+      AgentExecutionController.updateFloatText(message);
+    }
+    if (this.localTaskSessionId.length > 0) {
+      this.appendTaskTraceLineForSession(this.localTaskSessionId, message);
+    }
+  }
+
+  private abortLocalAgentStartupIfCancelled(): boolean {
+    if (!this.localAgentCleaningUp && !AgentExecutionController.isCancelRequested()) {
+      return false;
+    }
+    let message = '任务已终止，正在等待本地 Agent 收尾完成。';
+    this.output = message;
+    if (this.localTaskSessionId.length > 0) {
+      this.appendChatMessageForSession(this.localTaskSessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, message, new Date().getTime()));
+    }
+    AgentExecutionController.finishExecution('本地 Agent 已终止');
+    return true;
+  }
+
   private handleCloudAgentLog(message: string): void {
     this.appendCloudLog(message);
     let imagePath = this.snapshotImagePathFromLog(message);
@@ -455,6 +611,9 @@ struct Index {
   }
 
   private createChatSession(mode: string): void {
+    if (this.blockChatSessionMutationIfBusy('新建会话')) {
+      return;
+    }
     let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(), mode);
     this.applyChatSessionViewState(state);
     this.chatSessionDrawerOpen = false;
@@ -470,6 +629,9 @@ struct Index {
   }
 
   private async selectChatSession(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('切换会话')) {
+      return;
+    }
     if (this.cloudThinking || this.isThinking || this.restoringLocalSession) {
       showToastSafely('当前会话处理中，稍后再切换', 1500);
       return;
@@ -488,6 +650,9 @@ struct Index {
 
   private async switchChatMode(mode: string): Promise<void> {
     if (this.chatMode === mode && this.activeChatSessionId.length > 0) {
+      return;
+    }
+    if (this.blockChatSessionMutationIfBusy('切换模式')) {
       return;
     }
     let state = ChatSessionController.switchMode(this.filesDir, this.currentChatSessionViewState(), mode);
@@ -525,6 +690,9 @@ struct Index {
   }
 
   private async deleteChatSession(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('删除会话')) {
+      return;
+    }
     let target: ChatSessionSummary | null = null;
     for (let i = 0; i < this.chatSessions.length; i++) {
       if (this.chatSessions[i].id === sessionId) {
@@ -963,9 +1131,74 @@ struct Index {
     }
   }
 
+  private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
+    if (this.wechatAutoSummaryRunning) {
+      showToastSafely('微信采集正在进行', 1200);
+      return;
+    }
+    if (this.filesDir.length === 0) {
+      this.wechatAutoSummaryStatus = '采集失败：App 沙箱目录未初始化';
+      showToastSafely('App 沙箱目录未初始化', 1600);
+      return;
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      this.wechatAutoSummaryStatus = '采集失败：请先配置 HDC Server';
+      showToastSafely('请先配置 HDC Server', 1600);
+      return;
+    }
+
+    this.wechatAutoSummaryRunning = true;
+    this.wechatAutoSummaryStatus = '正在准备 HDC 连接';
+    try {
+      if (!await this.ensureHdcServerReadyForTask(true)) {
+        this.wechatAutoSummaryStatus = '采集失败：HDC Server 未就绪';
+        showToastSafely('HDC Server 未就绪', 1800);
+        return;
+      }
+      this.wechatAutoSummaryStatus = '正在采集微信消息';
+      // 微信自动汇总由 PC 侧 bridge 执行，App 侧只负责提交参数和保存返回产物。
+      let response: WechatAutoSummaryResponse = await new WechatAutoSummaryClient(this.hdcServerIp).collect(request);
+      if (response.status !== 'ok') {
+        throw new Error(response.message !== undefined && response.message.length > 0 ? response.message : '微信采集失败');
+      }
+
+      let runId = response.run_id !== undefined && response.run_id.trim().length > 0 ?
+        response.run_id : `${this.currentLocalDateKey()}-wechat`;
+      let storage = new WechatAutoSummaryStorage(this.filesDir);
+      storage.writeRawArtifact(runId, 'wechat_collect.json', stringifyJsonCompat(response as Object, 2));
+      storage.writeRawArtifact(runId, 'wechat_collect.md', renderWechatAutoSummaryMarkdown(response));
+      storage.writeRawArtifact(runId, 'wechat_collect_response.json', stringifyJsonCompat(response as Object, 2));
+      if (response.conversations !== undefined) {
+        storage.writeRawArtifact(runId, 'wechat_conversations.json',
+          stringifyJsonCompat(response.conversations as Object, 2));
+      }
+      let dailyLogEntries = wechatAutoSummaryDailyEntries(response);
+      let dailyLogMode = response.mode !== undefined && response.mode.length > 0 ? response.mode : request.mode;
+      let dailyLogDays = response.days !== undefined ? response.days : request.days;
+      storage.writeDailyLog(runId, dailyLogMode, dailyLogDays, this.currentLocalDateKey(), dailyLogEntries);
+
+      let contactCount = 0;
+      if (response.conversations !== undefined) {
+        contactCount = response.conversations.length;
+      } else if (response.contacts_collected !== undefined) {
+        contactCount = response.contacts_collected;
+      }
+      this.wechatAutoSummaryStatus = '采集完成：' + contactCount.toString() + ' 个联系人';
+      showToastSafely('微信采集完成，可点击同步整理', 1800);
+    } catch (e) {
+      let err = e as Error;
+      this.wechatAutoSummaryStatus = '采集失败：' + err.message;
+      dataManagerError('runWechatAutoSummary failed: ' + err.message);
+      showToastSafely('微信采集失败：' + err.message, 2200);
+    } finally {
+      this.wechatAutoSummaryRunning = false;
+    }
+  }
+
   aboutToAppear() {
     // 页面启动时先修正旧版本持久化默认值，再初始化模型目录、日志捕获、自定义算子和 Agent 路由。
     this.migrateDefaultEndpointValues();
+    this.migrateWechatAutoSummaryDefaultValues();
     if (this.manualHdcServerIp.trim().length === 0 && !this.isAutoHdcUrl(this.hdcServerIp)) {
       this.manualHdcServerIp = this.hdcServerIp;
     }
@@ -1004,18 +1237,27 @@ struct Index {
     }, async (response: string) => {
       return await this.approveCloudAgentResponse(response);
     });
+    this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
+        this.localAgentCleaningUp = true;
+        this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
         await this.activeAgentRunner.requestCancellation();
-        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+        this.output = '用户已通过悬浮窗终止本地 Agent 任务，正在等待收尾完成。';
         return;
       }
       if (this.agentRouter.getRouteMode() !== 'local') {
         return;
       }
-      await this.agentRouter.requestTaskCancellation();
-      this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+      this.localAgentCleaningUp = true;
+      this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
+      try {
+        await this.agentRouter.requestTaskCancellation();
+        this.output = '用户已通过悬浮窗终止本地 Agent 任务。';
+      } finally {
+        this.localAgentCleaningUp = false;
+      }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
@@ -1063,6 +1305,35 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
     this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
+  }
+
+  private migrateWechatAutoSummaryDefaultValues(): void {
+    // 仅迁移旧版本写入的默认采集参数；迁移后用户手动设置同样数值不会被再次覆盖。
+    this.wechatAutoSummarySwipeSpeed = this.migrateOneShotDefaultSetting(
+      this.wechatAutoSummarySwipeSpeed,
+      DEFAULT_WECHAT_AUTO_SUMMARY_SWIPE_SPEED,
+      ['2500'],
+      WECHAT_AUTO_SUMMARY_DEFAULT_SWIPE_SPEED_SNAPSHOT_KEY
+    );
+    this.wechatAutoSummaryHistorySwipeRatio = this.migrateOneShotDefaultSetting(
+      this.wechatAutoSummaryHistorySwipeRatio,
+      DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
+      ['0.65'],
+      WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY
+    );
+  }
+
+  private migrateOneShotDefaultSetting(currentValue: string, configuredDefault: string, legacyDefaults: string[],
+    snapshotKey: string): string {
+    let lastAppliedDefault = AppStorage.get(snapshotKey) as string;
+    let shouldUseConfiguredDefault = false;
+    if (lastAppliedDefault === undefined || lastAppliedDefault.length === 0) {
+      shouldUseConfiguredDefault = legacyDefaults.includes(currentValue);
+    } else {
+      shouldUseConfiguredDefault = currentValue === lastAppliedDefault;
+    }
+    AppStorage.setOrCreate(snapshotKey, configuredDefault);
+    return shouldUseConfiguredDefault ? configuredDefault : currentValue;
   }
 
   private migrateEndpointValue(currentValue: string, configuredDefault: string, legacyDefaults: string[],
@@ -1241,7 +1512,11 @@ struct Index {
   }
 
   deleteModelFiles() {
+    if (this.blockModelFileMutationIfBusy('删除模型文件')) {
+      return;
+    }
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = '模型目录不存在，无需删除。';
         return;
@@ -1255,8 +1530,12 @@ struct Index {
   }
 
   deleteModelConfigJson() {
+    if (this.blockModelFileMutationIfBusy('删除 config.json')) {
+      return;
+    }
     let cfgPath = this.modelDir + '/config.json';
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = `模型文件夹不存在: ${this.modelDir}`;
         return;
@@ -1374,7 +1653,11 @@ struct Index {
   }
 
   deleteChunkVisionOmFiles() {
+    if (this.blockModelFileMutationIfBusy('删除 vision.om')) {
+      return;
+    }
     try {
+      this.unloadLocalModelForFileMutation();
       if (!fs.accessSync(this.modelDir)) {
         this.output = `模型目录不存在: ${this.modelDir}`;
         return;
@@ -2864,41 +3147,53 @@ struct Index {
   private async ensureLocalModelLoaded(): Promise<boolean> {
     // 本地 Agent 启动前自动加载模型，减少用户遗漏“加载大模型”按钮导致的失败。
     if (this.modelLoaded) {
+      this.reportLocalAgentStartupStatus('本地模型已加载，继续准备 Agent。');
       return true;
     }
 
     let cfg = this.modelDir + '/config.json';
     if (!this.prepareCustomOpp()) {
+      let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
+      this.reportLocalAgentStartupStatus(reason, true, true);
       return false;
     }
 
-    this.output = '未检测到已加载模型，正在自动加载大模型...';
+    this.reportLocalAgentStartupStatus('正在加载本地模型，首次加载可能需要较长时间，请稍候...', true, true);
+    await this.sleep(80);
     try {
       let loadResult: string = await mnnllm.loadModel(cfg);
       this.output = loadResult;
       this.modelLoaded = this.output === 'ok';
       if (!this.modelLoaded) {
-        this.output = `自动加载模型失败: ${this.output}`;
+        this.reportLocalAgentStartupStatus(`自动加载模型失败: ${this.output}`, true, true);
+      } else {
+        this.reportLocalAgentStartupStatus('本地模型加载完成，正在启动本地 Agent。', true, true);
+        await this.sleep(30);
       }
       return this.modelLoaded;
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.output = '自动加载模型失败: ' + message;
+      this.reportLocalAgentStartupStatus('自动加载模型失败: ' + message, true, true);
       return false;
     }
   }
 
   private async ensureLocalAgentReady(): Promise<boolean> {
+    this.reportLocalAgentStartupStatus('正在检查本地模型状态...');
     if (!await this.ensureLocalModelLoaded()) {
       return false;
     }
+    this.reportLocalAgentStartupStatus('本地模型已就绪，正在连接 HDC Server...');
     if (!await this.ensureHdcServerReadyForTask(false)) {
+      let reason = this.output.trim().length > 0 ? this.output : 'HDC Server 连接失败，无法执行本地 Agent。';
+      this.reportLocalAgentStartupStatus(reason, true, true);
       return false;
     }
     if (this.hdcServerIp.trim().length === 0) {
-      this.output = 'HDC Server 未配置，无法执行本地 Agent。';
+      this.reportLocalAgentStartupStatus('HDC Server 未配置，无法执行本地 Agent。', true, true);
       return false;
     }
+    this.reportLocalAgentStartupStatus('HDC Server 已就绪，准备启动本地 Agent。');
     return true;
   }
 
@@ -2907,6 +3202,8 @@ struct Index {
       this.output = '请在上方文本框输入任务目标，例如：去淘宝买手机';
       return;
     }
+    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。', false, false);
+    await this.sleep(50);
     if (!await this.ensureLocalAgentReady()) {
       return;
     }
@@ -3069,27 +3366,50 @@ struct Index {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
       return;
     }
-    if (this.isThinking) {
+    if (this.localAgentCleaningUp ||
+      (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local')) {
+      this.reportLocalAgentCleanupStatus('上一轮本地 Agent 正在终止/收尾，请稍后再下发任务。');
       return;
     }
-    if (!await this.ensureLocalAgentReady()) {
+    if (this.isThinking) {
+      this.reportLocalAgentCleanupStatus('本地 Agent 正在处理上一轮任务，请稍后再试。');
       return;
     }
     this.ensureActiveChatSession();
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       task, new Date().getTime()));
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-trace'), 'task',
-      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(), []));
+      CHAT_MESSAGE_KIND_TASK_TRACE, '本地任务执行过程', new Date().getTime(),
+      ['任务已下发，正在准备本地 Agent。']));
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('task-result'), 'task',
-      CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 已开始执行。', new Date().getTime()));
+      CHAT_MESSAGE_KIND_TASK_RESULT, '任务已下发，正在准备本地 Agent。', new Date().getTime()));
     this.localTaskSessionId = this.activeChatSessionId;
     this.debugImagePath = '';
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.isThinking = true;
-    let runner = this.createAgentLoopRunner();
-    this.activeAgentRunner = runner;
-    this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+    AgentExecutionController.beginExecution('本地 Agent 准备中...');
+    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。');
+    await this.sleep(50);
     try {
+      if (this.abortLocalAgentStartupIfCancelled()) {
+        return;
+      }
+      if (!await this.ensureLocalAgentReady()) {
+        let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
+        this.appendChatMessageForSession(this.localTaskSessionId,
+          createChatMessage(this.nextChatMessageId('task-result'), 'task',
+            CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
+        AgentExecutionController.finishExecution('本地 Agent 启动失败');
+        return;
+      }
+      if (this.abortLocalAgentStartupIfCancelled()) {
+        return;
+      }
+      this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
+      await this.sleep(30);
+      let runner = this.createAgentLoopRunner();
+      this.activeAgentRunner = runner;
+      this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
       await runner.runLocalTask(task);
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
@@ -3099,13 +3419,19 @@ struct Index {
       }
     } catch (e) {
       let err = e as Error;
+      let resultText = this.localAgentCleaningUp ? '任务已终止，正在等待本地 Agent 收尾完成。' :
+        '任务执行失败：' + err.message;
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
-          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行失败：' + err.message, new Date().getTime()));
+          CHAT_MESSAGE_KIND_TASK_RESULT, resultText, new Date().getTime()));
     } finally {
+      if (this.localAgentCleaningUp && this.activeAgentRunner !== null) {
+        this.reportLocalAgentStartupStatus('本地 Agent 收尾完成，可以重新下发任务。', true, true);
+      }
       this.activeAgentRunner = null;
       this.localTaskSessionId = '';
       this.isThinking = false;
+      this.localAgentCleaningUp = false;
     }
   }
 
@@ -3260,7 +3586,16 @@ struct Index {
             collectionModule: $collectionModule,
             viewModels: this.collectionViews,
             refreshing: this.dataManagerRefreshing,
-            onRefresh: () => { this.refreshDataManager(); }
+            wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
+            wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
+            onRefresh: () => { this.refreshDataManager(); },
+            onOpenDataCollectionSettings: () => {
+              this.settingsSectionId = SettingsSectionId.DataCollection;
+              this.currentTab = MainTabIndex.Settings;
+            },
+            onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
+              await this.runWechatAutoSummary(request);
+            }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))
         TabContent() {
@@ -3274,7 +3609,7 @@ struct Index {
             localOutput: this.output,
             localDebugImagePath: this.debugImagePath,
             chatHistory: this.chatHistory,
-            localThinking: this.isThinking,
+            localThinking: this.isThinking || this.localAgentCleaningUp,
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
@@ -3311,6 +3646,7 @@ struct Index {
             threadNumInput: $threadNumInput,
             backendTypeInput: $backendTypeInput,
             mllmBackendTypeInput: $mllmBackendTypeInput,
+            selectedSectionId: $settingsSectionId,
             output: $output,
             cloudOutput: $cloudOutput,
             modelDownloadProgressVisible: $modelDownloadProgressVisible,

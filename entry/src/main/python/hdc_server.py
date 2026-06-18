@@ -18,6 +18,12 @@ except Exception as ex:
     harmony_agent = None
     print(f">> [警告] 无法导入 harmony_agent workflow bridge 能力: {ex}")
 
+try:
+    from wechat_collect import service as wechat_collect_service
+except Exception as ex:
+    wechat_collect_service = None
+    print(f">> [警告] 无法导入微信 UI dump 采集模块: {ex}")
+
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
@@ -1381,6 +1387,84 @@ def ensure_workflow_agent_ready():
     if not is_hdc_connected():
         raise RuntimeError('HDC target is not connected')
 
+def ensure_wechat_collect_service_ready():
+    if wechat_collect_service is None:
+        raise RuntimeError("wechat_collect module is unavailable")
+
+def ensure_workflow_hdc_ready():
+    if not is_hdc_connected():
+        raise RuntimeError('HDC target is not connected')
+
+def ensure_wechat_collect_ready(require_agent=False):
+    ensure_wechat_collect_service_ready()
+    ensure_workflow_hdc_ready()
+    if require_agent:
+        if harmony_agent is None:
+            raise RuntimeError('harmony_agent.py is unavailable')
+        if not hasattr(harmony_agent, 'run_gui_task'):
+            raise RuntimeError('harmony_agent.run_gui_task is unavailable')
+
+def wechat_collect_requires_gui_search(payload):
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("mode", "recent_contacts")).strip() == "target_contact"
+
+def run_wechat_gui_search(contact_name):
+    if harmony_agent is None:
+        print(">> [WeChatCollect] harmony_agent 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.py is unavailable"}
+    if not hasattr(harmony_agent, 'run_gui_task'):
+        print(">> [WeChatCollect] harmony_agent.run_gui_task 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.run_gui_task is unavailable"}
+    return harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面")
+
+def wechat_collect_driver_call():
+    if harmony_agent is None or not hasattr(harmony_agent, 'run_driver_call'):
+        return None
+    ensure_driver = getattr(harmony_agent, 'ensure_driver_available', None)
+    if callable(ensure_driver):
+        try:
+            if not ensure_driver():
+                return None
+        except Exception as ex:
+            print(f">> [WeChatCollect] hmdriver2 初始化失败，将回退 HDC: {ex}")
+            return None
+    return harmony_agent.run_driver_call
+
+def bring_llm_app_back_after_wechat_collect():
+    if harmony_agent is None or not hasattr(harmony_agent, 'bring_llm_app_to_foreground'):
+        return
+    try:
+        harmony_agent.bring_llm_app_to_foreground()
+    except Exception as ex:
+        print(f">> [WeChatCollect] 回到 MNN LLM Chat 失败: {ex}")
+
+def workflow_uidump_action(payload):
+    ensure_wechat_collect_ready()
+    return run_with_hdc_control(
+        "workflow_uidump",
+        lambda: wechat_collect_service.uidump_action(payload or {}, hdc_prefix())
+    )
+
+def workflow_wechat_collect_action(payload):
+    request_payload = payload or {}
+    ensure_wechat_collect_ready()
+    def collect_and_return_app():
+        try:
+            return wechat_collect_service.collect_action(
+                request_payload,
+                hdc_prefix(),
+                gui_search=run_wechat_gui_search,
+                driver_call=wechat_collect_driver_call(),
+            )
+        finally:
+            bring_llm_app_back_after_wechat_collect()
+
+    return run_with_hdc_control(
+        "workflow_wechat_collect",
+        collect_and_return_app
+    )
+
 def run_remote_command(cmd):
     def execute():
         try:
@@ -1768,6 +1852,12 @@ def handle_workflow_action(action, payload):
 
     if action == 'gui_action':
         return workflow_gui_action(payload)
+
+    if action == 'uidump':
+        return workflow_uidump_action(payload)
+
+    if action == 'wechat_collect':
+        return workflow_wechat_collect_action(payload)
 
     raise RuntimeError(f'Unsupported workflow action: {action}')
 

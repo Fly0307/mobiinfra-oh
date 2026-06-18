@@ -30,5 +30,6 @@ build-profile.json5*
 /hvigor-workspace-review-fix-*/
 /.codex
 /docs/superpowers/
+/.superpowers/brainstorm/
 /mobile_file_example/
 /.agents/

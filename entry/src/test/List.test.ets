@@ -7,6 +7,7 @@ import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
 import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
+import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 
 export default function testsuite() {
@@ -19,5 +20,6 @@ export default function testsuite() {
   settingsCenterConfigUnitTest();
   chatSessionStorageUnitTest();
   appLoggerUnitTest();
+  wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
 }

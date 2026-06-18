@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
+import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -14,10 +15,12 @@ struct WorkflowFileViewer {
   @State selectedPath: string = '';
   @State selectedName: string = '';
   @State fileText: string = '正在加载...';
-  @State fileListExpanded: boolean = true;
+  // 文件列表默认收起，避免大量历史文件占满首屏并挤压当前文件详情。
+  @State fileListExpanded: boolean = false;
   @State currentInfoExpanded: boolean = true;
   @State manageMode: boolean = false;
   @State selectedDeletePaths: string[] = [];
+  @State previewMode: boolean = true;
 
   private filesDir: string = '';
 
@@ -63,6 +66,7 @@ struct WorkflowFileViewer {
     this.selectedPath = '';
     this.selectedName = '';
     this.manageMode = false;
+    this.fileListExpanded = false;
     this.selectedDeletePaths = [];
     this.loadFiles();
   }
@@ -84,12 +88,14 @@ struct WorkflowFileViewer {
       this.selectedPath = '';
       this.selectedName = '';
       this.fileText = this.emptyText(this.category);
+      this.previewMode = false;
     }
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
     this.selectedPath = file.path;
     this.selectedName = file.name;
+    this.previewMode = this.defaultPreviewMode(file);
     try {
       this.fileText = WorkflowStorage.readText(file.path);
     } catch (e) {
@@ -118,12 +124,36 @@ struct WorkflowFileViewer {
     return '暂无 daily-log 文件';
   }
 
+  private defaultPreviewMode(file: WorkflowManagedFile): boolean {
+    // daily-log 与 Markdown 文件优先给用户可读预览；配置 JSON 和运行输出保持原文优先，避免隐藏结构化字段。
+    let lowerName = file.name.toLowerCase();
+    if (this.category === 'daily') {
+      return true;
+    }
+    return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  }
+
+  private setPreviewMode(enabled: boolean): void {
+    this.previewMode = enabled;
+  }
+
   private fileDisplayTitle(file: WorkflowManagedFile): string {
     let index = file.name.lastIndexOf('/');
     if (index >= 0 && index < file.name.length - 1) {
       return file.name.substring(index + 1);
     }
     return file.name;
+  }
+
+  private selectedDisplayTitle(): string {
+    if (this.selectedName.length === 0) {
+      return this.emptyText(this.category);
+    }
+    let index = this.selectedName.lastIndexOf('/');
+    if (index >= 0 && index < this.selectedName.length - 1) {
+      return this.selectedName.substring(index + 1);
+    }
+    return this.selectedName;
   }
 
   private fileDisplayMeta(file: WorkflowManagedFile): string {
@@ -288,14 +318,14 @@ struct WorkflowFileViewer {
           .fontWeight(FontWeight.Bold)
           .fontColor(this.selectedPath === file.path ? '#4F46E5' : '#202637')
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.fileDisplayMeta(file))
           .fontSize(11)
           .fontColor('#7B8290')
           .margin({ top: 6 })
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       if (!this.manageMode) {
@@ -481,7 +511,7 @@ struct WorkflowFileViewer {
             .fontColor('#7B8290')
             .margin({ top: 12 })
             .width('100%')
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
       }
@@ -498,6 +528,26 @@ struct WorkflowFileViewer {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.selectedName.length > 0) {
+            Button('预览')
+              .width(62)
+              .height(30)
+              .fontSize(12)
+              .fontColor(this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(true); })
+            Button('原文')
+              .width(62)
+              .height(30)
+              .fontSize(12)
+              .fontColor(!this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(!this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(false); })
+          }
           Button(this.currentInfoExpanded ? '收起' : '展开')
             .width(58)
             .height(30)
@@ -510,20 +560,51 @@ struct WorkflowFileViewer {
         .width('100%')
         .alignItems(VerticalAlign.Center)
         if (this.currentInfoExpanded) {
-          Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
-            .fontSize(12)
-            .fontColor('#6F7584')
+          Column({ space: 6 }) {
+            Row() {
+              Text('文件')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedDisplayTitle())
+                .fontSize(12)
+                .fontColor('#3C4354')
+                .fontWeight(FontWeight.Medium)
+                .layoutWeight(1)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+
+            Row() {
+              Text('路径')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
+                .fontSize(12)
+                .fontColor('#6F7584')
+                .layoutWeight(1)
+                .maxLines(4)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+          }
             .margin({ top: 8 })
             .width('100%')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         Scroll() {
-          Text(this.fileText)
-            .fontSize(11)
-            .fontFamily('monospace')
-            .fontColor('#2F3645')
-            .width('100%')
+          if (this.previewMode && this.selectedName.length > 0) {
+            MarkdownView({ text: this.fileText, variant: 'file_preview' })
+          } else {
+            Text(this.fileText)
+              .fontSize(11)
+              .fontFamily('monospace')
+              .fontColor('#2F3645')
+              .width('100%')
+          }
         }
         .width('100%')
         .layoutWeight(1)

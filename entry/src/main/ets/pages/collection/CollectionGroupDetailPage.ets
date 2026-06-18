@@ -7,6 +7,8 @@ import {
   CollectionImageViewModel,
   JsonMap
 } from '../../datamanager/DataManagerTypes';
+import { MarkdownView } from '../../components/MarkdownView';
+import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
 @Entry
 @Component
@@ -49,8 +51,16 @@ struct CollectionGroupDetailPage {
   }
 
   private applyGroup(group: CollectionGroupViewModel): void {
-    this.title = group.title;
+    this.title = this.readableTitle(group.title, '采集详情');
     this.events = group.events;
+  }
+
+  private readableTitle(text: string, fallback: string): string {
+    let title = markdownTitleText(text);
+    if (title.length > 0) {
+      return title;
+    }
+    return text.length > 0 ? text : fallback;
   }
 
   private showEventDetail(event: CollectionEventViewModel): void {
@@ -123,7 +133,7 @@ struct CollectionGroupDetailPage {
     Row() {
       this.Thumbnail(event)
       Column() {
-        Text(event.summary)
+        Text(this.readableTitle(event.summary, '未命名事件'))
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .fontColor('#151A28')
@@ -275,7 +285,7 @@ struct CollectionGroupDetailPage {
           Column() {
             Row() {
               Column() {
-                Text(event.summary)
+                Text(this.readableTitle(event.summary, '事件详情'))
                   .fontSize(18)
                   .fontWeight(FontWeight.Bold)
                   .fontColor('#11182F')
@@ -306,10 +316,9 @@ struct CollectionGroupDetailPage {
                 this.DetailImages(event)
 
                 this.DetailSectionTitle('详情')
-                Text(this.detailText(event))
-                  .fontSize(13)
-                  .fontColor('#4D5566')
-                  .lineHeight(20)
+                Column() {
+                  MarkdownView({ text: this.detailText(event), variant: 'collection_detail' })
+                }
                   .width('100%')
                   .padding(10)
                   .backgroundColor('#F7F9FC')

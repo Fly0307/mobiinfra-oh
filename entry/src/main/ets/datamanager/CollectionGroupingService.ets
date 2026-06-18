@@ -32,7 +32,7 @@ import {
   stableUnique,
   summarizeText
 } from './DataManagerUtils';
-import { workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
 
 export interface CollectionGroupingBuildResult {
   tabCount: number;
@@ -71,7 +71,7 @@ export interface IncrementalCollectionGroupPlan {
 }
 
 export function collectionTabSpecs(): CollectionTabSpec[] {
-  let scenes = workflowSceneConfigs();
+  let scenes = memorySceneConfigs();
   return scenes.map((scene: WorkflowSceneConfig): CollectionTabSpec => {
     let spec: CollectionTabSpec = {
       tabIndex: scene.sceneId,
@@ -85,6 +85,11 @@ export function collectionTabSpecs(): CollectionTabSpec[] {
 
 export function collectionTabSpecByIndex(index: number): CollectionTabSpec {
   let specs = collectionTabSpecs();
+  for (let spec of specs) {
+    if (spec.tabIndex === index) {
+      return spec;
+    }
+  }
   if (index >= 0 && index < specs.length) {
     return specs[index];
   }
@@ -993,4 +998,3 @@ function isLowValueKeyword(value: string): boolean {
   }
   return false;
 }
-

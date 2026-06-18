@@ -18,6 +18,7 @@ import {
   applyIncrementalCollectionGroupAssignments,
   collectionGroupEventInputFingerprint,
   collectionGroupSourceInputFingerprint,
+  collectionTabSpecByIndex,
   heuristicCollectionGroups,
   normalizeCollectionGroups,
   prepareIncrementalCollectionGroups
@@ -54,10 +55,16 @@ import {
   shouldShowHomeRecommendationInView
 } from '../main/ets/datamanager/DataManagerFacade';
 import {
+  GalleryMemorySync,
+  GalleryMemorySyncResult,
+  galleryMemorySceneIdForCategory
+} from '../main/ets/utils/gallery/GalleryMemorySync';
+import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupAssignment,
   CollectionGroupState,
+  CollectionViewModel,
   HomeRecommendationsDocument,
   HomeRecommendationState,
   HomeDomainViewModel,
@@ -65,14 +72,20 @@ import {
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
   DataManagerModelConfig,
+  CollectionGalleryDetailViewModel,
+  JsonMap,
   ProfileClaim,
   ProfileDomainState,
   ProfileModelPayload,
   ProfileState,
+  NumberedEntry,
   SourceEntry,
   createJsonMap,
   createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
+import { GalleryAnalysisResult } from '../main/ets/utils/gallery/GalleryTypes';
+import { memorySceneConfigs, workflowSceneConfigs, WorkflowSceneConfig } from '../main/ets/utils/WorkflowSceneConfig';
+import { parseJsonCompat, stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
 import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
 import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
 import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
@@ -254,6 +267,129 @@ function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
   return map;
 }
 
+let galleryMemoryRootCounter: number = 0;
+
+interface GalleryMemoryItemsIndexDocument {
+  items: string[];
+}
+
+function nextGalleryMemoryRoot(name: string): string {
+  galleryMemoryRootCounter += 1;
+  return '/tmp/gallery-memory-sync-' + name + '-' + String(new Date().getTime()) + '-' +
+    String(galleryMemoryRootCounter);
+}
+
+function galleryMemoryStorage(): DataManagerStorage {
+  return new DataManagerStorage();
+}
+
+function galleryMemoryWriteItem(root: string, result: GalleryAnalysisResult): void {
+  let storage = galleryMemoryStorage();
+  let path = root + '/gallery-log/items/' + result.date + '/' + result.id + '.json';
+  storage.writeText(path, stringifyJsonCompat(galleryMemoryResultJson(result), 2));
+  galleryMemoryUpsertIndex(root, 'gallery-log/items/' + result.date + '/' + result.id + '.json');
+}
+
+function galleryMemoryUpsertIndex(root: string, relativePath: string): void {
+  let storage = galleryMemoryStorage();
+  let indexPath = root + '/gallery-log/items-index.json';
+  let document: GalleryMemoryItemsIndexDocument = { items: [] };
+  let content = storage.readText(indexPath, '');
+  if (content.length > 0) {
+    try {
+      document = parseJsonCompat<GalleryMemoryItemsIndexDocument>(content);
+    } catch (e) {
+      document = { items: [] };
+    }
+  }
+  if (!Array.isArray(document.items)) {
+    document.items = [];
+  }
+  if (document.items.indexOf(relativePath) < 0) {
+    document.items.push(relativePath);
+  }
+  storage.writeText(indexPath, stringifyJsonCompat(document as Object, 2));
+}
+
+function galleryMemoryResultJson(result: GalleryAnalysisResult): JsonMap {
+  let record = createJsonMap();
+  record['id'] = result.id;
+  record['uri'] = result.uri;
+  record['thumbnailUri'] = result.thumbnailUri ? result.thumbnailUri : '';
+  record['title'] = result.title;
+  record['category'] = result.category;
+  record['summary'] = result.summary;
+  record['details'] = result.details as Object;
+  record['tags'] = result.tags as Object;
+  record['ocrText'] = result.ocrText;
+  record['rawModelText'] = result.rawModelText;
+  record['keywords'] = result.keywords as Object;
+  record['date'] = result.date;
+  record['embeddingRef'] = result.embeddingRef;
+  record['embeddingStatus'] = result.embeddingStatus;
+  record['embeddingDimension'] = result.embeddingDimension;
+  record['error'] = result.error;
+  if (result.latitude !== undefined) {
+    record['latitude'] = result.latitude;
+  }
+  if (result.longitude !== undefined) {
+    record['longitude'] = result.longitude;
+  }
+  if (result.exif) {
+    record['exif'] = result.exif as Object;
+  }
+  if (result.location) {
+    record['location'] = result.location as Object;
+  }
+  record['createdAt'] = result.createdAt;
+  return record;
+}
+
+function galleryMemoryItem(id: string, category: string, title: string, summary: string): GalleryAnalysisResult {
+  return {
+    id: id,
+    uri: 'file://gallery/' + id + '.jpg',
+    thumbnailUri: '',
+    title: title,
+    category: category,
+    summary: summary,
+    details: ['画面主体清晰', '包含可用于记忆的场景细节'],
+    tags: ['图库', category],
+    ocrText: 'OCR-' + id,
+    rawModelText: '',
+    keywords: ['图库'],
+    date: '2026-06-01',
+    embeddingRef: '',
+    embeddingStatus: '',
+    embeddingDimension: 0,
+    error: '',
+    latitude: 31.024267,
+    longitude: 121.437828,
+    exif: {
+      dateTimeOriginal: '2026:06:01 09:08:07',
+      deviceMake: 'Huawei',
+      deviceModel: 'Pura 80'
+    },
+    location: {
+      key: '31.024267,121.437828',
+      provider: 'amap',
+      rawLatitude: 31.024267,
+      rawLongitude: 121.437828,
+      amapLatitude: 31.024267,
+      amapLongitude: 121.437828,
+      formattedAddress: '上海市闵行区东川路 800 号',
+      province: '上海市',
+      city: '上海市',
+      district: '闵行区',
+      township: '江川路街道',
+      street: '东川路',
+      poiName: '上海交通大学',
+      updatedAt: 1760000000000
+    },
+    createdAt: 1760000000000
+  };
+}
+
 function demoCollectionGroupState(id: string, title: string, events: IndexedEvent[]): CollectionGroupState {
   let eventMap = demoEventMap(events);
   let hashes = createStringMap();
@@ -345,6 +481,192 @@ export default function dataManagerUnitTest() {
       expect(entries[0].index).assertEqual(1);
       expect(entries[0].text.indexOf('故障描述') >= 0).assertTrue();
       expect(entries[1].index).assertEqual(2);
+    });
+
+    it('galleryMemorySyncWritesParseableDailyLogWithMetadata', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('daily-log');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('food-001', '餐饮', '牛肉面照片', '午餐吃了牛肉面'));
+      let failed = galleryMemoryItem('failed-001', '餐饮', '失败照片', '失败摘要');
+      failed.error = 'model error';
+      galleryMemoryWriteItem(root, failed);
+      let empty = galleryMemoryItem('empty-001', '餐饮', '', '');
+      empty.details = [];
+      empty.ocrText = '';
+      galleryMemoryWriteItem(root, empty);
+
+      let result: GalleryMemorySyncResult = GalleryMemorySync.sync(root);
+
+      expect(result.scannedItemCount).assertEqual(3);
+      expect(result.exportedEntryCount).assertEqual(1);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let doc = parseDailyLogDocument(storage.readText(path, ''));
+      expect(Number(doc.workflow_metadata['task_scene_id'])).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+      expect(String(doc.workflow_metadata['source_kind'])).assertEqual('gallery');
+      expect(String(doc.workflow_metadata['gallery_category'])).assertEqual('餐饮');
+      expect(doc.latest_entry_index > 0).assertTrue();
+      let entries = parseNumberedEntries(doc.body);
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].text.indexOf('牛肉面照片') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('OCR-food-001') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncRecoversFieldsFromLegacyRawModelText', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('legacy-raw-model');
+      storage.removeTree(root);
+      let legacy = galleryMemoryItem('legacy-001', '其他', '图库图片', '{ "title": "生活记忆", "category": "餐饮", "summary": 这张图展示了与饮食相关的照片和日常使用场景。');
+      legacy.details = [];
+      legacy.tags = [];
+      legacy.rawModelText = '{\n' +
+        '  "title": "生活记忆",\n' +
+        '  "category": "餐饮",\n' +
+        '  "summary": 这张图展示了与饮食相关的照片和日常使用场景。",\n' +
+        '  "details": [\n' +
+        '    "桌上有咖啡杯和咖啡壶，表明餐饮活动",\n' +
+        '    "近期积极购入手冲咖啡器具"\n' +
+        '  ],\n' +
+        '  "tags": ["饮食", "外卖", "餐饮"]\n' +
+        '}';
+      galleryMemoryWriteItem(root, legacy);
+
+      GalleryMemorySync.sync(root);
+
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let doc = parseDailyLogDocument(storage.readText(path, ''));
+      expect(Number(doc.workflow_metadata['task_scene_id'])).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+      expect(String(doc.workflow_metadata['gallery_category'])).assertEqual('餐饮');
+      let entries = parseNumberedEntries(doc.body);
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].text.indexOf('生活记忆') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('这张图展示了与饮食相关') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('手冲咖啡器具') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('饮食、外卖、餐饮') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySceneConfigsKeepWorkflowScenesStable', 0, () => {
+      expect(galleryMemorySceneIdForCategory('聊天')).assertEqual(3);
+      expect(galleryMemorySceneIdForCategory('购物')).assertEqual(0);
+      expect(galleryMemorySceneIdForCategory('出行')).assertEqual(6);
+      expect(galleryMemorySceneIdForCategory('餐饮')).assertEqual(7);
+      expect(galleryMemorySceneIdForCategory('文档')).assertEqual(8);
+      expect(galleryMemorySceneIdForCategory('健康')).assertEqual(9);
+      expect(galleryMemorySceneIdForCategory('工作')).assertEqual(10);
+      expect(galleryMemorySceneIdForCategory('其他')).assertEqual(11);
+
+      expect(workflowSceneConfigs().length).assertEqual(7);
+      let memoryScenes: WorkflowSceneConfig[] = memorySceneConfigs();
+      expect(memoryScenes.length > workflowSceneConfigs().length).assertTrue();
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '餐饮').length).assertEqual(1);
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '图库').length).assertEqual(1);
+      let foodSpec = collectionTabSpecByIndex(galleryMemorySceneIdForCategory('餐饮'));
+      expect(foodSpec.title).assertEqual('餐饮记录');
+      expect(foodSpec.query.workflowSceneIds[0]).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+    });
+
+    it('galleryMemorySyncKeepsEntryIndexStableWhenNewItemsArrive', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('stable-index');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('stable-001', '餐饮', '第一张餐饮图', '第一条摘要'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let firstEntries: NumberedEntry[] = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body);
+      let firstIndex: number = firstEntries[0].index;
+
+      galleryMemoryWriteItem(root, galleryMemoryItem('stable-999', '餐饮', '第二张餐饮图', '第二条摘要'));
+      GalleryMemorySync.sync(root);
+      let secondEntries: NumberedEntry[] = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body);
+      let stableEntry: NumberedEntry = secondEntries.filter((entry: NumberedEntry): boolean =>
+        entry.text.indexOf('第一张餐饮图') >= 0)[0];
+
+      expect(stableEntry.index).assertEqual(firstIndex);
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncDeletesOldExportsWhenGalleryIsEmpty', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('clear');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('clear-001', '文档', '文档截图', '一张文档截图'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__文档.md';
+      expect(storage.exists(path)).assertTrue();
+
+      storage.removeTree(root + '/gallery-log/items');
+      let result: GalleryMemorySyncResult = GalleryMemorySync.sync(root);
+
+      expect(result.exportedFileCount).assertEqual(0);
+      expect(storage.exists(path)).assertFalse();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncResolvesImageRefsForSourceRefs', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('image-refs');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('image-001', '文档', '报告截图', '报告内容截图'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__文档.md';
+      let entry = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body)[0];
+      let refs: string[] = GalleryMemorySync.imageRefsForSourceRefs(root, root + '/workflows/daily-log',
+        ['2026-06-01/com.huawei.photos__gallery-analysis__文档.md#' + String(entry.index)]);
+
+      expect(refs.length).assertEqual(1);
+      expect(refs[0]).assertEqual('gallery-log/items/2026-06-01/image-001.json#uri');
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncReturnsDetailsForSourceRefs', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('details');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('detail-001', '健康', '跑步记录', '晨跑后的健康记录'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__健康.md';
+      let entry = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body)[0];
+      let details: CollectionGalleryDetailViewModel[] = GalleryMemorySync.detailsForSourceRefs(root, root + '/workflows/daily-log',
+        ['2026-06-01/com.huawei.photos__gallery-analysis__健康.md#' + String(entry.index)]);
+
+      expect(details.length).assertEqual(1);
+      expect(details[0].id).assertEqual('detail-001');
+      expect(details[0].uri).assertEqual('file://gallery/detail-001.jpg');
+      expect(details[0].ocrText).assertEqual('OCR-detail-001');
+      expect(details[0].captureTime).assertEqual('2026-06-01 09:08:07');
+      expect(details[0].captureDevice).assertEqual('Huawei Pura 80');
+      expect(details[0].captureLocation).assertEqual('北纬 31.024267，东经 121.437828');
+      expect(details[0].address).assertEqual('上海市闵行区东川路 800 号');
+      expect(details[0].poiName).assertEqual('上海交通大学');
+      expect(details[0].mapUrl.indexOf('position=121.437828,31.024267') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('dataManagerRefreshIndexesGalleryMemoryEventsWithImagesAndDetails', 0, async () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('facade-refresh');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('health-001', '健康', '晨跑健康记录', '晨跑后保存了一张健康记录截图'));
+
+      let facade = new DataManagerFacade(root);
+      await facade.refresh(disabledModelConfig());
+      let view: CollectionViewModel = facade.loadCollectionViewModel(galleryMemorySceneIdForCategory('健康'));
+
+      expect(view.empty).assertFalse();
+      expect(view.groups.length > 0).assertTrue();
+      expect(view.groups[0].events.length > 0).assertTrue();
+      let event = view.groups[0].events[0];
+      expect(event.summary.indexOf('晨跑') >= 0).assertTrue();
+      expect(event.imageRefs.length).assertEqual(1);
+      expect(event.imageRefs[0].ref).assertEqual('gallery-log/items/2026-06-01/health-001.json#uri');
+      expect(event.imageRefs[0].uri).assertEqual('file://gallery/health-001.jpg');
+      expect(event.thumbnailUri).assertEqual('file://gallery/health-001.jpg');
+      expect(event.galleryDetails.length).assertEqual(1);
+      expect(event.galleryDetails[0].id).assertEqual('health-001');
+      expect(event.galleryDetails[0].ocrText).assertEqual('OCR-health-001');
+      storage.removeTree(root);
     });
 
     it('sourceDisplayName', 0, () => {
@@ -961,7 +1283,9 @@ export default function dataManagerUnitTest() {
       expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('source_ref：输入 entry 的唯一引用标识') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('source_date：daily-log 文件日期') >= 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('workflow_scene_label：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_label：采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('餐饮、文档、健康、办公、图库') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('entry_text：原始日志条目正文') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"items"') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"facts"') >= 0).assertTrue();
@@ -984,7 +1308,9 @@ export default function dataManagerUnitTest() {
       expect(preview.userPrompt.indexOf('微信里提到这周六要买咖啡豆') >= 0).assertTrue();
       expect(preview.userPrompt.indexOf('与朋友聊天时提到这周六要在淘宝购买咖啡豆') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('workflow_scene_labels：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_labels：采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('餐饮、文档、健康、办公、图库') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('keywords 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('domains 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('eat|wear|live|travel|work|other') >= 0).assertTrue();

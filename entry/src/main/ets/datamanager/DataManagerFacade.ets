@@ -8,6 +8,7 @@ import { HomeRecommendationBuildResult, HomeRecommendationService } from './Home
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -272,6 +273,7 @@ export class DataManagerFacade {
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
     dataManagerInfo(`DataManagerFacade refresh start: modelEnabled=${modelConfig.enabled}, groupingModelEnabled=${groupingConfig.enabled}, dailyRoot=${this.paths.dailyLogRoot}`);
+    GalleryMemorySync.sync(this.paths.filesDir);
     let currentSnapshot = this.buildDailyLogSnapshot();
     let previousSnapshot = this.loadDailyLogSnapshot();
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
@@ -381,7 +383,11 @@ export class DataManagerFacade {
 
   private buildDailyLogSnapshot(): DailyLogSnapshot {
     let files: DailyLogSnapshotFile[] = [];
-    this.storage.findFiles(this.paths.dailyLogRoot, '.md').forEach((path: string) => {
+    let paths = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
+    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
+    });
+    stableUnique(paths).forEach((path: string) => {
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
       let content = this.storage.readText(path, '');
       let document = parseDailyLogDocument(content);
@@ -758,6 +764,7 @@ export class DataManagerFacade {
       status: '已整理',
       domain: primaryDomain,
       imageRefs: images,
+      galleryDetails: GalleryMemorySync.detailsForSourceRefs(this.paths.filesDir, this.paths.dailyLogRoot, event.source_refs || []),
       thumbnailUri: thumbnailUri
     };
     return row;

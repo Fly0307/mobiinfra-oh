@@ -6,7 +6,7 @@ import {
 } from '../../datamanager/DataManagerTypes';
 import { createEmptyCollectionViewModels } from '../../datamanager/DataManagerFacade';
 import { dataManagerInfo } from '../../datamanager/DataManagerLog';
-import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
 import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
@@ -435,7 +435,7 @@ export struct CollectionPage {
 
         Scroll() {
           Row() {
-            ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+            ForEach(memorySceneConfigs(), (scene: WorkflowSceneConfig) => {
               this.CollectTab(scene)
             }, (scene: WorkflowSceneConfig) => scene.tabId)
           }.padding({ left: 24, right: 24 })

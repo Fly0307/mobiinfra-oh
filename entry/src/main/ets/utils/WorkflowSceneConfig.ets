@@ -15,8 +15,21 @@ const WORKFLOW_SCENES: WorkflowSceneConfig[] = [
   { sceneId: 6, tabId: 'travel', label: '差旅', color: '#0EA5E9' }
 ];
 
+// DataManager 记忆层需要接纳图库分析补充场景，但工作流任务页仍只展示原 7 类采集场景。
+const MEMORY_EXTRA_SCENES: WorkflowSceneConfig[] = [
+  { sceneId: 7, tabId: 'gallery-food', label: '餐饮', color: '#F97316' },
+  { sceneId: 8, tabId: 'gallery-document', label: '文档', color: '#64748B' },
+  { sceneId: 9, tabId: 'gallery-health', label: '健康', color: '#10B981' },
+  { sceneId: 10, tabId: 'gallery-work', label: '办公', color: '#2563EB' },
+  { sceneId: 11, tabId: 'gallery-other', label: '图库', color: '#9333EA' }
+];
+
 export function workflowSceneConfigs(): WorkflowSceneConfig[] {
   return WORKFLOW_SCENES.slice();
+}
+
+export function memorySceneConfigs(): WorkflowSceneConfig[] {
+  return WORKFLOW_SCENES.concat(MEMORY_EXTRA_SCENES);
 }
 
 export function workflowSceneById(sceneId: number): WorkflowSceneConfig {
@@ -37,4 +50,14 @@ export function workflowSceneByIndex(index: number): WorkflowSceneConfig {
 
 export function workflowSceneLabel(sceneId: number): string {
   return workflowSceneById(sceneId).label;
+}
+
+export function memorySceneLabel(sceneId: number): string {
+  let scenes = memorySceneConfigs();
+  for (let scene of scenes) {
+    if (scene.sceneId === sceneId) {
+      return scene.label;
+    }
+  }
+  return workflowSceneLabel(sceneId);
 }

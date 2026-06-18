@@ -38,6 +38,7 @@ import {
   updateExistingRecord,
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 
 export interface ConsolidationResult {
   sourceEntries: number;
@@ -63,7 +64,14 @@ interface EntryGroupPlan {
   existingRecordCount: number;
 }
 
+interface ConsolidationOutputStateIndex {
+  schema: string;
+  generated_at: string;
+  state_paths: string[];
+}
+
 const DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY: number = 4;
+const OUTPUT_STATE_INDEX_FILE_NAME: string = 'state-index.json';
 
 export class ConsolidationService {
   private paths: DataManagerPaths;
@@ -82,6 +90,7 @@ export class ConsolidationService {
     dataManagerInfo(`Consolidation start: dailyRoot=${this.paths.dailyLogRoot}, dedupWindow=${dedupWindow}, modelEnabled=${modelConfig.enabled}`);
     let entries = this.collectSourceEntries();
     let groups = this.groupEntriesByMonth(entries);
+    this.writeOutputStateIndex(groups);
     this.emitProgress(progress, '扫描日志', `发现 ${entries.length} 条 daily-log`, 1, 100, 10);
     dataManagerInfo(`Consolidation collected: entries=${entries.length}, groups=${groups.length}`);
     if (entries.length === 0) {
@@ -141,12 +150,34 @@ export class ConsolidationService {
 
   private collectSourceEntries(): SourceEntry[] {
     let entries: SourceEntry[] = [];
-    let dayDirs = this.storage.listDir(this.paths.dailyLogRoot)
-      .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name));
+    let daySet: Record<string, boolean> = new Object() as Record<string, boolean>;
+    this.storage.listDir(this.paths.dailyLogRoot)
+      .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name))
+      .forEach((name: string) => daySet[name] = true);
+    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      let slash = relativePath.indexOf('/');
+      if (slash > 0) {
+        let day = relativePath.substring(0, slash);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          daySet[day] = true;
+        }
+      }
+    });
+    let dayDirs = Object.keys(daySet).sort();
     dataManagerInfo(`Consolidation daily dirs: count=${dayDirs.length}, names=${dayDirs.slice(0, 8).join(',')}`);
     for (let day of dayDirs) {
       let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
-      let files = this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md'));
+      let fileSet: Record<string, boolean> = new Object() as Record<string, boolean>;
+      this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
+      GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+        if (relativePath.startsWith(day + '/')) {
+          let fileName = relativePath.substring(day.length + 1);
+          if (fileName.endsWith('.md')) {
+            fileSet[fileName] = true;
+          }
+        }
+      });
+      let files = Object.keys(fileSet).sort();
       dataManagerInfo(`Consolidation day scan: day=${day}, mdFiles=${files.length}`);
       for (let fileName of files) {
         let path = this.storage.join(dayDir, fileName);
@@ -215,6 +246,19 @@ export class ConsolidationService {
         existingRecordCount: state.records.length
       };
     });
+  }
+
+  private writeOutputStateIndex(groups: EntryGroup[]): void {
+    let relativePaths = groups.map((group: EntryGroup): string => {
+      return this.storage.relativePath(this.paths.outputsRoot, this.paths.outputStatePath(group.month, group.fileName));
+    });
+    let payload: ConsolidationOutputStateIndex = {
+      schema: 'datamanager-consolidation-output-state-index-v1',
+      generated_at: nowIsoLocal(),
+      state_paths: stableUnique(relativePaths).sort()
+    };
+    // 记录本轮整理产物清单，目录枚举不可用时索引阶段仍能找到最新的 state 文件；图库清空时这里会写入空清单。
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.outputsRoot, OUTPUT_STATE_INDEX_FILE_NAME), payload as Object);
   }
 
   private async consolidateGroup(group: EntryGroup, modelConfig: DataManagerModelConfig, dedupWindow: number, progress?: DataManagerProgressCallback, startPercent: number = 12, endPercent: number = 55): Promise<ConsolidatedState> {
@@ -412,4 +456,3 @@ export class ConsolidationService {
     return metadata;
   }
 }
-

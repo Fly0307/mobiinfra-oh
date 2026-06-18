@@ -15,7 +15,8 @@ struct WorkflowFileViewer {
   @State selectedPath: string = '';
   @State selectedName: string = '';
   @State fileText: string = '正在加载...';
-  @State fileListExpanded: boolean = true;
+  // 文件列表默认收起，避免大量历史文件占满首屏并挤压当前文件详情。
+  @State fileListExpanded: boolean = false;
   @State currentInfoExpanded: boolean = true;
   @State manageMode: boolean = false;
   @State selectedDeletePaths: string[] = [];
@@ -65,6 +66,7 @@ struct WorkflowFileViewer {
     this.selectedPath = '';
     this.selectedName = '';
     this.manageMode = false;
+    this.fileListExpanded = false;
     this.selectedDeletePaths = [];
     this.loadFiles();
   }
@@ -141,6 +143,17 @@ struct WorkflowFileViewer {
       return file.name.substring(index + 1);
     }
     return file.name;
+  }
+
+  private selectedDisplayTitle(): string {
+    if (this.selectedName.length === 0) {
+      return this.emptyText(this.category);
+    }
+    let index = this.selectedName.lastIndexOf('/');
+    if (index >= 0 && index < this.selectedName.length - 1) {
+      return this.selectedName.substring(index + 1);
+    }
+    return this.selectedName;
   }
 
   private fileDisplayMeta(file: WorkflowManagedFile): string {
@@ -305,14 +318,14 @@ struct WorkflowFileViewer {
           .fontWeight(FontWeight.Bold)
           .fontColor(this.selectedPath === file.path ? '#4F46E5' : '#202637')
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.fileDisplayMeta(file))
           .fontSize(11)
           .fontColor('#7B8290')
           .margin({ top: 6 })
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       if (!this.manageMode) {
@@ -498,7 +511,7 @@ struct WorkflowFileViewer {
             .fontColor('#7B8290')
             .margin({ top: 12 })
             .width('100%')
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
       }
@@ -517,7 +530,7 @@ struct WorkflowFileViewer {
             .layoutWeight(1)
           if (this.selectedName.length > 0) {
             Button('预览')
-              .width(54)
+              .width(62)
               .height(30)
               .fontSize(12)
               .fontColor(this.previewMode ? Color.White : '#5968FF')
@@ -526,7 +539,7 @@ struct WorkflowFileViewer {
               .margin({ right: 8 })
               .onClick(() => { this.setPreviewMode(true); })
             Button('原文')
-              .width(54)
+              .width(62)
               .height(30)
               .fontSize(12)
               .fontColor(!this.previewMode ? Color.White : '#5968FF')
@@ -547,13 +560,40 @@ struct WorkflowFileViewer {
         .width('100%')
         .alignItems(VerticalAlign.Center)
         if (this.currentInfoExpanded) {
-          Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
-            .fontSize(12)
-            .fontColor('#6F7584')
+          Column({ space: 6 }) {
+            Row() {
+              Text('文件')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedDisplayTitle())
+                .fontSize(12)
+                .fontColor('#3C4354')
+                .fontWeight(FontWeight.Medium)
+                .layoutWeight(1)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+
+            Row() {
+              Text('路径')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
+                .fontSize(12)
+                .fontColor('#6F7584')
+                .layoutWeight(1)
+                .maxLines(4)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+          }
             .margin({ top: 8 })
             .width('100%')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         Scroll() {
           if (this.previewMode && this.selectedName.length > 0) {

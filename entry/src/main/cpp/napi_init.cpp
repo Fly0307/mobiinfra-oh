@@ -178,6 +178,29 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
     napi_create_string_utf8(env, "ok", 2, &ret);
     return ret;
 }
+
+static void appendLargeLogBlock(const std::string& title, const std::string& text) {
+    gLog.append("===== " + title + " BEGIN chars=" + std::to_string(text.size()) + " =====");
+    size_t offset = 0;
+    const size_t chunkSize = 3500;
+    while (offset < text.size()) {
+        gLog.append(text.substr(offset, std::min(chunkSize, text.size() - offset)));
+        offset += chunkSize;
+    }
+    if (text.empty()) {
+        gLog.append("");
+    }
+    gLog.append("===== " + title + " END =====");
+}
+
+static void dumpLlmRequest(const std::string& tag, const std::string& rawInput, const std::string& modelInput) {
+    appendLargeLogBlock(tag + " RAW INPUT", rawInput);
+    appendLargeLogBlock(tag + " MODEL INPUT", modelInput);
+}
+
+static void dumpLlmResponse(const std::string& tag, const std::string& response) {
+    appendLargeLogBlock(tag + " MODEL RESPONSE", response);
+}
 } // anonymous namespace
 
 // 去掉 HiLog 隐私格式（%{public}d -> %d），这样同一条格式串也能安全喂给 vsnprintf。
@@ -640,8 +663,10 @@ static void GenerateExecute(napi_env env, void* data) {
     }
 
     std::ostringstream oss;
+    dumpLlmRequest("Generate", asyncData->inputStr, g_llm->apply_chat_template(asyncData->inputStr));
     g_llm->response(asyncData->inputStr, &oss);
     asyncData->outputStr = oss.str();
+    dumpLlmResponse("Generate", asyncData->outputStr);
 
     auto context = g_llm->getContext();
     if(context) {
@@ -707,6 +732,8 @@ static void ChatExecute(napi_env env, void* data) {
     // 多轮对话保存 ChatMessages；Agent 模式使用独立 API，避免污染普通聊天历史。
     g_messages.emplace_back("user", asyncData->inputStr);
     std::ostringstream oss;
+    std::string modelInput = g_llm->apply_chat_template(g_messages);
+    dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
     g_llm->response(g_messages, &oss);
     auto context = g_llm->getContext();
     
@@ -722,6 +749,7 @@ static void ChatExecute(napi_env env, void* data) {
     }
 
     g_messages.emplace_back("assistant", assistant_str);
+    dumpLlmResponse("Chat", assistant_str);
     asyncData->outputStr = assistant_str;
     asyncData->success = true;
 }
@@ -771,6 +799,7 @@ static void AgentPrefillExecute(napi_env env, void* data) {
     g_llm->set_config("{\"use_template\":false}");
 
     // 只 prefill prefix，不生成新 token；记录 prefix 结束位置供后续 eraseHistory 使用。
+    dumpLlmRequest("AgentPrefill", asyncData->inputStr, asyncData->inputStr);
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
     g_prefix_pos = g_llm->getCurrentHistory();
     g_agent_mode = true;
@@ -830,6 +859,7 @@ static void AgentStepExecute(napi_env env, void* data) {
 
     // 预填当前 variable（历史 + 截图标签），随后生成动作 JSON；可选流式回调用于浮窗。
     std::string response;
+    dumpLlmRequest("AgentStep", asyncData->inputStr, asyncData->inputStr);
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
         std::ostream tokenStream(&buf);
@@ -851,6 +881,7 @@ static void AgentStepExecute(napi_env env, void* data) {
         asyncData->outputStr = "error: empty agent response";
         return;
     }
+    dumpLlmResponse("AgentStep", response);
 
     if (context) {
         float prefill_s = context->prefill_us / 1e6;

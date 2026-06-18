@@ -15,7 +15,7 @@ import {
 export const QUERY_EVENTS_TOOL_NAME: string = 'query_events';
 const DEFAULT_QUERY_EVENTS_LIMIT: number = 20;
 const QUERY_EVENTS_TOOL_DESCRIPTION: string =
-  '如果根据用户请求，你需要根据关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时（例如用户询问“帮我查一下我上周做了什么”时），调用该工具。';
+  '如果根据用户请求，你需要根据关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时（例如用户询问“帮我查一下我上周做了什么”时），调用该工具。未注明年份的日期必须根据系统消息中的当前日期补全年份后再调用。';
 const ENTITY_TYPES: string[] = ['person', 'place', 'merchant'];
 
 type QueryEventsJsonValue = Object | string | number | boolean | null;
@@ -105,10 +105,10 @@ export function queryEventsToolParameters(): Object {
   properties['domains'] = enumArraySchema('领域过滤。可选值：eat 吃、wear 穿、live 住、travel 行、work 办公、other 其他。' +
     '多个领域之间是 OR 关系，并会与其他过滤条件取 AND。', DOMAIN_KEYS) as Object;
   properties['entities'] = entitiesArraySchema() as Object;
-  properties['date'] = stringSchema('精确日期过滤，格式 YYYY-MM-DD，例如 2026-06-18。不能和 month、start_date、end_date 同时使用。') as Object;
-  properties['month'] = stringSchema('月份过滤，格式 YYYY-MM，例如 2026-06。不能和 date、start_date、end_date 同时使用。') as Object;
-  properties['start_date'] = stringSchema('日期范围开始日期，格式 YYYY-MM-DD，例如 2026-06-01。可与 end_date 搭配，也可单独表示从该日开始。') as Object;
-  properties['end_date'] = stringSchema('日期范围结束日期，格式 YYYY-MM-DD，例如 2026-06-30。可与 start_date 搭配，也可单独表示截至该日。') as Object;
+  properties['date'] = stringSchema('精确日期过滤，格式 YYYY-MM-DD，例如 2026-06-18。不能和 month、start_date、end_date 同时使用。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
+  properties['month'] = stringSchema('月份过滤，格式 YYYY-MM，例如 2026-06。不能和 date、start_date、end_date 同时使用。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
+  properties['start_date'] = stringSchema('日期范围开始日期，格式 YYYY-MM-DD，例如 2026-06-01。可与 end_date 搭配，也可单独表示从该日开始。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
+  properties['end_date'] = stringSchema('日期范围结束日期，格式 YYYY-MM-DD，例如 2026-06-30。可与 start_date 搭配，也可单独表示截至该日。用户未说明年份时，必须根据系统消息中的当前日期补全年份。') as Object;
   properties['limit'] = numberSchema('最多返回多少条事件。省略时默认返回 20 条；传 0 表示返回全部匹配事件。') as Object;
 
   let parameters = createSchemaMap();

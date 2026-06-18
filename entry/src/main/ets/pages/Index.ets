@@ -28,7 +28,7 @@ import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
-import { CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
+import { CloudChatMessage, CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
 import {
   createEmptyCollectionViewModels,
   createEmptyHomeProfileViewModel,
@@ -897,6 +897,20 @@ struct Index {
   private currentLocalDateKey(): string {
     let date = new Date();
     return `${date.getFullYear()}-${this.padDatePart(date.getMonth() + 1)}-${this.padDatePart(date.getDate())}`;
+  }
+
+  private currentLocalWeekdayLabel(): string {
+    let weekdays: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+    let date = new Date();
+    return weekdays[date.getDay()];
+  }
+
+  private cloudChatDateSystemMessage(): CloudChatMessage {
+    return {
+      role: 'system',
+      content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。\n\n' + '' +
+        '当前日期: ' + this.currentLocalDateKey() + '，' + this.currentLocalWeekdayLabel()
+    };
   }
 
   private reloadHomeViewModelIfDateChanged(): void {
@@ -2344,7 +2358,8 @@ struct Index {
     }
     let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
       new Date().getTime());
-    let contextMessages = buildCloudContextMessages(activeSession.messages.concat([userMessage]));
+    let contextMessages: CloudChatMessage[] = [this.cloudChatDateSystemMessage()]
+      .concat(buildCloudContextMessages(activeSession.messages.concat([userMessage])));
     this.appendActiveChatMessage(userMessage);
     this.appendCloudLog(`ReAct 云端聊天开始，任务：${task}`);
     let toolTraceLines: string[] = [];

@@ -36,6 +36,7 @@ import {
   isHomeTodoIndexCandidate,
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
+  monthLastDateForTemporalIndex,
   resolveQueryLimit,
   buildProfileDomainStateFromPayload,
   isProfileDomainStateReusable
@@ -378,6 +379,12 @@ export default function dataManagerUnitTest() {
       expect(weekdayLabelFromDate('2026-06-06')).assertEqual('星期六');
       expect(weekdayLabelFromDate('bad-date')).assertEqual('');
       expect(weekdayLabelFromDate('2026-02-31')).assertEqual('');
+    });
+
+    it('monthLastDateForTemporalIndex', 0, () => {
+      expect(monthLastDateForTemporalIndex('2026-05')).assertEqual('2026-05-31');
+      expect(monthLastDateForTemporalIndex('2026-06')).assertEqual('2026-06-30');
+      expect(monthLastDateForTemporalIndex('2024-02')).assertEqual('2024-02-29');
     });
 
     it('profileShortSummaryNormalization', 0, () => {

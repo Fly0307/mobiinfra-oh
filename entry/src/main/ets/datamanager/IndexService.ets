@@ -224,6 +224,18 @@ export function isRecentNoDeadlineHomeTodoEvent(eventDate: string, today: string
   return eventDate > recentLowerBoundExclusive;
 }
 
+export function monthLastDateForTemporalIndex(month: string): string {
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return month + '-31';
+  }
+  let year = Number(month.substring(0, 4));
+  let monthNumber = Number(month.substring(5, 7));
+  if (isNaN(year) || isNaN(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+    return month + '-31';
+  }
+  return new Date(Date.UTC(year, monthNumber, 0)).toISOString().substring(0, 10);
+}
+
 function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
   for (let sceneId of selectedSceneIds) {
     if (eventSceneIds.indexOf(sceneId) >= 0) {
@@ -2121,14 +2133,7 @@ export class IndexService {
   }
 
   private monthLastDate(month: string): string {
-    let first = dateToTime(month + '-01');
-    if (first <= 0) {
-      return month + '-31';
-    }
-    let date = new Date(first);
-    let year = date.getUTCFullYear();
-    let monthIndex = date.getUTCMonth();
-    return new Date(Date.UTC(year, monthIndex + 1, 0)).toISOString().substring(0, 10);
+    return monthLastDateForTemporalIndex(month);
   }
 
   private eventDateRange(events: IndexedEvent[]): StringMap {

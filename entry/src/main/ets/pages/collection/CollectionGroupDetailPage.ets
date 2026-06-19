@@ -3,6 +3,7 @@ import { router } from '@kit.ArkUI';
 import { DataManagerFacade } from '../../datamanager/DataManagerFacade';
 import {
   CollectionEventViewModel,
+  CollectionGalleryDetailViewModel,
   CollectionGroupViewModel,
   CollectionImageViewModel,
   JsonMap
@@ -104,6 +105,23 @@ struct CollectionGroupDetailPage {
       return '暂无图片';
     }
     return count.toString() + ' 张图片';
+  }
+
+  private joinedText(values: string[], separator: string): string {
+    let output = '';
+    for (let value of values) {
+      if (value.length > 0) {
+        output = output.length > 0 ? output + separator + value : value;
+      }
+    }
+    return output;
+  }
+
+  private galleryCaptureTime(detail: CollectionGalleryDetailViewModel): string {
+    if (detail.captureTime.length > 0) {
+      return detail.captureTime;
+    }
+    return detail.date;
   }
 
   @Builder Thumbnail(event: CollectionEventViewModel) {
@@ -270,6 +288,75 @@ struct CollectionGroupDetailPage {
     }
   }
 
+  @Builder GalleryLongText(label: string, value: string) {
+    Column() {
+      Text(label)
+        .fontSize(12)
+        .fontColor('#7C8494')
+        .maxLines(1)
+      Text(value.length > 0 ? value : '暂无数据')
+        .fontSize(12)
+        .fontColor('#303746')
+        .lineHeight(19)
+        .width('100%')
+        .margin({ top: 4 })
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .margin({ top: 10 })
+  }
+
+  @Builder GalleryDetailCard(detail: CollectionGalleryDetailViewModel) {
+    Column() {
+      Row() {
+        Text(detail.category.length > 0 ? detail.category : '图库')
+          .fontSize(11)
+          .fontColor('#8066FF')
+          .maxLines(1)
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor('#F0ECFF')
+          .borderRadius(10)
+        Text(this.readableTitle(detail.title, '图库分析详情'))
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+
+      this.GalleryLongText('分类', detail.category)
+      this.GalleryLongText('标签', this.joinedText(detail.tags, '、'))
+      this.GalleryLongText('摘要', detail.summary)
+      this.GalleryLongText('分析明细', this.joinedText(detail.details, '\n'))
+      this.GalleryLongText('OCR 文本', detail.ocrText)
+      this.GalleryLongText('拍摄时间', this.galleryCaptureTime(detail))
+      this.GalleryLongText('设备', detail.captureDevice)
+      this.GalleryLongText('坐标', detail.captureLocation)
+      this.GalleryLongText('地址', detail.address)
+      this.GalleryLongText('附近地点', detail.poiName)
+      this.GalleryLongText('地图链接', detail.mapUrl)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#F7F9FC')
+    .borderRadius(12)
+    .margin({ top: 10 })
+  }
+
+  @Builder GalleryDetails(event: CollectionEventViewModel) {
+    if (event.galleryDetails.length > 0) {
+      this.DetailSectionTitle('图库分析')
+      ForEach(event.galleryDetails, (detail: CollectionGalleryDetailViewModel, index: number) => {
+        this.GalleryDetailCard(detail)
+      }, (detail: CollectionGalleryDetailViewModel, index: number) =>
+        event.id + '_gallery_' + detail.id + '_' + index.toString())
+    }
+  }
+
   @Builder EventDetailPanel() {
     if (this.selectedEventId.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -312,8 +399,9 @@ struct CollectionGroupDetailPage {
 
             Scroll() {
               Column() {
-                this.DetailSectionTitle('来源图片')
+                this.DetailSectionTitle(event.galleryDetails.length > 0 ? '图库图片' : '来源图片')
                 this.DetailImages(event)
+                this.GalleryDetails(event)
 
                 this.DetailSectionTitle('详情')
                 Column() {

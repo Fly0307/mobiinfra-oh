@@ -323,6 +323,12 @@ function sourceContextDisplayNames(value: string): string[] {
   if (parts.length <= 2) {
     return [];
   }
+  let workflowName = normalizeLookupText(parts[1]);
+  // 微信自动采集第三段是 run_id，图库导出第三段是图库分类；二者都不是联系人/业务对象。
+  if (workflowName === 'wechat_auto_summary' || workflowName === 'wechatautosummary' ||
+    workflowName === 'gallery_analysis' || workflowName === 'galleryanalysis') {
+    return [];
+  }
   return stableUnique(parts.slice(2).map((part: string) => normalizeFreeText(part))).filter((part: string) => part.length > 0);
 }
 
@@ -344,11 +350,21 @@ function appDisplayNameFromPackage(packageName: string): string {
   let mappings: Record<string, string> = {};
   mappings['comtencentmm'] = '微信';
   mappings['comtencentwechat'] = '微信';
+  mappings['comhuaweiphotos'] = '图库';
+  mappings['comjdharmony'] = '京东';
+  mappings['comctripharmony'] = '携程';
   mappings['comalipaymobileclient'] = '支付宝';
+  mappings['comsankuaimeituan'] = '美团';
+  mappings['commeituanwaimai'] = '美团外卖';
+  mappings['commeituantakeoutnew'] = '美团外卖';
   mappings['comsankuaidianping'] = '大众点评';
+  mappings['comtaobaotaobao'] = '淘宝';
   mappings['comtencentvideohm'] = '腾讯视频';
+  mappings['tvdanmakubili'] = '哔哩哔哩';
   mappings['comxinginxhshos'] = '小红书';
   mappings['comxinginxhs_hos'] = '小红书';
+  mappings['comautonaviminimap'] = '高德地图';
+  mappings['comhuaweihealth'] = '华为运动健康';
   mappings['meeleeleme'] = '饿了么';
   return mappings[normalized] || '';
 }

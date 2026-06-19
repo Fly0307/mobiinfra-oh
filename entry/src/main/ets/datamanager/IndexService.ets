@@ -27,6 +27,7 @@ import {
   NumberMap,
   StringArrayMap,
   StringMap,
+  createJsonMap,
   createDataManagerProgress,
   createStringMap
 } from './DataManagerTypes';
@@ -56,7 +57,14 @@ import {
   stableUniqueNumbers,
   summarizeText
 } from './DataManagerUtils';
-import { workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import {
+  memorySceneConfigs,
+  normalizeMemorySceneId,
+  normalizeMemorySceneIds,
+  workflowSceneConfigs,
+  WorkflowSceneConfig
+} from '../utils/WorkflowSceneConfig';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 
 export interface IndexBuildResult {
   sourceFiles: number;
@@ -122,6 +130,7 @@ type TemporalDocumentMap = Record<string, TemporalDocument>;
 type ProfileDomainMap = Record<string, ProfileDomainState>;
 
 const DEFAULT_INDEX_SOURCE_CONCURRENCY: number = 4;
+const EVENT_PARTITION_INDEX_FILE_NAME: string = 'partition-index.json';
 
 interface InvertedDocument {
   postings: StringArrayMap;
@@ -143,6 +152,12 @@ interface HomeTodoDocument {
   deadline_postings: StringArrayMap;
   no_deadline_event_ids: string[];
   type_postings: StringArrayMap;
+}
+
+interface EventPartitionIndex {
+  schema: string;
+  generated_at: string;
+  partition_files: string[];
 }
 
 interface EntityDefinition {
@@ -310,7 +325,7 @@ export class IndexService {
 
   async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<IndexBuildResult> {
     this.paths.ensureBaseDirs();
-    let statePaths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
+    let statePaths = this.loadOutputStatePaths();
     this.emitProgress(progress, '索引', `发现 ${statePaths.length} 个整理文件`, 0, Math.max(1, statePaths.length), 62);
     dataManagerInfo(`Index build start: stateFiles=${statePaths.length}, outputsRoot=${this.paths.outputsRoot}, modelEnabled=${modelConfig.enabled}`);
     if (statePaths.length === 0) {
@@ -371,6 +386,31 @@ export class IndexService {
       profileClaimCount: profile.claim_count,
       updatedAt: profile.generated_at
     };
+  }
+
+  private loadOutputStatePaths(): string[] {
+    let paths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
+    paths = paths.concat(this.outputStatePathsFromIndex());
+    return stableUnique(paths)
+      .filter((path: string) => path.endsWith('.md.state.json') && this.storage.exists(path))
+      .sort();
+  }
+
+  private outputStatePathsFromIndex(): string[] {
+    let payload = this.storage.readJson<JsonMap>(this.storage.join(this.paths.outputsRoot, 'state-index.json'), createJsonMap());
+    let value = payload['state_paths'];
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    let paths: string[] = [];
+    (value as string[]).forEach((item: string) => {
+      let relativePath = normalizeFreeText(item);
+      if (relativePath.length > 0) {
+        paths.push(this.storage.join(this.paths.outputsRoot, relativePath));
+      }
+    });
+    // 读取整理阶段写出的产物清单，补足单测/沙箱环境无法递归枚举目录时的 state 文件来源。
+    return paths;
   }
 
   private async buildSourcesConcurrently(statePaths: string[], previousManifest: IndexManifest,
@@ -548,12 +588,12 @@ export class IndexService {
       ids.forEach((id: string) => matching[id] = matching[id] && domainIds[id] === true);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let selectedScenes = this.setFromNumbers(workflowSceneIds);
       ids.forEach((id: string) => {
         let sceneMatch = false;
-        (events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
+        normalizeMemorySceneIds(events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
           if (selectedScenes[String(sceneId)] === true) {
             sceneMatch = true;
           }
@@ -591,13 +631,12 @@ export class IndexService {
   loadEvents(): EventMap {
     let result: EventMap = {};
     let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
-    this.storage.listDir(eventDir)
-      .filter((name: string) => name.endsWith('.json'))
+    this.eventPartitionNames()
       .forEach((name: string) => {
         let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
         if (partition && Array.isArray(partition.events)) {
           partition.events.forEach((event: IndexedEvent) => {
-            result[event.event_id] = event;
+            result[event.event_id] = this.copyEvent(event);
           });
         }
       });
@@ -616,17 +655,32 @@ export class IndexService {
     let months = this.eventMonthsForIds(wanted);
     let loadedPartitions: BooleanMap = {};
     let partitionNames = months.length > 0 ? months.map((month: string) => month + '.json') :
-      this.storage.listDir(eventDir).filter((name: string) => name.endsWith('.json'));
+      this.eventPartitionNames();
     partitionNames.forEach((name: string) => {
       loadedPartitions[name] = true;
       this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result);
     });
     if (Object.keys(result).length < uniqueIds.length) {
-      this.storage.listDir(eventDir)
-        .filter((name: string) => name.endsWith('.json') && loadedPartitions[name] !== true)
+      this.eventPartitionNames()
+        .filter((name: string) => loadedPartitions[name] !== true)
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
     return result;
+  }
+
+  private eventPartitionNames(): string[] {
+    let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
+    let names = this.storage.listDir(eventDir)
+      .filter((name: string) => name.endsWith('.json') && name !== EVENT_PARTITION_INDEX_FILE_NAME);
+    let partitionIndex = this.storage.readJson<JsonMap>(this.storage.join(eventDir, EVENT_PARTITION_INDEX_FILE_NAME), createJsonMap());
+    let value = partitionIndex['partition_files'];
+    if (Array.isArray(value)) {
+      names = names.concat((value as string[]).map((item: string): string => normalizeFreeText(item)));
+    }
+    // 事件分区按月写入，清单用于目录枚举不可用的环境；只保留分区文件名，排除清单自身。
+    return stableUnique(names)
+      .filter((name: string) => /^\d{4}-\d{2}\.json$/.test(name))
+      .sort();
   }
 
   loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
@@ -680,13 +734,18 @@ export class IndexService {
       candidate = this.intersectCandidate(candidate, domainIds);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let sceneDocument = this.storage.readJson<WorkflowSceneDocument>(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.emptyWorkflowSceneDocument());
       let postings = sceneDocument.postings || {};
+      let selectedScenes = this.setFromNumbers(workflowSceneIds);
       let sceneIds: BooleanMap = {};
-      workflowSceneIds.forEach((sceneId: number) => {
-        (postings[String(sceneId)] || []).forEach((id: string) => sceneIds[id] = true);
+      Object.keys(postings).forEach((sceneKey: string) => {
+        let numericSceneId = Number(sceneKey);
+        if (isNaN(numericSceneId) || selectedScenes[String(normalizeMemorySceneId(numericSceneId))] !== true) {
+          return;
+        }
+        (postings[sceneKey] || []).forEach((id: string) => sceneIds[id] = true);
       });
       candidate = this.intersectCandidate(candidate, sceneIds);
     }
@@ -826,7 +885,7 @@ export class IndexService {
     }
     partition.events.forEach((event: IndexedEvent) => {
       if (wanted[event.event_id] === true) {
-        out[event.event_id] = event;
+        out[event.event_id] = this.copyEvent(event);
       }
     });
   }
@@ -944,9 +1003,9 @@ export class IndexService {
       tags: (event.tags || []).slice(),
       source_refs: (event.source_refs || []).slice(),
       sources: (event.sources || []).slice(),
-      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
+      workflow_scene_ids: normalizeMemorySceneIds(event.workflow_scene_ids || []),
       image_paths: (event.image_paths || []).slice(),
-      todo: this.copyTodo(event.todo),
+      todo: this.copyTodo(event.todo || this.emptyTodo()),
       keywords: (event.keywords || []).slice(),
       domains: (event.domains || []).slice(),
       entity_mentions: (event.entity_mentions || []).slice(),
@@ -1022,7 +1081,7 @@ export class IndexService {
         tags: stableUnique(record.tags || []),
         source_refs: stableUnique(record.source_refs || []),
         sources: eventSourceNames(record.source_refs || [], relativePath),
-        workflow_scene_ids: stableUniqueNumbers(record.workflow_scene_ids || []),
+        workflow_scene_ids: normalizeMemorySceneIds(stableUniqueNumbers(record.workflow_scene_ids || [])),
         image_paths: this.imagePathsForSourceRefs(record.source_refs || [], imageReferences),
         todo: this.emptyTodo(),
         keywords: [],
@@ -1318,6 +1377,7 @@ export class IndexService {
     sourceRefs.forEach((sourceRef: string) => {
       paths = paths.concat(imageReferences[sourceRef] || []);
     });
+    paths = paths.concat(GalleryMemorySync.imageRefsForSourceRefs(this.paths.filesDir, this.paths.dailyLogRoot, sourceRefs));
     return stableUnique(paths);
   }
 
@@ -1354,6 +1414,13 @@ export class IndexService {
       };
       desired[month + '.json'] = partition as Object;
     });
+    let partitionIndex: EventPartitionIndex = {
+      schema: 'datamanager-event-partition-index-v1',
+      generated_at: nowIsoLocal(),
+      partition_files: Object.keys(partitions).sort().map((month: string): string => month + '.json')
+    };
+    // 记录事件分区清单，避免查询阶段因目录枚举失败而读不到刚写入的图库事件。
+    desired[EVENT_PARTITION_INDEX_FILE_NAME] = partitionIndex as Object;
     this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'events'), desired);
   }
 
@@ -1468,12 +1535,12 @@ export class IndexService {
 
   private buildWorkflowSceneDocument(events: EventMap): WorkflowSceneDocument {
     let postings: StringArrayMap = {};
-    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+    memorySceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
       postings[key] = [];
     });
     Object.keys(events).sort().forEach((eventId: string) => {
-      let sceneIds = stableUniqueNumbers(events[eventId].workflow_scene_ids || []);
+      let sceneIds = normalizeMemorySceneIds(stableUniqueNumbers(events[eventId].workflow_scene_ids || []));
       sceneIds.forEach((sceneId: number) => {
         let key = String(sceneId);
         if (!postings[key]) {
@@ -2241,7 +2308,7 @@ export class IndexService {
 
   private emptyWorkflowSceneDocument(): WorkflowSceneDocument {
     let postings: StringArrayMap = {};
-    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+    memorySceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
       postings[key] = [];
     });

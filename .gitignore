@@ -34,3 +34,4 @@ build-profile.json5*
 /mobile_file_example/
 /.agents/
 .agents
+entry/src/main/python/wechat_collect/__pycache__/

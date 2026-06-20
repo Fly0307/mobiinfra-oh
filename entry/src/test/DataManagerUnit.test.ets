@@ -34,12 +34,14 @@ import {
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
+  IndexService,
   eventEnrichInputFingerprint,
   isEventEnrichInputReusable,
   isHomeTodoIndexCandidate,
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
-  IndexService,
+  monthLastDateForTemporalIndex,
+  normalizeQueryKeywordOperator,
   resolveQueryLimit,
   buildProfileDomainStateFromPayload,
   isProfileDomainStateReusable
@@ -84,6 +86,7 @@ import {
   ProfileDomainState,
   ProfileModelPayload,
   ProfileState,
+  QueryOptions,
   QueryResult,
   NumberedEntry,
   SourceEntry,
@@ -117,6 +120,100 @@ import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
 import { sourceEntryProcessingHash } from '../main/ets/datamanager/ConsolidationService';
+
+interface TestTemporalSummary {
+  text: string;
+  input_hash: string;
+  generation: string;
+}
+
+interface TestTemporalDocument {
+  month: string;
+  event_ids: string[];
+  summary: TestTemporalSummary;
+  weeks: Object[];
+}
+
+interface TestStringArrayDocument {
+  postings: Record<string, string[]>;
+}
+
+interface TestHomeTodoDocument {
+  deadline_postings: Record<string, string[]>;
+  no_deadline_event_ids: string[];
+  type_postings: Record<string, string[]>;
+}
+
+class MemoryDataManagerStorage extends DataManagerStorage {
+  private documents: Record<string, Object> = new Object() as Record<string, Object>;
+  private directories: Record<string, boolean> = new Object() as Record<string, boolean>;
+
+  ensureDir(path: string): void {
+    if (path.length > 0) {
+      this.directories[path] = true;
+    }
+  }
+
+  listDir(path: string): string[] {
+    let names: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let prefix = path.length > 0 ? path + '/' : '';
+    Object.keys(this.directories).forEach((directory: string) => {
+      this.addListDirChild(directory, prefix, names);
+    });
+    Object.keys(this.documents).forEach((document: string) => {
+      this.addListDirChild(document, prefix, names);
+    });
+    return Object.keys(names).sort();
+  }
+
+  readJson<T>(path: string, fallback: T): T {
+    let document = this.documents[path];
+    if (document === undefined) {
+      return fallback;
+    }
+    return document as T;
+  }
+
+  writeJsonAtomic(path: string, payload: Object): void {
+    let parent = this.dirname(path);
+    if (parent.length > 0) {
+      this.ensureDir(parent);
+    }
+    this.documents[path] = payload;
+  }
+
+  removeTree(path: string): void {
+    let nextDocuments: Record<string, Object> = new Object() as Record<string, Object>;
+    Object.keys(this.documents).forEach((document: string) => {
+      if (document !== path && !document.startsWith(path + '/')) {
+        nextDocuments[document] = this.documents[document];
+      }
+    });
+    this.documents = nextDocuments;
+    let nextDirectories: Record<string, boolean> = new Object() as Record<string, boolean>;
+    Object.keys(this.directories).forEach((directory: string) => {
+      if (directory !== path && !directory.startsWith(path + '/')) {
+        nextDirectories[directory] = this.directories[directory];
+      }
+    });
+    this.directories = nextDirectories;
+  }
+
+  private addListDirChild(path: string, prefix: string, names: Record<string, boolean>): void {
+    if (!path.startsWith(prefix)) {
+      return;
+    }
+    let rest = path.substring(prefix.length);
+    if (rest.length === 0) {
+      return;
+    }
+    let slash = rest.indexOf('/');
+    let child = slash >= 0 ? rest.substring(0, slash) : rest;
+    if (child.length > 0) {
+      names[child] = true;
+    }
+  }
+}
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
   return {
@@ -280,6 +377,36 @@ function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
     map[event.event_id] = event;
   });
   return map;
+}
+
+function demoQueryOptions(): QueryOptions {
+  return {
+    keywords: [],
+    keywordOperator: 'and',
+    includeTodoDeadlineInTimeRange: false,
+    domains: [],
+    entities: [],
+    date: '',
+    month: '',
+    startDate: '',
+    endDate: '',
+    workflowSceneIds: [],
+    limit: 0
+  };
+}
+
+function demoIndexService(filesDir: string): IndexService {
+  let storage = new DataManagerStorage();
+  let paths = new DataManagerPaths(filesDir, storage);
+  return new IndexService(paths, storage, new DataPipelineModelClient());
+}
+
+function demoTemporalSummary(text: string): TestTemporalSummary {
+  return {
+    text: text,
+    input_hash: 'hash-' + text,
+    generation: 'test'
+  };
 }
 
 let galleryMemoryRootCounter: number = 0;
@@ -850,6 +977,20 @@ export default function dataManagerUnitTest() {
       expect(weekdayLabelFromDate('2026-06-06')).assertEqual('星期六');
       expect(weekdayLabelFromDate('bad-date')).assertEqual('');
       expect(weekdayLabelFromDate('2026-02-31')).assertEqual('');
+    });
+
+    it('monthLastDateForTemporalIndex', 0, () => {
+      expect(monthLastDateForTemporalIndex('2026-05')).assertEqual('2026-05-31');
+      expect(monthLastDateForTemporalIndex('2026-06')).assertEqual('2026-06-30');
+      expect(monthLastDateForTemporalIndex('2024-02')).assertEqual('2024-02-29');
+    });
+
+    it('normalizeQueryKeywordOperator', 0, () => {
+      expect(normalizeQueryKeywordOperator()).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('AND')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('OR')).assertEqual('or');
+      expect(normalizeQueryKeywordOperator('xor')).assertEqual('and');
     });
 
     it('profileShortSummaryNormalization', 0, () => {
@@ -1538,6 +1679,150 @@ export default function dataManagerUnitTest() {
       expect(isQueryResultTruncated(2, 0)).assertFalse();
       expect(resolveQueryLimit(2, 1)).assertEqual(1);
       expect(isQueryResultTruncated(2, 1)).assertTrue();
+    });
+
+    it('indexQueryWithEventsCanIncludeTodoDeadlineInTimeRange', 0, () => {
+      let service = demoIndexService('/tmp/index-query-with-events-deadline');
+      let eventDateMatch = demoIndexedEvent('e1', '六月三日完成周报', '微信', 'work', '周报');
+      eventDateMatch.event_date = '2026-06-03';
+      let deadlineEarly = demoIndexedEvent('e2', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      deadlineEarly.event_date = '2026-05-20';
+      deadlineEarly.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let deadlineLate = demoIndexedEvent('e3', '五月创建的酒店待办', '微信', 'travel', '酒店');
+      deadlineLate.event_date = '2026-05-21';
+      deadlineLate.todo = {
+        type: 'buy',
+        deadline: '2026-06-05',
+        text: '预订酒店',
+        agent_task: ''
+      };
+      let outside = demoIndexedEvent('e4', '七月待办', '微信', 'work', '七月');
+      outside.event_date = '2026-05-22';
+      outside.todo = {
+        type: 'buy',
+        deadline: '2026-07-01',
+        text: '七月处理',
+        agent_task: ''
+      };
+      let events = demoEventMap([eventDateMatch, deadlineEarly, deadlineLate, outside]);
+      let query = demoQueryOptions();
+      query.startDate = '2026-06-01';
+      query.endDate = '2026-06-30';
+
+      let defaultResult = service.queryWithEvents(query, events);
+      expect(defaultResult.total_events).assertEqual(1);
+      expect(defaultResult.events[0].event_id).assertEqual('e1');
+
+      query.includeTodoDeadlineInTimeRange = true;
+      let expandedResult = service.queryWithEvents(query, events);
+      expect(expandedResult.total_events).assertEqual(3);
+      expect(expandedResult.events[0].event_id).assertEqual('e3');
+      expect(expandedResult.events[1].event_id).assertEqual('e1');
+      expect(expandedResult.events[2].event_id).assertEqual('e2');
+    });
+
+    it('indexQueryUsesHomeTodoDeadlineCandidatesWhenEnabled', 0, () => {
+      let storage = new MemoryDataManagerStorage();
+      let filesDir = 'memory/index-query-home-todo-deadline';
+      storage.removeTree(filesDir);
+      let paths = new DataManagerPaths(filesDir, storage);
+      paths.ensureBaseDirs();
+      storage.ensureDir(storage.join(paths.indexesRoot, 'home-todo'));
+      let service = new IndexService(paths, storage, new DataPipelineModelClient());
+      let eventDateOnly = demoIndexedEvent('e1', '五月普通记录', '微信', 'work', '普通');
+      eventDateOnly.event_date = '2026-05-29';
+      let deadlineCoffee = demoIndexedEvent('e2', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      deadlineCoffee.event_date = '2026-05-20';
+      deadlineCoffee.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let deadlineHotel = demoIndexedEvent('e3', '五月创建的酒店待办', '微信', 'travel', '酒店');
+      deadlineHotel.event_date = '2026-05-21';
+      deadlineHotel.todo = {
+        type: 'buy',
+        deadline: '2026-06-05',
+        text: '预订酒店',
+        agent_task: ''
+      };
+      let partition: EventPartition = {
+        month: '2026-05',
+        events: [eventDateOnly, deadlineCoffee, deadlineHotel]
+      };
+      storage.writeJsonAtomic(paths.eventPartitionPath('2026-05'), partition as Object);
+      let temporalWeeks: Object[] = [];
+      let temporalDocument: TestTemporalDocument = {
+        month: '2026-06',
+        event_ids: [],
+        summary: demoTemporalSummary('month'),
+        weeks: temporalWeeks
+      };
+      storage.writeJsonAtomic(paths.temporalPath('2026-06'), temporalDocument as Object);
+      let deadlinePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      deadlinePostings['2026-06-02'] = ['e2'];
+      deadlinePostings['2026-06-05'] = ['e3'];
+      let typePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      typePostings.buy = ['e2', 'e3'];
+      let homeTodoDocument: TestHomeTodoDocument = {
+        deadline_postings: deadlinePostings,
+        no_deadline_event_ids: [],
+        type_postings: typePostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'home-todo', 'index.json'), homeTodoDocument as Object);
+      let invertedPostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      invertedPostings['咖啡'] = ['e2'];
+      let invertedDocument: TestStringArrayDocument = {
+        postings: invertedPostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'inverted', 'index.json'), invertedDocument as Object);
+      let sourcePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      let sourceDocument: TestStringArrayDocument = {
+        postings: sourcePostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'source', 'index.json'), sourceDocument as Object);
+      let query = demoQueryOptions();
+      query.startDate = '2026-06-01';
+      query.endDate = '2026-06-30';
+
+      let defaultResult = service.query(query);
+      expect(defaultResult.total_events).assertEqual(0);
+
+      query.includeTodoDeadlineInTimeRange = true;
+      let expandedResult = service.query(query);
+      expect(expandedResult.total_events).assertEqual(2);
+      expect(expandedResult.events[0].event_id).assertEqual('e3');
+      expect(expandedResult.events[1].event_id).assertEqual('e2');
+
+      query.keywords = ['咖啡'];
+      let keywordResult = service.query(query);
+      expect(keywordResult.total_events).assertEqual(1);
+      expect(keywordResult.events[0].event_id).assertEqual('e2');
+      storage.removeTree(filesDir);
+    });
+
+    it('indexQueryDoesNotExpandTodoDeadlineWithoutTimeRange', 0, () => {
+      let service = demoIndexService('/tmp/index-query-no-time-deadline');
+      let event = demoIndexedEvent('e1', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      event.event_date = '2026-05-20';
+      event.workflow_scene_ids = [3];
+      event.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let query = demoQueryOptions();
+      query.includeTodoDeadlineInTimeRange = true;
+      query.workflowSceneIds = [99];
+      let result = service.queryWithEvents(query, demoEventMap([event]));
+      expect(result.total_events).assertEqual(0);
     });
 
     it('galleryExifCoordinateParsesDmsAndRef', 0, () => {

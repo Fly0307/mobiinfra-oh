@@ -268,6 +268,8 @@ export interface ProfileState {
 
 export interface QueryOptions {
   keywords: string[];
+  keywordOperator?: string;
+  includeTodoDeadlineInTimeRange?: boolean;
   domains: string[];
   entities: string[];
   date: string;

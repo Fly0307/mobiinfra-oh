@@ -96,6 +96,22 @@ export default function chatSessionStorageUnitTest() {
       expect(context[2].role).assertEqual('assistant');
     });
 
+    it('cloudContextSkipsReactToolTraceMessages', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', 'chat', '查一下今天咖啡记录', 1000),
+        createChatMessage('trace1', 'task', CHAT_MESSAGE_KIND_TASK_TRACE, '工具调用过程', 1001,
+          ['工具：lookup_note\n参数：{"query":"咖啡"}\n结果：{"ok":true}']),
+        createChatMessage('a1', 'assistant', 'chat', '今天有一条咖啡记录。', 1002)
+      ];
+
+      let context = buildCloudContextMessages(messages);
+
+      expect(context.length).assertEqual(2);
+      expect(context[0].role).assertEqual('user');
+      expect(context[1].role).assertEqual('assistant');
+      expect(context[1].content as string).assertEqual('今天有一条咖啡记录。');
+    });
+
     it('persistsSessionIndexAndDeletesSessionFile', 0, () => {
       let root = nextTestRoot('persist');
       prepareTestRoot(root);

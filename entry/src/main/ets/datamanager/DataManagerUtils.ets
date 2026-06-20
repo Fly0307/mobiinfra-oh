@@ -15,6 +15,7 @@ import {
   createStringArrayMap
 } from './DataManagerTypes';
 import { parseJsonCompat } from '../utils/JsonCompat';
+import { weekdayLabelFromDate as dateUtilsWeekdayLabelFromDate } from '../utils/DateUtils';
 
 export const DAILY_LOG_METADATA_PATTERN: RegExp = /^<!-- DAILY_LOG_METADATA\n([\s\S]*?)\n-->\n*/;
 export const STATE_FILE_SUFFIX: string = '.state.json';
@@ -213,24 +214,8 @@ export function dateToTime(value: string): number {
   return new Date(value + 'T00:00:00').getTime();
 }
 
-const WEEKDAY_LABELS: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-
 export function weekdayLabelFromDate(value: string): string {
-  if (!isIsoDate(value)) {
-    return '';
-  }
-  let year = Number(value.substring(0, 4));
-  let month = Number(value.substring(5, 7));
-  let day = Number(value.substring(8, 10));
-  let date = new Date(year, month - 1, day);
-  if (isNaN(date.getTime()) || date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
-    return '';
-  }
-  let weekday = date.getDay();
-  if (weekday < 0 || weekday >= WEEKDAY_LABELS.length) {
-    return '';
-  }
-  return WEEKDAY_LABELS[weekday];
+  return dateUtilsWeekdayLabelFromDate(value);
 }
 
 export function addDays(value: string, days: number): string {

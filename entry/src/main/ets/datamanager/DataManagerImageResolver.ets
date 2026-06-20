@@ -55,9 +55,16 @@ export class DataManagerImageResolver {
     if (ref.startsWith('data:image/')) {
       return ref;
     }
+    if (this.isDisplayableGalleryUri(ref)) {
+      return ref;
+    }
     let hashIndex = ref.indexOf('#');
     if (hashIndex >= 0) {
       return this.displayUriFromJsonPointer(ref.substring(0, hashIndex), ref.substring(hashIndex + 1));
+    }
+    if (this.isGalleryItemJsonRef(ref)) {
+      let uri = this.displayUriFromJsonPointer(ref, 'thumbnailUri');
+      return uri.length > 0 ? uri : this.displayUriFromJsonPointer(ref, 'uri');
     }
     let imageText = normalizeFreeText(ref);
     let dataUri = this.base64DataUri(imageText);
@@ -77,6 +84,9 @@ export class DataManagerImageResolver {
     let value = this.pointerString(payload, pointer);
     if (value.length === 0) {
       return '';
+    }
+    if (this.isDisplayableGalleryUri(value)) {
+      return value;
     }
     if (value.startsWith('data:image/')) {
       return value;
@@ -114,6 +124,10 @@ export class DataManagerImageResolver {
       let absolute = this.storage.join(this.paths.filesDir, filePath);
       return this.storage.exists(absolute) ? absolute : '';
     }
+    if (filePath.startsWith('gallery-log/')) {
+      let absolute = this.storage.join(this.paths.filesDir, filePath);
+      return this.storage.exists(absolute) ? absolute : '';
+    }
     let relative = this.paths.fromDataManagerRelative(filePath);
     return this.storage.exists(relative) ? relative : '';
   }
@@ -136,6 +150,17 @@ export class DataManagerImageResolver {
 
   private isAbsolutePath(pathText: string): boolean {
     return pathText.startsWith('/') || /^[A-Za-z]:\//.test(pathText);
+  }
+
+  private isGalleryItemJsonRef(ref: string): boolean {
+    let normalized = normalizeFreeText(ref).replace(/\\/g, '/');
+    return normalized.startsWith('gallery-log/items/') && normalized.endsWith('.json');
+  }
+
+  private isDisplayableGalleryUri(value: string): boolean {
+    let text = normalizeFreeText(value);
+    return text.startsWith('datashare://') || text.startsWith('content://') ||
+      text.startsWith('photo://') || text.startsWith('file://');
   }
 
   private base64DataUri(value: string): string {

@@ -403,6 +403,25 @@ export interface CollectionImageViewModel {
   label: string;
 }
 
+// 图库分析详情用于把 DataManager 事件反查到原始图库结果，便于 UI 展示 OCR、EXIF 和位置证据。
+export interface CollectionGalleryDetailViewModel {
+  id: string;
+  uri: string;
+  title: string;
+  category: string;
+  summary: string;
+  details: string[];
+  tags: string[];
+  ocrText: string;
+  date: string;
+  captureTime: string;
+  captureDevice: string;
+  captureLocation: string;
+  address: string;
+  poiName: string;
+  mapUrl: string;
+}
+
 export interface CollectionEventViewModel {
   id: string;
   summary: string;
@@ -416,6 +435,7 @@ export interface CollectionEventViewModel {
   status: string;
   domain: string;
   imageRefs: CollectionImageViewModel[];
+  galleryDetails: CollectionGalleryDetailViewModel[];
   thumbnailUri: string;
 }
 

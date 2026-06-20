@@ -38,6 +38,8 @@ import {
   updateExistingRecord,
   workflowSceneIdFromMetadata
 } from './DataManagerUtils';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { normalizeMemorySceneIds } from '../utils/WorkflowSceneConfig';
 
 export interface ConsolidationResult {
   sourceEntries: number;
@@ -63,7 +65,18 @@ interface EntryGroupPlan {
   existingRecordCount: number;
 }
 
+interface ConsolidationOutputStateIndex {
+  schema: string;
+  generated_at: string;
+  state_paths: string[];
+}
+
 const DEFAULT_CONSOLIDATION_GROUP_CONCURRENCY: number = 4;
+const OUTPUT_STATE_INDEX_FILE_NAME: string = 'state-index.json';
+
+export function sourceEntryProcessingHash(storage: DataManagerStorage, entry: SourceEntry): string {
+  return storage.sha256Text(normalizeFreeText(entry.entry_text) + '\u001f' + String(entry.workflow_scene_id));
+}
 
 export class ConsolidationService {
   private paths: DataManagerPaths;
@@ -82,6 +95,7 @@ export class ConsolidationService {
     dataManagerInfo(`Consolidation start: dailyRoot=${this.paths.dailyLogRoot}, dedupWindow=${dedupWindow}, modelEnabled=${modelConfig.enabled}`);
     let entries = this.collectSourceEntries();
     let groups = this.groupEntriesByMonth(entries);
+    this.writeOutputStateIndex(groups);
     this.emitProgress(progress, '扫描日志', `发现 ${entries.length} 条 daily-log`, 1, 100, 10);
     dataManagerInfo(`Consolidation collected: entries=${entries.length}, groups=${groups.length}`);
     if (entries.length === 0) {
@@ -141,12 +155,34 @@ export class ConsolidationService {
 
   private collectSourceEntries(): SourceEntry[] {
     let entries: SourceEntry[] = [];
-    let dayDirs = this.storage.listDir(this.paths.dailyLogRoot)
-      .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name));
+    let daySet: Record<string, boolean> = new Object() as Record<string, boolean>;
+    this.storage.listDir(this.paths.dailyLogRoot)
+      .filter((name: string) => /^\d{4}-\d{2}-\d{2}$/.test(name))
+      .forEach((name: string) => daySet[name] = true);
+    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      let slash = relativePath.indexOf('/');
+      if (slash > 0) {
+        let day = relativePath.substring(0, slash);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          daySet[day] = true;
+        }
+      }
+    });
+    let dayDirs = Object.keys(daySet).sort();
     dataManagerInfo(`Consolidation daily dirs: count=${dayDirs.length}, names=${dayDirs.slice(0, 8).join(',')}`);
     for (let day of dayDirs) {
       let dayDir = this.storage.join(this.paths.dailyLogRoot, day);
-      let files = this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md'));
+      let fileSet: Record<string, boolean> = new Object() as Record<string, boolean>;
+      this.storage.listDir(dayDir).filter((name: string) => name.endsWith('.md')).forEach((name: string) => fileSet[name] = true);
+      GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+        if (relativePath.startsWith(day + '/')) {
+          let fileName = relativePath.substring(day.length + 1);
+          if (fileName.endsWith('.md')) {
+            fileSet[fileName] = true;
+          }
+        }
+      });
+      let files = Object.keys(fileSet).sort();
       dataManagerInfo(`Consolidation day scan: day=${day}, mdFiles=${files.length}`);
       for (let fileName of files) {
         let path = this.storage.join(dayDir, fileName);
@@ -215,6 +251,19 @@ export class ConsolidationService {
         existingRecordCount: state.records.length
       };
     });
+  }
+
+  private writeOutputStateIndex(groups: EntryGroup[]): void {
+    let relativePaths = groups.map((group: EntryGroup): string => {
+      return this.storage.relativePath(this.paths.outputsRoot, this.paths.outputStatePath(group.month, group.fileName));
+    });
+    let payload: ConsolidationOutputStateIndex = {
+      schema: 'datamanager-consolidation-output-state-index-v1',
+      generated_at: nowIsoLocal(),
+      state_paths: stableUnique(relativePaths).sort()
+    };
+    // 记录本轮整理产物清单，目录枚举不可用时索引阶段仍能找到最新的 state 文件；图库清空时这里会写入空清单。
+    this.storage.writeJsonAtomic(this.storage.join(this.paths.outputsRoot, OUTPUT_STATE_INDEX_FILE_NAME), payload as Object);
   }
 
   private async consolidateGroup(group: EntryGroup, modelConfig: DataManagerModelConfig, dedupWindow: number, progress?: DataManagerProgressCallback, startPercent: number = 12, endPercent: number = 55): Promise<ConsolidatedState> {
@@ -309,7 +358,7 @@ export class ConsolidationService {
       item.dedup_text = normalizeDedupText(item.dedup_text || item.normalized_fact || '');
       item.source_refs = Array.isArray(item.source_refs) ? item.source_refs : [];
       item.source_dates = Array.isArray(item.source_dates) ? item.source_dates : [];
-      item.workflow_scene_ids = Array.isArray(item.workflow_scene_ids) ? stableUniqueNumbers(item.workflow_scene_ids) : [];
+      item.workflow_scene_ids = Array.isArray(item.workflow_scene_ids) ? normalizeMemorySceneIds(stableUniqueNumbers(item.workflow_scene_ids)) : [];
       item.raw_excerpts = Array.isArray(item.raw_excerpts) ? item.raw_excerpts : [];
       item.tags = Array.isArray(item.tags) ? item.tags : [];
       item.model_notes = Array.isArray(item.model_notes) ? item.model_notes : [];
@@ -335,7 +384,7 @@ export class ConsolidationService {
       (record.source_refs || []).forEach((ref: string) => processedRefs[ref] = true);
     });
     return entries.filter((entry: SourceEntry) => {
-      let currentHash = this.storage.sha256Text(entry.entry_text);
+      let currentHash = sourceEntryProcessingHash(this.storage, entry);
       let previousHash = processedByHash[entry.source_ref] || '';
       if (previousHash.length > 0) {
         return previousHash !== currentHash;
@@ -378,7 +427,7 @@ export class ConsolidationService {
     dateRange['end_date'] = dates.length > 0 ? dates[dates.length - 1] : '';
     let entryHashes: StringMap = createStringMap();
     group.entries.forEach((entry: SourceEntry) => {
-      entryHashes[entry.source_ref] = this.storage.sha256Text(entry.entry_text);
+      entryHashes[entry.source_ref] = sourceEntryProcessingHash(this.storage, entry);
     });
     let metadata: ConsolidatedMetadata = {
       source_date_range: dateRange,
@@ -412,4 +461,3 @@ export class ConsolidationService {
     return metadata;
   }
 }
-

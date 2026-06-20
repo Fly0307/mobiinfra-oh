@@ -1070,7 +1070,7 @@ struct Index {
       role: 'system',
       content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。\n\n' + '' +
         '当前日期: ' + formatLocalDateKey(now) + '，' + localWeekdayLabel(now) +
-        '。本周范围（周一-周日）：' + weekRangeTextFromDate(now)
+        '。本周的日期范围（周一-周日，你需要据此换算诸如“上周”等表述的日期范围）：' + weekRangeTextFromDate(now)
     };
   }
 

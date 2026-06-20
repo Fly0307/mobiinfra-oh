@@ -135,6 +135,9 @@ export struct TaskPage {
   @State breakOperatorDraft: string = '==';
   @State breakRightDraft: string = '';
   @State runningTaskId: string = '';
+  @State configViewOpen: boolean = false;
+  @State batchRunning: boolean = false;
+  @State batchRunStatusText: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
   @State configManagedFiles: WorkflowManagedFile[] = [];
   @State dailyLogManagedFiles: WorkflowManagedFile[] = [];
@@ -214,13 +217,73 @@ export struct TaskPage {
   }
 
   private sceneTasks(): WorkflowTask[] {
+    return this.tasksForScene(this.taskScene);
+  }
+
+  private tasksForScene(sceneId: number): WorkflowTask[] {
     let filtered: WorkflowTask[] = [];
     for (let i = 0; i < this.tasks.length; i++) {
-      if (this.tasks[i].sceneId === this.taskScene) {
+      if (this.tasks[i].sceneId === sceneId) {
         filtered.push(this.tasks[i]);
       }
     }
     return filtered;
+  }
+
+  private enabledTasks(): WorkflowTask[] {
+    let enabled: WorkflowTask[] = [];
+    let scenes = workflowSceneConfigs();
+    for (let sceneIndex = 0; sceneIndex < scenes.length; sceneIndex++) {
+      let sceneTasks = this.tasksForScene(scenes[sceneIndex].sceneId);
+      for (let taskIndex = 0; taskIndex < sceneTasks.length; taskIndex++) {
+        if (sceneTasks[taskIndex].enabled) {
+          enabled.push(sceneTasks[taskIndex]);
+        }
+      }
+    }
+    return enabled;
+  }
+
+  private enabledTaskCount(): number {
+    let count = 0;
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].enabled) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private enabledTaskCountForScene(sceneId: number): number {
+    let count = 0;
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].sceneId === sceneId && this.tasks[i].enabled) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private isTaskExecutionBusy(): boolean {
+    return this.batchRunning || this.runningTaskId.length > 0;
+  }
+
+  private isWorkflowCancelledStatus(status: string, message: string): boolean {
+    let normalizedStatus = status.trim().toLowerCase();
+    if (normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') {
+      return true;
+    }
+    let normalizedMessage = message.trim().toLowerCase();
+    return normalizedMessage.indexOf('用户取消') >= 0 || normalizedMessage.indexOf('已终止') >= 0 ||
+      normalizedMessage.indexOf('task cancelled') >= 0 || normalizedMessage.indexOf('task canceled') >= 0;
+  }
+
+  private isTaskCancelled(taskId: string): boolean {
+    let task = this.findTask(taskId);
+    if (!task) {
+      return false;
+    }
+    return this.isWorkflowCancelledStatus(task.lastStatus, task.lastMessage);
   }
 
   private taskCardRenderKey(task: WorkflowTask): string {
@@ -234,6 +297,31 @@ export struct TaskPage {
       task.lastMessage
     ];
     return ArkJSON.stringify(keyParts);
+  }
+
+  private taskRowRenderKey(task: WorkflowTask): string {
+    return this.taskCardRenderKey(task) + '|' + (this.runningTaskId === task.id ? 'running' : 'idle');
+  }
+
+  private openConfigView(): void {
+    this.reloadTasks();
+    this.configViewOpen = true;
+  }
+
+  private closeConfigView(): void {
+    this.reloadTasks();
+    this.configViewOpen = false;
+  }
+
+  private batchRunButtonText(): string {
+    if (this.batchRunning) {
+      return '执行中';
+    }
+    let count = this.enabledTaskCount();
+    if (count === 0) {
+      return '暂无开启任务';
+    }
+    return '一键执行已开启任务（' + count + '）';
   }
 
   private openCreateEditor(mode: string = 'graph'): void {
@@ -386,6 +474,10 @@ export struct TaskPage {
   }
 
   private setTaskEnabled(task: WorkflowTask, enabled: boolean): void {
+    if (this.isTaskExecutionBusy()) {
+      showToastSafely('Workflow 正在执行，请稍后再调整任务开关', 1500);
+      return;
+    }
     let next: WorkflowTask = {
       id: task.id,
       sceneId: task.sceneId,
@@ -406,6 +498,10 @@ export struct TaskPage {
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
+    if (this.isTaskExecutionBusy()) {
+      showToastSafely('已有 workflow 正在执行', 1500);
+      return;
+    }
     this.reloadTasks();
     let currentTask = this.findTask(task.id);
     if (!currentTask) {
@@ -416,10 +512,6 @@ export struct TaskPage {
       showToastSafely('任务已停用，请先打开开关', 1500);
       return;
     }
-    if (this.runningTaskId.length > 0) {
-      showToastSafely('已有 workflow 正在执行', 1500);
-      return;
-    }
     this.runningTaskId = currentTask.id;
     WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
     this.reloadTasks();
@@ -428,6 +520,62 @@ export struct TaskPage {
       this.reloadTasks();
     } finally {
       this.runningTaskId = '';
+      this.reloadTasks();
+    }
+  }
+
+  private async runEnabledTasks(): Promise<void> {
+    if (this.isTaskExecutionBusy()) {
+      showToastSafely('已有 workflow 正在执行', 1500);
+      return;
+    }
+    this.reloadTasks();
+    let queue = this.enabledTasks();
+    if (queue.length === 0) {
+      showToastSafely('请先开启至少一个任务', 1500);
+      return;
+    }
+    this.batchRunning = true;
+    this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
+    let stoppedByError = false;
+    let stoppedByCancel = false;
+    try {
+      for (let i = 0; i < queue.length; i++) {
+        this.reloadTasks();
+        let currentTask = this.findTask(queue[i].id);
+        if (!currentTask || !currentTask.enabled) {
+          continue;
+        }
+        this.runningTaskId = currentTask.id;
+        this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
+        WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
+        this.reloadTasks();
+        try {
+          await this.onRunWorkflow(currentTask);
+          this.reloadTasks();
+          if (this.isTaskCancelled(currentTask.id)) {
+            stoppedByCancel = true;
+            showToastSafely('批量执行已终止', 1500);
+            break;
+          }
+        } catch (e) {
+          let err = e as Error;
+          stoppedByError = true;
+          WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
+          showToastSafely('任务执行中断：' + err.message, 2500);
+          break;
+        } finally {
+          this.runningTaskId = '';
+          this.reloadTasks();
+        }
+      }
+      if (!stoppedByError && !stoppedByCancel) {
+        showToastSafely('已完成开启任务的依次执行', 1500);
+      }
+    } finally {
+      this.batchRunning = false;
+      this.runningTaskId = '';
+      this.batchRunStatusText = '';
       this.reloadTasks();
     }
   }
@@ -3197,6 +3345,197 @@ export struct TaskPage {
     }
   }
 
+  @Builder TaskExecutionHeaderPanel() {
+    Column() {
+      Row() {
+        Column() {
+          Text('任务执行')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .maxLines(1)
+          Text('已开启 ' + this.enabledTaskCount() + ' / 全部 ' + this.tasks.length)
+            .fontSize(12)
+            .fontColor('#6F7584')
+            .margin({ top: 7 })
+            .maxLines(1)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Button('配置任务')
+          .width(92)
+          .height(36)
+          .fontSize(12)
+          .fontColor(Color.White)
+          .backgroundColor('#276EF1')
+          .borderRadius(10)
+          .enabled(!this.isTaskExecutionBusy())
+          .onClick(() => { this.openConfigView(); })
+      }
+      .width('100%')
+    }
+    .width('86%')
+    .padding(18)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 24, bottom: 18 })
+  }
+
+  @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
+    Row() {
+      Text(task.icon)
+        .fontSize(12)
+        .fontColor(task.enabled ? scene.color : '#8E95A3')
+        .fontWeight(FontWeight.Bold)
+        .width(40)
+        .height(40)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
+        .borderRadius(12)
+      Column() {
+        Text(task.title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#11182F')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
+          .fontSize(11)
+          .fontColor(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3')
+          .margin({ top: 5 })
+          .maxLines(1)
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 12 })
+      Toggle({ type: ToggleType.Switch, isOn: task.enabled })
+        .selectedColor(scene.color)
+        .width(44)
+        .height(26)
+        .enabled(!this.isTaskExecutionBusy())
+        .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
+    }
+    .width('100%')
+    .constraintSize({ minHeight: 66 })
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .backgroundColor(Color.White)
+    .borderRadius(12)
+    .border({ width: 1, color: this.runningTaskId === task.id ? scene.color : '#E8EDF5' })
+    .margin({ top: 10 })
+  }
+
+  @Builder TaskExecutionSceneSection(scene: WorkflowSceneConfig) {
+    if (this.tasksForScene(scene.sceneId).length > 0) {
+      Column() {
+        Row() {
+          Text(scene.label)
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .layoutWeight(1)
+            .maxLines(1)
+          Text(this.enabledTaskCountForScene(scene.sceneId) + '/' + this.tasksForScene(scene.sceneId).length + ' 开启')
+            .fontSize(11)
+            .fontColor(scene.color)
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+            .backgroundColor('#F8F9FE')
+            .borderRadius(8)
+            .maxLines(1)
+        }
+        .width('100%')
+        ForEach(this.tasksForScene(scene.sceneId), (task: WorkflowTask) => {
+          this.SimpleTaskRow(task, scene)
+        }, (task: WorkflowTask) => this.taskRowRenderKey(task))
+      }
+      .width('86%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ bottom: 18 })
+    }
+  }
+
+  @Builder TaskExecutionList() {
+    if (this.tasks.length === 0) {
+      Column() {
+        Text('暂无任务')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+        Button('配置任务')
+          .height(36)
+          .fontSize(12)
+          .backgroundColor('#276EF1')
+          .borderRadius(10)
+          .margin({ top: 14 })
+          .onClick(() => { this.openConfigView(); })
+      }
+      .width('86%')
+      .padding(22)
+      .backgroundColor(Color.White)
+      .borderRadius(14)
+      .margin({ bottom: 18 })
+    } else {
+      ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+        this.TaskExecutionSceneSection(scene)
+      }, (scene: WorkflowSceneConfig) => scene.tabId)
+    }
+  }
+
+  @Builder BatchRunPanel() {
+    Column() {
+      if (this.batchRunStatusText.length > 0) {
+        Text(this.batchRunStatusText)
+          .fontSize(12)
+          .fontColor('#4E5666')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ bottom: 10 })
+      }
+      Button(this.batchRunButtonText())
+        .width('100%')
+        .height(46)
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .backgroundColor(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy() ? '#276EF1' : '#A9B7E9')
+        .borderRadius(12)
+        .enabled(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy())
+        .onClick(() => { this.runEnabledTasks(); })
+    }
+    .width('86%')
+    .padding(14)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 2, bottom: 18 })
+  }
+
+  @Builder ConfigHeaderPanel() {
+    Row() {
+      Button('返回任务')
+        .width(88)
+        .height(34)
+        .fontSize(12)
+        .fontColor('#4E5666')
+        .backgroundColor('#F2F5FA')
+        .borderRadius(10)
+        .onClick(() => { this.closeConfigView(); })
+      Blank()
+      Button('刷新')
+        .width(64)
+        .height(34)
+        .fontSize(12)
+        .fontColor(Color.White)
+        .backgroundColor('#4E5666')
+        .borderRadius(10)
+        .onClick(() => { this.reloadTasks(); })
+    }
+    .width('86%')
+    .margin({ top: 18 })
+  }
+
   @Builder TaskCard(task: WorkflowTask) {
     Column() {
       Row() {
@@ -3250,6 +3589,7 @@ export struct TaskPage {
           .selectedColor('#276EF1')
           .width(44)
           .height(26)
+          .enabled(!this.isTaskExecutionBusy())
           .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
       }
       .width('100%')
@@ -3259,9 +3599,11 @@ export struct TaskPage {
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor(this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1')
+            .backgroundColor(this.isTaskExecutionBusy() && this.runningTaskId !== task.id ? '#A9B7E9' :
+              this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1')
             .borderRadius(10)
             .margin({ right: 8 })
+            .enabled(!this.isTaskExecutionBusy())
             .onClick(() => { this.runTask(task); })
           Button('图编辑')
             .width(86)
@@ -3618,28 +3960,36 @@ export struct TaskPage {
   build() {
     Scroll() {
       Column() {
-        AppHeader({ title: '定时任务', subtitle: '可视化 workflow 编排' })
-        this.CreatePanel()
-        if (this.editorOpen && this.editingTaskId.length === 0) {
-          this.EditorPanel()
-        }
-
-        Scroll() {
-          Row() {
-            ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
-              this.TaskSceneTab(scene)
-            }, (scene: WorkflowSceneConfig) => scene.tabId)
+        if (this.configViewOpen) {
+          AppHeader({ title: '配置任务', subtitle: 'Workflow 编排与文件管理' })
+          this.ConfigHeaderPanel()
+          this.CreatePanel()
+          if (this.editorOpen && this.editingTaskId.length === 0) {
+            this.EditorPanel()
           }
-          .padding({ left: 24, right: 24 })
-        }
-        .width('100%')
-        .height(42)
-        .scrollable(ScrollDirection.Horizontal)
-        .scrollBar(BarState.Off)
-        .margin({ top: 20, bottom: 16 })
 
-        this.TaskSceneList()
-        this.FileManagerPanel()
+          Scroll() {
+            Row() {
+              ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+                this.TaskSceneTab(scene)
+              }, (scene: WorkflowSceneConfig) => scene.tabId)
+            }
+            .padding({ left: 24, right: 24 })
+          }
+          .width('100%')
+          .height(42)
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .margin({ top: 20, bottom: 16 })
+
+          this.TaskSceneList()
+          this.FileManagerPanel()
+        } else {
+          AppHeader({ title: '定时任务', subtitle: '任务队列' })
+          this.TaskExecutionHeaderPanel()
+          this.TaskExecutionList()
+          this.BatchRunPanel()
+        }
         Blank().height(110)
       }
       .width('100%')

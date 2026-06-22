@@ -4,6 +4,7 @@ import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
+import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
 import chatSessionStorageUnitTest from './ChatSessionStorageUnit.test';
 import chatContextBudgetUnitTest from './ChatContextBudgetUnit.test';
@@ -22,6 +23,7 @@ export default function testsuite() {
   workflowDateContextUnitTest();
   mainTabConfigUnitTest();
   chatPageTypesUnitTest();
+  digitalAvatarTypesUnitTest();
   settingsCenterConfigUnitTest();
   chatSessionStorageUnitTest();
   chatContextBudgetUnitTest();

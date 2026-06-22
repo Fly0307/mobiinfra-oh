@@ -4,11 +4,12 @@ import { CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE, chatModeLabel } from 
 export { CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE };
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system' | 'task';
-export type ChatMessageKind = 'chat' | 'task_result' | 'task_trace';
+export type ChatMessageKind = 'chat' | 'task_result' | 'task_trace' | 'context_notice';
 
 export const CHAT_MESSAGE_KIND_CHAT: ChatMessageKind = 'chat';
 export const CHAT_MESSAGE_KIND_TASK_RESULT: ChatMessageKind = 'task_result';
 export const CHAT_MESSAGE_KIND_TASK_TRACE: ChatMessageKind = 'task_trace';
+export const CHAT_MESSAGE_KIND_CONTEXT_NOTICE: ChatMessageKind = 'context_notice';
 
 export interface ChatMessage {
   id: string;
@@ -46,6 +47,10 @@ export interface ChatSessionRecord {
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
+  contextSummary?: string;
+  contextSummaryUpdatedAt?: number;
+  contextSummaryUntilMessageId?: string;
+  contextSummaryMessageCount?: number;
 }
 
 export interface ChatSessionIndex {
@@ -67,7 +72,11 @@ export function createEmptyChatSession(id: string, mode: string, now: number): C
     mode: normalizeChatMode(mode),
     createdAt: now,
     updatedAt: now,
-    messages: []
+    messages: [],
+    contextSummary: '',
+    contextSummaryUpdatedAt: 0,
+    contextSummaryUntilMessageId: '',
+    contextSummaryMessageCount: 0
   };
 }
 
@@ -245,7 +254,8 @@ export function buildCloudContextMessages(messages: ChatMessage[]): CloudChatMes
   for (let i = 0; i < messages.length; i++) {
     let message = messages[i];
     let content = message.content.trim();
-    if (content.length === 0 || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    if (content.length === 0 || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE ||
+      message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
       continue;
     }
     if (message.role === 'user' || message.role === 'assistant' || message.role === 'system') {

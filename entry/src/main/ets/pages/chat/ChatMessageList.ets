@@ -1,4 +1,5 @@
 import {
+  CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
@@ -29,6 +30,9 @@ export struct ChatMessageList {
     if (message.role === 'user') {
       return '你';
     }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '上下文';
+    }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '任务结果';
     }
@@ -45,6 +49,9 @@ export struct ChatMessageList {
     if (message.role === 'user') {
       return '我';
     }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '压';
+    }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
       return '任';
     }
@@ -54,6 +61,9 @@ export struct ChatMessageList {
   private avatarColor(message: ChatMessage): string {
     if (message.role === 'user') {
       return '#111827';
+    }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '#F59E0B';
     }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '#059669';
@@ -67,6 +77,9 @@ export struct ChatMessageList {
   private bubbleColor(message: ChatMessage): string {
     if (this.isUserMessage(message)) {
       return '#111827';
+    }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '#FFFBEB';
     }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '#ECFDF5';
@@ -155,7 +168,8 @@ export struct ChatMessageList {
     .borderRadius(17)
     .border({
       width: this.isUserMessage(message) ? 0 : 1,
-      color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' : '#E8ECF3'
+      color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
+        (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')
     })
   }
 

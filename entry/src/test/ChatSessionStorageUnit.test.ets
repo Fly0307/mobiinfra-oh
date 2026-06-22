@@ -1,6 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import fs from '@ohos.file.fs';
 import {
+  CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
@@ -147,6 +148,52 @@ export default function chatSessionStorageUnitTest() {
       expect(context[0].role).assertEqual('user');
       expect(context[1].role).assertEqual('assistant');
       expect(context[1].content as string).assertEqual('今天有一条咖啡记录。');
+    });
+
+    it('cloudContextSkipsContextCompressionNoticeMessages', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', 'chat', '继续总结', 1000),
+        createChatMessage('notice1', 'system', CHAT_MESSAGE_KIND_CONTEXT_NOTICE, '历史过长，已自动压缩上下文', 1001),
+        createChatMessage('a1', 'assistant', 'chat', '已继续处理。', 1002)
+      ];
+
+      let context = buildCloudContextMessages(messages);
+
+      expect(context.length).assertEqual(2);
+      expect(context[0].role).assertEqual('user');
+      expect(context[1].role).assertEqual('assistant');
+      expect(context[1].content as string).assertEqual('已继续处理。');
+    });
+
+    it('persistsContextSummaryMetadataWithoutChangingOriginalMessages', 0, () => {
+      let root = nextTestRoot('context-summary');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      session.contextSummary = '较早历史摘要';
+      session.contextSummaryUpdatedAt = 2000;
+      session.contextSummaryUntilMessageId = 'm-old';
+      session.contextSummaryMessageCount = 12;
+      session.messages = [
+        createChatMessage('m1', 'user', 'chat', '原始用户消息', 1001),
+        createChatMessage('m2', 'assistant', 'chat', '原始助手消息', 1002)
+      ];
+      ChatSessionStorage.saveSession(root, session);
+
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.contextSummary).assertEqual('较早历史摘要');
+        expect(reloaded.contextSummaryUpdatedAt).assertEqual(2000);
+        expect(reloaded.contextSummaryUntilMessageId).assertEqual('m-old');
+        expect(reloaded.contextSummaryMessageCount).assertEqual(12);
+        expect(reloaded.messages.length).assertEqual(2);
+        expect(reloaded.messages[0].content).assertEqual('原始用户消息');
+        expect(reloaded.messages[1].content).assertEqual('原始助手消息');
+      }
+
+      cleanupPath(root);
     });
 
     it('persistsSessionIndexAndDeletesSessionFile', 0, () => {

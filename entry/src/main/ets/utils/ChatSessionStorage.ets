@@ -176,6 +176,10 @@ export class ChatSessionStorage {
       let session = parseJsonCompat<ChatSessionRecord>(ChatSessionStorage.readText(ChatSessionStorage.sessionPath(filesDir, sessionId)));
       session.mode = normalizeChatMode(session.mode);
       session.messages = session.messages === undefined ? [] : ChatSessionStorage.normalizeMessages(session.messages);
+      session.contextSummary = ChatSessionStorage.normalizedOptionalString(session.contextSummary);
+      session.contextSummaryUpdatedAt = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt);
+      session.contextSummaryUntilMessageId = ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId);
+      session.contextSummaryMessageCount = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount);
       return session;
     } catch (e) {
       ChatSessionStorage.removeFromIndex(filesDir, sessionId);
@@ -191,7 +195,11 @@ export class ChatSessionStorage {
       mode: normalizeChatMode(session.mode),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
-      messages: ChatSessionStorage.normalizeMessages(session.messages)
+      messages: ChatSessionStorage.normalizeMessages(session.messages),
+      contextSummary: ChatSessionStorage.normalizedOptionalString(session.contextSummary),
+      contextSummaryUpdatedAt: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt),
+      contextSummaryUntilMessageId: ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId),
+      contextSummaryMessageCount: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount)
     };
     ChatSessionStorage.writeText(ChatSessionStorage.sessionPath(filesDir, normalized.id),
       stringifyJsonCompat(normalized as Object, 2));
@@ -292,6 +300,14 @@ export class ChatSessionStorage {
       });
     }
     return normalized;
+  }
+
+  private static normalizedOptionalString(value?: string): string {
+    return value === undefined ? '' : value;
+  }
+
+  private static normalizedOptionalNumber(value?: number): number {
+    return value === undefined ? 0 : value;
   }
 
   private static stripFileUri(path: string): string {

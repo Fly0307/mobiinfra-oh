@@ -191,6 +191,7 @@ PersistentStorage.persistProp('avatarImageOutputFormat', DEFAULT_ENDPOINT_CONFIG
 PersistentStorage.persistProp('avatarSequentialImageGeneration', 'disabled');
 PersistentStorage.persistProp('avatarImageStream', false);
 PersistentStorage.persistProp('avatarImageWatermark', DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark);
+PersistentStorage.persistProp('chatDeepThinkingEnabled', false);
 PersistentStorage.persistProp('avatarImageTimeoutMs', 60000);
 PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
@@ -260,6 +261,7 @@ struct Index {
   @StorageLink('avatarSequentialImageGeneration') avatarSequentialImageGeneration: string = 'disabled';
   @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
+  @StorageLink('chatDeepThinkingEnabled') chatDeepThinkingEnabled: boolean = false;
   @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
   @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
   @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string = DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
@@ -2637,7 +2639,8 @@ struct Index {
     let contextMessages: CloudChatMessage[] = [this.cloudChatDateSystemMessage()]
       .concat(buildCloudContextMessages(activeSession.messages.concat([userMessage])));
     this.appendActiveChatMessage(userMessage);
-    this.appendCloudLog(`ReAct 云端聊天开始，任务：${task}`);
+    let enableThinking = this.chatDeepThinkingEnabled;
+    this.appendCloudLog(`ReAct 云端聊天开始，Think：${enableThinking ? '开启' : '关闭'}，任务：${task}`);
     let toolTraceLines: string[] = [];
     try {
       let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
@@ -2645,6 +2648,7 @@ struct Index {
         filesDir: this.filesDir,
         sessionId: activeSession.id,
         userMessage: task,
+        enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
         }
@@ -3640,6 +3644,7 @@ struct Index {
             chatMode: $chatMode,
             cloudUserInput: $cloudUserInput,
             userInput: $userInput,
+            chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
             cloudOutput: this.cloudOutput,
             cloudDebugImagePath: this.cloudDebugImagePath,
             cloudThinking: this.cloudThinking,

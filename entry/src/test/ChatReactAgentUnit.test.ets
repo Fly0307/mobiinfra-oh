@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { ChatReactAgent } from '../main/ets/utils/ChatReactAgent';
+import { ChatReactAgent, ChatReactAgentRunOptions } from '../main/ets/utils/ChatReactAgent';
 import {
   ChatTool,
   ChatToolExecutionContext,
@@ -18,6 +18,7 @@ class FakeReactModelClient extends CloudModelClient {
   private responses: CloudChatCompletionResult[];
   callToolCounts: number[] = [];
   callMessages: CloudChatMessage[][] = [];
+  callThinkingFlags: boolean[] = [];
 
   constructor(responses: CloudChatCompletionResult[]) {
     super();
@@ -27,6 +28,8 @@ class FakeReactModelClient extends CloudModelClient {
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
     this.callToolCounts.push(options.tools === undefined ? 0 : options.tools.length);
     this.callMessages.push(this.cloneMessages(options.messages));
+    this.callThinkingFlags.push(options.chatTemplateKwargs === undefined ? false :
+      options.chatTemplateKwargs.enable_thinking);
     let index = this.callMessages.length - 1;
     if (index >= this.responses.length) {
       return completion('fallback');
@@ -64,6 +67,10 @@ interface TestToolParameters {
   required?: string[];
 }
 
+interface TestThinkingRunOptions extends ChatReactAgentRunOptions {
+  enableThinking: boolean;
+}
+
 function testConfig(): CloudModelConfig {
   return {
     plannerBaseUrl: 'http://localhost:8000',
@@ -93,6 +100,13 @@ function emptyToolParameters(): Object {
     type: 'object'
   };
   return parameters as Object;
+}
+
+function thinkingRunOptions(enableThinking: boolean): ChatReactAgentRunOptions {
+  let options: TestThinkingRunOptions = {
+    enableThinking: enableThinking
+  };
+  return options;
 }
 
 function toolCall(id: string, name: string, args: string): CloudToolCall {
@@ -166,6 +180,18 @@ export default function chatReactAgentUnitTest() {
       expect(result.toolCallCount).assertEqual(0);
       expect(client.callMessages.length).assertEqual(1);
       expect(client.callToolCounts[0]).assertEqual(0);
+      expect(client.callThinkingFlags[0]).assertFalse();
+    });
+
+    it('passesThinkingFlagToCloudChatTemplateKwargs', 0, async () => {
+      let client = new FakeReactModelClient([completion('深度思考回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      let result = await agent.run([userMessage('需要深入分析')], testConfig(), thinkingRunOptions(true));
+
+      expect(result.content).assertEqual('深度思考回答。');
+      expect(client.callThinkingFlags.length).assertEqual(1);
+      expect(client.callThinkingFlags[0]).assertTrue();
     });
 
     it('executesRegisteredToolAndContinuesToFinalAnswer', 0, async () => {

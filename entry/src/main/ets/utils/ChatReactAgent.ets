@@ -18,6 +18,7 @@ export interface ChatReactAgentRunOptions {
   filesDir?: string;
   sessionId?: string;
   userMessage?: string;
+  enableThinking?: boolean;
   onTrace?: ChatReactTraceHandler;
 }
 
@@ -48,7 +49,8 @@ export class ChatReactAgent {
     let toolCallCount = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      let result = await this.client.chatCompletion(this.buildCompletionOptions(workingMessages, config, tools));
+      let result = await this.client.chatCompletion(this.buildCompletionOptions(workingMessages, config, tools,
+        options.enableThinking === true));
       if (result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
         return {
@@ -85,14 +87,14 @@ export class ChatReactAgent {
   }
 
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,
-    tools: CloudChatToolDefinition[]): CloudChatCompletionOptions {
+    tools: CloudChatToolDefinition[], enableThinking: boolean): CloudChatCompletionOptions {
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: config.apiKey,
       messages: messages,
       temperature: 0,
       chatTemplateKwargs: {
-        enable_thinking: false
+        enable_thinking: enableThinking
       }
     };
     if (tools.length > 0) {

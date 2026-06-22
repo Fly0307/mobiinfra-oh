@@ -8,7 +8,9 @@ import {
   ChatMessage,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessageStableRenderKey,
   chatMessagesAutoScrollKey,
+  chatMessagesStreamFollowKey,
   chatSessionPreview,
   compactChatPreviewText,
   createChatMessage,
@@ -89,9 +91,94 @@ export default function chatSessionStorageUnitTest() {
       let streamingKey = chatMessagesAutoScrollKey('session-a', messages, true);
 
       expect(sameSessionKey.indexOf('session-a') === 0).assertTrue();
-      expect(sameSessionKey.indexOf(chatMessageRenderKey(messages[1])) >= 0).assertTrue();
+      expect(sameSessionKey.indexOf(chatMessageStableRenderKey(messages[1])) >= 0).assertTrue();
       expect(changedSessionKey === sameSessionKey).assertFalse();
       expect(streamingKey === sameSessionKey).assertFalse();
+    });
+
+    it('keepsStableRenderKeyWhenStreamingContentGrows', 0, () => {
+      let initial = createChatMessage('m1', 'assistant', 'chat', '正在整理', 1000);
+      let streamed = createChatMessage('m1', 'assistant', 'chat', '正在整理更多内容', 1000);
+
+      expect(chatMessageStableRenderKey(initial)).assertEqual(chatMessageStableRenderKey(streamed));
+      expect(chatMessageRenderKey(initial) === chatMessageRenderKey(streamed)).assertFalse();
+    });
+
+    it('updatesRenderKeyWhenSameLengthContentChangesWithoutAutoScroll', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', 'hello', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001)
+      ];
+      let changedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙戊', 1001)
+      ];
+
+      expect(chatMessageRenderKey(initialMessages[1]) === chatMessageRenderKey(changedMessages[1])).assertFalse();
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true))
+        .assertEqual(chatMessagesAutoScrollKey('session-a', changedMessages, true));
+    });
+
+    it('keepsAutoScrollKeyStableForStreamingContentGrowth', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001)
+      ];
+      let streamedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '正在整理更多内容', 1001)
+      ];
+      let newMessageMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m3', 'assistant', 'chat', '新的回答', 1002)
+      ];
+
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true))
+        .assertEqual(chatMessagesAutoScrollKey('session-a', streamedMessages, true));
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true) ===
+        chatMessagesAutoScrollKey('session-a', newMessageMessages, true)).assertFalse();
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true) ===
+        chatMessagesAutoScrollKey('session-a', initialMessages, false)).assertFalse();
+    });
+
+    it('buildsStreamFollowKeyFromLatestStreamingContent', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001)
+      ];
+      let streamedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '正在整理更多内容', 1001)
+      ];
+
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', streamedMessages, true)).assertFalse();
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', initialMessages, false)).assertFalse();
+    });
+
+    it('buildsStreamFollowKeyFromSameLengthContentChanges', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001)
+      ];
+      let changedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙戊', 1001)
+      ];
+      let traceInitialMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001, ['工具 A 完成'])
+      ];
+      let traceChangedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001, ['工具 B 完成'])
+      ];
+
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', changedMessages, true)).assertFalse();
+      expect(chatMessagesStreamFollowKey('session-a', traceInitialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', traceChangedMessages, true)).assertFalse();
     });
 
     it('compactsLongPreviewFromPrefixOnly', 0, () => {

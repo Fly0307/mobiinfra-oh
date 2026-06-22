@@ -281,16 +281,55 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
   return next;
 }
 
+function chatTextSignature(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 131 + text.charCodeAt(i)) % 2147483647;
+  }
+  return String(text.length) + '#' + String(hash);
+}
+
+function chatTraceSignature(trace: string[]): string {
+  let parts: string[] = [String(trace.length)];
+  for (let i = 0; i < trace.length; i++) {
+    parts.push(chatTextSignature(trace[i]));
+  }
+  return parts.join('|');
+}
+
 export function chatMessageRenderKey(message: ChatMessage): string {
-  return message.id + ':' + message.kind + ':' + String(message.trace.length) + ':' +
-    (message.collapsed ? '1' : '0') + ':' + String(message.content.length) + ':' +
-    String(chatMessageThinkingContent(message).length) + ':' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
-    ':' + chatMessageImagePath(message);
+  return message.id + ':' + message.kind +
+    ':trace=' + chatTraceSignature(message.trace) +
+    ':collapsed=' + (message.collapsed ? '1' : '0') +
+    ':content=' + chatTextSignature(message.content) +
+    ':thinking=' + chatTextSignature(chatMessageThinkingContent(message)) +
+    ':thinkingCollapsed=' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
+    ':image=' + chatTextSignature(chatMessageImagePath(message));
+}
+
+export function chatMessageStableRenderKey(message: ChatMessage): string {
+  return message.id + ':' + message.kind;
+}
+
+function chatMessageStreamFollowRenderKey(message: ChatMessage): string {
+  return chatMessageStableRenderKey(message) +
+    ':content=' + chatTextSignature(message.content) +
+    ':thinking=' + chatTextSignature(chatMessageThinkingContent(message)) +
+    ':thinkingCollapsed=' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
+    ':trace=' + chatTraceSignature(message.trace) +
+    ':image=' + chatTextSignature(chatMessageImagePath(message));
 }
 
 export function chatMessagesAutoScrollKey(sessionId: string, messages: ChatMessage[], thinking: boolean): string {
   let normalizedSessionId = sessionId.length > 0 ? sessionId : 'no-session';
-  let latestMessageKey = messages.length > 0 ? chatMessageRenderKey(messages[messages.length - 1]) : 'empty';
+  let latestMessageKey = messages.length > 0 ? chatMessageStableRenderKey(messages[messages.length - 1]) : 'empty';
+  return normalizedSessionId + ':' + String(messages.length) + ':' + latestMessageKey + ':' +
+    (thinking ? 'thinking' : 'idle');
+}
+
+export function chatMessagesStreamFollowKey(sessionId: string, messages: ChatMessage[], thinking: boolean): string {
+  let normalizedSessionId = sessionId.length > 0 ? sessionId : 'no-session';
+  let latestMessageKey = messages.length > 0 ? chatMessageStreamFollowRenderKey(messages[messages.length - 1]) : 'empty';
   return normalizedSessionId + ':' + String(messages.length) + ':' + latestMessageKey + ':' +
     (thinking ? 'thinking' : 'idle');
 }

@@ -9,7 +9,12 @@ import {
   chatModePlaceholder,
   chatTimeGreeting
 } from './ChatPageTypes';
-import { ChatMessage, ChatSessionSummary, chatMessagesAutoScrollKey } from './ChatSessionTypes';
+import {
+  ChatMessage,
+  ChatSessionSummary,
+  chatMessagesAutoScrollKey,
+  chatMessagesStreamFollowKey
+} from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
@@ -68,6 +73,10 @@ export struct ChatPage {
 
   private composerTextAreaHeight(): number {
     return chatComposerTextAreaHeight(this.activeInput());
+  }
+
+  private bottomOverlayInset(): number {
+    return this.composerBarHeight() + 64;
   }
 
   private welcomeGreeting(): string {
@@ -289,9 +298,11 @@ export struct ChatPage {
         messages: this.messages,
         thinking: this.isBusy(),
         autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
+        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.isBusy()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         avatarForegroundUri: this.avatarForegroundUri,
+        bottomOverlayInset: this.bottomOverlayInset(),
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },

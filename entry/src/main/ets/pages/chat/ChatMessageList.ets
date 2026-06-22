@@ -1,14 +1,18 @@
+import { promptAction } from '@kit.ArkUI';
+import { pasteboard } from '@kit.BasicServicesKit';
 import {
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
+  chatMessageCopyContent,
   chatMessageImagePath,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
   chatMessageRenderKey
 } from './ChatSessionTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
+import { AppLogger } from '../../utils/AppLogger';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
 @Component
@@ -139,6 +143,22 @@ export struct ChatMessageList {
     return message.content.trim().length > 0;
   }
 
+  private async copyMessageContent(message: ChatMessage): Promise<void> {
+    let content = chatMessageCopyContent(message).trim();
+    if (content.length === 0) {
+      promptAction.showToast({ message: '暂无可复制内容', duration: 1200 });
+      return;
+    }
+    try {
+      let pb = pasteboard.getSystemPasteboard();
+      await pb.setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, content));
+      promptAction.showToast({ message: '已复制消息', duration: 1200 });
+    } catch (e) {
+      AppLogger.warnCause('ChatMessageList', 'copy message content failed', e as Error);
+      promptAction.showToast({ message: '复制失败', duration: 1200 });
+    }
+  }
+
   private formatMessageTime(time: number): string {
     if (time <= 0) {
       return '';
@@ -172,6 +192,20 @@ export struct ChatMessageList {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ left: 8 })
+        Blank()
+          .layoutWeight(1)
+        if (this.hasVisibleContent(message)) {
+          Text('复制')
+            .fontSize(10)
+            .fontColor(this.isUserMessage(message) ? '#DBEAFE' : '#5968FF')
+            .height(22)
+            .padding({ left: 8, right: 8 })
+            .backgroundColor(this.isUserMessage(message) ? '#273449' : '#EEF2FF')
+            .borderRadius(11)
+            .onClick(async () => {
+              await this.copyMessageContent(message);
+            })
+        }
       }
       .width('100%')
 

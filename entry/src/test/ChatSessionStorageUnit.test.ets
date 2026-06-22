@@ -8,6 +8,7 @@ import {
   ChatMessage,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessageCopyContent,
   chatMessagesAutoScrollKey,
   chatSessionPreview,
   compactChatPreviewText,
@@ -92,6 +93,13 @@ export default function chatSessionStorageUnitTest() {
       expect(sameSessionKey.indexOf(chatMessageRenderKey(messages[1])) >= 0).assertTrue();
       expect(changedSessionKey === sameSessionKey).assertFalse();
       expect(streamingKey === sameSessionKey).assertFalse();
+    });
+
+    it('buildsCopyContentFromVisibleMessageBodyOnly', 0, () => {
+      let message = createChatMessage('assistant-1', 'assistant', 'chat',
+        '<think>\n内部推理。\n</think>\n最终回答正文。', 1000, ['工具轨迹']);
+
+      expect(chatMessageCopyContent(message)).assertEqual('最终回答正文。');
     });
 
     it('compactsLongPreviewFromPrefixOnly', 0, () => {

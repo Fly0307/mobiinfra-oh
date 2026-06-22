@@ -156,6 +156,11 @@ export function chatMessageThinkingCollapsed(message: ChatMessage): boolean {
   return message.thinkingCollapsed === undefined ? true : message.thinkingCollapsed;
 }
 
+export function chatMessageCopyContent(message: ChatMessage): string {
+  // 复制整条消息时使用当前可见正文；assistant 的 think 内容在 createChatMessage 阶段已拆出。
+  return message.content;
+}
+
 function isCompactPreviewWhitespace(ch: string): boolean {
   return ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\f' || ch === '\v';
 }

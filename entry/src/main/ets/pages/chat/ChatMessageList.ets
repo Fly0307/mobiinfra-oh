@@ -8,6 +8,14 @@ import {
   chatMessageThinkingContent,
   chatMessageRenderKey
 } from './ChatSessionTypes';
+import { DigitalAvatarView } from './DigitalAvatarView';
+import {
+  chatAvatarRenderModel,
+  DIGITAL_AVATAR_MESSAGE_WIDTH,
+  DigitalAvatarVisualState,
+  TEXT_AVATAR_SIZE,
+  useDigitalAvatarForMessage
+} from './DigitalAvatarTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
@@ -18,6 +26,7 @@ export struct ChatMessageList {
   @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
@@ -71,32 +80,29 @@ export struct ChatMessageList {
   }
 
   private avatarText(message: ChatMessage): string {
-    if (message.role === 'user') {
-      return '我';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '压';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '任';
-    }
-    return this.modeMark.length > 0 ? this.modeMark : '助';
+    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackText;
   }
 
   private avatarColor(message: ChatMessage): string {
-    if (message.role === 'user') {
-      return '#111827';
+    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackColor;
+  }
+
+  private shouldUseDigitalAvatar(message: ChatMessage): boolean {
+    return useDigitalAvatarForMessage(message);
+  }
+
+  private avatarColumnWidth(message: ChatMessage): number {
+    if (this.shouldUseDigitalAvatar(message) && this.avatarForegroundUri.length > 0) {
+      return DIGITAL_AVATAR_MESSAGE_WIDTH;
     }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '#F59E0B';
+    return TEXT_AVATAR_SIZE;
+  }
+
+  private thinkingAvatarColumnWidth(): number {
+    if (this.avatarForegroundUri.length > 0) {
+      return DIGITAL_AVATAR_MESSAGE_WIDTH;
     }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
-      return '#059669';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '#7C3AED';
-    }
-    return '#5968FF';
+    return TEXT_AVATAR_SIZE;
   }
 
   private bubbleColor(message: ChatMessage): string {
@@ -147,15 +153,39 @@ export struct ChatMessageList {
   }
 
   @Builder Avatar(message: ChatMessage) {
-    Text(this.avatarText(message))
-      .fontSize(13)
-      .fontWeight(FontWeight.Bold)
-      .fontColor(Color.White)
-      .width(34)
-      .height(34)
-      .textAlign(TextAlign.Center)
-      .backgroundColor(this.avatarColor(message))
-      .borderRadius(13)
+    this.AvatarWithState(message, 'idle');
+  }
+
+  @Builder AvatarWithState(message: ChatMessage, visualState: DigitalAvatarVisualState) {
+    if (this.shouldUseDigitalAvatar(message)) {
+      DigitalAvatarView({
+        avatarForegroundUri: this.avatarForegroundUri,
+        fallbackText: this.avatarText(message),
+        fallbackColor: this.avatarColor(message),
+        visualState: visualState,
+        size: 'message'
+      })
+    } else {
+      Text(this.avatarText(message))
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(TEXT_AVATAR_SIZE)
+        .height(TEXT_AVATAR_SIZE)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(this.avatarColor(message))
+        .borderRadius(13)
+    }
+  }
+
+  @Builder ThinkingAvatar() {
+    DigitalAvatarView({
+      avatarForegroundUri: this.avatarForegroundUri,
+      fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
+      fallbackColor: '#5968FF',
+      visualState: 'thinking',
+      size: 'message'
+    })
   }
 
   @Builder ChatBubble(message: ChatMessage) {
@@ -350,13 +380,13 @@ export struct ChatMessageList {
         Column() {
           this.Avatar(message)
         }
-        .width(34)
+        .width(TEXT_AVATAR_SIZE)
         .margin({ left: 10 })
       } else {
         Column() {
           this.Avatar(message)
         }
-        .width(34)
+        .width(this.avatarColumnWidth(message))
         .margin({ right: 10 })
         .onClick(() => {
           if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
@@ -389,15 +419,10 @@ export struct ChatMessageList {
 
         if (this.thinking) {
           Row() {
-            Text(this.modeMark.length > 0 ? this.modeMark : '助')
-              .fontSize(13)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .width(34)
-              .height(34)
-              .textAlign(TextAlign.Center)
-              .backgroundColor('#5968FF')
-              .borderRadius(13)
+            Column() {
+              this.ThinkingAvatar()
+            }
+            .width(this.thinkingAvatarColumnWidth())
               .margin({ right: 10 })
             Text('处理中...')
               .fontSize(13)

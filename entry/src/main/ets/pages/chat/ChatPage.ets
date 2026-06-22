@@ -304,6 +304,7 @@ export struct ChatPage {
         autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
+        avatarForegroundUri: this.avatarForegroundUri,
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },

@@ -13,13 +13,20 @@ import {
   CHAT_CONTEXT_BUDGET_DEFAULT_THRESHOLD_PERCENT,
   CHAT_CONTEXT_BUDGET_RESERVED_OUTPUT_TOKENS,
   buildChatContextBudgetSettings,
+  buildCloudContextMessagesWithCurrentRequest,
   buildCompressedCloudContextMessages,
   buildContextSummarySystemMessage,
   buildLocalExtractiveFallbackSummary,
+  buildLocalExtractiveChatSummary,
   estimateCloudChatMessagesTokens,
+  contextSummaryMessageCountForCoverage,
   messagesAfterContextSummaryUntil,
+  messagesAfterKnownContextSummaryCoverage,
+  messagesWithoutCurrentRequest,
+  nonRetreatingContextSummaryUntilMessageId,
   normalizeChatContextBudgetSettings,
   shouldCompressChatContext,
+  splitChatMessagesForContextCompressionExact,
   splitChatHistoryByRecentTurns
 } from '../main/ets/pages/chat/ChatContextBudget';
 import { CloudChatMessage } from '../main/ets/utils/CloudModelClient';
@@ -167,6 +174,33 @@ export default function chatContextBudgetUnitTest() {
       expect(delta[1].id).assertEqual('a2');
     });
 
+    it('doesNotRepeatOlderMessagesWhenExistingCoverageIsOutsideSplit', 0, () => {
+      let olderMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮回答', 1001)
+      ];
+
+      let delta = messagesAfterKnownContextSummaryCoverage(olderMessages, 'u3');
+
+      expect(delta.length).assertEqual(0);
+    });
+
+    it('keepsLaterExistingCoverageAndMessageCountWhenCandidateWouldRetreat', 0, () => {
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮回答', 1001),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '第二轮问题', 1002),
+        createChatMessage('a2', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第二轮回答', 1003),
+        createChatMessage('u3', 'user', CHAT_MESSAGE_KIND_CHAT, '第三轮问题', 1004)
+      ];
+
+      let coverageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, 'u3', 'a1');
+      let messageCount = contextSummaryMessageCountForCoverage(historyMessages, coverageId, 2);
+
+      expect(coverageId).assertEqual('u3');
+      expect(messageCount).assertEqual(5);
+    });
+
     it('buildsContextSummarySystemMessageFromSummaryText', 0, () => {
       let summaryText = '用户想整理今天截图，助手已建议按时间线输出。';
       let message = buildContextSummarySystemMessage(summaryText);
@@ -195,6 +229,110 @@ export default function chatContextBudgetUnitTest() {
       expect(context[2].content as string).assertEqual('最近问题');
       expect(context[3].role).assertEqual('assistant');
       expect(context[3].content as string).assertEqual('最近回答');
+    });
+
+    it('removesCurrentRequestFromHistoryBeforeCompression', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '历史问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '历史回答', 1001),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '本轮问题', 1002)
+      ];
+
+      let historyMessages = messagesWithoutCurrentRequest(messages, 'u2');
+
+      expect(historyMessages.length).assertEqual(2);
+      expect(historyMessages[0].id).assertEqual('u1');
+      expect(historyMessages[1].id).assertEqual('a1');
+    });
+
+    it('placesCurrentRequestAtCompressedCloudContextTail', 0, () => {
+      let dateMessage: CloudChatMessage = {
+        role: 'system',
+        content: '当前日期: 2026-06-22'
+      };
+      let retained: ChatMessage[] = [
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '最近历史问题', 1004),
+        createChatMessage('a2', 'assistant', CHAT_MESSAGE_KIND_CHAT, '最近历史回答', 1005)
+      ];
+      let currentRequest = createChatMessage('u3', 'user', CHAT_MESSAGE_KIND_CHAT, '本轮必须回答的问题', 1006);
+
+      let context = buildCloudContextMessagesWithCurrentRequest(dateMessage, '旧历史摘要', retained,
+        currentRequest);
+
+      expect(context.length).assertEqual(5);
+      expect(context[context.length - 1].role).assertEqual('user');
+      expect(context[context.length - 1].content as string).assertEqual('本轮必须回答的问题');
+      expect(context[2].content as string).assertEqual('最近历史问题');
+      expect(context[3].content as string).assertEqual('最近历史回答');
+    });
+
+    it('keepsCurrentRequestOutOfOlderMessagesWhenHistoryIsSplit', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '历史问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '历史回答', 1001),
+        createChatMessage('trace1', 'task', CHAT_MESSAGE_KIND_TASK_TRACE, '轨迹不进入上下文', 1002),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '本轮问题', 1003)
+      ];
+
+      let historyMessages = messagesWithoutCurrentRequest(messages, 'u2');
+      let split = splitChatMessagesForContextCompressionExact(historyMessages, 0);
+
+      expect(split.olderMessages.length).assertEqual(2);
+      expect(split.olderMessages[0].id).assertEqual('u1');
+      expect(split.olderMessages[1].id).assertEqual('a1');
+      expect(split.summaryUntilMessageId).assertEqual('a1');
+    });
+
+    it('allowsZeroRecentRoundsAndStillKeepsOnlyCurrentRequestInCloudContext', 0, () => {
+      let dateMessage: CloudChatMessage = {
+        role: 'system',
+        content: '当前日期: 2026-06-22'
+      };
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮历史问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮历史回答', 1001),
+        contextNoticeMessage('notice1', '压缩提示不进入上下文', 1002),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '第二轮历史问题', 1003),
+        createChatMessage('a2', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第二轮历史回答', 1004)
+      ];
+      let currentRequest = createChatMessage('u3', 'user', CHAT_MESSAGE_KIND_CHAT, '本轮问题', 1005);
+
+      let split = splitChatMessagesForContextCompressionExact(historyMessages, 0);
+      let context = buildCloudContextMessagesWithCurrentRequest(dateMessage, '历史摘要', split.retainedMessages,
+        currentRequest);
+
+      expect(split.olderMessages.length).assertEqual(4);
+      expect(split.retainedMessages.length).assertEqual(0);
+      expect(split.retainedRoundCount).assertEqual(0);
+      expect(context.length).assertEqual(3);
+      expect(context[context.length - 1].role).assertEqual('user');
+      expect(context[context.length - 1].content as string).assertEqual('本轮问题');
+    });
+
+    it('buildsZeroRoundContextFromExistingAndDeltaSummariesWithCurrentTail', 0, () => {
+      let dateMessage: CloudChatMessage = {
+        role: 'system',
+        content: '当前日期: 2026-06-22'
+      };
+      let existingSummary = '既有摘要：用户正在整理截图，已确认输出时间线。';
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '历史里新增的用户问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '历史里新增的助手回答', 1001)
+      ];
+      let currentRequest = createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '本轮继续追问', 1002);
+
+      let split = splitChatMessagesForContextCompressionExact(historyMessages, 0);
+      let summary = buildLocalExtractiveChatSummary(existingSummary, split.olderMessages);
+      let context = buildCloudContextMessagesWithCurrentRequest(dateMessage, summary, split.retainedMessages,
+        currentRequest);
+      let summaryContent = context[1].content as string;
+
+      expect(context.length).assertEqual(3);
+      expect(summaryContent.indexOf(existingSummary) >= 0).assertTrue();
+      expect(summaryContent.indexOf('历史里新增的用户问题') >= 0).assertTrue();
+      expect(summaryContent.indexOf('历史里新增的助手回答') >= 0).assertTrue();
+      expect(context[context.length - 1].role).assertEqual('user');
+      expect(context[context.length - 1].content as string).assertEqual('本轮继续追问');
     });
 
     it('buildsLocalExtractiveFallbackSummaryAndDropsNonContextMessages', 0, () => {

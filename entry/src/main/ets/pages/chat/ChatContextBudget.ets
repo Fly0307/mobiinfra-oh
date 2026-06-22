@@ -301,6 +301,75 @@ export function splitChatMessagesForContextCompression(messages: ChatMessage[],
   };
 }
 
+export function messagesWithoutCurrentRequest(messages: ChatMessage[], currentMessageId: string): ChatMessage[] {
+  let historyMessages: ChatMessage[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].id !== currentMessageId) {
+      historyMessages.push(messages[i]);
+    }
+  }
+  return historyMessages;
+}
+
+export function splitChatMessagesForContextCompressionExact(messages: ChatMessage[],
+  recentRounds: number): ChatContextCompressionSplit {
+  let normalizedRounds = recentRounds <= 0 ? 0 : Math.floor(recentRounds);
+  let usableMessages: ChatMessage[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    if (!isSkippedContextMessage(messages[i])) {
+      usableMessages.push(messages[i]);
+    }
+  }
+
+  if (normalizedRounds === 0) {
+    let summaryUntilMessageId = usableMessages.length > 0 ? usableMessages[usableMessages.length - 1].id : '';
+    return {
+      olderMessages: usableMessages.slice(),
+      retainedMessages: [],
+      summaryUntilMessageId: summaryUntilMessageId,
+      olderMessageCount: usableMessages.length,
+      retainedRoundCount: 0
+    };
+  }
+
+  let userTurnCount = 0;
+  let boundaryIndex = 0;
+  for (let i = usableMessages.length - 1; i >= 0; i--) {
+    if (usableMessages[i].role === 'user') {
+      userTurnCount += 1;
+      if (userTurnCount === normalizedRounds) {
+        boundaryIndex = i;
+        break;
+      }
+    }
+  }
+
+  if (userTurnCount === 0) {
+    return {
+      olderMessages: [],
+      retainedMessages: usableMessages.slice(),
+      summaryUntilMessageId: '',
+      olderMessageCount: 0,
+      retainedRoundCount: 0
+    };
+  }
+
+  if (userTurnCount < normalizedRounds) {
+    boundaryIndex = 0;
+  }
+
+  let olderMessages = usableMessages.slice(0, boundaryIndex);
+  let summaryUntilMessageId = olderMessages.length > 0 ? olderMessages[olderMessages.length - 1].id : '';
+  return {
+    olderMessages: olderMessages,
+    retainedMessages: usableMessages.slice(boundaryIndex),
+    summaryUntilMessageId: summaryUntilMessageId,
+    olderMessageCount: olderMessages.length,
+    retainedRoundCount: userTurnCount < normalizedRounds ? userTurnCount : normalizedRounds
+  };
+}
+
 export function messagesAfterContextSummaryUntil(messages: ChatMessage[], untilMessageId: string): ChatMessage[] {
   if (untilMessageId.length === 0) {
     return messages.slice();
@@ -313,6 +382,60 @@ export function messagesAfterContextSummaryUntil(messages: ChatMessage[], untilM
   return messages.slice();
 }
 
+function messageIndexById(messages: ChatMessage[], messageId: string): number {
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].id === messageId) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function messagesAfterKnownContextSummaryCoverage(messages: ChatMessage[],
+  untilMessageId: string): ChatMessage[] {
+  if (untilMessageId.length === 0) {
+    return messages.slice();
+  }
+  let coverageIndex = messageIndexById(messages, untilMessageId);
+  if (coverageIndex < 0) {
+    return [];
+  }
+  return messages.slice(coverageIndex + 1);
+}
+
+export function nonRetreatingContextSummaryUntilMessageId(historyMessages: ChatMessage[],
+  previousUntilMessageId: string, candidateUntilMessageId: string): string {
+  if (previousUntilMessageId.length === 0) {
+    return candidateUntilMessageId;
+  }
+  if (candidateUntilMessageId.length === 0) {
+    return previousUntilMessageId;
+  }
+
+  let previousIndex = messageIndexById(historyMessages, previousUntilMessageId);
+  let candidateIndex = messageIndexById(historyMessages, candidateUntilMessageId);
+  if (previousIndex < 0) {
+    return candidateUntilMessageId;
+  }
+  if (candidateIndex < 0) {
+    return previousUntilMessageId;
+  }
+  return previousIndex > candidateIndex ? previousUntilMessageId : candidateUntilMessageId;
+}
+
+export function contextSummaryMessageCountForCoverage(historyMessages: ChatMessage[], coverageMessageId: string,
+  fallbackCount: number): number {
+  let normalizedFallback = fallbackCount <= 0 ? 0 : Math.floor(fallbackCount);
+  if (coverageMessageId.length === 0) {
+    return normalizedFallback;
+  }
+  let coverageIndex = messageIndexById(historyMessages, coverageMessageId);
+  if (coverageIndex < 0) {
+    return normalizedFallback;
+  }
+  return coverageIndex + 1;
+}
+
 export function buildCompressedCloudContextMessages(dateSystemMessage: CloudChatMessage, summary: string,
   retainedMessages: ChatMessage[]): CloudChatMessage[] {
   let compressed: CloudChatMessage[] = [dateSystemMessage];
@@ -321,6 +444,17 @@ export function buildCompressedCloudContextMessages(dateSystemMessage: CloudChat
     compressed.push(buildContextSummarySystemMessage(trimmedSummary));
   }
   return compressed.concat(buildCloudContextMessages(retainedMessages));
+}
+
+export function buildCloudContextMessagesWithCurrentRequest(dateSystemMessage: CloudChatMessage, summary: string,
+  retainedHistoryMessages: ChatMessage[], currentUserMessage: ChatMessage): CloudChatMessage[] {
+  // 当前请求不进入历史压缩链路，只在最终上下文末尾作为本轮 user 消息追加。
+  let context = buildCompressedCloudContextMessages(dateSystemMessage, summary, retainedHistoryMessages);
+  context.push({
+    role: 'user',
+    content: currentUserMessage.content.trim()
+  });
+  return context;
 }
 
 function compactTextForSummary(text: string): string {

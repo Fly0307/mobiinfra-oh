@@ -20,7 +20,6 @@ import {
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
-  buildCloudContextMessages,
   createChatMessage
 } from './chat/ChatSessionTypes';
 import {
@@ -30,12 +29,15 @@ import {
   ChatContextBudgetSettings,
   ChatContextCompressionSplit,
   buildChatContextBudgetSettings,
-  buildCompressedCloudContextMessages,
+  buildCloudContextMessagesWithCurrentRequest,
   buildLocalExtractiveChatSummary,
+  contextSummaryMessageCountForCoverage,
   estimateCloudContextTokens,
-  messagesAfterContextSummaryUntil,
+  messagesAfterKnownContextSummaryCoverage,
+  messagesWithoutCurrentRequest,
+  nonRetreatingContextSummaryUntilMessageId,
   shouldCompressCloudContext,
-  splitChatMessagesForContextCompression
+  splitChatMessagesForContextCompressionExact
 } from './chat/ChatContextBudget';
 import {
   ChatStreamUpdateFlushState,
@@ -200,6 +202,10 @@ interface CloudChatContextPreparation {
   summaryUntilMessageId: string;
   summaryMessageCount: number;
   estimatedTokens: number;
+  originalEstimatedTokens: number;
+  retainedRounds: number;
+  currentRequestAtTail: boolean;
+  overBudgetAfterCompression: boolean;
 }
 
 type JsonValue = Object | string | number | boolean | null;
@@ -1231,6 +1237,17 @@ struct Index {
     return buildChatContextBudgetSettings(this.chatContextCompressionThresholdPercent, this.chatContextRecentRounds);
   }
 
+  private isCurrentRequestAtCloudContextTail(messages: CloudChatMessage[], currentUserMessage: ChatMessage): boolean {
+    if (messages.length === 0) {
+      return false;
+    }
+    let tailMessage = messages[messages.length - 1];
+    if (tailMessage.role !== 'user' || typeof tailMessage.content !== 'string') {
+      return false;
+    }
+    return tailMessage.content === currentUserMessage.content.trim();
+  }
+
   private compactContextSummarySource(text: string, maxLength: number = 1600): string {
     let compact = text.trim().replace(/\s+/g, ' ');
     if (compact.length <= maxLength) {
@@ -1269,7 +1286,7 @@ struct Index {
   }
 
   private olderMessagesAfterSummaryCoverage(split: ChatContextCompressionSplit, untilMessageId: string): ChatMessage[] {
-    return messagesAfterContextSummaryUntil(split.olderMessages, untilMessageId);
+    return messagesAfterKnownContextSummaryCoverage(split.olderMessages, untilMessageId);
   }
 
   private async requestCloudChatContextSummary(previousSummary: string,
@@ -1314,8 +1331,8 @@ struct Index {
   private async buildCloudChatContextSummary(activeSession: ChatSessionRecord,
     split: ChatContextCompressionSplit): Promise<string> {
     let previousSummary = activeSession.contextSummary === undefined ? '' : activeSession.contextSummary;
-    let previousUntilMessageId = activeSession.contextSummaryUntilMessageId === undefined ? '' :
-      activeSession.contextSummaryUntilMessageId;
+    let previousUntilMessageId = previousSummary.trim().length === 0 ||
+      activeSession.contextSummaryUntilMessageId === undefined ? '' : activeSession.contextSummaryUntilMessageId;
     let newOlderMessages = this.olderMessagesAfterSummaryCoverage(split, previousUntilMessageId);
     if (newOlderMessages.length === 0 && previousSummary.trim().length > 0) {
       return previousSummary.trim();
@@ -1334,11 +1351,14 @@ struct Index {
     return buildLocalExtractiveChatSummary(previousSummary, newOlderMessages);
   }
 
-  private async prepareCloudChatContext(activeSession: ChatSessionRecord): Promise<CloudChatContextPreparation> {
+  private async prepareCloudChatContext(activeSession: ChatSessionRecord,
+    currentUserMessage: ChatMessage): Promise<CloudChatContextPreparation> {
     let settings = this.currentChatContextBudgetSettings();
     let dateSystemMessage = this.cloudChatDateSystemMessage();
-    let fullContextMessages: CloudChatMessage[] = [dateSystemMessage]
-      .concat(buildCloudContextMessages(activeSession.messages));
+    let historyMessages = messagesWithoutCurrentRequest(activeSession.messages, currentUserMessage.id);
+    let fullContextMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, '', historyMessages,
+      currentUserMessage);
+    let originalEstimatedTokens = estimateCloudContextTokens(fullContextMessages);
     if (!shouldCompressCloudContext(fullContextMessages, settings)) {
       return {
         messages: fullContextMessages,
@@ -1348,46 +1368,69 @@ struct Index {
           activeSession.contextSummaryUntilMessageId,
         summaryMessageCount: activeSession.contextSummaryMessageCount === undefined ? 0 :
           activeSession.contextSummaryMessageCount,
-        estimatedTokens: estimateCloudContextTokens(fullContextMessages)
+        estimatedTokens: originalEstimatedTokens,
+        originalEstimatedTokens: originalEstimatedTokens,
+        retainedRounds: 0,
+        currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(fullContextMessages, currentUserMessage),
+        overBudgetAfterCompression: false
       };
     }
 
-    let split = splitChatMessagesForContextCompression(activeSession.messages, settings.keepRecentTurns);
-    if (split.olderMessages.length === 0) {
-      return {
-        messages: fullContextMessages,
-        compressed: false,
-        summary: activeSession.contextSummary === undefined ? '' : activeSession.contextSummary,
-        summaryUntilMessageId: activeSession.contextSummaryUntilMessageId === undefined ? '' :
-          activeSession.contextSummaryUntilMessageId,
-        summaryMessageCount: activeSession.contextSummaryMessageCount === undefined ? 0 :
-          activeSession.contextSummaryMessageCount,
-        estimatedTokens: estimateCloudContextTokens(fullContextMessages)
-      };
-    }
-
-    let summary = await this.buildCloudChatContextSummary(activeSession, split);
-    let compressedMessages = buildCompressedCloudContextMessages(dateSystemMessage, summary, split.retainedMessages);
-    let retainedRounds = settings.keepRecentTurns;
+    let split = splitChatMessagesForContextCompressionExact(historyMessages, settings.keepRecentTurns);
+    let previousSummary = activeSession.contextSummary === undefined ? '' : activeSession.contextSummary.trim();
+    let previousCoverageMessageId = previousSummary.length === 0 ||
+      activeSession.contextSummaryUntilMessageId === undefined ? '' : activeSession.contextSummaryUntilMessageId;
+    let summary = split.olderMessages.length > 0 ? await this.buildCloudChatContextSummary(activeSession, split) :
+      previousSummary;
+    let compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+      split.retainedMessages, currentUserMessage);
+    let retainedRounds = split.retainedRoundCount;
     let finalSplit = split;
-    let summaryCoverageMessageId = split.summaryUntilMessageId;
-    while (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds > 2) {
+    let summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages,
+      previousCoverageMessageId, split.summaryUntilMessageId);
+    let compressedHistory = split.olderMessages.length > 0 || summary.length > 0;
+    while (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds > 0) {
       retainedRounds -= 1;
-      finalSplit = splitChatMessagesForContextCompression(activeSession.messages, retainedRounds);
+      finalSplit = splitChatMessagesForContextCompressionExact(historyMessages, retainedRounds);
+      let deltaOlderMessages = this.olderMessagesAfterSummaryCoverage(finalSplit, summaryCoverageMessageId);
+      if (deltaOlderMessages.length > 0) {
+        // 进一步降轮数时只把新转入较早历史的消息补进摘要，当前请求始终不参与。
+        summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
+      }
+      summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+        finalSplit.summaryUntilMessageId);
+      compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+        finalSplit.retainedMessages, currentUserMessage);
+      compressedHistory = true;
+    }
+    if (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds === 0 &&
+      finalSplit.retainedMessages.length > 0) {
+      finalSplit = splitChatMessagesForContextCompressionExact(historyMessages, 0);
       let deltaOlderMessages = this.olderMessagesAfterSummaryCoverage(finalSplit, summaryCoverageMessageId);
       if (deltaOlderMessages.length > 0) {
         summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
       }
-      summaryCoverageMessageId = finalSplit.summaryUntilMessageId;
-      compressedMessages = buildCompressedCloudContextMessages(dateSystemMessage, summary, finalSplit.retainedMessages);
+      summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+        finalSplit.summaryUntilMessageId);
+      compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+        finalSplit.retainedMessages, currentUserMessage);
+      compressedHistory = true;
     }
+    let estimatedTokens = estimateCloudContextTokens(compressedMessages);
+    let overBudgetAfterCompression = shouldCompressCloudContext(compressedMessages, settings);
+    let summaryMessageCount = contextSummaryMessageCountForCoverage(historyMessages, summaryCoverageMessageId,
+      finalSplit.olderMessageCount);
     return {
       messages: compressedMessages,
-      compressed: true,
+      compressed: compressedHistory,
       summary: summary,
-      summaryUntilMessageId: finalSplit.summaryUntilMessageId,
-      summaryMessageCount: finalSplit.olderMessageCount,
-      estimatedTokens: estimateCloudContextTokens(compressedMessages)
+      summaryUntilMessageId: summaryCoverageMessageId,
+      summaryMessageCount: summaryMessageCount,
+      estimatedTokens: estimatedTokens,
+      originalEstimatedTokens: originalEstimatedTokens,
+      retainedRounds: finalSplit.retainedRoundCount,
+      currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(compressedMessages, currentUserMessage),
+      overBudgetAfterCompression: overBudgetAfterCompression
     };
   }
 
@@ -2974,15 +3017,19 @@ struct Index {
       if (sessionWithUser === null) {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
-      let contextPreparation = await this.prepareCloudChatContext(sessionWithUser);
+      let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
       let contextMessages = contextPreparation.messages;
       if (contextPreparation.compressed) {
         this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
           contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
         this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
           CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
-        this.appendCloudLog('ReAct 云端聊天上下文已自动压缩，估算输入 tokens：' +
-          String(contextPreparation.estimatedTokens));
+        this.appendCloudLog('ReAct 云端聊天上下文已自动压缩，压缩前估算 tokens：' +
+          String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
+          String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
+          String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
+          (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
+          (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
       }
       if (this.cloudChatCancelRequested) {
         throw new Error('已取消本次回复。');
@@ -3009,7 +3056,8 @@ struct Index {
       let response = result.content;
       this.resetCloudStreamMessageUpdate();
       this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, response, toolTraceLines);
-      this.appendCloudLog(`ReAct 云端聊天返回：\n${response}`);
+      let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
+      this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
       this.resetCloudStreamMessageUpdate();

@@ -30,9 +30,11 @@ export interface ChatReactAgentResult {
   iterations: number;
   toolCallCount: number;
   reachedLimit: boolean;
+  finishReason: string;
 }
 
 const DEFAULT_MAX_REACT_ITERATIONS: number = 30;
+export const CHAT_REACT_EMPTY_CONTENT_MESSAGE: string = '模型未返回有效内容。';
 const ITERATION_LIMIT_MESSAGE: string = '工具调用轮数已达到上限，未生成最终答案。';
 const QWEN_CHAT_MAX_TOKENS: number = 32768;
 
@@ -86,10 +88,11 @@ export class ChatReactAgent {
       if (result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
         return {
-          content: finalContent.length > 0 ? finalContent : '模型未返回有效内容。',
+          content: finalContent.length > 0 ? finalContent : CHAT_REACT_EMPTY_CONTENT_MESSAGE,
           iterations: iteration,
           toolCallCount: toolCallCount,
-          reachedLimit: false
+          reachedLimit: false,
+          finishReason: result.finishReason
         };
       }
 
@@ -165,7 +168,8 @@ export class ChatReactAgent {
       content: ITERATION_LIMIT_MESSAGE,
       iterations: iterations,
       toolCallCount: toolCallCount,
-      reachedLimit: true
+      reachedLimit: true,
+      finishReason: ''
     };
   }
 }

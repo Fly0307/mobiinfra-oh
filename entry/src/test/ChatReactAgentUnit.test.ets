@@ -155,6 +155,18 @@ function completion(content: string, toolCalls: CloudToolCall[] = []): CloudChat
   };
 }
 
+function completionWithFinishReason(content: string, finishReason: string): CloudChatCompletionResult {
+  return {
+    content: content,
+    toolCalls: [],
+    finishReason: finishReason,
+    assistantMessage: {
+      role: 'assistant',
+      content: content
+    }
+  };
+}
+
 function userMessage(content: string): CloudChatMessage {
   return {
     role: 'user',
@@ -199,10 +211,22 @@ export default function chatReactAgentUnitTest() {
       let result = await agent.run([userMessage('你好')], testConfig());
 
       expect(result.content).assertEqual('你好，我可以帮你。');
+      expect(result.finishReason).assertEqual('stop');
       expect(result.toolCallCount).assertEqual(0);
       expect(client.callMessages.length).assertEqual(1);
       expect(client.callToolCounts[0]).assertEqual(0);
       expect(client.callThinkingFlags[0]).assertFalse();
+    });
+
+    it('returnsFallbackTextAndFinishReasonForEmptyFinalResponse', 0, async () => {
+      let client = new FakeReactModelClient([completionWithFinishReason('', 'length')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      let result = await agent.run([userMessage('请回答')], testConfig());
+
+      expect(result.content).assertEqual('模型未返回有效内容。');
+      expect(result.finishReason).assertEqual('length');
+      expect(result.reachedLimit).assertFalse();
     });
 
     it('passesThinkingFlagToCloudChatTemplateKwargs', 0, async () => {

@@ -15,10 +15,17 @@ export interface ChatMessage {
   role: ChatMessageRole;
   kind: ChatMessageKind;
   content: string;
+  thinkingContent: string;
+  thinkingCollapsed: boolean;
   trace: string[];
   collapsed: boolean;
   createdAt: number;
   imagePath?: string;
+}
+
+export interface ChatAssistantThinkingParts {
+  content: string;
+  thinkingContent: string;
 }
 
 export interface ChatSessionSummary {
@@ -64,13 +71,63 @@ export function createEmptyChatSession(id: string, mode: string, now: number): C
   };
 }
 
+export function splitAssistantThinkingContent(rawContent: string): ChatAssistantThinkingParts {
+  let closeTag = '</think>';
+  let openTag = '<think>';
+  let lookup = rawContent.toLowerCase();
+  let closeIndex = lookup.indexOf(closeTag);
+  if (closeIndex < 0) {
+    let partialOpenIndex = lookup.indexOf(openTag);
+    if (partialOpenIndex >= 0) {
+      let beforeThinking = rawContent.substring(0, partialOpenIndex).trim();
+      let thinkingContent = rawContent.substring(partialOpenIndex + openTag.length).trim();
+      return {
+        content: beforeThinking,
+        thinkingContent: thinkingContent
+      };
+    }
+    return {
+      content: rawContent,
+      thinkingContent: ''
+    };
+  }
+
+  let openIndex = lookup.lastIndexOf(openTag, closeIndex);
+  let thinkingStart = openIndex >= 0 ? openIndex + openTag.length : 0;
+  let beforeThinking = openIndex >= 0 ? rawContent.substring(0, openIndex).trim() : '';
+  let thinkingContent = rawContent.substring(thinkingStart, closeIndex).trim();
+  let afterThinking = rawContent.substring(closeIndex + closeTag.length).trim();
+  let visibleContent = afterThinking;
+  if (beforeThinking.length > 0) {
+    visibleContent = afterThinking.length > 0 ? beforeThinking + '\n\n' + afterThinking : beforeThinking;
+  }
+  return {
+    content: visibleContent,
+    thinkingContent: thinkingContent
+  };
+}
+
+function normalizeAssistantMessageContent(role: ChatMessageRole, kind: ChatMessageKind,
+  content: string): ChatAssistantThinkingParts {
+  if (role === 'assistant' && kind === CHAT_MESSAGE_KIND_CHAT) {
+    return splitAssistantThinkingContent(content);
+  }
+  return {
+    content: content,
+    thinkingContent: ''
+  };
+}
+
 export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatMessageKind, content: string,
   createdAt: number, trace: string[] = [], imagePath: string = ''): ChatMessage {
+  let parts = normalizeAssistantMessageContent(role, kind, content);
   return {
     id: id,
     role: role,
     kind: kind,
-    content: content,
+    content: parts.content,
+    thinkingContent: parts.thinkingContent,
+    thinkingCollapsed: true,
     trace: trace,
     collapsed: kind === CHAT_MESSAGE_KIND_TASK_TRACE,
     createdAt: createdAt,
@@ -80,6 +137,14 @@ export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatM
 
 export function chatMessageImagePath(message: ChatMessage): string {
   return message.imagePath === undefined ? '' : message.imagePath;
+}
+
+export function chatMessageThinkingContent(message: ChatMessage): string {
+  return message.thinkingContent === undefined ? '' : message.thinkingContent;
+}
+
+export function chatMessageThinkingCollapsed(message: ChatMessage): boolean {
+  return message.thinkingCollapsed === undefined ? true : message.thinkingCollapsed;
 }
 
 export function chatSessionPreview(messages: ChatMessage[]): string {
@@ -130,6 +195,8 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         role: message.role,
         kind: message.kind,
         content: message.content,
+        thinkingContent: chatMessageThinkingContent(message),
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
         trace: message.trace.slice(),
         collapsed: !message.collapsed,
         createdAt: message.createdAt,
@@ -142,9 +209,35 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
   return next;
 }
 
+export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], messageId: string): ChatMessage[] {
+  let next: ChatMessage[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    let message = messages[i];
+    if (message.id === messageId && chatMessageThinkingContent(message).length > 0) {
+      next.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: message.content,
+        thinkingContent: chatMessageThinkingContent(message),
+        thinkingCollapsed: !chatMessageThinkingCollapsed(message),
+        trace: message.trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message)
+      });
+    } else {
+      next.push(message);
+    }
+  }
+  return next;
+}
+
 export function chatMessageRenderKey(message: ChatMessage): string {
   return message.id + ':' + message.kind + ':' + String(message.trace.length) + ':' +
-    (message.collapsed ? '1' : '0') + ':' + String(message.content.length) + ':' + chatMessageImagePath(message);
+    (message.collapsed ? '1' : '0') + ':' + String(message.content.length) + ':' +
+    String(chatMessageThinkingContent(message).length) + ':' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
+    ':' + chatMessageImagePath(message);
 }
 
 export function buildCloudContextMessages(messages: ChatMessage[]): CloudChatMessage[] {

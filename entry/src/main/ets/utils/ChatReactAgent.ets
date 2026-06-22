@@ -1,5 +1,6 @@
 import {
   CloudChatCompletionOptions,
+  CloudChatCompletionResult,
   CloudChatMessage,
   CloudChatToolDefinition,
   CloudModelClient,
@@ -12,6 +13,7 @@ import {
 } from './ChatToolRegistry';
 
 export type ChatReactTraceHandler = (line: string) => void;
+export type ChatReactContentDeltaHandler = (delta: string) => void;
 
 export interface ChatReactAgentRunOptions {
   maxIterations?: number;
@@ -20,6 +22,7 @@ export interface ChatReactAgentRunOptions {
   userMessage?: string;
   enableThinking?: boolean;
   onTrace?: ChatReactTraceHandler;
+  onContentDelta?: ChatReactContentDeltaHandler;
 }
 
 export interface ChatReactAgentResult {
@@ -49,8 +52,9 @@ export class ChatReactAgent {
     let toolCallCount = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      let result = await this.client.chatCompletion(this.buildCompletionOptions(workingMessages, config, tools,
-        options.enableThinking === true));
+      let completionOptions = this.buildCompletionOptions(workingMessages, config, tools,
+        options.enableThinking === true);
+      let result = await this.requestCompletion(completionOptions, options);
       if (result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
         return {
@@ -84,6 +88,16 @@ export class ChatReactAgent {
     }
 
     return this.limitResult(maxIterations, toolCallCount);
+  }
+
+  private async requestCompletion(completionOptions: CloudChatCompletionOptions,
+    options: ChatReactAgentRunOptions): Promise<CloudChatCompletionResult> {
+    if (options.onContentDelta === undefined) {
+      return this.client.chatCompletion(completionOptions);
+    }
+    return this.client.chatCompletionStream(completionOptions, {
+      onContentDelta: options.onContentDelta
+    });
   }
 
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,

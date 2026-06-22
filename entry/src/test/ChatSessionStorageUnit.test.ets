@@ -11,6 +11,8 @@ import {
   createChatMessage,
   createEmptyChatSession,
   defaultChatSessionTitle,
+  splitAssistantThinkingContent,
+  toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from '../main/ets/pages/chat/ChatSessionTypes';
 import { ChatSessionController, ChatSessionViewState } from '../main/ets/pages/chat/ChatSessionController';
@@ -64,6 +66,41 @@ export default function chatSessionStorageUnitTest() {
       ];
 
       expect(chatSessionPreview(messages)).assertEqual('我会先读取最近截图并按主题归纳。');
+    });
+
+    it('splitsAssistantThinkingFromVisibleAnswer', 0, () => {
+      let parts = splitAssistantThinkingContent('<think>\n先分析问题。\n</think>\n最终回答。');
+
+      expect(parts.thinkingContent).assertEqual('先分析问题。');
+      expect(parts.content).assertEqual('最终回答。');
+    });
+
+    it('splitsAssistantThinkingWhenOpeningTagIsMissing', 0, () => {
+      let parts = splitAssistantThinkingContent('先分析问题。\n</think>\n最终回答。');
+
+      expect(parts.thinkingContent).assertEqual('先分析问题。');
+      expect(parts.content).assertEqual('最终回答。');
+    });
+
+    it('keepsPartialStreamingThinkingOutOfVisibleAnswer', 0, () => {
+      let parts = splitAssistantThinkingContent('<think>\n正在分析第一步');
+
+      expect(parts.thinkingContent).assertEqual('正在分析第一步');
+      expect(parts.content).assertEqual('');
+    });
+
+    it('createsAssistantMessageWithCollapsedThinkingModule', 0, () => {
+      let message = createChatMessage('assistant-1', 'assistant', 'chat',
+        '<think>\n先分析。\n</think>\n回答正文。', 1000);
+
+      expect(message.content).assertEqual('回答正文。');
+      expect(message.thinkingContent).assertEqual('先分析。');
+      expect(message.thinkingCollapsed).assertTrue();
+
+      let toggled = toggleChatMessageThinkingCollapsed([message], 'assistant-1');
+
+      expect(toggled[0].thinkingCollapsed).assertFalse();
+      expect(chatMessageRenderKey(message) === chatMessageRenderKey(toggled[0])).assertFalse();
     });
 
     it('keepsTaskTraceCollapsedByDefaultAndTogglesIt', 0, () => {
@@ -177,6 +214,37 @@ export default function chatSessionStorageUnitTest() {
       expect(reloaded !== null).assertTrue();
       if (reloaded !== null) {
         expect(reloaded.messages[0].collapsed).assertFalse();
+      }
+
+      cleanupPath(root);
+    });
+
+    it('updatesAssistantMessageContentAndSplitsStreamingThinking', 0, () => {
+      let root = nextTestRoot('stream-update');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let assistant = createChatMessage('assistant-1', 'assistant', 'chat', '', 1001);
+      let saved = ChatSessionStorage.appendMessage(root, session.id, assistant);
+      expect(saved !== null).assertTrue();
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: session.id,
+        activeMessages: [assistant],
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: saved
+      };
+
+      let next = ChatSessionController.updateMessageContent(root, state, 'assistant-1',
+        '<think>\n先分析。\n</think>\n最终回答。', ['工具：lookup_note']);
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(next.activeMessages[0].content).assertEqual('最终回答。');
+      expect(next.activeMessages[0].thinkingContent).assertEqual('先分析。');
+      expect(next.activeMessages[0].trace.length).assertEqual(1);
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.messages[0].content).assertEqual('最终回答。');
       }
 
       cleanupPath(root);

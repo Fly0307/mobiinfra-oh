@@ -2,14 +2,19 @@ import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
+  CHAT_MESSAGE_KIND_CHAT,
+  ChatAssistantThinkingParts,
   ChatMessage,
   ChatSessionIndex,
   ChatSessionRecord,
   ChatSessionSummary,
   buildChatSessionSummary,
   chatMessageImagePath,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
   createEmptyChatSession,
-  normalizeChatMode
+  normalizeChatMode,
+  splitAssistantThinkingContent
 } from '../pages/chat/ChatSessionTypes';
 
 const CHAT_SESSION_DIR: string = 'chat-sessions';
@@ -266,11 +271,20 @@ export class ChatSessionStorage {
     let normalized: ChatMessage[] = [];
     for (let i = 0; i < messages.length; i++) {
       let message = messages[i];
+      let thinkingContent = chatMessageThinkingContent(message);
+      let visibleContent = message.content;
+      if (thinkingContent.length === 0 && message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+        let parts: ChatAssistantThinkingParts = splitAssistantThinkingContent(message.content);
+        visibleContent = parts.content;
+        thinkingContent = parts.thinkingContent;
+      }
       normalized.push({
         id: message.id,
         role: message.role,
         kind: message.kind,
-        content: message.content,
+        content: visibleContent,
+        thinkingContent: thinkingContent,
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
         trace: message.trace === undefined ? [] : message.trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,

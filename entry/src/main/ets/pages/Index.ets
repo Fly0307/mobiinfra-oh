@@ -287,6 +287,7 @@ struct Index {
   private localTaskSessionId: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State cloudChatCancelRequested: boolean = false;
   @State chatSessions: ChatSessionSummary[] = [];
   @State activeChatSessionId: string = '';
   @State activeChatMessages: ChatMessage[] = [];
@@ -403,6 +404,12 @@ struct Index {
     this.applyChatSessionViewState(state);
   }
 
+  private updateActiveChatMessageContent(messageId: string, content: string, trace: string[] = []): void {
+    let state = ChatSessionController.updateMessageContent(this.filesDir, this.currentChatSessionViewState(), messageId,
+      content, trace);
+    this.applyChatSessionViewState(state);
+  }
+
   private appendChatMessageForSession(sessionId: string, message: ChatMessage): void {
     let state = ChatSessionController.appendMessageToSession(this.filesDir, this.currentChatSessionViewState(),
       this.taskSessionId(sessionId), message);
@@ -427,6 +434,20 @@ struct Index {
       return compact;
     }
     return compact.substring(0, maxLength) + '...';
+  }
+
+  private cancelledCloudChatContent(streamedContent: string): string {
+    let content = streamedContent.trim();
+    if (content.length === 0) {
+      return '已取消本次回复。';
+    }
+    let lookup = content.toLowerCase();
+    let lastOpen = lookup.lastIndexOf('<think>');
+    let lastClose = lookup.lastIndexOf('</think>');
+    if (lastOpen >= 0 && lastClose < lastOpen) {
+      return content + '\n</think>\n\n已取消本次回复。';
+    }
+    return content + '\n\n已取消本次回复。';
   }
 
   private extractJsonObjectText(text: string): string {
@@ -735,6 +756,11 @@ struct Index {
 
   private toggleActiveTaskTrace(messageId: string): void {
     let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private toggleActiveThinking(messageId: string): void {
+    let state = ChatSessionController.toggleThinking(this.filesDir, this.currentChatSessionViewState(), messageId);
     this.applyChatSessionViewState(state);
   }
 
@@ -2617,6 +2643,15 @@ struct Index {
     }
   }
 
+  cancelCurrentCloudChat(): void {
+    if (!this.cloudThinking) {
+      return;
+    }
+    this.cloudChatCancelRequested = true;
+    this.cloudClient.cancelActiveRequests();
+    this.appendCloudLog('ReAct 云端聊天取消：已中断当前 HTTP 请求。');
+  }
+
   async runCloudPlannerOnce() {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -2628,6 +2663,7 @@ struct Index {
     let task = this.cloudUserInput.trim();
     this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
@@ -2639,9 +2675,13 @@ struct Index {
     let contextMessages: CloudChatMessage[] = [this.cloudChatDateSystemMessage()]
       .concat(buildCloudContextMessages(activeSession.messages.concat([userMessage])));
     this.appendActiveChatMessage(userMessage);
+    let assistantMessageId = this.nextChatMessageId('assistant');
+    this.appendActiveChatMessage(createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT, '',
+      new Date().getTime()));
     let enableThinking = this.chatDeepThinkingEnabled;
     this.appendCloudLog(`ReAct 云端聊天开始，Think：${enableThinking ? '开启' : '关闭'}，任务：${task}`);
     let toolTraceLines: string[] = [];
+    let streamedContent = '';
     try {
       let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), {
@@ -2651,19 +2691,29 @@ struct Index {
         enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
+          this.updateActiveChatMessageContent(assistantMessageId, streamedContent, toolTraceLines);
+        },
+        onContentDelta: (delta: string) => {
+          streamedContent += delta;
+          this.updateActiveChatMessageContent(assistantMessageId, streamedContent, toolTraceLines);
         }
       });
       let response = result.content;
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime(), toolTraceLines));
+      this.updateActiveChatMessageContent(assistantMessageId, response, toolTraceLines);
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}`);
     } catch (e) {
       let err = e as Error;
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime(), toolTraceLines));
-      this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
+      if (this.cloudChatCancelRequested) {
+        this.updateActiveChatMessageContent(assistantMessageId, this.cancelledCloudChatContent(streamedContent),
+          toolTraceLines);
+        this.appendCloudLog('ReAct 云端聊天已取消。');
+      } else {
+        this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + err.message, toolTraceLines);
+        this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
+      }
     } finally {
       this.cloudThinking = false;
+      this.cloudChatCancelRequested = false;
     }
   }
 
@@ -3666,7 +3716,9 @@ struct Index {
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
+            onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+            onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },

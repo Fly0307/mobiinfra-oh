@@ -3,6 +3,8 @@ import {
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
   chatMessageImagePath,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
   chatMessageRenderKey
 } from './ChatSessionTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
@@ -15,6 +17,7 @@ export struct ChatMessageList {
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onScrollContent: (yOffset: number) => void = () => {};
 
@@ -94,6 +97,10 @@ export struct ChatMessageList {
     return message.trace.length;
   }
 
+  private hasVisibleContent(message: ChatMessage): boolean {
+    return message.content.trim().length > 0;
+  }
+
   private formatMessageTime(time: number): string {
     if (time <= 0) {
       return '';
@@ -132,9 +139,13 @@ export struct ChatMessageList {
 
       this.ToolCallSummary(message)
 
-      MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
-        .width('100%')
-        .margin({ top: 6 })
+      this.ThinkingModule(message)
+
+      if (this.hasVisibleContent(message)) {
+        MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
+          .width('100%')
+          .margin({ top: 6 })
+      }
 
       this.MessageImagePreview(message)
     }
@@ -156,6 +167,54 @@ export struct ChatMessageList {
         .lineHeight(18)
         .width('100%')
         .margin({ top: 6 })
+    }
+  }
+
+  @Builder ThinkingModule(message: ChatMessage) {
+    if (message.role === 'assistant' && chatMessageThinkingContent(message).length > 0) {
+      Column() {
+        Row() {
+          Text(chatMessageThinkingCollapsed(message) ? '▶' : '▼')
+            .fontSize(11)
+            .fontColor('#6B7280')
+            .width(20)
+            .height(20)
+            .textAlign(TextAlign.Center)
+          Column() {
+            Text('Think 思考过程')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#4B5563')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(chatMessageThinkingCollapsed(message) ? '已折叠，点击查看' : '点击收起')
+              .fontSize(10)
+              .fontColor('#8B95A5')
+              .margin({ top: 2 })
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        if (!chatMessageThinkingCollapsed(message)) {
+          Text(chatMessageThinkingContent(message))
+            .fontSize(12)
+            .fontColor('#4B5563')
+            .lineHeight(18)
+            .width('100%')
+            .margin({ top: 8 })
+        }
+      }
+      .width('100%')
+      .padding({ left: 10, right: 10, top: 9, bottom: 9 })
+      .margin({ top: 8 })
+      .backgroundColor('#F3F4F6')
+      .borderRadius(12)
+      .border({ width: 1, color: '#E5E7EB' })
+      .onClick(() => {
+        this.onToggleThinking(message.id);
+      })
     }
   }
 

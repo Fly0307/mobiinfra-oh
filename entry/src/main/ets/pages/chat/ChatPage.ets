@@ -42,7 +42,9 @@ export struct ChatPage {
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
   onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
+  onCancelCloudChat: () => void = () => {};
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
@@ -80,6 +82,13 @@ export struct ChatPage {
 
   private isBusy(): boolean {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
+  }
+
+  private primaryButtonText(): string {
+    if (this.isCloudMode() && this.cloudThinking) {
+      return '停止';
+    }
+    return this.isBusy() ? '...' : '发送';
   }
 
   private toggleDeepThinking(): void {
@@ -295,6 +304,7 @@ export struct ChatPage {
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
+        onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
         onScrollContent: (_yOffset: number) => {}
       })
@@ -351,6 +361,12 @@ export struct ChatPage {
   }
 
   private async runPrimaryAction(): Promise<void> {
+    if (this.isBusy()) {
+      if (this.isCloudMode()) {
+        this.onCancelCloudChat();
+      }
+      return;
+    }
     if (this.activeInput().trim().length > 0 && !this.isBusy()) {
       this.dismissChatInput();
     }
@@ -536,7 +552,7 @@ export struct ChatPage {
             .padding({ left: this.hasConversationContent() ? 12 : 14, right: 12, top: 8, bottom: 8 })
             .margin({ left: this.hasConversationContent() ? 0 : 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
-          Button(this.isBusy() ? '...' : '发送')
+          Button(this.primaryButtonText())
             .width(68)
             .height(40)
             .fontSize(14)

@@ -26,6 +26,7 @@ export struct DigitalAvatarView {
   @State tapHaloScale: number = 0.86;
   @State tapHaloOpacity: number = 0;
   private thinkingTimerId: number = -1;
+  private tapFrameTimerIds: number[] = [];
   private tapUnlockTimerId: number = -1;
   private tapLocked: boolean = false;
 
@@ -35,6 +36,7 @@ export struct DigitalAvatarView {
 
   aboutToDisappear(): void {
     this.clearThinkingTimer();
+    this.clearTapFrameTimers();
     this.clearTapUnlockTimer();
     this.tapLocked = false;
   }
@@ -147,7 +149,29 @@ export struct DigitalAvatarView {
   }
 
   private tapLiftY(): number {
-    return this.avatarSize === 'hero' ? -12 : -7;
+    return this.avatarSize === 'hero' ? -16 : -10;
+  }
+
+  private tapPeakScale(): number {
+    return this.avatarSize === 'hero' ? 1.16 : 1.28;
+  }
+
+  private tapSettleScale(): number {
+    return this.avatarSize === 'hero' ? 1.04 : 1.08;
+  }
+
+  private tapForegroundAnimationDuration(): number {
+    if (this.tapScale !== 1 || this.tapTranslateY !== 0) {
+      return 120;
+    }
+    return this.visualState === 'thinking' ? 620 : 120;
+  }
+
+  private tapShadowAnimationDuration(): number {
+    if (this.tapShadowScale !== 1 || this.tapShadowOpacity !== 0.22) {
+      return 120;
+    }
+    return this.visualState === 'thinking' ? 620 : 120;
   }
 
   private foregroundScale(): number {
@@ -205,6 +229,13 @@ export struct DigitalAvatarView {
     this.tapUnlockTimerId = -1;
   }
 
+  private clearTapFrameTimers(): void {
+    for (let i = 0; i < this.tapFrameTimerIds.length; i++) {
+      clearTimeout(this.tapFrameTimerIds[i]);
+    }
+    this.tapFrameTimerIds = [];
+  }
+
   private syncThinkingTimer(): void {
     if (this.visualState === 'thinking' && this.hasForegroundImage()) {
       this.startThinkingTimer();
@@ -219,6 +250,26 @@ export struct DigitalAvatarView {
     this.triggerTapFeedback();
   }
 
+  private applyTapFeedbackFrame(stage: string, tapScale: number, tapTranslateY: number, tapShadowScale: number,
+    tapShadowOpacity: number, tapHaloScale: number, tapHaloOpacity: number): void {
+    this.tapScale = tapScale;
+    this.tapTranslateY = tapTranslateY;
+    this.tapShadowScale = tapShadowScale;
+    this.tapShadowOpacity = tapShadowOpacity;
+    this.tapHaloScale = tapHaloScale;
+    this.tapHaloOpacity = tapHaloOpacity;
+    this.logAvatarInfo('tap feedback frame=' + stage);
+  }
+
+  private scheduleTapFeedbackFrame(delay: number, stage: string, tapScale: number, tapTranslateY: number,
+    tapShadowScale: number, tapShadowOpacity: number, tapHaloScale: number, tapHaloOpacity: number): void {
+    let timerId = setTimeout(() => {
+      this.applyTapFeedbackFrame(stage, tapScale, tapTranslateY, tapShadowScale, tapShadowOpacity, tapHaloScale,
+        tapHaloOpacity);
+    }, delay);
+    this.tapFrameTimerIds.push(timerId);
+  }
+
   private triggerTapFeedback(): void {
     if (!this.hasAvatarFrame() && this.fallbackText.length === 0) {
       this.logAvatarWarn('tap ignored reason=empty-avatar');
@@ -230,47 +281,17 @@ export struct DigitalAvatarView {
     }
     this.logAvatarInfo('tap feedback start');
     this.tapLocked = true;
-    this.getUIContext()?.keyframeAnimateTo({ iterations: 1 }, [
-      {
-        duration: 120,
-        event: () => {
-          this.tapScale = 1.14;
-          this.tapTranslateY = this.tapLiftY();
-          this.tapShadowScale = 0.78;
-          this.tapShadowOpacity = 0.14;
-          this.tapHaloScale = 1.24;
-          this.tapHaloOpacity = 0.46;
-        }
-      },
-      {
-        duration: 120,
-        event: () => {
-          this.tapScale = 0.98;
-          this.tapTranslateY = 1;
-          this.tapShadowScale = 1.08;
-          this.tapShadowOpacity = 0.24;
-          this.tapHaloScale = 1.08;
-          this.tapHaloOpacity = 0.22;
-        }
-      },
-      {
-        duration: 180,
-        event: () => {
-          this.tapScale = 1;
-          this.tapTranslateY = 0;
-          this.tapShadowScale = 1;
-          this.tapShadowOpacity = 0.22;
-          this.tapHaloScale = 1.42;
-          this.tapHaloOpacity = 0;
-        }
-      }
-    ]);
+    this.clearTapFrameTimers();
     this.clearTapUnlockTimer();
+    this.applyTapFeedbackFrame('lift', this.tapPeakScale(), this.tapLiftY(), 0.68, 0.08, 1.34, 0.72);
+    this.scheduleTapFeedbackFrame(170, 'settle', this.tapSettleScale(), 2, 1.18, 0.28, 1.16, 0.34);
+    this.scheduleTapFeedbackFrame(340, 'restore', 1, 0, 1, 0.22, 1.58, 0);
     this.tapUnlockTimerId = setTimeout(() => {
       this.tapLocked = false;
       this.tapUnlockTimerId = -1;
+      this.clearTapFrameTimers();
       this.logAvatarInfo('tap feedback unlocked');
-    }, 460);
+    }, 560);
   }
 
   @Builder FallbackAvatar() {
@@ -285,7 +306,7 @@ export struct DigitalAvatarView {
       .borderRadius(this.fallbackRadius())
       .translate({ x: 0, y: this.tapTranslateY })
       .scale({ x: this.tapScale, y: this.tapScale })
-      .animation({ duration: 180, curve: Curve.EaseOut });
+      .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
   }
 
   @Builder ForegroundAvatar() {
@@ -298,7 +319,7 @@ export struct DigitalAvatarView {
         .borderRadius(this.ringRadius())
         .opacity(this.tapHaloOpacity)
         .scale({ x: this.tapHaloScale, y: this.tapHaloScale })
-        .animation({ duration: 180, curve: Curve.EaseOut });
+        .animation({ duration: 120, curve: Curve.EaseOut });
 
       Row()
         .width(this.ringSize())
@@ -317,7 +338,7 @@ export struct DigitalAvatarView {
         .translate({ x: 0, y: this.shadowTranslateY() })
         .opacity(this.tapShadowOpacity)
         .scale({ x: this.shadowScale(), y: 1 })
-        .animation({ duration: 760, curve: Curve.EaseInOut });
+        .animation({ duration: this.tapShadowAnimationDuration(), curve: Curve.EaseOut });
 
       Image(this.avatarForegroundUri)
         .width(this.frameWidth())
@@ -325,7 +346,7 @@ export struct DigitalAvatarView {
         .objectFit(ImageFit.Contain)
         .translate({ x: 0, y: this.tapTranslateY })
         .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
-        .animation({ duration: 760, curve: Curve.EaseInOut })
+        .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut })
         .onError(() => {
           this.imageLoadFailed = true;
           this.stopThinkingTimer();

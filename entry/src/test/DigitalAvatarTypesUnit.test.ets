@@ -11,8 +11,14 @@ import {
   digitalAvatarContainerHeight,
   digitalAvatarContainerWidth,
   digitalAvatarFallbackSize,
+  digitalAvatarFrameHeight,
+  digitalAvatarFrameWidth,
+  DIGITAL_AVATAR_HERO_CONTAINER_HEIGHT,
+  DIGITAL_AVATAR_HERO_CONTAINER_WIDTH,
   DIGITAL_AVATAR_HERO_HEIGHT,
   DIGITAL_AVATAR_HERO_WIDTH,
+  DIGITAL_AVATAR_MESSAGE_CONTAINER_HEIGHT,
+  DIGITAL_AVATAR_MESSAGE_CONTAINER_WIDTH,
   DIGITAL_AVATAR_MESSAGE_HEIGHT,
   DIGITAL_AVATAR_MESSAGE_WIDTH,
   HERO_TEXT_AVATAR_SIZE,
@@ -81,10 +87,17 @@ export default function digitalAvatarTypesUnitTest() {
     });
 
     it('avatarFrameSizeKeepsDigitalFrameWhenUriExists', 0, () => {
-      expect(digitalAvatarContainerWidth('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_WIDTH);
-      expect(digitalAvatarContainerHeight('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_HEIGHT);
-      expect(digitalAvatarContainerWidth('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_WIDTH);
-      expect(digitalAvatarContainerHeight('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_HEIGHT);
+      expect(digitalAvatarFrameWidth('message')).assertEqual(DIGITAL_AVATAR_MESSAGE_WIDTH);
+      expect(digitalAvatarFrameHeight('message')).assertEqual(DIGITAL_AVATAR_MESSAGE_HEIGHT);
+      expect(digitalAvatarFrameWidth('hero')).assertEqual(DIGITAL_AVATAR_HERO_WIDTH);
+      expect(digitalAvatarFrameHeight('hero')).assertEqual(DIGITAL_AVATAR_HERO_HEIGHT);
+    });
+
+    it('avatarContainerReservesTapFeedbackSpaceWhenUriExists', 0, () => {
+      expect(digitalAvatarContainerWidth('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_CONTAINER_WIDTH);
+      expect(digitalAvatarContainerHeight('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_CONTAINER_HEIGHT);
+      expect(digitalAvatarContainerWidth('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_CONTAINER_WIDTH);
+      expect(digitalAvatarContainerHeight('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_CONTAINER_HEIGHT);
     });
 
     it('avatarFallbackSizeUsesTextBadgeWhenUriMissing', 0, () => {

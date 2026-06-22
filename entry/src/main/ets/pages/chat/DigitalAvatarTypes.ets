@@ -20,6 +20,10 @@ export const DIGITAL_AVATAR_MESSAGE_WIDTH: number = 42;
 export const DIGITAL_AVATAR_MESSAGE_HEIGHT: number = 54;
 export const DIGITAL_AVATAR_HERO_WIDTH: number = 120;
 export const DIGITAL_AVATAR_HERO_HEIGHT: number = 150;
+export const DIGITAL_AVATAR_MESSAGE_CONTAINER_WIDTH: number = 56;
+export const DIGITAL_AVATAR_MESSAGE_CONTAINER_HEIGHT: number = 72;
+export const DIGITAL_AVATAR_HERO_CONTAINER_WIDTH: number = 150;
+export const DIGITAL_AVATAR_HERO_CONTAINER_HEIGHT: number = 196;
 export const TEXT_AVATAR_SIZE: number = 34;
 export const HERO_TEXT_AVATAR_SIZE: number = 56;
 
@@ -36,11 +40,17 @@ export function digitalAvatarFrameHeight(size: DigitalAvatarSize): number {
 }
 
 export function digitalAvatarContainerWidth(size: DigitalAvatarSize, hasAvatarFrame: boolean): number {
-  return hasAvatarFrame ? digitalAvatarFrameWidth(size) : digitalAvatarFallbackSize(size);
+  if (!hasAvatarFrame) {
+    return digitalAvatarFallbackSize(size);
+  }
+  return size === 'hero' ? DIGITAL_AVATAR_HERO_CONTAINER_WIDTH : DIGITAL_AVATAR_MESSAGE_CONTAINER_WIDTH;
 }
 
 export function digitalAvatarContainerHeight(size: DigitalAvatarSize, hasAvatarFrame: boolean): number {
-  return hasAvatarFrame ? digitalAvatarFrameHeight(size) : digitalAvatarFallbackSize(size);
+  if (!hasAvatarFrame) {
+    return digitalAvatarFallbackSize(size);
+  }
+  return size === 'hero' ? DIGITAL_AVATAR_HERO_CONTAINER_HEIGHT : DIGITAL_AVATAR_MESSAGE_CONTAINER_HEIGHT;
 }
 
 export function useDigitalAvatarForMessage(message: ChatMessage): boolean {

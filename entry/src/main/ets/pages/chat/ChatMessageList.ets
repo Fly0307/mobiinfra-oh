@@ -11,7 +11,7 @@ import {
 import { DigitalAvatarView } from './DigitalAvatarView';
 import {
   chatAvatarRenderModel,
-  DIGITAL_AVATAR_MESSAGE_WIDTH,
+  digitalAvatarContainerWidth,
   DigitalAvatarVisualState,
   TEXT_AVATAR_SIZE,
   useDigitalAvatarForMessage
@@ -93,14 +93,14 @@ export struct ChatMessageList {
 
   private avatarColumnWidth(message: ChatMessage): number {
     if (this.shouldUseDigitalAvatar(message) && this.avatarForegroundUri.length > 0) {
-      return DIGITAL_AVATAR_MESSAGE_WIDTH;
+      return digitalAvatarContainerWidth('message', true);
     }
     return TEXT_AVATAR_SIZE;
   }
 
   private thinkingAvatarColumnWidth(): number {
     if (this.avatarForegroundUri.length > 0) {
-      return DIGITAL_AVATAR_MESSAGE_WIDTH;
+      return digitalAvatarContainerWidth('message', true);
     }
     return TEXT_AVATAR_SIZE;
   }

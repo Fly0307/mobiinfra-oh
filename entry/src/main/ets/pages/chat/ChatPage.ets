@@ -13,6 +13,7 @@ import { ChatMessage, ChatSessionSummary, chatMessagesAutoScrollKey } from './Ch
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
+import { digitalAvatarContainerHeight } from './DigitalAvatarTypes';
 
 @Component
 export struct ChatPage {
@@ -235,7 +236,7 @@ export struct ChatPage {
         .layoutWeight(1)
     }
     .width('100%')
-    .height(this.avatarForegroundUri.length > 0 ? 180 : 118)
+    .height(this.avatarForegroundUri.length > 0 ? digitalAvatarContainerHeight('hero', true) + 8 : 118)
     .alignItems(VerticalAlign.Bottom)
     .margin({ top: 0 })
   }

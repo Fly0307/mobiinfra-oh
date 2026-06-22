@@ -105,6 +105,14 @@ export struct ChatMessageList {
     return TEXT_AVATAR_SIZE;
   }
 
+  private avatarDebugSource(message: ChatMessage): string {
+    return 'message id=' + message.id + ', role=' + message.role + ', kind=' + message.kind;
+  }
+
+  private thinkingAvatarDebugSource(): string {
+    return 'thinking-row modeMark=' + (this.modeMark.length > 0 ? this.modeMark : '助');
+  }
+
   private bubbleColor(message: ChatMessage): string {
     if (this.isUserMessage(message)) {
       return '#111827';
@@ -163,7 +171,8 @@ export struct ChatMessageList {
         fallbackText: this.avatarText(message),
         fallbackColor: this.avatarColor(message),
         visualState: visualState,
-        avatarSize: 'message'
+        avatarSize: 'message',
+        debugSource: this.avatarDebugSource(message)
       })
     } else {
       Text(this.avatarText(message))
@@ -184,7 +193,8 @@ export struct ChatMessageList {
       fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
       fallbackColor: '#5968FF',
       visualState: 'thinking',
-      avatarSize: 'message'
+      avatarSize: 'message',
+      debugSource: this.thinkingAvatarDebugSource()
     })
   }
 

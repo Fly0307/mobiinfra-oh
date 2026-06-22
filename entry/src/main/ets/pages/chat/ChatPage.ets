@@ -227,7 +227,8 @@ export struct ChatPage {
         fallbackText: 'H',
         fallbackColor: '#5968FF',
         visualState: 'idle',
-        avatarSize: 'hero'
+        avatarSize: 'hero',
+        debugSource: 'welcome-hero mode=' + this.chatMode
       })
       .margin({ left: 8 })
       Blank()

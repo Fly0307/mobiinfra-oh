@@ -7,6 +7,7 @@ import {
   DigitalAvatarSize,
   DigitalAvatarVisualState
 } from './DigitalAvatarTypes';
+import { AppLogger } from '../../utils/AppLogger';
 
 @Component
 export struct DigitalAvatarView {
@@ -15,6 +16,7 @@ export struct DigitalAvatarView {
   @Prop fallbackColor: string = '#5968FF';
   @Prop avatarSize: DigitalAvatarSize = 'message';
   @Prop @Watch('onVisualStateChanged') visualState: DigitalAvatarVisualState = 'idle';
+  @Prop debugSource: string = '';
   @State imageLoadFailed: boolean = false;
   @State thinkingPulse: boolean = false;
   @State tapScale: number = 1;
@@ -52,6 +54,24 @@ export struct DigitalAvatarView {
 
   private hasAvatarFrame(): boolean {
     return this.avatarForegroundUri.length > 0;
+  }
+
+  private avatarLogContext(): string {
+    let source: string = this.debugSource.length > 0 ? this.debugSource : 'unknown';
+    return 'source=' + source +
+      ', size=' + this.avatarSize +
+      ', visualState=' + this.visualState +
+      ', hasUri=' + String(this.avatarForegroundUri.length > 0) +
+      ', imageLoadFailed=' + String(this.imageLoadFailed) +
+      ', tapLocked=' + String(this.tapLocked);
+  }
+
+  private logAvatarInfo(message: string): void {
+    AppLogger.info('Chat.Avatar', message + ' ' + this.avatarLogContext());
+  }
+
+  private logAvatarWarn(message: string): void {
+    AppLogger.warn('Chat.Avatar', message + ' ' + this.avatarLogContext());
   }
 
   private containerWidth(): number {
@@ -194,13 +214,21 @@ export struct DigitalAvatarView {
   }
 
   // 点击反馈用关键帧同步前景与投影，形成轻量 2.5D 弹跳效果。
+  private handleAvatarClick(): void {
+    this.logAvatarInfo('click received');
+    this.triggerTapFeedback();
+  }
+
   private triggerTapFeedback(): void {
     if (!this.hasAvatarFrame() && this.fallbackText.length === 0) {
+      this.logAvatarWarn('tap ignored reason=empty-avatar');
       return;
     }
     if (this.tapLocked) {
+      this.logAvatarWarn('tap ignored reason=tap-locked');
       return;
     }
+    this.logAvatarInfo('tap feedback start');
     this.tapLocked = true;
     this.getUIContext()?.keyframeAnimateTo({ iterations: 1 }, [
       {
@@ -241,6 +269,7 @@ export struct DigitalAvatarView {
     this.tapUnlockTimerId = setTimeout(() => {
       this.tapLocked = false;
       this.tapUnlockTimerId = -1;
+      this.logAvatarInfo('tap feedback unlocked');
     }, 460);
   }
 
@@ -300,6 +329,7 @@ export struct DigitalAvatarView {
         .onError(() => {
           this.imageLoadFailed = true;
           this.stopThinkingTimer();
+          this.logAvatarWarn('foreground image load failed');
         });
 
       Row()
@@ -325,7 +355,7 @@ export struct DigitalAvatarView {
     .width(this.containerWidth())
     .height(this.containerHeight())
     .onClick(() => {
-      this.triggerTapFeedback();
+      this.handleAvatarClick();
     });
   }
 }

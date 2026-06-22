@@ -12,6 +12,7 @@ import {
 import { ChatMessage, ChatSessionSummary, chatMessagesAutoScrollKey } from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
+import { DigitalAvatarView } from './DigitalAvatarView';
 
 @Component
 export struct ChatPage {
@@ -220,38 +221,22 @@ export struct ChatPage {
   }
 
   @Builder WelcomeAvatarHero() {
-    if (this.avatarForegroundUri.length > 0) {
-      Row() {
-        Image(this.avatarForegroundUri)
-          .width(120)
-          .height(150)
-          .objectFit(ImageFit.Contain)
-          .margin({ left: 8 })
-        Blank()
-          .layoutWeight(1)
-      }
-      .width('100%')
-      .height(180)
-      .alignItems(VerticalAlign.Bottom)
-      .margin({ top: 0 })
-    } else {
-      Row() {
-        Text('H')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Color.White)
-          .width(56)
-          .height(56)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#5968FF')
-          .borderRadius(18)
-        Blank()
-          .layoutWeight(1)
-      }
-      .width('100%')
-      .height(118)
-      .alignItems(VerticalAlign.Bottom)
+    Row() {
+      DigitalAvatarView({
+        avatarForegroundUri: this.avatarForegroundUri,
+        fallbackText: 'H',
+        fallbackColor: '#5968FF',
+        visualState: 'idle',
+        avatarSize: 'hero'
+      })
+      .margin({ left: 8 })
+      Blank()
+        .layoutWeight(1)
     }
+    .width('100%')
+    .height(this.avatarForegroundUri.length > 0 ? 180 : 118)
+    .alignItems(VerticalAlign.Bottom)
+    .margin({ top: 0 })
   }
 
   @Builder EmptyWelcome() {

@@ -8,6 +8,15 @@ import {
 } from '../main/ets/pages/chat/ChatSessionTypes';
 import {
   chatAvatarRenderModel,
+  digitalAvatarContainerHeight,
+  digitalAvatarContainerWidth,
+  digitalAvatarFallbackSize,
+  DIGITAL_AVATAR_HERO_HEIGHT,
+  DIGITAL_AVATAR_HERO_WIDTH,
+  DIGITAL_AVATAR_MESSAGE_HEIGHT,
+  DIGITAL_AVATAR_MESSAGE_WIDTH,
+  HERO_TEXT_AVATAR_SIZE,
+  TEXT_AVATAR_SIZE,
   useDigitalAvatarForMessage
 } from '../main/ets/pages/chat/DigitalAvatarTypes';
 
@@ -69,6 +78,20 @@ export default function digitalAvatarTypesUnitTest() {
       expect(traceModel.useDigitalAvatar).assertFalse();
       expect(traceModel.fallbackText).assertEqual('任');
       expect(traceModel.fallbackColor).assertEqual('#7C3AED');
+    });
+
+    it('avatarFrameSizeKeepsDigitalFrameWhenUriExists', 0, () => {
+      expect(digitalAvatarContainerWidth('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_WIDTH);
+      expect(digitalAvatarContainerHeight('message', true)).assertEqual(DIGITAL_AVATAR_MESSAGE_HEIGHT);
+      expect(digitalAvatarContainerWidth('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_WIDTH);
+      expect(digitalAvatarContainerHeight('hero', true)).assertEqual(DIGITAL_AVATAR_HERO_HEIGHT);
+    });
+
+    it('avatarFallbackSizeUsesTextBadgeWhenUriMissing', 0, () => {
+      expect(digitalAvatarFallbackSize('message')).assertEqual(TEXT_AVATAR_SIZE);
+      expect(digitalAvatarFallbackSize('hero')).assertEqual(HERO_TEXT_AVATAR_SIZE);
+      expect(digitalAvatarContainerWidth('message', false)).assertEqual(TEXT_AVATAR_SIZE);
+      expect(digitalAvatarContainerHeight('hero', false)).assertEqual(HERO_TEXT_AVATAR_SIZE);
     });
   });
 }

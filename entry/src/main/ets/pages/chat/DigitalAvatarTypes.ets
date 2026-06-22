@@ -7,7 +7,7 @@ import {
 } from './ChatSessionTypes';
 
 export type DigitalAvatarVisualState = 'idle' | 'thinking';
-export type DigitalAvatarSize = 'message';
+export type DigitalAvatarSize = 'message' | 'hero';
 
 export interface ChatAvatarRenderModel {
   useDigitalAvatar: boolean;
@@ -18,7 +18,30 @@ export interface ChatAvatarRenderModel {
 
 export const DIGITAL_AVATAR_MESSAGE_WIDTH: number = 42;
 export const DIGITAL_AVATAR_MESSAGE_HEIGHT: number = 54;
+export const DIGITAL_AVATAR_HERO_WIDTH: number = 120;
+export const DIGITAL_AVATAR_HERO_HEIGHT: number = 150;
 export const TEXT_AVATAR_SIZE: number = 34;
+export const HERO_TEXT_AVATAR_SIZE: number = 56;
+
+export function digitalAvatarFallbackSize(size: DigitalAvatarSize): number {
+  return size === 'hero' ? HERO_TEXT_AVATAR_SIZE : TEXT_AVATAR_SIZE;
+}
+
+export function digitalAvatarFrameWidth(size: DigitalAvatarSize): number {
+  return size === 'hero' ? DIGITAL_AVATAR_HERO_WIDTH : DIGITAL_AVATAR_MESSAGE_WIDTH;
+}
+
+export function digitalAvatarFrameHeight(size: DigitalAvatarSize): number {
+  return size === 'hero' ? DIGITAL_AVATAR_HERO_HEIGHT : DIGITAL_AVATAR_MESSAGE_HEIGHT;
+}
+
+export function digitalAvatarContainerWidth(size: DigitalAvatarSize, hasAvatarFrame: boolean): number {
+  return hasAvatarFrame ? digitalAvatarFrameWidth(size) : digitalAvatarFallbackSize(size);
+}
+
+export function digitalAvatarContainerHeight(size: DigitalAvatarSize, hasAvatarFrame: boolean): number {
+  return hasAvatarFrame ? digitalAvatarFrameHeight(size) : digitalAvatarFallbackSize(size);
+}
 
 export function useDigitalAvatarForMessage(message: ChatMessage): boolean {
   return message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT;

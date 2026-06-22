@@ -383,16 +383,22 @@ export struct ChatMessageList {
         .width(TEXT_AVATAR_SIZE)
         .margin({ left: 10 })
       } else {
-        Column() {
-          this.Avatar(message)
-        }
-        .width(this.avatarColumnWidth(message))
-        .margin({ right: 10 })
-        .onClick(() => {
-          if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-            this.onToggleTaskTrace(message.id);
+        if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+          Column() {
+            this.Avatar(message)
           }
-        })
+          .width(this.avatarColumnWidth(message))
+          .margin({ right: 10 })
+          .onClick(() => {
+            this.onToggleTaskTrace(message.id);
+          })
+        } else {
+          Column() {
+            this.Avatar(message)
+          }
+          .width(this.avatarColumnWidth(message))
+          .margin({ right: 10 })
+        }
         Column() {
           if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
             this.TraceBubble(message)

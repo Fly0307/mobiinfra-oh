@@ -1,9 +1,11 @@
 import {
-  DIGITAL_AVATAR_MESSAGE_HEIGHT,
-  DIGITAL_AVATAR_MESSAGE_WIDTH,
+  digitalAvatarContainerHeight,
+  digitalAvatarContainerWidth,
+  digitalAvatarFallbackSize,
+  digitalAvatarFrameHeight,
+  digitalAvatarFrameWidth,
   DigitalAvatarSize,
-  DigitalAvatarVisualState,
-  TEXT_AVATAR_SIZE
+  DigitalAvatarVisualState
 } from './DigitalAvatarTypes';
 
 @Component
@@ -19,6 +21,8 @@ export struct DigitalAvatarView {
   @State tapTranslateY: number = 0;
   @State tapShadowScale: number = 1;
   @State tapShadowOpacity: number = 0.22;
+  @State tapHaloScale: number = 0.86;
+  @State tapHaloOpacity: number = 0;
   private thinkingTimerId: number = -1;
   private tapUnlockTimerId: number = -1;
   private tapLocked: boolean = false;
@@ -51,11 +55,79 @@ export struct DigitalAvatarView {
   }
 
   private containerWidth(): number {
-    return this.hasAvatarFrame() ? DIGITAL_AVATAR_MESSAGE_WIDTH : TEXT_AVATAR_SIZE;
+    return digitalAvatarContainerWidth(this.avatarSize, this.hasAvatarFrame());
   }
 
   private containerHeight(): number {
-    return this.hasAvatarFrame() ? DIGITAL_AVATAR_MESSAGE_HEIGHT : TEXT_AVATAR_SIZE;
+    return digitalAvatarContainerHeight(this.avatarSize, this.hasAvatarFrame());
+  }
+
+  private frameWidth(): number {
+    return digitalAvatarFrameWidth(this.avatarSize);
+  }
+
+  private frameHeight(): number {
+    return digitalAvatarFrameHeight(this.avatarSize);
+  }
+
+  private fallbackSize(): number {
+    return digitalAvatarFallbackSize(this.avatarSize);
+  }
+
+  private fallbackFontSize(): number {
+    return this.avatarSize === 'hero' ? 20 : 13;
+  }
+
+  private fallbackRadius(): number {
+    return this.avatarSize === 'hero' ? 18 : 13;
+  }
+
+  private ringSize(): number {
+    return this.avatarSize === 'hero' ? 104 : 40;
+  }
+
+  private ringRadius(): number {
+    return this.avatarSize === 'hero' ? 52 : 20;
+  }
+
+  private shadowWidth(): number {
+    return this.avatarSize === 'hero' ? 92 : 32;
+  }
+
+  private shadowHeight(): number {
+    return this.avatarSize === 'hero' ? 16 : 8;
+  }
+
+  private shadowRadius(): number {
+    return this.avatarSize === 'hero' ? 8 : 4;
+  }
+
+  private shadowTranslateY(): number {
+    return this.avatarSize === 'hero' ? 57 : 19;
+  }
+
+  private highlightWidth(): number {
+    return this.avatarSize === 'hero' ? 22 : 10;
+  }
+
+  private highlightHeight(): number {
+    return this.avatarSize === 'hero' ? 86 : 34;
+  }
+
+  private highlightRadius(): number {
+    return this.avatarSize === 'hero' ? 11 : 5;
+  }
+
+  private highlightTranslateX(): number {
+    return this.avatarSize === 'hero' ? 28 : 10;
+  }
+
+  private highlightTranslateY(): number {
+    return this.avatarSize === 'hero' ? -12 : -2;
+  }
+
+  private tapLiftY(): number {
+    return this.avatarSize === 'hero' ? -12 : -7;
   }
 
   private foregroundScale(): number {
@@ -123,7 +195,10 @@ export struct DigitalAvatarView {
 
   // 点击反馈用关键帧同步前景与投影，形成轻量 2.5D 弹跳效果。
   private triggerTapFeedback(): void {
-    if (!this.hasForegroundImage() || this.tapLocked) {
+    if (!this.hasAvatarFrame() && this.fallbackText.length === 0) {
+      return;
+    }
+    if (this.tapLocked) {
       return;
     }
     this.tapLocked = true;
@@ -131,10 +206,12 @@ export struct DigitalAvatarView {
       {
         duration: 120,
         event: () => {
-          this.tapScale = 1.08;
-          this.tapTranslateY = -5;
+          this.tapScale = 1.14;
+          this.tapTranslateY = this.tapLiftY();
           this.tapShadowScale = 0.78;
           this.tapShadowOpacity = 0.14;
+          this.tapHaloScale = 1.24;
+          this.tapHaloOpacity = 0.46;
         }
       },
       {
@@ -144,6 +221,8 @@ export struct DigitalAvatarView {
           this.tapTranslateY = 1;
           this.tapShadowScale = 1.08;
           this.tapShadowOpacity = 0.24;
+          this.tapHaloScale = 1.08;
+          this.tapHaloOpacity = 0.22;
         }
       },
       {
@@ -153,6 +232,8 @@ export struct DigitalAvatarView {
           this.tapTranslateY = 0;
           this.tapShadowScale = 1;
           this.tapShadowOpacity = 0.22;
+          this.tapHaloScale = 1.42;
+          this.tapHaloOpacity = 0;
         }
       }
     ]);
@@ -165,41 +246,53 @@ export struct DigitalAvatarView {
 
   @Builder FallbackAvatar() {
     Text(this.fallbackText)
-      .fontSize(13)
+      .fontSize(this.fallbackFontSize())
       .fontWeight(FontWeight.Bold)
       .fontColor(Color.White)
-      .width(TEXT_AVATAR_SIZE)
-      .height(TEXT_AVATAR_SIZE)
+      .width(this.fallbackSize())
+      .height(this.fallbackSize())
       .textAlign(TextAlign.Center)
       .backgroundColor(this.fallbackColor)
-      .borderRadius(13);
+      .borderRadius(this.fallbackRadius())
+      .translate({ x: 0, y: this.tapTranslateY })
+      .scale({ x: this.tapScale, y: this.tapScale })
+      .animation({ duration: 180, curve: Curve.EaseOut });
   }
 
   @Builder ForegroundAvatar() {
     // 背景光圈、地面投影、透明前景图与高光分层叠加，保持头像尺寸稳定。
     Stack({ alignContent: Alignment.Center }) {
       Row()
-        .width(40)
-        .height(40)
+        .width(this.ringSize())
+        .height(this.ringSize())
+        .backgroundColor('#445968FF')
+        .borderRadius(this.ringRadius())
+        .opacity(this.tapHaloOpacity)
+        .scale({ x: this.tapHaloScale, y: this.tapHaloScale })
+        .animation({ duration: 180, curve: Curve.EaseOut });
+
+      Row()
+        .width(this.ringSize())
+        .height(this.ringSize())
         .backgroundColor('#335968FF')
-        .borderRadius(20)
+        .borderRadius(this.ringRadius())
         .opacity(this.ringOpacity())
         .scale({ x: this.ringScale(), y: this.ringScale() })
         .animation({ duration: 760, curve: Curve.EaseInOut });
 
       Row()
-        .width(32)
-        .height(8)
+        .width(this.shadowWidth())
+        .height(this.shadowHeight())
         .backgroundColor('#35222B46')
-        .borderRadius(4)
-        .translate({ x: 0, y: 19 })
+        .borderRadius(this.shadowRadius())
+        .translate({ x: 0, y: this.shadowTranslateY() })
         .opacity(this.tapShadowOpacity)
         .scale({ x: this.shadowScale(), y: 1 })
         .animation({ duration: 760, curve: Curve.EaseInOut });
 
       Image(this.avatarForegroundUri)
-        .width(DIGITAL_AVATAR_MESSAGE_WIDTH)
-        .height(DIGITAL_AVATAR_MESSAGE_HEIGHT)
+        .width(this.frameWidth())
+        .height(this.frameHeight())
         .objectFit(ImageFit.Contain)
         .translate({ x: 0, y: this.tapTranslateY })
         .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
@@ -210,18 +303,15 @@ export struct DigitalAvatarView {
         });
 
       Row()
-        .width(10)
-        .height(34)
+        .width(this.highlightWidth())
+        .height(this.highlightHeight())
         .backgroundColor('#33FFFFFF')
-        .borderRadius(5)
-        .translate({ x: 10, y: -2 })
+        .borderRadius(this.highlightRadius())
+        .translate({ x: this.highlightTranslateX(), y: this.highlightTranslateY() })
         .opacity(0.32);
     }
-    .width(DIGITAL_AVATAR_MESSAGE_WIDTH)
-    .height(DIGITAL_AVATAR_MESSAGE_HEIGHT)
-    .onClick(() => {
-      this.triggerTapFeedback();
-    });
+    .width(this.frameWidth())
+    .height(this.frameHeight());
   }
 
   build() {
@@ -233,6 +323,9 @@ export struct DigitalAvatarView {
       }
     }
     .width(this.containerWidth())
-    .height(this.containerHeight());
+    .height(this.containerHeight())
+    .onClick(() => {
+      this.triggerTapFeedback();
+    });
   }
 }

@@ -893,6 +893,62 @@ struct Index {
     showToastSafely('会话已删除', 1500);
   }
 
+  private normalizeChatSessionRenameTitle(title: string): string {
+    let normalizedTitle = title.trim();
+    return normalizedTitle.length > 40 ? normalizedTitle.substring(0, 40) : normalizedTitle;
+  }
+
+  private async renameChatSession(sessionId: string, title: string): Promise<boolean> {
+    if (this.blockChatSessionMutationIfBusy('重命名会话')) {
+      return false;
+    }
+    let normalizedTitle = this.normalizeChatSessionRenameTitle(title);
+    if (normalizedTitle.length === 0) {
+      showToastSafely('名称不能为空', 1400);
+      return false;
+    }
+    let state = ChatSessionController.renameSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      normalizedTitle);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    let saved = false;
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId && state.sessions[i].customTitle === normalizedTitle) {
+        saved = true;
+        break;
+      }
+    }
+    if (!saved) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    showToastSafely('会话已重命名', 1500);
+    return true;
+  }
+
+  private async toggleChatSessionPinned(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('置顶会话')) {
+      return;
+    }
+    let wasPinned = false;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        wasPinned = this.chatSessions[i].pinned === true;
+        break;
+      }
+    }
+    let state = ChatSessionController.toggleSessionPinned(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('会话置顶状态更新失败', 1500);
+      return;
+    }
+    showToastSafely(wasPinned ? '已取消置顶' : '已置顶', 1500);
+  }
+
   private toggleActiveTaskTrace(messageId: string): void {
     let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
     this.applyChatSessionViewState(state);
@@ -4210,6 +4266,10 @@ struct Index {
             onCreateSession: (mode: string) => { this.createChatSession(mode); },
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.renameChatSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },

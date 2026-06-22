@@ -38,6 +38,9 @@ export interface ChatSessionSummary {
   updatedAt: number;
   messageCount: number;
   lastMessagePreview: string;
+  customTitle?: string;
+  pinned?: boolean;
+  pinnedAt?: number;
 }
 
 export interface ChatSessionRecord {
@@ -51,6 +54,9 @@ export interface ChatSessionRecord {
   contextSummaryUpdatedAt?: number;
   contextSummaryUntilMessageId?: string;
   contextSummaryMessageCount?: number;
+  customTitle?: string;
+  pinned?: boolean;
+  pinnedAt?: number;
 }
 
 export interface ChatSessionIndex {
@@ -76,7 +82,10 @@ export function createEmptyChatSession(id: string, mode: string, now: number): C
     contextSummary: '',
     contextSummaryUpdatedAt: 0,
     contextSummaryUntilMessageId: '',
-    contextSummaryMessageCount: 0
+    contextSummaryMessageCount: 0,
+    customTitle: '',
+    pinned: false,
+    pinnedAt: 0
   };
 }
 
@@ -225,16 +234,33 @@ export function chatSessionTitleFromMessages(mode: string, messages: ChatMessage
   return defaultChatSessionTitle(mode);
 }
 
+function normalizedSessionCustomTitle(value?: string): string {
+  return value === undefined ? '' : value.trim();
+}
+
+function chatSessionDisplayTitle(session: ChatSessionRecord): string {
+  let customTitle = normalizedSessionCustomTitle(session.customTitle);
+  if (customTitle.length > 0) {
+    return customTitle;
+  }
+  return chatSessionTitleFromMessages(session.mode, session.messages);
+}
+
 export function buildChatSessionSummary(session: ChatSessionRecord, fileName: string): ChatSessionSummary {
+  let customTitle = normalizedSessionCustomTitle(session.customTitle);
+  let pinned = session.pinned === true;
   return {
     id: session.id,
-    title: chatSessionTitleFromMessages(session.mode, session.messages),
+    title: chatSessionDisplayTitle(session),
     mode: normalizeChatMode(session.mode),
     fileName: fileName,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     messageCount: session.messages.length,
-    lastMessagePreview: chatSessionPreview(session.messages)
+    lastMessagePreview: chatSessionPreview(session.messages),
+    customTitle: customTitle,
+    pinned: pinned,
+    pinnedAt: pinned && session.pinnedAt !== undefined ? session.pinnedAt : 0
   };
 }
 
@@ -291,6 +317,13 @@ export function chatMessageRenderKey(message: ChatMessage): string {
     (message.collapsed ? '1' : '0') + ':' + String(message.content.length) + ':' +
     String(chatMessageThinkingContent(message).length) + ':' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
     ':' + chatMessageImagePath(message);
+}
+
+export function chatSessionRenderKey(session: ChatSessionSummary): string {
+  // ForEach 只用会话 id 作为 key 时会复用旧列表项，导致重命名/置顶后抽屉内展示不能立即刷新。
+  return session.id + ':' + session.title + ':' + (session.pinned === true ? '1' : '0') + ':' +
+    String(session.pinnedAt === undefined ? 0 : session.pinnedAt) + ':' + String(session.updatedAt) + ':' +
+    String(session.messageCount) + ':' + session.lastMessagePreview;
 }
 
 export function chatMessagesAutoScrollKey(sessionId: string, messages: ChatMessage[], thinking: boolean): string {

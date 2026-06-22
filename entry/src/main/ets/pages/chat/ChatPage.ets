@@ -41,6 +41,8 @@ export struct ChatPage {
   onCreateSession: (mode: string) => void = () => {};
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
+  onRenameSession: (id: string, title: string) => Promise<boolean> = async () => false;
+  onToggleSessionPinned: (id: string) => Promise<void> = async () => {};
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
@@ -581,7 +583,11 @@ export struct ChatPage {
             onClose: () => { this.onCloseSessionDrawer(); },
             onCreateSession: (mode: string) => { this.onCreateSession(mode); },
             onSelectSession: async (id: string) => { await this.onSelectSession(id); },
-            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); }
+            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.onRenameSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.onToggleSessionPinned(id); }
           })
           Blank()
             .layoutWeight(1)

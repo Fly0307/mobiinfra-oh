@@ -1,12 +1,17 @@
+import { promptAction } from '@kit.ArkUI';
 import {
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
   chatModeLabel
 } from './ChatPageTypes';
-import { ChatSessionSummary } from './ChatSessionTypes';
+import { ChatSessionSummary, chatSessionRenderKey } from './ChatSessionTypes';
+import { showToastSafely } from '../../utils/PromptSafe';
 
 @Component
 export struct ChatSessionDrawer {
+  @State renameOverlayVisible: boolean = false;
+  @State renameSessionId: string = '';
+  @State renameDraftTitle: string = '';
   @Prop sessions: ChatSessionSummary[] = [];
   @Prop activeSessionId: string = '';
   @Prop restoringLocalSession: boolean = false;
@@ -14,6 +19,12 @@ export struct ChatSessionDrawer {
   onCreateSession: (mode: string) => void = () => {};
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
+  onRenameSession: (id: string, title: string) => Promise<boolean> = async () => false;
+  onToggleSessionPinned: (id: string) => Promise<void> = async () => {};
+
+  private renameMaxLength(): number {
+    return 40;
+  }
 
   private sessionCount(mode: string): number {
     let count = 0;
@@ -30,6 +41,61 @@ export struct ChatSessionDrawer {
       return '未知时间';
     }
     return new Date(time).toLocaleString();
+  }
+
+  private normalizedRenameTitle(): string {
+    let title = this.renameDraftTitle.trim();
+    return title.length > this.renameMaxLength() ? title.substring(0, this.renameMaxLength()) : title;
+  }
+
+  private openRenameOverlay(session: ChatSessionSummary): void {
+    this.renameSessionId = session.id;
+    this.renameDraftTitle = session.title;
+    this.renameOverlayVisible = true;
+  }
+
+  private closeRenameOverlay(): void {
+    this.renameOverlayVisible = false;
+    this.renameSessionId = '';
+    this.renameDraftTitle = '';
+  }
+
+  private async saveRenameOverlay(): Promise<void> {
+    let title = this.normalizedRenameTitle();
+    if (title.length === 0) {
+      showToastSafely('名称不能为空', 1400);
+      return;
+    }
+    let saved = await this.onRenameSession(this.renameSessionId, title);
+    if (saved) {
+      this.closeRenameOverlay();
+    }
+  }
+
+  private showSessionActionMenu(session: ChatSessionSummary): void {
+    let pinned = session.pinned === true;
+    // 长按菜单只承载管理操作；普通点击仍由卡片 onClick 负责切换会话。
+    promptAction.showActionMenu({
+      title: session.title,
+      buttons: [
+        { text: pinned ? '取消置顶' : '置顶', color: '#111827' },
+        { text: '重命名', color: '#111827' },
+        { text: '删除', color: '#EF4444' }
+      ]
+    }).then(async (data: promptAction.ActionMenuSuccessResponse) => {
+      if (data.index === 0) {
+        await this.onToggleSessionPinned(session.id);
+        return;
+      }
+      if (data.index === 1) {
+        this.openRenameOverlay(session);
+        return;
+      }
+      if (data.index === 2) {
+        await this.onDeleteSession(session.id);
+      }
+    }).catch(() => {
+    });
   }
 
   @Builder NewSessionButton(mode: string) {
@@ -69,6 +135,16 @@ export struct ChatSessionDrawer {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .margin({ left: 10 })
+          if (session.pinned === true) {
+            Text('置顶')
+              .fontSize(10)
+              .fontColor('#5968FF')
+              .height(20)
+              .padding({ left: 6, right: 6 })
+              .backgroundColor('#EEF2FF')
+              .borderRadius(10)
+              .margin({ left: 8 })
+          }
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
@@ -90,22 +166,6 @@ export struct ChatSessionDrawer {
           .margin({ top: 6 })
       }
       .layoutWeight(1)
-      .onClick(async () => {
-        await this.onSelectSession(session.id);
-      })
-
-      Text('删')
-        .fontSize(12)
-        .fontColor('#EF4444')
-        .width(34)
-        .height(34)
-        .textAlign(TextAlign.Center)
-        .backgroundColor('#FFF1F2')
-        .borderRadius(17)
-        .margin({ left: 10 })
-        .onClick(async () => {
-          await this.onDeleteSession(session.id);
-        })
     }
     .width('100%')
     .padding(12)
@@ -113,6 +173,12 @@ export struct ChatSessionDrawer {
     .borderRadius(16)
     .border({ width: 1, color: this.activeSessionId === session.id ? '#C7D2FE' : '#EDF0F5' })
     .margin({ bottom: 10 })
+    .onClick(async () => {
+      await this.onSelectSession(session.id);
+    })
+    .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 500 }).onAction(() => {
+      this.showSessionActionMenu(session);
+    }))
   }
 
   @Builder SessionSection(mode: string) {
@@ -139,7 +205,7 @@ export struct ChatSessionDrawer {
         if (session.mode === mode) {
           this.SessionItem(session)
         }
-      }, (session: ChatSessionSummary) => session.id)
+      }, (session: ChatSessionSummary) => chatSessionRenderKey(session))
 
       if (this.sessionCount(mode) === 0) {
         Text('暂无' + chatModeLabel(mode) + '会话')
@@ -153,62 +219,130 @@ export struct ChatSessionDrawer {
     .margin({ top: 18 })
   }
 
-  build() {
-    Column() {
-      Row() {
+  @Builder RenameOverlay() {
+    if (this.renameOverlayVisible) {
+      Stack({ alignContent: Alignment.Center }) {
         Column() {
-          Text('历史会话')
-            .fontSize(22)
+          Text('重命名会话')
+            .fontSize(18)
             .fontWeight(FontWeight.Bold)
             .fontColor('#111827')
-          Text(this.restoringLocalSession ? '正在恢复本地上下文' : '选择会话后由上层恢复上下文')
-            .fontSize(12)
-            .fontColor(this.restoringLocalSession ? '#5968FF' : '#6B7280')
-            .margin({ top: 4 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+          TextInput({ placeholder: '请输入会话名称', text: this.renameDraftTitle })
+            .width('100%')
+            .height(42)
+            .fontSize(14)
+            .fontColor('#111827')
+            .backgroundColor('#F7F9FC')
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .maxLength(this.renameMaxLength())
+            .margin({ top: 16 })
+            .onChange((value: string) => {
+              this.renameDraftTitle = value;
+            })
+          Row() {
+            Text('取消')
+              .fontSize(14)
+              .fontColor('#4B5563')
+              .height(38)
+              .layoutWeight(1)
+              .textAlign(TextAlign.Center)
+              .backgroundColor('#F3F4F6')
+              .borderRadius(12)
+              .onClick(() => {
+                this.closeRenameOverlay();
+              })
+            Text('保存')
+              .fontSize(14)
+              .fontColor(Color.White)
+              .height(38)
+              .layoutWeight(1)
+              .textAlign(TextAlign.Center)
+              .backgroundColor('#111827')
+              .borderRadius(12)
+              .margin({ left: 10 })
+              .onClick(async () => {
+                await this.saveRenameOverlay();
+              })
+          }
+          .width('100%')
+          .margin({ top: 16 })
         }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        Text('×')
-          .fontSize(24)
-          .fontColor('#4B5563')
-          .width(40)
-          .height(40)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#F4F6FA')
-          .borderRadius(20)
-          .onClick(() => {
-            this.onClose();
-          })
+        .width('86%')
+        .padding(16)
+        .backgroundColor(Color.White)
+        .borderRadius(16)
       }
       .width('100%')
-      .alignItems(VerticalAlign.Center)
+      .height('100%')
+      .backgroundColor('#66000000')
+      .zIndex(40)
+    }
+  }
 
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.NewSessionButton(CHAT_MODE_CLOUD_AGENT)
-        this.NewSessionButton(CHAT_MODE_LOCAL_INFERENCE)
-      }
-      .width('100%')
-      .margin({ top: 18 })
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column() {
+        Row() {
+          Column() {
+            Text('历史会话')
+              .fontSize(22)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#111827')
+            Text(this.restoringLocalSession ? '正在恢复本地上下文' : '选择会话后由上层恢复上下文')
+              .fontSize(12)
+              .fontColor(this.restoringLocalSession ? '#5968FF' : '#6B7280')
+              .margin({ top: 4 })
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
 
-      Scroll() {
-        Column() {
-          this.SessionSection(CHAT_MODE_CLOUD_AGENT)
-          this.SessionSection(CHAT_MODE_LOCAL_INFERENCE)
-          Blank()
-            .height(28)
+          Text('×')
+            .fontSize(24)
+            .fontColor('#4B5563')
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#F4F6FA')
+            .borderRadius(20)
+            .onClick(() => {
+              this.onClose();
+            })
         }
         .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          this.NewSessionButton(CHAT_MODE_CLOUD_AGENT)
+          this.NewSessionButton(CHAT_MODE_LOCAL_INFERENCE)
+        }
+        .width('100%')
+        .margin({ top: 18 })
+
+        Scroll() {
+          Column() {
+            this.SessionSection(CHAT_MODE_CLOUD_AGENT)
+            this.SessionSection(CHAT_MODE_LOCAL_INFERENCE)
+            Blank()
+              .height(28)
+          }
+          .width('100%')
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .margin({ top: 4 })
       }
-      .layoutWeight(1)
       .width('100%')
-      .margin({ top: 4 })
+      .height('100%')
+      .padding({ left: 18, right: 18, top: 26, bottom: 20 })
+
+      this.RenameOverlay()
     }
     .width(320)
     .height('100%')
-    .padding({ left: 18, right: 18, top: 26, bottom: 20 })
     .backgroundColor('#FFFFFF')
     .shadow({ radius: 20, color: '#26000000', offsetX: 5, offsetY: 0 })
   }

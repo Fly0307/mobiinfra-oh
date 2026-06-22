@@ -229,6 +229,21 @@ function isSkippedContextMessage(message: ChatMessage): boolean {
   return message.kind === CHAT_MESSAGE_KIND_TASK_TRACE || message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE;
 }
 
+export function hasContextCompressionNotice(messages: ChatMessage[]): boolean {
+  // 只识别系统自动插入的固定压缩提示，避免其他 context_notice 被误判为已提示。
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE &&
+      messages[i].content === CHAT_CONTEXT_COMPRESSION_NOTICE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function shouldAppendContextCompressionNotice(messages: ChatMessage[], noticeNeeded: boolean): boolean {
+  return noticeNeeded && !hasContextCompressionNotice(messages);
+}
+
 export function splitChatHistoryByRecentTurns(messages: ChatMessage[], keepRecentTurns?: number):
   ChatContextHistorySplit {
   let normalizedTurns = normalizeKeepRecentTurns(keepRecentTurns);
@@ -401,6 +416,23 @@ export function messagesAfterKnownContextSummaryCoverage(messages: ChatMessage[]
     return [];
   }
   return messages.slice(coverageIndex + 1);
+}
+
+export function messagesAfterExistingContextSummaryCoverage(historyMessages: ChatMessage[],
+  coverageId: string): ChatMessage[] {
+  // 既有摘要缺少覆盖点或覆盖点找不到时，保守返回空数组，避免把旧原文再次发送给云端。
+  if (coverageId.length === 0) {
+    return [];
+  }
+  return messagesAfterKnownContextSummaryCoverage(historyMessages, coverageId);
+}
+
+export function buildCloudContextMessagesAfterExistingSummaryCoverage(dateSystemMessage: CloudChatMessage,
+  summary: string, historyMessages: ChatMessage[], coverageId: string,
+  currentUserMessage: ChatMessage): CloudChatMessage[] {
+  // 复用既有摘要时，只携带摘要覆盖点之后的原始尾部消息；当前请求仍固定追加到末尾。
+  let tailMessages = messagesAfterExistingContextSummaryCoverage(historyMessages, coverageId);
+  return buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary, tailMessages, currentUserMessage);
 }
 
 export function nonRetreatingContextSummaryUntilMessageId(historyMessages: ChatMessage[],

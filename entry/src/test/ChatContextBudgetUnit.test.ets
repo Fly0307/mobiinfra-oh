@@ -8,11 +8,13 @@ import {
   createChatMessage
 } from '../main/ets/pages/chat/ChatSessionTypes';
 import {
+  CHAT_CONTEXT_COMPRESSION_NOTICE,
   CHAT_CONTEXT_BUDGET_DEFAULT_KEEP_RECENT_TURNS,
   CHAT_CONTEXT_BUDGET_DEFAULT_MAX_TOKENS,
   CHAT_CONTEXT_BUDGET_DEFAULT_THRESHOLD_PERCENT,
   CHAT_CONTEXT_BUDGET_RESERVED_OUTPUT_TOKENS,
   buildChatContextBudgetSettings,
+  buildCloudContextMessagesAfterExistingSummaryCoverage,
   buildCloudContextMessagesWithCurrentRequest,
   buildCompressedCloudContextMessages,
   buildContextSummarySystemMessage,
@@ -20,11 +22,14 @@ import {
   buildLocalExtractiveChatSummary,
   estimateCloudChatMessagesTokens,
   contextSummaryMessageCountForCoverage,
+  hasContextCompressionNotice,
+  messagesAfterExistingContextSummaryCoverage,
   messagesAfterContextSummaryUntil,
   messagesAfterKnownContextSummaryCoverage,
   messagesWithoutCurrentRequest,
   nonRetreatingContextSummaryUntilMessageId,
   normalizeChatContextBudgetSettings,
+  shouldAppendContextCompressionNotice,
   shouldCompressChatContext,
   splitChatMessagesForContextCompressionExact,
   splitChatHistoryByRecentTurns
@@ -183,6 +188,81 @@ export default function chatContextBudgetUnitTest() {
       let delta = messagesAfterKnownContextSummaryCoverage(olderMessages, 'u3');
 
       expect(delta.length).assertEqual(0);
+    });
+
+    it('detectsExistingContextCompressionNoticeAndAvoidsDuplicateAppend', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        contextNoticeMessage('notice1', CHAT_CONTEXT_COMPRESSION_NOTICE, 1001),
+        contextNoticeMessage('notice2', '其他上下文提示', 1002)
+      ];
+
+      expect(hasContextCompressionNotice(messages)).assertTrue();
+      expect(shouldAppendContextCompressionNotice(messages, true)).assertFalse();
+      expect(shouldAppendContextCompressionNotice(messages, false)).assertFalse();
+      expect(shouldAppendContextCompressionNotice([messages[0]], true)).assertTrue();
+    });
+
+    it('returnsMessagesAfterExistingSummaryCoverageTail', 0, () => {
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮回答', 1001),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '第二轮问题', 1002),
+        createChatMessage('a2', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第二轮回答', 1003)
+      ];
+
+      let delta = messagesAfterExistingContextSummaryCoverage(historyMessages, 'a1');
+
+      expect(delta.length).assertEqual(2);
+      expect(delta[0].id).assertEqual('u2');
+      expect(delta[1].id).assertEqual('a2');
+    });
+
+    it('returnsEmptyMessagesWhenExistingSummaryCoverageIsEmpty', 0, () => {
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮回答', 1001)
+      ];
+
+      let delta = messagesAfterExistingContextSummaryCoverage(historyMessages, '');
+
+      expect(delta.length).assertEqual(0);
+    });
+
+    it('returnsEmptyMessagesWhenExistingSummaryCoverageIsMissing', 0, () => {
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '第一轮问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '第一轮回答', 1001)
+      ];
+
+      let delta = messagesAfterExistingContextSummaryCoverage(historyMessages, 'missing');
+
+      expect(delta.length).assertEqual(0);
+    });
+
+    it('buildsCloudContextFromExistingSummaryCoverageTailAndCurrentRequest', 0, () => {
+      let dateMessage: CloudChatMessage = {
+        role: 'system',
+        content: '当前日期: 2026-06-22'
+      };
+      let historyMessages: ChatMessage[] = [
+        createChatMessage('u1', 'user', CHAT_MESSAGE_KIND_CHAT, '已摘要问题', 1000),
+        createChatMessage('a1', 'assistant', CHAT_MESSAGE_KIND_CHAT, '已摘要回答', 1001),
+        contextNoticeMessage('notice1', CHAT_CONTEXT_COMPRESSION_NOTICE, 1002),
+        createChatMessage('u2', 'user', CHAT_MESSAGE_KIND_CHAT, '尾部问题', 1003),
+        createChatMessage('a2', 'assistant', CHAT_MESSAGE_KIND_CHAT, '尾部回答', 1004)
+      ];
+      let currentRequest = createChatMessage('u3', 'user', CHAT_MESSAGE_KIND_CHAT, '当前请求', 1005);
+
+      let context = buildCloudContextMessagesAfterExistingSummaryCoverage(dateMessage, '既有摘要', historyMessages,
+        'a1', currentRequest);
+
+      expect(context.length).assertEqual(4);
+      expect(context[0].role).assertEqual('system');
+      expect((context[0].content as string).indexOf('既有摘要') >= 0).assertTrue();
+      expect(context[1].content as string).assertEqual('尾部问题');
+      expect(context[2].content as string).assertEqual('尾部回答');
+      expect(context[3].content as string).assertEqual('当前请求');
     });
 
     it('keepsLaterExistingCoverageAndMessageCountWhenCandidateWouldRetreat', 0, () => {

@@ -20,6 +20,7 @@ class FakeReactModelClient extends CloudModelClient {
   callToolCounts: number[] = [];
   callMessages: CloudChatMessage[][] = [];
   callThinkingFlags: boolean[] = [];
+  callOptions: CloudChatCompletionOptions[] = [];
   streamCallCount: number = 0;
 
   constructor(responses: CloudChatCompletionResult[]) {
@@ -32,6 +33,7 @@ class FakeReactModelClient extends CloudModelClient {
     this.callMessages.push(this.cloneMessages(options.messages));
     this.callThinkingFlags.push(options.chatTemplateKwargs === undefined ? false :
       options.chatTemplateKwargs.enable_thinking);
+    this.callOptions.push(options);
     let index = this.callMessages.length - 1;
     if (index >= this.responses.length) {
       return completion('fallback');
@@ -46,6 +48,7 @@ class FakeReactModelClient extends CloudModelClient {
     this.callMessages.push(this.cloneMessages(options.messages));
     this.callThinkingFlags.push(options.chatTemplateKwargs === undefined ? false :
       options.chatTemplateKwargs.enable_thinking);
+    this.callOptions.push(options);
     let index = this.callMessages.length - 1;
     let response = index >= this.responses.length ? completion('fallback') : this.responses[index];
     if (callbacks.onContentDelta !== undefined && response.content.length > 0) {
@@ -211,6 +214,36 @@ export default function chatReactAgentUnitTest() {
       expect(result.content).assertEqual('深度思考回答。');
       expect(client.callThinkingFlags.length).assertEqual(1);
       expect(client.callThinkingFlags[0]).assertTrue();
+    });
+
+    it('usesQwenThinkingSamplingPresetForThinkingChat', 0, async () => {
+      let client = new FakeReactModelClient([completion('深度思考回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      await agent.run([userMessage('需要深入分析')], testConfig(), thinkingRunOptions(true));
+
+      expect(client.callOptions[0].temperature).assertEqual(1.0);
+      expect(client.callOptions[0].top_p).assertEqual(0.95);
+      expect(client.callOptions[0].top_k).assertEqual(20);
+      expect(client.callOptions[0].min_p).assertEqual(0.0);
+      expect(client.callOptions[0].presence_penalty).assertEqual(1.5);
+      expect(client.callOptions[0].repetition_penalty).assertEqual(1.0);
+      expect(client.callOptions[0].maxTokens).assertEqual(32768);
+    });
+
+    it('usesQwenInstructSamplingPresetForNonThinkingChat', 0, async () => {
+      let client = new FakeReactModelClient([completion('普通回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      await agent.run([userMessage('请回答')], testConfig());
+
+      expect(client.callOptions[0].temperature).assertEqual(0.7);
+      expect(client.callOptions[0].top_p).assertEqual(0.8);
+      expect(client.callOptions[0].top_k).assertEqual(20);
+      expect(client.callOptions[0].min_p).assertEqual(0.0);
+      expect(client.callOptions[0].presence_penalty).assertEqual(1.5);
+      expect(client.callOptions[0].repetition_penalty).assertEqual(1.0);
+      expect(client.callOptions[0].maxTokens).assertEqual(32768);
     });
 
     it('executesRegisteredToolAndContinuesToFinalAnswer', 0, async () => {

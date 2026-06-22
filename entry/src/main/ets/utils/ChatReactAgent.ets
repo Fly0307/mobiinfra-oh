@@ -34,6 +34,34 @@ export interface ChatReactAgentResult {
 
 const DEFAULT_MAX_REACT_ITERATIONS: number = 30;
 const ITERATION_LIMIT_MESSAGE: string = '工具调用轮数已达到上限，未生成最终答案。';
+const QWEN_CHAT_MAX_TOKENS: number = 32768;
+
+interface QwenChatSamplingPreset {
+  temperature: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  presence_penalty: number;
+  repetition_penalty: number;
+}
+
+const QWEN_GENERAL_THINKING_PRESET: QwenChatSamplingPreset = {
+  temperature: 1.0,
+  top_p: 0.95,
+  top_k: 20,
+  min_p: 0.0,
+  presence_penalty: 1.5,
+  repetition_penalty: 1.0
+};
+
+const QWEN_GENERAL_INSTRUCT_PRESET: QwenChatSamplingPreset = {
+  temperature: 0.7,
+  top_p: 0.8,
+  top_k: 20,
+  min_p: 0.0,
+  presence_penalty: 1.5,
+  repetition_penalty: 1.0
+};
 
 export class ChatReactAgent {
   private client: CloudModelClient;
@@ -102,11 +130,18 @@ export class ChatReactAgent {
 
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,
     tools: CloudChatToolDefinition[], enableThinking: boolean): CloudChatCompletionOptions {
+    let preset = enableThinking ? QWEN_GENERAL_THINKING_PRESET : QWEN_GENERAL_INSTRUCT_PRESET;
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: config.apiKey,
       messages: messages,
-      temperature: 0,
+      temperature: preset.temperature,
+      maxTokens: QWEN_CHAT_MAX_TOKENS,
+      top_p: preset.top_p,
+      top_k: preset.top_k,
+      min_p: preset.min_p,
+      presence_penalty: preset.presence_penalty,
+      repetition_penalty: preset.repetition_penalty,
       chatTemplateKwargs: {
         enable_thinking: enableThinking
       }

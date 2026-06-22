@@ -46,12 +46,16 @@ export struct DigitalAvatarView {
     return this.avatarForegroundUri.length > 0 && !this.imageLoadFailed;
   }
 
+  private hasAvatarFrame(): boolean {
+    return this.avatarForegroundUri.length > 0;
+  }
+
   private containerWidth(): number {
-    return this.hasForegroundImage() ? DIGITAL_AVATAR_MESSAGE_WIDTH : TEXT_AVATAR_SIZE;
+    return this.hasAvatarFrame() ? DIGITAL_AVATAR_MESSAGE_WIDTH : TEXT_AVATAR_SIZE;
   }
 
   private containerHeight(): number {
-    return this.hasForegroundImage() ? DIGITAL_AVATAR_MESSAGE_HEIGHT : TEXT_AVATAR_SIZE;
+    return this.hasAvatarFrame() ? DIGITAL_AVATAR_MESSAGE_HEIGHT : TEXT_AVATAR_SIZE;
   }
 
   private foregroundScale(): number {

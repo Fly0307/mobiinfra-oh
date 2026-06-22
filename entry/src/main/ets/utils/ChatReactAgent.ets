@@ -1,5 +1,6 @@
 import {
   CloudChatCompletionOptions,
+  CloudChatCompletionResult,
   CloudChatMessage,
   CloudChatToolDefinition,
   CloudModelClient,
@@ -12,13 +13,16 @@ import {
 } from './ChatToolRegistry';
 
 export type ChatReactTraceHandler = (line: string) => void;
+export type ChatReactContentDeltaHandler = (delta: string) => void;
 
 export interface ChatReactAgentRunOptions {
   maxIterations?: number;
   filesDir?: string;
   sessionId?: string;
   userMessage?: string;
+  enableThinking?: boolean;
   onTrace?: ChatReactTraceHandler;
+  onContentDelta?: ChatReactContentDeltaHandler;
 }
 
 export interface ChatReactAgentResult {
@@ -26,10 +30,40 @@ export interface ChatReactAgentResult {
   iterations: number;
   toolCallCount: number;
   reachedLimit: boolean;
+  finishReason: string;
 }
 
 const DEFAULT_MAX_REACT_ITERATIONS: number = 30;
+export const CHAT_REACT_EMPTY_CONTENT_MESSAGE: string = '模型未返回有效内容。';
 const ITERATION_LIMIT_MESSAGE: string = '工具调用轮数已达到上限，未生成最终答案。';
+const QWEN_CHAT_MAX_TOKENS: number = 32768;
+
+interface QwenChatSamplingPreset {
+  temperature: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  presence_penalty: number;
+  repetition_penalty: number;
+}
+
+const QWEN_GENERAL_THINKING_PRESET: QwenChatSamplingPreset = {
+  temperature: 1.0,
+  top_p: 0.95,
+  top_k: 20,
+  min_p: 0.0,
+  presence_penalty: 1.5,
+  repetition_penalty: 1.0
+};
+
+const QWEN_GENERAL_INSTRUCT_PRESET: QwenChatSamplingPreset = {
+  temperature: 0.7,
+  top_p: 0.8,
+  top_k: 20,
+  min_p: 0.0,
+  presence_penalty: 1.5,
+  repetition_penalty: 1.0
+};
 
 export class ChatReactAgent {
   private client: CloudModelClient;
@@ -48,14 +82,17 @@ export class ChatReactAgent {
     let toolCallCount = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      let result = await this.client.chatCompletion(this.buildCompletionOptions(workingMessages, config, tools));
+      let completionOptions = this.buildCompletionOptions(workingMessages, config, tools,
+        options.enableThinking === true);
+      let result = await this.requestCompletion(completionOptions, options);
       if (result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
         return {
-          content: finalContent.length > 0 ? finalContent : '模型未返回有效内容。',
+          content: finalContent.length > 0 ? finalContent : CHAT_REACT_EMPTY_CONTENT_MESSAGE,
           iterations: iteration,
           toolCallCount: toolCallCount,
-          reachedLimit: false
+          reachedLimit: false,
+          finishReason: result.finishReason
         };
       }
 
@@ -84,15 +121,32 @@ export class ChatReactAgent {
     return this.limitResult(maxIterations, toolCallCount);
   }
 
+  private async requestCompletion(completionOptions: CloudChatCompletionOptions,
+    options: ChatReactAgentRunOptions): Promise<CloudChatCompletionResult> {
+    if (options.onContentDelta === undefined) {
+      return this.client.chatCompletion(completionOptions);
+    }
+    return this.client.chatCompletionStream(completionOptions, {
+      onContentDelta: options.onContentDelta
+    });
+  }
+
   private buildCompletionOptions(messages: CloudChatMessage[], config: CloudModelConfig,
-    tools: CloudChatToolDefinition[]): CloudChatCompletionOptions {
+    tools: CloudChatToolDefinition[], enableThinking: boolean): CloudChatCompletionOptions {
+    let preset = enableThinking ? QWEN_GENERAL_THINKING_PRESET : QWEN_GENERAL_INSTRUCT_PRESET;
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
       apiKey: config.apiKey,
       messages: messages,
-      temperature: 0,
+      temperature: preset.temperature,
+      maxTokens: QWEN_CHAT_MAX_TOKENS,
+      top_p: preset.top_p,
+      top_k: preset.top_k,
+      min_p: preset.min_p,
+      presence_penalty: preset.presence_penalty,
+      repetition_penalty: preset.repetition_penalty,
       chatTemplateKwargs: {
-        enable_thinking: false
+        enable_thinking: enableThinking
       }
     };
     if (tools.length > 0) {
@@ -114,7 +168,8 @@ export class ChatReactAgent {
       content: ITERATION_LIMIT_MESSAGE,
       iterations: iterations,
       toolCallCount: toolCallCount,
-      reachedLimit: true
+      reachedLimit: true,
+      finishReason: ''
     };
   }
 }

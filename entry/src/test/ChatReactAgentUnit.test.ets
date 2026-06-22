@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { ChatReactAgent } from '../main/ets/utils/ChatReactAgent';
+import { ChatReactAgent, ChatReactAgentRunOptions } from '../main/ets/utils/ChatReactAgent';
 import {
   ChatTool,
   ChatToolExecutionContext,
@@ -8,6 +8,7 @@ import {
 import {
   CloudChatCompletionOptions,
   CloudChatCompletionResult,
+  CloudChatCompletionStreamCallbacks,
   CloudChatMessage,
   CloudModelClient,
   CloudModelConfig,
@@ -18,6 +19,9 @@ class FakeReactModelClient extends CloudModelClient {
   private responses: CloudChatCompletionResult[];
   callToolCounts: number[] = [];
   callMessages: CloudChatMessage[][] = [];
+  callThinkingFlags: boolean[] = [];
+  callOptions: CloudChatCompletionOptions[] = [];
+  streamCallCount: number = 0;
 
   constructor(responses: CloudChatCompletionResult[]) {
     super();
@@ -27,11 +31,32 @@ class FakeReactModelClient extends CloudModelClient {
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
     this.callToolCounts.push(options.tools === undefined ? 0 : options.tools.length);
     this.callMessages.push(this.cloneMessages(options.messages));
+    this.callThinkingFlags.push(options.chatTemplateKwargs === undefined ? false :
+      options.chatTemplateKwargs.enable_thinking);
+    this.callOptions.push(options);
     let index = this.callMessages.length - 1;
     if (index >= this.responses.length) {
       return completion('fallback');
     }
     return this.responses[index];
+  }
+
+  async chatCompletionStream(options: CloudChatCompletionOptions,
+    callbacks: CloudChatCompletionStreamCallbacks = {}): Promise<CloudChatCompletionResult> {
+    this.streamCallCount += 1;
+    this.callToolCounts.push(options.tools === undefined ? 0 : options.tools.length);
+    this.callMessages.push(this.cloneMessages(options.messages));
+    this.callThinkingFlags.push(options.chatTemplateKwargs === undefined ? false :
+      options.chatTemplateKwargs.enable_thinking);
+    this.callOptions.push(options);
+    let index = this.callMessages.length - 1;
+    let response = index >= this.responses.length ? completion('fallback') : this.responses[index];
+    if (callbacks.onContentDelta !== undefined && response.content.length > 0) {
+      let splitIndex = response.content.length > 1 ? 1 : response.content.length;
+      callbacks.onContentDelta(response.content.substring(0, splitIndex));
+      callbacks.onContentDelta(response.content.substring(splitIndex));
+    }
+    return response;
   }
 
   private cloneMessages(messages: CloudChatMessage[]): CloudChatMessage[] {
@@ -62,6 +87,10 @@ interface TestToolParameters {
   type: string;
   properties?: TestLookupProperties;
   required?: string[];
+}
+
+interface TestThinkingRunOptions extends ChatReactAgentRunOptions {
+  enableThinking: boolean;
 }
 
 function testConfig(): CloudModelConfig {
@@ -95,6 +124,13 @@ function emptyToolParameters(): Object {
   return parameters as Object;
 }
 
+function thinkingRunOptions(enableThinking: boolean): ChatReactAgentRunOptions {
+  let options: TestThinkingRunOptions = {
+    enableThinking: enableThinking
+  };
+  return options;
+}
+
 function toolCall(id: string, name: string, args: string): CloudToolCall {
   return {
     id: id,
@@ -115,6 +151,18 @@ function completion(content: string, toolCalls: CloudToolCall[] = []): CloudChat
       role: 'assistant',
       content: content,
       tool_calls: toolCalls
+    }
+  };
+}
+
+function completionWithFinishReason(content: string, finishReason: string): CloudChatCompletionResult {
+  return {
+    content: content,
+    toolCalls: [],
+    finishReason: finishReason,
+    assistantMessage: {
+      role: 'assistant',
+      content: content
     }
   };
 }
@@ -163,9 +211,63 @@ export default function chatReactAgentUnitTest() {
       let result = await agent.run([userMessage('你好')], testConfig());
 
       expect(result.content).assertEqual('你好，我可以帮你。');
+      expect(result.finishReason).assertEqual('stop');
       expect(result.toolCallCount).assertEqual(0);
       expect(client.callMessages.length).assertEqual(1);
       expect(client.callToolCounts[0]).assertEqual(0);
+      expect(client.callThinkingFlags[0]).assertFalse();
+    });
+
+    it('returnsFallbackTextAndFinishReasonForEmptyFinalResponse', 0, async () => {
+      let client = new FakeReactModelClient([completionWithFinishReason('', 'length')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      let result = await agent.run([userMessage('请回答')], testConfig());
+
+      expect(result.content).assertEqual('模型未返回有效内容。');
+      expect(result.finishReason).assertEqual('length');
+      expect(result.reachedLimit).assertFalse();
+    });
+
+    it('passesThinkingFlagToCloudChatTemplateKwargs', 0, async () => {
+      let client = new FakeReactModelClient([completion('深度思考回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      let result = await agent.run([userMessage('需要深入分析')], testConfig(), thinkingRunOptions(true));
+
+      expect(result.content).assertEqual('深度思考回答。');
+      expect(client.callThinkingFlags.length).assertEqual(1);
+      expect(client.callThinkingFlags[0]).assertTrue();
+    });
+
+    it('usesQwenThinkingSamplingPresetForThinkingChat', 0, async () => {
+      let client = new FakeReactModelClient([completion('深度思考回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      await agent.run([userMessage('需要深入分析')], testConfig(), thinkingRunOptions(true));
+
+      expect(client.callOptions[0].temperature).assertEqual(1.0);
+      expect(client.callOptions[0].top_p).assertEqual(0.95);
+      expect(client.callOptions[0].top_k).assertEqual(20);
+      expect(client.callOptions[0].min_p).assertEqual(0.0);
+      expect(client.callOptions[0].presence_penalty).assertEqual(1.5);
+      expect(client.callOptions[0].repetition_penalty).assertEqual(1.0);
+      expect(client.callOptions[0].maxTokens).assertEqual(32768);
+    });
+
+    it('usesQwenInstructSamplingPresetForNonThinkingChat', 0, async () => {
+      let client = new FakeReactModelClient([completion('普通回答。')]);
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      await agent.run([userMessage('请回答')], testConfig());
+
+      expect(client.callOptions[0].temperature).assertEqual(0.7);
+      expect(client.callOptions[0].top_p).assertEqual(0.8);
+      expect(client.callOptions[0].top_k).assertEqual(20);
+      expect(client.callOptions[0].min_p).assertEqual(0.0);
+      expect(client.callOptions[0].presence_penalty).assertEqual(1.5);
+      expect(client.callOptions[0].repetition_penalty).assertEqual(1.0);
+      expect(client.callOptions[0].maxTokens).assertEqual(32768);
     });
 
     it('executesRegisteredToolAndContinuesToFinalAnswer', 0, async () => {
@@ -194,6 +296,22 @@ export default function chatReactAgentUnitTest() {
       expect(client.callMessages[1][2].tool_call_id).assertEqual('call-1');
       expect(traces.length).assertEqual(1);
       expect(traces[0].indexOf('lookup_note') >= 0).assertTrue();
+    });
+
+    it('streamsFinalAnswerDeltasWhenCallbackProvided', 0, async () => {
+      let client = new FakeReactModelClient([completion('流式回答')]);
+      let deltas: string[] = [];
+      let agent = new ChatReactAgent(client, new ChatToolRegistry());
+
+      let result = await agent.run([userMessage('你好')], testConfig(), {
+        onContentDelta: (delta: string) => {
+          deltas.push(delta);
+        }
+      });
+
+      expect(result.content).assertEqual('流式回答');
+      expect(client.streamCallCount).assertEqual(1);
+      expect(deltas.join('')).assertEqual('流式回答');
     });
 
     it('keepsFullToolTraceForChatSession', 0, async () => {
@@ -339,6 +457,75 @@ export default function chatReactAgentUnitTest() {
       expect(parsed.finishReason).assertEqual('tool_calls');
       expect(parsed.toolCalls.length).assertEqual(1);
       expect(parsed.toolCalls[0].function.name).assertEqual('lookup_note');
+    });
+
+    it('parsesCloudStreamingContentAndToolCallDeltas', 0, () => {
+      let contentChunk = CloudModelClient.parseChatCompletionStreamDataLine(
+        'data: {"choices":[{"delta":{"content":"你"}}]}');
+      let toolChunk = CloudModelClient.parseChatCompletionStreamDataLine('data: {"choices":[{"finish_reason":' +
+        '"tool_calls","delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":' +
+        '{"name":"lookup_note","arguments":"{\\"query\\":"}}]}}]}');
+      let doneChunk = CloudModelClient.parseChatCompletionStreamDataLine('data: [DONE]');
+
+      expect(contentChunk.contentDelta).assertEqual('你');
+      expect(toolChunk.finishReason).assertEqual('tool_calls');
+      expect(toolChunk.toolCallDeltas.length).assertEqual(1);
+      expect(toolChunk.toolCallDeltas[0].id).assertEqual('call-1');
+      expect(doneChunk.done).assertTrue();
+    });
+
+    it('mergesCloudStreamingToolCallDeltasWithNullFields', 0, () => {
+      let toolChunk = CloudModelClient.parseChatCompletionStreamDataLine('data: {"choices":[{"delta":' +
+        '{"tool_calls":[{"index":0,"id":null,"type":null,"function":{"name":null,' +
+        '"arguments":"{\\"range\\":\\""}}]}}]}');
+      let toolCalls: CloudToolCall[] = [];
+
+      CloudModelClient.applyStreamToolCallDeltas(toolCalls, toolChunk.toolCallDeltas);
+
+      expect(toolCalls.length).assertEqual(1);
+      expect(toolCalls[0].id).assertEqual('');
+      expect(toolCalls[0].type).assertEqual('function');
+      expect(toolCalls[0].function.name).assertEqual('');
+      expect(toolCalls[0].function.arguments).assertEqual('{"range":"');
+    });
+
+    it('parsesNonSseStreamFallbackChatCompletion', 0, () => {
+      let parsed = CloudModelClient.parseNonSseStreamFallbackResponse('{"choices":[{"finish_reason":"stop",' +
+        '"message":{"role":"assistant","content":"你好"}}]}');
+
+      expect(parsed.content).assertEqual('你好');
+      expect(parsed.finishReason).assertEqual('stop');
+      expect(parsed.toolCalls.length).assertEqual(0);
+    });
+
+    it('reportsNonSseStreamErrorPayload', 0, () => {
+      let message = '';
+      try {
+        CloudModelClient.parseNonSseStreamFallbackResponse('{"error":{"message":"context length exceeded",' +
+          '"type":"invalid_request_error"}}');
+      } catch (e) {
+        let err = e as Error;
+        message = err.message;
+      }
+
+      expect(message.indexOf('context length exceeded') >= 0).assertTrue();
+    });
+
+    it('formatsCloudStreamDiagnostics', 0, () => {
+      let text = CloudModelClient.formatStreamDiagnosticsForLog({
+        responseCode: 200,
+        receivedBytes: 128,
+        sseLineCount: 3,
+        contentDeltaChars: 12,
+        reasoningDeltaChars: 5,
+        toolCallCount: 1,
+        rawPreview: 'data: test'
+      });
+
+      expect(text.indexOf('status=200') >= 0).assertTrue();
+      expect(text.indexOf('bytes=128') >= 0).assertTrue();
+      expect(text.indexOf('sse_lines=3') >= 0).assertTrue();
+      expect(text.indexOf('tool_calls=1') >= 0).assertTrue();
     });
 
     it('throwsOnEmptyCloudChoices', 0, () => {

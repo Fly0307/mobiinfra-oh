@@ -1,18 +1,31 @@
 import { describe, it, expect } from '@ohos/hypium';
 import fs from '@ohos.file.fs';
 import {
+  CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
   ChatMessage,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessagesAutoScrollKey,
   chatSessionPreview,
+  compactChatPreviewText,
   createChatMessage,
   createEmptyChatSession,
   defaultChatSessionTitle,
+  splitAssistantThinkingContent,
+  toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from '../main/ets/pages/chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_FLUSH_CHAR_DELTA,
+  CHAT_STREAM_FLUSH_INTERVAL_MS,
+  ChatStreamUpdateFlushState,
+  chatStreamUpdateDelayMs,
+  chatStreamUpdateStateAfterFlush,
+  shouldFlushChatStreamUpdate
+} from '../main/ets/pages/chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from '../main/ets/pages/chat/ChatSessionController';
 import { ChatSessionStorage } from '../main/ets/utils/ChatSessionStorage';
 
@@ -66,6 +79,89 @@ export default function chatSessionStorageUnitTest() {
       expect(chatSessionPreview(messages)).assertEqual('我会先读取最近截图并按主题归纳。');
     });
 
+    it('buildsAutoScrollKeyFromSessionAndLatestMessage', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '第一条消息', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '最新回答', 1001)
+      ];
+      let sameSessionKey = chatMessagesAutoScrollKey('session-a', messages, false);
+      let changedSessionKey = chatMessagesAutoScrollKey('session-b', messages, false);
+      let streamingKey = chatMessagesAutoScrollKey('session-a', messages, true);
+
+      expect(sameSessionKey.indexOf('session-a') === 0).assertTrue();
+      expect(sameSessionKey.indexOf(chatMessageRenderKey(messages[1])) >= 0).assertTrue();
+      expect(changedSessionKey === sameSessionKey).assertFalse();
+      expect(streamingKey === sameSessionKey).assertFalse();
+    });
+
+    it('compactsLongPreviewFromPrefixOnly', 0, () => {
+      let longText = '长文标题\n\n第一段内容' + ' 很长'.repeat(1000) + ' 结尾';
+
+      let preview = compactChatPreviewText(longText, 36);
+
+      expect(preview.indexOf('长文标题 第一段内容') === 0).assertTrue();
+      expect(preview.endsWith('...')).assertTrue();
+      expect(preview.indexOf('结尾')).assertEqual(-1);
+    });
+
+    it('throttlesStreamingContentFlushes', 0, () => {
+      let initial: ChatStreamUpdateFlushState = {
+        lastFlushAt: 0,
+        lastFlushedLength: 0,
+        timerScheduled: false
+      };
+
+      expect(shouldFlushChatStreamUpdate(1000, 1, initial)).assertTrue();
+
+      let flushed = chatStreamUpdateStateAfterFlush(1000, 1, false);
+      expect(shouldFlushChatStreamUpdate(1000 + CHAT_STREAM_FLUSH_INTERVAL_MS - 1, 20, flushed)).assertFalse();
+      expect(shouldFlushChatStreamUpdate(1000 + CHAT_STREAM_FLUSH_INTERVAL_MS, 20, flushed)).assertTrue();
+      expect(shouldFlushChatStreamUpdate(1001, 1 + CHAT_STREAM_FLUSH_CHAR_DELTA, flushed)).assertTrue();
+
+      let waiting: ChatStreamUpdateFlushState = {
+        lastFlushAt: flushed.lastFlushAt,
+        lastFlushedLength: flushed.lastFlushedLength,
+        timerScheduled: true
+      };
+      expect(shouldFlushChatStreamUpdate(1001, 1 + CHAT_STREAM_FLUSH_CHAR_DELTA, waiting)).assertFalse();
+      expect(chatStreamUpdateDelayMs(1000 + 100, flushed)).assertEqual(CHAT_STREAM_FLUSH_INTERVAL_MS - 100);
+    });
+
+    it('splitsAssistantThinkingFromVisibleAnswer', 0, () => {
+      let parts = splitAssistantThinkingContent('<think>\n先分析问题。\n</think>\n最终回答。');
+
+      expect(parts.thinkingContent).assertEqual('先分析问题。');
+      expect(parts.content).assertEqual('最终回答。');
+    });
+
+    it('splitsAssistantThinkingWhenOpeningTagIsMissing', 0, () => {
+      let parts = splitAssistantThinkingContent('先分析问题。\n</think>\n最终回答。');
+
+      expect(parts.thinkingContent).assertEqual('先分析问题。');
+      expect(parts.content).assertEqual('最终回答。');
+    });
+
+    it('keepsPartialStreamingThinkingOutOfVisibleAnswer', 0, () => {
+      let parts = splitAssistantThinkingContent('<think>\n正在分析第一步');
+
+      expect(parts.thinkingContent).assertEqual('正在分析第一步');
+      expect(parts.content).assertEqual('');
+    });
+
+    it('createsAssistantMessageWithCollapsedThinkingModule', 0, () => {
+      let message = createChatMessage('assistant-1', 'assistant', 'chat',
+        '<think>\n先分析。\n</think>\n回答正文。', 1000);
+
+      expect(message.content).assertEqual('回答正文。');
+      expect(message.thinkingContent).assertEqual('先分析。');
+      expect(message.thinkingCollapsed).assertTrue();
+
+      let toggled = toggleChatMessageThinkingCollapsed([message], 'assistant-1');
+
+      expect(toggled[0].thinkingCollapsed).assertFalse();
+      expect(chatMessageRenderKey(message) === chatMessageRenderKey(toggled[0])).assertFalse();
+    });
+
     it('keepsTaskTraceCollapsedByDefaultAndTogglesIt', 0, () => {
       let message = createChatMessage('trace-1', 'task', CHAT_MESSAGE_KIND_TASK_TRACE, '执行过程', 1000,
         ['Planner started', 'Decider selected click']);
@@ -110,6 +206,52 @@ export default function chatSessionStorageUnitTest() {
       expect(context[0].role).assertEqual('user');
       expect(context[1].role).assertEqual('assistant');
       expect(context[1].content as string).assertEqual('今天有一条咖啡记录。');
+    });
+
+    it('cloudContextSkipsContextCompressionNoticeMessages', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('u1', 'user', 'chat', '继续总结', 1000),
+        createChatMessage('notice1', 'system', CHAT_MESSAGE_KIND_CONTEXT_NOTICE, '历史过长，已自动压缩上下文', 1001),
+        createChatMessage('a1', 'assistant', 'chat', '已继续处理。', 1002)
+      ];
+
+      let context = buildCloudContextMessages(messages);
+
+      expect(context.length).assertEqual(2);
+      expect(context[0].role).assertEqual('user');
+      expect(context[1].role).assertEqual('assistant');
+      expect(context[1].content as string).assertEqual('已继续处理。');
+    });
+
+    it('persistsContextSummaryMetadataWithoutChangingOriginalMessages', 0, () => {
+      let root = nextTestRoot('context-summary');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      session.contextSummary = '较早历史摘要';
+      session.contextSummaryUpdatedAt = 2000;
+      session.contextSummaryUntilMessageId = 'm-old';
+      session.contextSummaryMessageCount = 12;
+      session.messages = [
+        createChatMessage('m1', 'user', 'chat', '原始用户消息', 1001),
+        createChatMessage('m2', 'assistant', 'chat', '原始助手消息', 1002)
+      ];
+      ChatSessionStorage.saveSession(root, session);
+
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.contextSummary).assertEqual('较早历史摘要');
+        expect(reloaded.contextSummaryUpdatedAt).assertEqual(2000);
+        expect(reloaded.contextSummaryUntilMessageId).assertEqual('m-old');
+        expect(reloaded.contextSummaryMessageCount).assertEqual(12);
+        expect(reloaded.messages.length).assertEqual(2);
+        expect(reloaded.messages[0].content).assertEqual('原始用户消息');
+        expect(reloaded.messages[1].content).assertEqual('原始助手消息');
+      }
+
+      cleanupPath(root);
     });
 
     it('persistsSessionIndexAndDeletesSessionFile', 0, () => {
@@ -177,6 +319,37 @@ export default function chatSessionStorageUnitTest() {
       expect(reloaded !== null).assertTrue();
       if (reloaded !== null) {
         expect(reloaded.messages[0].collapsed).assertFalse();
+      }
+
+      cleanupPath(root);
+    });
+
+    it('updatesAssistantMessageContentAndSplitsStreamingThinking', 0, () => {
+      let root = nextTestRoot('stream-update');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let assistant = createChatMessage('assistant-1', 'assistant', 'chat', '', 1001);
+      let saved = ChatSessionStorage.appendMessage(root, session.id, assistant);
+      expect(saved !== null).assertTrue();
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: session.id,
+        activeMessages: [assistant],
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: saved
+      };
+
+      let next = ChatSessionController.updateMessageContent(root, state, 'assistant-1',
+        '<think>\n先分析。\n</think>\n最终回答。', ['工具：lookup_note']);
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(next.activeMessages[0].content).assertEqual('最终回答。');
+      expect(next.activeMessages[0].thinkingContent).assertEqual('先分析。');
+      expect(next.activeMessages[0].trace.length).assertEqual(1);
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.messages[0].content).assertEqual('最终回答。');
       }
 
       cleanupPath(root);

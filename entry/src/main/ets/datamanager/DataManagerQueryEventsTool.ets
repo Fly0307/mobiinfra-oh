@@ -1,5 +1,5 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import { ChatTool, ChatToolExecutionContext } from '../utils/ChatToolRegistry';
+import { parseJsonCompat, stringifyJsonCompat } from '../utils/JsonCompat';
 import {
   DOMAIN_KEYS,
   IndexedEvent,
@@ -97,7 +97,7 @@ export function createQueryEventsTool(hasBuiltIndexes: QueryEventsIndexAvailabil
         return queryEventsToolErrorPayload('数据归家事件索引尚未构建，请先同步或刷新数据后再查询。');
       }
       let result = queryRunner(normalized.options);
-      return ArkJSON.stringify(queryEventsToolResponse(result) as Object);
+      return stringifyJsonCompat(queryEventsToolResponse(result) as Object);
     }
   };
 }
@@ -128,7 +128,7 @@ export function queryEventsToolParameters(): Object {
 
 export function normalizeQueryEventsToolArguments(argsText: string): QueryEventsArgumentValidation {
   try {
-    let parsed = ArkJSON.parse(argsText.trim().length === 0 ? '{}' : argsText.trim()) as QueryEventsJsonValue;
+    let parsed = parseJsonCompat<QueryEventsJsonValue>(argsText.trim().length === 0 ? '{}' : argsText.trim());
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('Tool arguments must be a JSON object.');
     }
@@ -420,7 +420,7 @@ function queryEventsToolErrorPayload(error: string): string {
     ok: false,
     error: error
   };
-  return ArkJSON.stringify(response as Object);
+  return stringifyJsonCompat(response as Object);
 }
 
 function emptyQueryOptions(): QueryOptions {

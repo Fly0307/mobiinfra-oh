@@ -1,8 +1,8 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import {
   CloudChatToolDefinition,
   CloudToolCall
 } from './CloudModelClient';
+import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 
 export interface ChatToolExecutionContext {
   filesDir: string;
@@ -30,6 +30,11 @@ export interface ChatToolExecutionResult {
 interface ChatToolArgumentValidation {
   ok: boolean;
   normalizedArgs: string;
+  error: string;
+}
+
+interface ChatToolErrorPayload {
+  ok: boolean;
   error: string;
 }
 
@@ -107,7 +112,7 @@ export class ChatToolRegistry {
   private validateArguments(argsText: string): ChatToolArgumentValidation {
     let normalizedArgs = argsText.trim().length === 0 ? '{}' : argsText.trim();
     try {
-      let parsed = ArkJSON.parse(normalizedArgs) as Object | string | number | boolean | null;
+      let parsed = parseJsonCompat<Object | string | number | boolean | null>(normalizedArgs);
       if (parsed !== null && typeof parsed === 'object') {
         return {
           ok: true,
@@ -144,10 +149,11 @@ export class ChatToolRegistry {
   }
 
   private errorPayload(errorMessage: string): string {
-    return ArkJSON.stringify({
+    let payload: ChatToolErrorPayload = {
       ok: false,
       error: errorMessage
-    });
+    };
+    return stringifyJsonCompat(payload as Object);
   }
 
   private truncateResult(text: string): string {

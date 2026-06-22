@@ -4,11 +4,12 @@ import {
   CHAT_MODE_LOCAL_INFERENCE,
   chatComposerBarHeight,
   chatComposerTextAreaHeight,
+  chatDeepThinkingToggleVisible,
   chatModeLabel,
   chatModePlaceholder,
   chatTimeGreeting
 } from './ChatPageTypes';
-import { ChatMessage, ChatSessionSummary } from './ChatSessionTypes';
+import { ChatMessage, ChatSessionSummary, chatMessagesAutoScrollKey } from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 
@@ -17,6 +18,7 @@ export struct ChatPage {
   @Link chatMode: string;
   @Link cloudUserInput: string;
   @Link userInput: string;
+  @Link chatDeepThinkingEnabled: boolean;
   @State previewImagePath: string = '';
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
@@ -40,7 +42,9 @@ export struct ChatPage {
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
   onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
+  onCancelCloudChat: () => void = () => {};
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
@@ -78,6 +82,21 @@ export struct ChatPage {
 
   private isBusy(): boolean {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
+  }
+
+  private primaryButtonText(): string {
+    if (this.isCloudMode() && this.cloudThinking) {
+      return '停止';
+    }
+    return this.isBusy() ? '...' : '发送';
+  }
+
+  private toggleDeepThinking(): void {
+    // Think 开关只影响下一次默认云端模型聊天请求；处理中保持当前请求参数不变。
+    if (this.isBusy()) {
+      return;
+    }
+    this.chatDeepThinkingEnabled = !this.chatDeepThinkingEnabled;
   }
 
   private hasConversationContent(): boolean {
@@ -282,9 +301,11 @@ export struct ChatPage {
       ChatMessageList({
         messages: this.messages,
         thinking: this.isBusy(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
+        onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
         onScrollContent: (_yOffset: number) => {}
       })
@@ -341,6 +362,12 @@ export struct ChatPage {
   }
 
   private async runPrimaryAction(): Promise<void> {
+    if (this.isBusy()) {
+      if (this.isCloudMode()) {
+        this.onCancelCloudChat();
+      }
+      return;
+    }
     if (this.activeInput().trim().length > 0 && !this.isBusy()) {
       this.dismissChatInput();
     }
@@ -476,15 +503,18 @@ export struct ChatPage {
 
       Column() {
         Row() {
-          Text('深度思考')
-            .fontSize(12)
-            .fontColor('#222222')
-            .height(34)
-            .padding({ left: 13, right: 13 })
-            .backgroundColor(Color.White)
-            .borderRadius(17)
-            .border({ width: 1, color: '#E2E5EA' })
-            .onClick(async () => { await this.runPrimaryAction(); })
+          if (chatDeepThinkingToggleVisible(this.chatMode)) {
+            Text(this.chatDeepThinkingEnabled ? '深度思考 开' : '深度思考 关')
+              .fontSize(12)
+              .fontColor(this.chatDeepThinkingEnabled ? '#FFFFFF' : '#222222')
+              .height(34)
+              .padding({ left: 13, right: 13 })
+              .backgroundColor(this.chatDeepThinkingEnabled ? '#111827' : Color.White)
+              .borderRadius(17)
+              .border({ width: 1, color: this.chatDeepThinkingEnabled ? '#111827' : '#E2E5EA' })
+              .opacity(this.isBusy() ? 0.6 : 1)
+              .onClick(() => { this.toggleDeepThinking(); })
+          }
           Text('下发任务')
             .fontSize(12)
             .fontColor('#222222')
@@ -493,7 +523,7 @@ export struct ChatPage {
             .backgroundColor(Color.White)
             .borderRadius(17)
             .border({ width: 1, color: '#E2E5EA' })
-            .margin({ left: 10 })
+            .margin({ left: chatDeepThinkingToggleVisible(this.chatMode) ? 10 : 0 })
             .onClick(async () => { await this.runTaskAction(); })
         }
         .width('100%')
@@ -523,7 +553,7 @@ export struct ChatPage {
             .padding({ left: this.hasConversationContent() ? 12 : 14, right: 12, top: 8, bottom: 8 })
             .margin({ left: this.hasConversationContent() ? 0 : 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
-          Button(this.isBusy() ? '...' : '发送')
+          Button(this.primaryButtonText())
             .width(68)
             .height(40)
             .fontSize(14)

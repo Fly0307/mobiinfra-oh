@@ -13,15 +13,41 @@ import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
 import {
   CHAT_MESSAGE_KIND_CHAT,
+  CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_LOCAL_INFERENCE,
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
-  buildCloudContextMessages,
   createChatMessage
 } from './chat/ChatSessionTypes';
+import {
+  CHAT_CONTEXT_COMPRESSION_NOTICE,
+  CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
+  CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT,
+  ChatContextBudgetSettings,
+  ChatContextCompressionSplit,
+  buildChatContextBudgetSettings,
+  buildCloudContextMessagesAfterExistingSummaryCoverage,
+  buildCloudContextMessagesWithCurrentRequest,
+  buildLocalExtractiveChatSummary,
+  contextSummaryMessageCountForCoverage,
+  estimateCloudContextTokens,
+  messagesAfterExistingContextSummaryCoverage,
+  messagesAfterKnownContextSummaryCoverage,
+  messagesWithoutCurrentRequest,
+  nonRetreatingContextSummaryUntilMessageId,
+  shouldCompressCloudContext,
+  shouldAppendContextCompressionNotice,
+  splitChatMessagesForContextCompressionExact
+} from './chat/ChatContextBudget';
+import {
+  ChatStreamUpdateFlushState,
+  chatStreamUpdateDelayMs,
+  chatStreamUpdateStateAfterFlush,
+  shouldFlushChatStreamUpdate
+} from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
@@ -29,7 +55,12 @@ import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { AgentRouterServer } from '../utils/AgentRouterServer';
-import { CloudChatMessage, CloudModelClient, CloudModelConfig } from '../utils/CloudModelClient';
+import {
+  CloudChatCompletionOptions,
+  CloudChatMessage,
+  CloudModelClient,
+  CloudModelConfig
+} from '../utils/CloudModelClient';
 import {
   createEmptyCollectionViewModels,
   createEmptyHomeProfileViewModel,
@@ -58,6 +89,7 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent } from '../utils/ChatReactAgent';
+import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
@@ -166,6 +198,24 @@ interface CloudAgentTaskSubmitResult {
   error: string;
 }
 
+type CloudChatContextCompressionAction = 'none' | 'created' | 'reused' | 'updated';
+
+interface CloudChatContextPreparation {
+  messages: CloudChatMessage[];
+  usingCompressedContext: boolean;
+  summaryUpdated: boolean;
+  noticeNeeded: boolean;
+  compressionAction: CloudChatContextCompressionAction;
+  summary: string;
+  summaryUntilMessageId: string;
+  summaryMessageCount: number;
+  estimatedTokens: number;
+  originalEstimatedTokens: number;
+  retainedRounds: number;
+  currentRequestAtTail: boolean;
+  overBudgetAfterCompression: boolean;
+}
+
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
@@ -181,6 +231,9 @@ PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.clo
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+PersistentStorage.persistProp('chatContextCompressionThresholdPercent',
+  String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT));
+PersistentStorage.persistProp('chatContextRecentRounds', String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT));
 PersistentStorage.persistProp('avatarImageBaseUrl', DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl);
 PersistentStorage.persistProp('avatarImageApiKey', '');
 PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
@@ -191,6 +244,7 @@ PersistentStorage.persistProp('avatarImageOutputFormat', DEFAULT_ENDPOINT_CONFIG
 PersistentStorage.persistProp('avatarSequentialImageGeneration', 'disabled');
 PersistentStorage.persistProp('avatarImageStream', false);
 PersistentStorage.persistProp('avatarImageWatermark', DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark);
+PersistentStorage.persistProp('chatDeepThinkingEnabled', false);
 PersistentStorage.persistProp('avatarImageTimeoutMs', 60000);
 PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
@@ -250,6 +304,9 @@ struct Index {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
+    String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
+  @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string = String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
   @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
@@ -260,6 +317,7 @@ struct Index {
   @StorageLink('avatarSequentialImageGeneration') avatarSequentialImageGeneration: string = 'disabled';
   @StorageLink('avatarImageStream') avatarImageStream: boolean = false;
   @StorageLink('avatarImageWatermark') avatarImageWatermark: boolean = DEFAULT_ENDPOINT_CONFIG.avatarImageWatermark;
+  @StorageLink('chatDeepThinkingEnabled') chatDeepThinkingEnabled: boolean = false;
   @StorageLink('avatarImageTimeoutMs') avatarImageTimeoutMs: number = 60000;
   @StorageLink('wechatAutoSummaryEnabled') wechatAutoSummaryEnabled: string = DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED;
   @StorageLink('wechatAutoSummaryDefaultDays') wechatAutoSummaryDefaultDays: string = DEFAULT_WECHAT_AUTO_SUMMARY_DAYS;
@@ -285,6 +343,7 @@ struct Index {
   private localTaskSessionId: string = '';
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
+  @State cloudChatCancelRequested: boolean = false;
   @State chatSessions: ChatSessionSummary[] = [];
   @State activeChatSessionId: string = '';
   @State activeChatMessages: ChatMessage[] = [];
@@ -321,6 +380,12 @@ struct Index {
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
+  private cloudStreamFlushState: ChatStreamUpdateFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+  private cloudStreamFlushTimerId: number = -1;
+  private cloudStreamPendingSessionId: string = '';
+  private cloudStreamPendingMessageId: string = '';
+  private cloudStreamPendingContent: string = '';
+  private cloudStreamPendingTrace: string[] = [];
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -401,9 +466,92 @@ struct Index {
     this.applyChatSessionViewState(state);
   }
 
+  private updateActiveChatMessageContent(messageId: string, content: string, trace: string[] = []): void {
+    let state = ChatSessionController.updateMessageContent(this.filesDir, this.currentChatSessionViewState(), messageId,
+      content, trace);
+    this.applyChatSessionViewState(state);
+  }
+
+  private updateChatMessageContentForSession(sessionId: string, messageId: string, content: string,
+    trace: string[] = []): void {
+    let state = ChatSessionController.updateMessageContentInSession(this.filesDir, this.currentChatSessionViewState(),
+      sessionId, messageId, content, trace);
+    this.applyChatSessionViewState(state);
+  }
+
+  private clearCloudStreamFlushTimer(): void {
+    if (this.cloudStreamFlushTimerId !== -1) {
+      clearTimeout(this.cloudStreamFlushTimerId);
+      this.cloudStreamFlushTimerId = -1;
+    }
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamFlushTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamPendingSessionId = '';
+    this.cloudStreamPendingMessageId = '';
+    this.cloudStreamPendingContent = '';
+    this.cloudStreamPendingTrace = [];
+  }
+
+  private flushCloudStreamMessageUpdate(): void {
+    if (this.cloudStreamPendingSessionId.length === 0 || this.cloudStreamPendingMessageId.length === 0) {
+      this.clearCloudStreamFlushTimer();
+      return;
+    }
+    this.clearCloudStreamFlushTimer();
+    let sessionId = this.cloudStreamPendingSessionId;
+    let messageId = this.cloudStreamPendingMessageId;
+    let content = this.cloudStreamPendingContent;
+    let trace = this.cloudStreamPendingTrace.slice();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
+  private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.cloudStreamPendingSessionId = sessionId;
+    this.cloudStreamPendingMessageId = messageId;
+    this.cloudStreamPendingContent = content;
+    this.cloudStreamPendingTrace = trace.slice();
+
+    let now = new Date().getTime();
+    let state: ChatStreamUpdateFlushState = {
+      lastFlushAt: this.cloudStreamFlushState.lastFlushAt,
+      lastFlushedLength: this.cloudStreamFlushState.lastFlushedLength,
+      timerScheduled: this.cloudStreamFlushTimerId !== -1
+    };
+    if (shouldFlushChatStreamUpdate(now, content.length, state)) {
+      this.flushCloudStreamMessageUpdate();
+      return;
+    }
+    if (this.cloudStreamFlushTimerId !== -1) {
+      return;
+    }
+    let delayMs = chatStreamUpdateDelayMs(now, state);
+    this.cloudStreamFlushTimerId = setTimeout(() => {
+      this.cloudStreamFlushTimerId = -1;
+      this.flushCloudStreamMessageUpdate();
+    }, delayMs);
+  }
+
+  private updateChatContextSummaryForSession(sessionId: string, summary: string, updatedAt: number,
+    untilMessageId: string, messageCount: number): void {
+    let state = ChatSessionController.updateContextSummaryInSession(this.filesDir, this.currentChatSessionViewState(),
+      sessionId, summary, updatedAt, untilMessageId, messageCount);
+    this.applyChatSessionViewState(state);
+  }
+
   private appendChatMessageForSession(sessionId: string, message: ChatMessage): void {
     let state = ChatSessionController.appendMessageToSession(this.filesDir, this.currentChatSessionViewState(),
       this.taskSessionId(sessionId), message);
+    this.applyChatSessionViewState(state);
+  }
+
+  private appendChatMessageToExactSession(sessionId: string, message: ChatMessage): void {
+    let state = ChatSessionController.appendMessageToSession(this.filesDir, this.currentChatSessionViewState(),
+      sessionId, message);
     this.applyChatSessionViewState(state);
   }
 
@@ -425,6 +573,20 @@ struct Index {
       return compact;
     }
     return compact.substring(0, maxLength) + '...';
+  }
+
+  private cancelledCloudChatContent(streamedContent: string): string {
+    let content = streamedContent.trim();
+    if (content.length === 0) {
+      return '已取消本次回复。';
+    }
+    let lookup = content.toLowerCase();
+    let lastOpen = lookup.lastIndexOf('<think>');
+    let lastClose = lookup.lastIndexOf('</think>');
+    if (lastOpen >= 0 && lastClose < lastOpen) {
+      return content + '\n</think>\n\n已取消本次回复。';
+    }
+    return content + '\n\n已取消本次回复。';
   }
 
   private extractJsonObjectText(text: string): string {
@@ -733,6 +895,11 @@ struct Index {
 
   private toggleActiveTaskTrace(messageId: string): void {
     let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
+    this.applyChatSessionViewState(state);
+  }
+
+  private toggleActiveThinking(messageId: string): void {
+    let state = ChatSessionController.toggleThinking(this.filesDir, this.currentChatSessionViewState(), messageId);
     this.applyChatSessionViewState(state);
   }
 
@@ -1071,6 +1238,314 @@ struct Index {
       content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。\n\n' + '' +
         '当前日期: ' + formatLocalDateKey(now) + '，' + localWeekdayLabel(now) +
         '。本周的日期范围（周一-周日，你需要据此换算诸如“上周”等表述的日期范围）：' + weekRangeTextFromDate(now)
+    };
+  }
+
+  private currentChatContextBudgetSettings(): ChatContextBudgetSettings {
+    return buildChatContextBudgetSettings(this.chatContextCompressionThresholdPercent, this.chatContextRecentRounds);
+  }
+
+  private isCurrentRequestAtCloudContextTail(messages: CloudChatMessage[], currentUserMessage: ChatMessage): boolean {
+    if (messages.length === 0) {
+      return false;
+    }
+    let tailMessage = messages[messages.length - 1];
+    if (tailMessage.role !== 'user' || typeof tailMessage.content !== 'string') {
+      return false;
+    }
+    return tailMessage.content === currentUserMessage.content.trim();
+  }
+
+  private compactContextSummarySource(text: string, maxLength: number = 1600): string {
+    let compact = text.trim().replace(/\s+/g, ' ');
+    if (compact.length <= maxLength) {
+      return compact;
+    }
+    let headLength = Math.floor(maxLength * 0.62);
+    let tailLength = maxLength - headLength - 8;
+    return compact.substring(0, headLength) + ' ... ' + compact.substring(compact.length - tailLength);
+  }
+
+  private roleNameForContextSummary(message: ChatMessage): string {
+    if (message.role === 'user') {
+      return '用户';
+    }
+    if (message.role === 'assistant') {
+      return '助手';
+    }
+    if (message.role === 'system') {
+      return '系统';
+    }
+    return '工具结果';
+  }
+
+  private formatChatMessagesForContextSummary(messages: ChatMessage[]): string {
+    let lines: string[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      lines.push('[' + this.roleNameForContextSummary(message) + '] ' +
+        this.compactContextSummarySource(message.content));
+    }
+    let text = lines.join('\n\n');
+    if (text.length <= 120000) {
+      return text;
+    }
+    return text.substring(text.length - 120000);
+  }
+
+  private olderMessagesAfterSummaryCoverage(split: ChatContextCompressionSplit, untilMessageId: string): ChatMessage[] {
+    return messagesAfterKnownContextSummaryCoverage(split.olderMessages, untilMessageId);
+  }
+
+  private olderMessagesAfterTailSummaryCoverage(split: ChatContextCompressionSplit, summaryCoverageMessageId: string,
+    previousCoverageMessageId: string): ChatMessage[] {
+    if (split.olderMessages.length === 0) {
+      return [];
+    }
+    if (summaryCoverageMessageId === previousCoverageMessageId && previousCoverageMessageId.length > 0) {
+      // 既有摘要覆盖点位于 tail 之前；tail 内新滑入 older 区的消息都属于本次增量摘要。
+      return split.olderMessages;
+    }
+    return this.olderMessagesAfterSummaryCoverage(split, summaryCoverageMessageId);
+  }
+
+  private async requestCloudChatContextSummary(previousSummary: string,
+    newOlderMessages: ChatMessage[]): Promise<string> {
+    if (previousSummary.trim().length === 0 && newOlderMessages.length === 0) {
+      return '';
+    }
+    let userPrompt = '请压缩下面的聊天历史，输出中文摘要。要求：保留用户目标、已经确认的事实、重要结论、工具结果和待办状态；不要加入新事实；不要输出思考过程。\n\n' +
+      '【已有摘要】\n' + (previousSummary.trim().length > 0 ? previousSummary.trim() : '无') +
+      '\n\n【新增较早历史】\n' + this.formatChatMessagesForContextSummary(newOlderMessages);
+    let messages: CloudChatMessage[] = [
+      {
+        role: 'system',
+        content: '你是会话历史压缩器，只输出可用于后续对话续接的简洁摘要。'
+      },
+      {
+        role: 'user',
+        content: userPrompt
+      }
+    ];
+    let config = this.getCloudConfig();
+    let options: CloudChatCompletionOptions = {
+      baseUrl: config.plannerBaseUrl,
+      apiKey: config.apiKey,
+      messages: messages,
+      temperature: 0.7,
+      maxTokens: 4096,
+      readTimeout: 120000,
+      top_p: 0.8,
+      top_k: 20,
+      min_p: 0.0,
+      presence_penalty: 1.5,
+      repetition_penalty: 1.0,
+      chatTemplateKwargs: {
+        enable_thinking: false
+      }
+    };
+    let summary = await this.cloudClient.chatCompletionText(options);
+    return summary.trim();
+  }
+
+  private async buildCloudChatContextSummaryFromMessages(previousSummary: string,
+    newOlderMessages: ChatMessage[]): Promise<string> {
+    if (newOlderMessages.length === 0 && previousSummary.trim().length > 0) {
+      return previousSummary.trim();
+    }
+    try {
+      let summary = await this.requestCloudChatContextSummary(previousSummary, newOlderMessages);
+      if (summary.length > 0) {
+        return summary;
+      }
+    } catch (e) {
+      if (this.cloudChatCancelRequested) {
+        throw e as Error;
+      }
+      AppLogger.warnCause('CloudAgent', 'chat context summary request failed, fallback to local summary', e as Error);
+    }
+    return buildLocalExtractiveChatSummary(previousSummary, newOlderMessages);
+  }
+
+  private async buildCloudChatContextSummary(activeSession: ChatSessionRecord,
+    split: ChatContextCompressionSplit): Promise<string> {
+    let previousSummary = activeSession.contextSummary === undefined ? '' : activeSession.contextSummary;
+    let previousUntilMessageId = previousSummary.trim().length === 0 ||
+      activeSession.contextSummaryUntilMessageId === undefined ? '' : activeSession.contextSummaryUntilMessageId;
+    let newOlderMessages = this.olderMessagesAfterSummaryCoverage(split, previousUntilMessageId);
+    return this.buildCloudChatContextSummaryFromMessages(previousSummary, newOlderMessages);
+  }
+
+  private async prepareCloudChatContext(activeSession: ChatSessionRecord,
+    currentUserMessage: ChatMessage): Promise<CloudChatContextPreparation> {
+    let settings = this.currentChatContextBudgetSettings();
+    let dateSystemMessage = this.cloudChatDateSystemMessage();
+    let historyMessages = messagesWithoutCurrentRequest(activeSession.messages, currentUserMessage.id);
+    let fullContextMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, '', historyMessages,
+      currentUserMessage);
+    let originalEstimatedTokens = estimateCloudContextTokens(fullContextMessages);
+    let previousSummary = activeSession.contextSummary === undefined ? '' : activeSession.contextSummary.trim();
+    let previousCoverageMessageId = previousSummary.length === 0 ||
+      activeSession.contextSummaryUntilMessageId === undefined ? '' : activeSession.contextSummaryUntilMessageId;
+    let previousSummaryMessageCount = activeSession.contextSummaryMessageCount === undefined ?
+      contextSummaryMessageCountForCoverage(historyMessages, previousCoverageMessageId, 0) :
+      activeSession.contextSummaryMessageCount;
+    if (previousSummary.length > 0) {
+      let reusedMessages = buildCloudContextMessagesAfterExistingSummaryCoverage(dateSystemMessage, previousSummary,
+        historyMessages, previousCoverageMessageId, currentUserMessage);
+      let reusedEstimatedTokens = estimateCloudContextTokens(reusedMessages);
+      if (!shouldCompressCloudContext(reusedMessages, settings)) {
+        return {
+          messages: reusedMessages,
+          usingCompressedContext: true,
+          summaryUpdated: false,
+          noticeNeeded: false,
+          compressionAction: 'reused',
+          summary: previousSummary,
+          summaryUntilMessageId: previousCoverageMessageId,
+          summaryMessageCount: previousSummaryMessageCount,
+          estimatedTokens: reusedEstimatedTokens,
+          originalEstimatedTokens: originalEstimatedTokens,
+          retainedRounds: 0,
+          currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(reusedMessages, currentUserMessage),
+          overBudgetAfterCompression: false
+        };
+      }
+
+      let tailMessages = messagesAfterExistingContextSummaryCoverage(historyMessages, previousCoverageMessageId);
+      let split = splitChatMessagesForContextCompressionExact(tailMessages, settings.keepRecentTurns);
+      let summary = previousSummary;
+      let summaryCoverageMessageId = previousCoverageMessageId;
+      if (split.olderMessages.length > 0) {
+        summary = await this.buildCloudChatContextSummaryFromMessages(previousSummary, split.olderMessages);
+        summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages,
+          previousCoverageMessageId, split.summaryUntilMessageId);
+      }
+      let compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+        split.retainedMessages, currentUserMessage);
+      let retainedRounds = split.retainedRoundCount;
+      let finalSplit = split;
+      while (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds > 0) {
+        retainedRounds -= 1;
+        finalSplit = splitChatMessagesForContextCompressionExact(tailMessages, retainedRounds);
+        let deltaOlderMessages = this.olderMessagesAfterTailSummaryCoverage(finalSplit, summaryCoverageMessageId,
+          previousCoverageMessageId);
+        if (deltaOlderMessages.length > 0) {
+          summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
+        }
+        summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+          finalSplit.summaryUntilMessageId);
+        compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+          finalSplit.retainedMessages, currentUserMessage);
+      }
+      if (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds === 0 &&
+        finalSplit.retainedMessages.length > 0) {
+        finalSplit = splitChatMessagesForContextCompressionExact(tailMessages, 0);
+        let deltaOlderMessages = this.olderMessagesAfterTailSummaryCoverage(finalSplit, summaryCoverageMessageId,
+          previousCoverageMessageId);
+        if (deltaOlderMessages.length > 0) {
+          summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
+        }
+        summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+          finalSplit.summaryUntilMessageId);
+        compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+          finalSplit.retainedMessages, currentUserMessage);
+      }
+      let estimatedTokens = estimateCloudContextTokens(compressedMessages);
+      let overBudgetAfterCompression = shouldCompressCloudContext(compressedMessages, settings);
+      let summaryUpdated = summaryCoverageMessageId !== previousCoverageMessageId || summary !== previousSummary;
+      let summaryMessageCount = contextSummaryMessageCountForCoverage(historyMessages, summaryCoverageMessageId,
+        previousSummaryMessageCount);
+      return {
+        messages: compressedMessages,
+        usingCompressedContext: true,
+        summaryUpdated: summaryUpdated,
+        noticeNeeded: false,
+        compressionAction: summaryUpdated ? 'updated' : 'reused',
+        summary: summary,
+        summaryUntilMessageId: summaryCoverageMessageId,
+        summaryMessageCount: summaryMessageCount,
+        estimatedTokens: estimatedTokens,
+        originalEstimatedTokens: originalEstimatedTokens,
+        retainedRounds: finalSplit.retainedRoundCount,
+        currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(compressedMessages, currentUserMessage),
+        overBudgetAfterCompression: overBudgetAfterCompression
+      };
+    }
+
+    if (!shouldCompressCloudContext(fullContextMessages, settings)) {
+      return {
+        messages: fullContextMessages,
+        usingCompressedContext: false,
+        summaryUpdated: false,
+        noticeNeeded: false,
+        compressionAction: 'none',
+        summary: '',
+        summaryUntilMessageId: '',
+        summaryMessageCount: 0,
+        estimatedTokens: originalEstimatedTokens,
+        originalEstimatedTokens: originalEstimatedTokens,
+        retainedRounds: 0,
+        currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(fullContextMessages, currentUserMessage),
+        overBudgetAfterCompression: false
+      };
+    }
+
+    let split = splitChatMessagesForContextCompressionExact(historyMessages, settings.keepRecentTurns);
+    let summary = split.olderMessages.length > 0 ? await this.buildCloudChatContextSummary(activeSession, split) :
+      previousSummary;
+    let compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+      split.retainedMessages, currentUserMessage);
+    let retainedRounds = split.retainedRoundCount;
+    let finalSplit = split;
+    let summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages,
+      previousCoverageMessageId, split.summaryUntilMessageId);
+    let compressedHistory = split.olderMessages.length > 0 || summary.length > 0;
+    while (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds > 0) {
+      retainedRounds -= 1;
+      finalSplit = splitChatMessagesForContextCompressionExact(historyMessages, retainedRounds);
+      let deltaOlderMessages = this.olderMessagesAfterSummaryCoverage(finalSplit, summaryCoverageMessageId);
+      if (deltaOlderMessages.length > 0) {
+        // 进一步降轮数时只把新转入较早历史的消息补进摘要，当前请求始终不参与。
+        summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
+      }
+      summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+        finalSplit.summaryUntilMessageId);
+      compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+        finalSplit.retainedMessages, currentUserMessage);
+      compressedHistory = true;
+    }
+    if (shouldCompressCloudContext(compressedMessages, settings) && retainedRounds === 0 &&
+      finalSplit.retainedMessages.length > 0) {
+      finalSplit = splitChatMessagesForContextCompressionExact(historyMessages, 0);
+      let deltaOlderMessages = this.olderMessagesAfterSummaryCoverage(finalSplit, summaryCoverageMessageId);
+      if (deltaOlderMessages.length > 0) {
+        summary = buildLocalExtractiveChatSummary(summary, deltaOlderMessages);
+      }
+      summaryCoverageMessageId = nonRetreatingContextSummaryUntilMessageId(historyMessages, summaryCoverageMessageId,
+        finalSplit.summaryUntilMessageId);
+      compressedMessages = buildCloudContextMessagesWithCurrentRequest(dateSystemMessage, summary,
+        finalSplit.retainedMessages, currentUserMessage);
+      compressedHistory = true;
+    }
+    let estimatedTokens = estimateCloudContextTokens(compressedMessages);
+    let overBudgetAfterCompression = shouldCompressCloudContext(compressedMessages, settings);
+    let summaryMessageCount = contextSummaryMessageCountForCoverage(historyMessages, summaryCoverageMessageId,
+      finalSplit.olderMessageCount);
+    return {
+      messages: compressedMessages,
+      usingCompressedContext: compressedHistory,
+      summaryUpdated: compressedHistory,
+      noticeNeeded: shouldAppendContextCompressionNotice(activeSession.messages, compressedHistory),
+      compressionAction: compressedHistory ? 'created' : 'none',
+      summary: summary,
+      summaryUntilMessageId: summaryCoverageMessageId,
+      summaryMessageCount: summaryMessageCount,
+      estimatedTokens: estimatedTokens,
+      originalEstimatedTokens: originalEstimatedTokens,
+      retainedRounds: finalSplit.retainedRoundCount,
+      currentRequestAtTail: this.isCurrentRequestAtCloudContextTail(compressedMessages, currentUserMessage),
+      overBudgetAfterCompression: overBudgetAfterCompression
     };
   }
 
@@ -2615,6 +3090,15 @@ struct Index {
     }
   }
 
+  cancelCurrentCloudChat(): void {
+    if (!this.cloudThinking) {
+      return;
+    }
+    this.cloudChatCancelRequested = true;
+    this.cloudClient.cancelActiveRequests();
+    this.appendCloudLog('ReAct 云端聊天取消：已中断当前 HTTP 请求。');
+  }
+
   async runCloudPlannerOnce() {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
@@ -2626,6 +3110,7 @@ struct Index {
     let task = this.cloudUserInput.trim();
     this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
@@ -2634,32 +3119,96 @@ struct Index {
     }
     let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
       new Date().getTime());
-    let contextMessages: CloudChatMessage[] = [this.cloudChatDateSystemMessage()]
-      .concat(buildCloudContextMessages(activeSession.messages.concat([userMessage])));
-    this.appendActiveChatMessage(userMessage);
-    this.appendCloudLog(`ReAct 云端聊天开始，任务：${task}`);
+    let chatSessionId = activeSession.id;
+    this.appendChatMessageToExactSession(chatSessionId, userMessage);
+    let assistantMessageId = this.nextChatMessageId('assistant');
+    let assistantMessageCreated = false;
+    let enableThinking = this.chatDeepThinkingEnabled;
     let toolTraceLines: string[] = [];
+    let streamedContent = '';
+    this.resetCloudStreamMessageUpdate();
     try {
+      let sessionWithUser = ChatSessionStorage.loadSession(this.filesDir, chatSessionId);
+      if (sessionWithUser === null) {
+        throw new Error('发起会话已不存在，无法继续云端聊天。');
+      }
+      let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
+      let contextMessages = contextPreparation.messages;
+      if (contextPreparation.summaryUpdated) {
+        this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
+          contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
+      }
+      if (contextPreparation.noticeNeeded) {
+        this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
+          CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
+      }
+      if (contextPreparation.usingCompressedContext) {
+        let compressionLogPrefix = 'ReAct 云端聊天复用已有压缩上下文';
+        if (contextPreparation.compressionAction === 'created') {
+          compressionLogPrefix = 'ReAct 云端聊天上下文已自动压缩';
+        } else if (contextPreparation.compressionAction === 'updated') {
+          compressionLogPrefix = 'ReAct 云端聊天上下文已增量压缩';
+        }
+        this.appendCloudLog(compressionLogPrefix + '，压缩前估算 tokens：' +
+          String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
+          String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
+          String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
+          (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
+          (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
+      }
+      if (this.cloudChatCancelRequested) {
+        throw new Error('已取消本次回复。');
+      }
+      this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT, '',
+        new Date().getTime()));
+      assistantMessageCreated = true;
+      this.appendCloudLog(`ReAct 云端聊天开始，Think：${enableThinking ? '开启' : '关闭'}，任务：${task}`);
       let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), {
         filesDir: this.filesDir,
         sessionId: activeSession.id,
         userMessage: task,
+        enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
+        },
+        onContentDelta: (delta: string) => {
+          streamedContent += delta;
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
         }
       });
       let response = result.content;
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, response, new Date().getTime(), toolTraceLines));
-      this.appendCloudLog(`ReAct 云端聊天返回：\n${response}`);
+      this.resetCloudStreamMessageUpdate();
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, response, toolTraceLines);
+      let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
+      this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + err.message, new Date().getTime(), toolTraceLines));
-      this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
+      this.resetCloudStreamMessageUpdate();
+      if (this.cloudChatCancelRequested) {
+        if (assistantMessageCreated) {
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+            this.cancelledCloudChatContent(streamedContent), toolTraceLines);
+        } else {
+          this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
+            this.cancelledCloudChatContent(streamedContent), new Date().getTime()));
+        }
+        this.appendCloudLog('ReAct 云端聊天已取消。');
+      } else {
+        if (assistantMessageCreated) {
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + err.message,
+            toolTraceLines);
+        } else {
+          this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
+            '[错误] ' + err.message, new Date().getTime()));
+        }
+        this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
+      }
     } finally {
+      this.resetCloudStreamMessageUpdate();
       this.cloudThinking = false;
+      this.cloudChatCancelRequested = false;
     }
   }
 
@@ -3640,6 +4189,7 @@ struct Index {
             chatMode: $chatMode,
             cloudUserInput: $cloudUserInput,
             userInput: $userInput,
+            chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
             cloudOutput: this.cloudOutput,
             cloudDebugImagePath: this.cloudDebugImagePath,
             cloudThinking: this.cloudThinking,
@@ -3661,7 +4211,9 @@ struct Index {
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
+            onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+            onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },

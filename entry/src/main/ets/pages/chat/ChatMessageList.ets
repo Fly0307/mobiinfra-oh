@@ -1,8 +1,11 @@
 import {
+  CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
   chatMessageImagePath,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
   chatMessageRenderKey
 } from './ChatSessionTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
@@ -12,11 +15,37 @@ import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 export struct ChatMessageList {
   @Prop messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
+  @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onScrollContent: (yOffset: number) => void = () => {};
+  private messageScroller: Scroller = new Scroller();
+  private lastAutoScrollKey: string = '';
+
+  aboutToAppear(): void {
+    this.scheduleScrollToLatest(true);
+  }
+
+  private onAutoScrollKeyChanged(): void {
+    this.scheduleScrollToLatest(false);
+  }
+
+  private scheduleScrollToLatest(force: boolean): void {
+    if (!force && this.autoScrollKey === this.lastAutoScrollKey) {
+      return;
+    }
+    this.lastAutoScrollKey = this.autoScrollKey;
+    // 消息气泡中有 Markdown/图片等异步布局，延迟两次滚动确保切换会话时落到底部。
+    setTimeout(() => {
+      this.messageScroller.scrollEdge(Edge.Bottom);
+    }, 0);
+    setTimeout(() => {
+      this.messageScroller.scrollEdge(Edge.Bottom);
+    }, 80);
+  }
 
   private isUserMessage(message: ChatMessage): boolean {
     return message.role === 'user';
@@ -25,6 +54,9 @@ export struct ChatMessageList {
   private roleLabel(message: ChatMessage): string {
     if (message.role === 'user') {
       return '你';
+    }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '上下文';
     }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '任务结果';
@@ -42,6 +74,9 @@ export struct ChatMessageList {
     if (message.role === 'user') {
       return '我';
     }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '压';
+    }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
       return '任';
     }
@@ -51,6 +86,9 @@ export struct ChatMessageList {
   private avatarColor(message: ChatMessage): string {
     if (message.role === 'user') {
       return '#111827';
+    }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '#F59E0B';
     }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '#059669';
@@ -64,6 +102,9 @@ export struct ChatMessageList {
   private bubbleColor(message: ChatMessage): string {
     if (this.isUserMessage(message)) {
       return '#111827';
+    }
+    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+      return '#FFFBEB';
     }
     if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
       return '#ECFDF5';
@@ -92,6 +133,10 @@ export struct ChatMessageList {
       return 0;
     }
     return message.trace.length;
+  }
+
+  private hasVisibleContent(message: ChatMessage): boolean {
+    return message.content.trim().length > 0;
   }
 
   private formatMessageTime(time: number): string {
@@ -132,9 +177,13 @@ export struct ChatMessageList {
 
       this.ToolCallSummary(message)
 
-      MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
-        .width('100%')
-        .margin({ top: 6 })
+      this.ThinkingModule(message)
+
+      if (this.hasVisibleContent(message)) {
+        MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
+          .width('100%')
+          .margin({ top: 6 })
+      }
 
       this.MessageImagePreview(message)
     }
@@ -144,7 +193,8 @@ export struct ChatMessageList {
     .borderRadius(17)
     .border({
       width: this.isUserMessage(message) ? 0 : 1,
-      color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' : '#E8ECF3'
+      color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
+        (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')
     })
   }
 
@@ -156,6 +206,54 @@ export struct ChatMessageList {
         .lineHeight(18)
         .width('100%')
         .margin({ top: 6 })
+    }
+  }
+
+  @Builder ThinkingModule(message: ChatMessage) {
+    if (message.role === 'assistant' && chatMessageThinkingContent(message).length > 0) {
+      Column() {
+        Row() {
+          Text(chatMessageThinkingCollapsed(message) ? '▶' : '▼')
+            .fontSize(11)
+            .fontColor('#6B7280')
+            .width(20)
+            .height(20)
+            .textAlign(TextAlign.Center)
+          Column() {
+            Text('Think 思考过程')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#4B5563')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(chatMessageThinkingCollapsed(message) ? '已折叠，点击查看' : '点击收起')
+              .fontSize(10)
+              .fontColor('#8B95A5')
+              .margin({ top: 2 })
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        if (!chatMessageThinkingCollapsed(message)) {
+          Text(chatMessageThinkingContent(message))
+            .fontSize(12)
+            .fontColor('#4B5563')
+            .lineHeight(18)
+            .width('100%')
+            .margin({ top: 8 })
+        }
+      }
+      .width('100%')
+      .padding({ left: 10, right: 10, top: 9, bottom: 9 })
+      .margin({ top: 8 })
+      .backgroundColor('#F3F4F6')
+      .borderRadius(12)
+      .border({ width: 1, color: '#E5E7EB' })
+      .onClick(() => {
+        this.onToggleThinking(message.id);
+      })
     }
   }
 
@@ -283,7 +381,7 @@ export struct ChatMessageList {
   }
 
   build() {
-    Scroll() {
+    Scroll(this.messageScroller) {
       Column() {
         ForEach(this.messages, (message: ChatMessage) => {
           this.MessageRow(message)

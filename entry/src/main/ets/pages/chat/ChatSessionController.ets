@@ -1,12 +1,18 @@
 import {
+  CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
+  ChatAssistantThinkingParts,
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
   chatMessageImagePath,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
+  splitAssistantThinkingContent,
   normalizeChatMode,
+  toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from './ChatSessionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
@@ -121,6 +127,8 @@ export class ChatSessionController {
       role: lastMessage.role,
       kind: lastMessage.kind,
       content: lastMessage.content,
+      thinkingContent: chatMessageThinkingContent(lastMessage),
+      thinkingCollapsed: chatMessageThinkingCollapsed(lastMessage),
       trace: trace,
       collapsed: lastMessage.collapsed,
       createdAt: lastMessage.createdAt,
@@ -156,6 +164,8 @@ export class ChatSessionController {
       role: resultMessage.role,
       kind: resultMessage.kind,
       content: resultMessage.content,
+      thinkingContent: chatMessageThinkingContent(resultMessage),
+      thinkingCollapsed: chatMessageThinkingCollapsed(resultMessage),
       trace: resultMessage.trace.slice(),
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
@@ -246,6 +256,108 @@ export class ChatSessionController {
     session.messages = toggleChatMessageCollapsed(session.messages, messageId);
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static toggleThinking(filesDir: string, state: ChatSessionViewState, messageId: string): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, state.activeSessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    session.messages = toggleChatMessageThinkingCollapsed(session.messages, messageId);
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateMessageContent(filesDir: string, state: ChatSessionViewState, messageId: string, content: string,
+    trace?: string[]): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    return ChatSessionController.updateMessageContentInSession(filesDir, state, state.activeSessionId, messageId,
+      content, trace);
+  }
+
+  static updateMessageContentInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    messageId: string, content: string, trace?: string[]): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let messages = session.messages.slice();
+    let changed = false;
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      if (message.id !== messageId) {
+        continue;
+      }
+      let visibleContent = content;
+      let thinkingContent = chatMessageThinkingContent(message);
+      if (message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+        let parts: ChatAssistantThinkingParts = splitAssistantThinkingContent(content);
+        visibleContent = parts.content;
+        thinkingContent = parts.thinkingContent;
+      }
+      messages[i] = {
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: visibleContent,
+        thinkingContent: thinkingContent,
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
+        trace: trace === undefined ? message.trace.slice() : trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message)
+      };
+      changed = true;
+      break;
+    }
+    if (!changed) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    session.messages = messages;
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateContextSummary(filesDir: string, state: ChatSessionViewState, summary: string, updatedAt: number,
+    untilMessageId: string, messageCount: number): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0) {
+      return state;
+    }
+    return ChatSessionController.updateContextSummaryInSession(filesDir, state, state.activeSessionId, summary,
+      updatedAt, untilMessageId, messageCount);
+  }
+
+  static updateContextSummaryInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    summary: string, updatedAt: number, untilMessageId: string, messageCount: number): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    session.contextSummary = summary;
+    session.contextSummaryUpdatedAt = updatedAt;
+    session.contextSummaryUntilMessageId = untilMessageId;
+    session.contextSummaryMessageCount = messageCount;
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
     return ChatSessionController.stateFromSession(filesDir, session);
   }
 

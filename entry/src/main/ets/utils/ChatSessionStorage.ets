@@ -2,14 +2,19 @@ import fs from '@ohos.file.fs';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
+  CHAT_MESSAGE_KIND_CHAT,
+  ChatAssistantThinkingParts,
   ChatMessage,
   ChatSessionIndex,
   ChatSessionRecord,
   ChatSessionSummary,
   buildChatSessionSummary,
   chatMessageImagePath,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
   createEmptyChatSession,
-  normalizeChatMode
+  normalizeChatMode,
+  splitAssistantThinkingContent
 } from '../pages/chat/ChatSessionTypes';
 
 const CHAT_SESSION_DIR: string = 'chat-sessions';
@@ -171,6 +176,10 @@ export class ChatSessionStorage {
       let session = parseJsonCompat<ChatSessionRecord>(ChatSessionStorage.readText(ChatSessionStorage.sessionPath(filesDir, sessionId)));
       session.mode = normalizeChatMode(session.mode);
       session.messages = session.messages === undefined ? [] : ChatSessionStorage.normalizeMessages(session.messages);
+      session.contextSummary = ChatSessionStorage.normalizedOptionalString(session.contextSummary);
+      session.contextSummaryUpdatedAt = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt);
+      session.contextSummaryUntilMessageId = ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId);
+      session.contextSummaryMessageCount = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount);
       return session;
     } catch (e) {
       ChatSessionStorage.removeFromIndex(filesDir, sessionId);
@@ -186,7 +195,11 @@ export class ChatSessionStorage {
       mode: normalizeChatMode(session.mode),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
-      messages: ChatSessionStorage.normalizeMessages(session.messages)
+      messages: ChatSessionStorage.normalizeMessages(session.messages),
+      contextSummary: ChatSessionStorage.normalizedOptionalString(session.contextSummary),
+      contextSummaryUpdatedAt: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt),
+      contextSummaryUntilMessageId: ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId),
+      contextSummaryMessageCount: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount)
     };
     ChatSessionStorage.writeText(ChatSessionStorage.sessionPath(filesDir, normalized.id),
       stringifyJsonCompat(normalized as Object, 2));
@@ -266,11 +279,20 @@ export class ChatSessionStorage {
     let normalized: ChatMessage[] = [];
     for (let i = 0; i < messages.length; i++) {
       let message = messages[i];
+      let thinkingContent = chatMessageThinkingContent(message);
+      let visibleContent = message.content;
+      if (thinkingContent.length === 0 && message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+        let parts: ChatAssistantThinkingParts = splitAssistantThinkingContent(message.content);
+        visibleContent = parts.content;
+        thinkingContent = parts.thinkingContent;
+      }
       normalized.push({
         id: message.id,
         role: message.role,
         kind: message.kind,
-        content: message.content,
+        content: visibleContent,
+        thinkingContent: thinkingContent,
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
         trace: message.trace === undefined ? [] : message.trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
@@ -278,6 +300,14 @@ export class ChatSessionStorage {
       });
     }
     return normalized;
+  }
+
+  private static normalizedOptionalString(value?: string): string {
+    return value === undefined ? '' : value;
+  }
+
+  private static normalizedOptionalNumber(value?: number): number {
+    return value === undefined ? 0 : value;
   }
 
   private static stripFileUri(path: string): string {

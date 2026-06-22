@@ -163,22 +163,22 @@ interface CloudChatResponse {
 }
 
 export interface CloudStreamToolCallFunctionDelta {
-  name?: string;
-  arguments?: string;
+  name?: string | null;
+  arguments?: string | null;
 }
 
 export interface CloudStreamToolCallDelta {
-  index?: number;
-  id?: string;
-  type?: string;
-  function?: CloudStreamToolCallFunctionDelta;
+  index?: number | null;
+  id?: string | null;
+  type?: string | null;
+  function?: CloudStreamToolCallFunctionDelta | null;
 }
 
 interface CloudStreamChoiceDelta {
   content?: string | null;
   reasoning_content?: string | null;
   reasoning?: string | null;
-  tool_calls?: CloudStreamToolCallDelta[];
+  tool_calls?: CloudStreamToolCallDelta[] | null;
 }
 
 interface CloudStreamChoice {
@@ -417,7 +417,7 @@ export class CloudModelClient {
     return {
       contentDelta: typeof rawContent === 'string' ? rawContent : '',
       reasoningDelta: typeof reasoningContent === 'string' ? reasoningContent : '',
-      toolCallDeltas: delta.tool_calls === undefined ? [] : delta.tool_calls.slice(),
+      toolCallDeltas: Array.isArray(delta.tool_calls) ? delta.tool_calls.slice() : [],
       finishReason: choice.finish_reason === undefined || choice.finish_reason === null ? '' : choice.finish_reason,
       done: false
     };
@@ -453,10 +453,19 @@ export class CloudModelClient {
     };
   }
 
-  private static applyStreamToolCallDeltas(toolCalls: CloudToolCall[], deltas: CloudStreamToolCallDelta[]): void {
+  private static streamStringDelta(value: string | null | undefined): string {
+    return typeof value === 'string' ? value : '';
+  }
+
+  // 流式工具调用会分片返回，并且部分 OpenAI-compatible 服务会把暂未产生的字段置为 null。
+  // 这里集中做空值归一化，避免在 HTTP dataReceive 回调中访问 null.length 导致 JS crash。
+  static applyStreamToolCallDeltas(toolCalls: CloudToolCall[], deltas: CloudStreamToolCallDelta[]): void {
     for (let i = 0; i < deltas.length; i++) {
       let delta = deltas[i];
-      let index = delta.index === undefined ? 0 : delta.index;
+      if (delta === undefined || delta === null) {
+        continue;
+      }
+      let index = typeof delta.index === 'number' && delta.index >= 0 ? Math.floor(delta.index) : 0;
       while (toolCalls.length <= index) {
         toolCalls.push({
           id: '',
@@ -468,18 +477,22 @@ export class CloudModelClient {
         });
       }
       let target = toolCalls[index];
-      if (delta.id !== undefined && delta.id.length > 0) {
-        target.id = delta.id;
+      let deltaId = CloudModelClient.streamStringDelta(delta.id);
+      if (deltaId.length > 0) {
+        target.id = deltaId;
       }
-      if (delta.type !== undefined && delta.type.length > 0) {
-        target.type = delta.type;
+      let deltaType = CloudModelClient.streamStringDelta(delta.type);
+      if (deltaType.length > 0) {
+        target.type = deltaType;
       }
-      if (delta.function !== undefined) {
-        if (delta.function.name !== undefined && delta.function.name.length > 0) {
-          target.function.name = delta.function.name;
+      if (delta.function !== undefined && delta.function !== null) {
+        let functionName = CloudModelClient.streamStringDelta(delta.function.name);
+        if (functionName.length > 0) {
+          target.function.name = functionName;
         }
-        if (delta.function.arguments !== undefined && delta.function.arguments.length > 0) {
-          target.function.arguments += delta.function.arguments;
+        let functionArguments = CloudModelClient.streamStringDelta(delta.function.arguments);
+        if (functionArguments.length > 0) {
+          target.function.arguments += functionArguments;
         }
       }
       toolCalls[index] = target;
@@ -631,34 +644,33 @@ export class CloudModelClient {
         if (resolved) {
           return;
         }
-        let chunk: CloudChatStreamChunk;
         try {
-          chunk = CloudModelClient.parseChatCompletionStreamDataLine(line);
+          let chunk = CloudModelClient.parseChatCompletionStreamDataLine(line);
+          if (chunk.done) {
+            finishWithResult();
+            return;
+          }
+          if (chunk.finishReason.length > 0) {
+            finishReason = chunk.finishReason;
+          }
+          if (chunk.toolCallDeltas.length > 0) {
+            CloudModelClient.applyStreamToolCallDeltas(toolCalls, chunk.toolCallDeltas);
+          }
+          if (chunk.reasoningDelta.length > 0) {
+            if (!separateReasoningOpen) {
+              separateReasoningOpen = true;
+              emitRawDelta('<think>');
+            }
+            emitRawDelta(chunk.reasoningDelta);
+          }
+          if (chunk.contentDelta.length > 0) {
+            closeSeparateReasoning();
+            emitRawDelta(chunk.contentDelta);
+          }
         } catch (e) {
           let err = e as Error;
           finishWithError(err.message);
           return;
-        }
-        if (chunk.done) {
-          finishWithResult();
-          return;
-        }
-        if (chunk.finishReason.length > 0) {
-          finishReason = chunk.finishReason;
-        }
-        if (chunk.toolCallDeltas.length > 0) {
-          CloudModelClient.applyStreamToolCallDeltas(toolCalls, chunk.toolCallDeltas);
-        }
-        if (chunk.reasoningDelta.length > 0) {
-          if (!separateReasoningOpen) {
-            separateReasoningOpen = true;
-            emitRawDelta('<think>');
-          }
-          emitRawDelta(chunk.reasoningDelta);
-        }
-        if (chunk.contentDelta.length > 0) {
-          closeSeparateReasoning();
-          emitRawDelta(chunk.contentDelta);
         }
       };
       let processBufferedText = (flushRemaining: boolean): void => {

@@ -450,6 +450,21 @@ export default function chatReactAgentUnitTest() {
       expect(doneChunk.done).assertTrue();
     });
 
+    it('mergesCloudStreamingToolCallDeltasWithNullFields', 0, () => {
+      let toolChunk = CloudModelClient.parseChatCompletionStreamDataLine('data: {"choices":[{"delta":' +
+        '{"tool_calls":[{"index":0,"id":null,"type":null,"function":{"name":null,' +
+        '"arguments":"{\\"range\\":\\""}}]}}]}');
+      let toolCalls: CloudToolCall[] = [];
+
+      CloudModelClient.applyStreamToolCallDeltas(toolCalls, toolChunk.toolCallDeltas);
+
+      expect(toolCalls.length).assertEqual(1);
+      expect(toolCalls[0].id).assertEqual('');
+      expect(toolCalls[0].type).assertEqual('function');
+      expect(toolCalls[0].function.name).assertEqual('');
+      expect(toolCalls[0].function.arguments).assertEqual('{"range":"');
+    });
+
     it('throwsOnEmptyCloudChoices', 0, () => {
       let message = '';
       try {

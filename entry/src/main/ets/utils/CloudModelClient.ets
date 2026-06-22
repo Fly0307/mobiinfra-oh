@@ -121,6 +121,16 @@ export interface CloudChatCompletionStreamCallbacks {
   onContentDelta?: CloudChatStreamDeltaHandler;
 }
 
+export interface CloudChatStreamDiagnostics {
+  responseCode: number;
+  receivedBytes: number;
+  sseLineCount: number;
+  contentDeltaChars: number;
+  reasoningDeltaChars: number;
+  toolCallCount: number;
+  rawPreview: string;
+}
+
 interface CloudChatRequest {
   messages: CloudChatMessage[];
   temperature: number;
@@ -160,6 +170,18 @@ interface CloudChatChoice {
 
 interface CloudChatResponse {
   choices: CloudChatChoice[];
+}
+
+interface CloudErrorDetail {
+  message?: string;
+  type?: string;
+  code?: string | number | null;
+}
+
+interface CloudErrorResponse {
+  error?: string | CloudErrorDetail;
+  message?: string;
+  detail?: string;
 }
 
 export interface CloudStreamToolCallFunctionDelta {
@@ -453,6 +475,77 @@ export class CloudModelClient {
     };
   }
 
+  private static previewTextForLog(text: string, maxLength: number): string {
+    let normalizedMaxLength = maxLength <= 0 ? 512 : Math.floor(maxLength);
+    let singleLine = text.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+    if (singleLine.length <= normalizedMaxLength) {
+      return singleLine;
+    }
+    return singleLine.substring(0, normalizedMaxLength) + '...';
+  }
+
+  private static errorMessageFromNonSsePayload(text: string): string {
+    try {
+      let parsed = parseJsonCompat<CloudErrorResponse>(text);
+      let messages: string[] = [];
+      if (parsed.message !== undefined && parsed.message.length > 0) {
+        messages.push(parsed.message);
+      }
+      if (parsed.detail !== undefined && parsed.detail.length > 0) {
+        messages.push(parsed.detail);
+      }
+      let errorField = parsed.error;
+      if (typeof errorField === 'string' && errorField.length > 0) {
+        messages.push(errorField);
+      } else if (errorField !== undefined && errorField !== null && typeof errorField === 'object' &&
+        !Array.isArray(errorField)) {
+        let detail = errorField as CloudErrorDetail;
+        if (detail.message !== undefined && detail.message.length > 0) {
+          messages.push(detail.message);
+        }
+        if (detail.type !== undefined && detail.type.length > 0) {
+          messages.push('type=' + detail.type);
+        }
+        if (detail.code !== undefined && detail.code !== null) {
+          messages.push('code=' + String(detail.code));
+        }
+      }
+      return messages.join(', ');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // 在 stream=true 时，错误场景不会返回 SSE，而是直接返回普通 JSON。
+  // 该兜底优先尝试按非流式 chat completion 解析；失败时再抽取 error/message，避免上层只看到空回复。
+  static parseNonSseStreamFallbackResponse(text: string): CloudChatCompletionResult {
+    let trimmed = text.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Cloud stream returned empty non-SSE response.');
+    }
+    try {
+      return CloudModelClient.parseChatCompletionResponseText(trimmed);
+    } catch (e) {
+      let err = e as Error;
+      let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(trimmed);
+      if (errorMessage.length > 0) {
+        throw new Error(errorMessage);
+      }
+      throw new Error('Cloud stream returned non-SSE response: ' +
+        CloudModelClient.previewTextForLog(trimmed, 512) + '; parse failed: ' + err.message);
+    }
+  }
+
+  static formatStreamDiagnosticsForLog(diagnostics: CloudChatStreamDiagnostics): string {
+    return 'status=' + String(diagnostics.responseCode) +
+      ', bytes=' + String(diagnostics.receivedBytes) +
+      ', sse_lines=' + String(diagnostics.sseLineCount) +
+      ', content_delta_chars=' + String(diagnostics.contentDeltaChars) +
+      ', reasoning_delta_chars=' + String(diagnostics.reasoningDeltaChars) +
+      ', tool_calls=' + String(diagnostics.toolCallCount) +
+      ', raw_preview=' + diagnostics.rawPreview;
+  }
+
   private static streamStringDelta(value: string | null | undefined): string {
     return typeof value === 'string' ? value : '';
   }
@@ -573,11 +666,20 @@ export class CloudModelClient {
       let self = this;
       let resolved = false;
       let textBuffer = '';
+      let rawResponseText = '';
+      let rawResponseTruncated = false;
       let contentParts: string[] = [];
       let toolCalls: CloudToolCall[] = [];
       let finishReason = '';
       let separateReasoningOpen = false;
+      let responseCode = -1;
+      let receivedBytes = 0;
+      let sseLineCount = 0;
+      let contentDeltaChars = 0;
+      let reasoningDeltaChars = 0;
+      let finishResultPending = false;
       let textDecoder = util.TextDecoder.create('utf-8');
+      const MAX_RAW_RESPONSE_CHARS: number = 200000;
 
       let cleanup = (): void => {
         httpReq.off('dataReceive');
@@ -588,6 +690,45 @@ export class CloudModelClient {
         } catch (e) {
           AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
         }
+      };
+      let appendRawResponseText = (text: string): void => {
+        if (rawResponseText.length >= MAX_RAW_RESPONSE_CHARS) {
+          rawResponseTruncated = true;
+          return;
+        }
+        let remaining = MAX_RAW_RESPONSE_CHARS - rawResponseText.length;
+        if (text.length <= remaining) {
+          rawResponseText += text;
+          return;
+        }
+        rawResponseText += text.substring(0, remaining);
+        rawResponseTruncated = true;
+      };
+      let buildDiagnostics = (toolCallCountOverride?: number): CloudChatStreamDiagnostics => {
+        let rawPreview = CloudModelClient.previewTextForLog(rawResponseText, 512);
+        if (rawResponseTruncated) {
+          rawPreview += '...<truncated>';
+        }
+        return {
+          responseCode: responseCode,
+          receivedBytes: receivedBytes,
+          sseLineCount: sseLineCount,
+          contentDeltaChars: contentDeltaChars,
+          reasoningDeltaChars: reasoningDeltaChars,
+          toolCallCount: toolCallCountOverride === undefined ?
+            CloudModelClient.compactStreamToolCalls(toolCalls).length : toolCallCountOverride,
+          rawPreview: rawPreview
+        };
+      };
+      let diagnosticsForLog = (toolCallCountOverride?: number): string => {
+        return CloudModelClient.formatStreamDiagnosticsForLog(buildDiagnostics(toolCallCountOverride));
+      };
+      let httpStatusErrorMessage = (code: number): string => {
+        let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(rawResponseText.trim());
+        if (errorMessage.length > 0) {
+          return 'Cloud HTTP ' + String(code) + ': ' + errorMessage;
+        }
+        return 'Cloud HTTP ' + String(code);
       };
       let emitRawDelta = (delta: string): void => {
         if (delta.length === 0) {
@@ -609,11 +750,36 @@ export class CloudModelClient {
         if (resolved) {
           return;
         }
+        if (responseCode < 0) {
+          finishResultPending = true;
+          return;
+        }
+        finishResultPending = false;
+        if (sseLineCount === 0 && rawResponseText.trim().length > 0) {
+          try {
+            let fallbackResult = CloudModelClient.parseNonSseStreamFallbackResponse(rawResponseText);
+            resolved = true;
+            cleanup();
+            AppLogger.warn('CloudModel', 'chat stream received non-SSE response, fallback parsed: ' +
+              diagnosticsForLog(fallbackResult.toolCalls.length));
+            resolve(fallbackResult);
+          } catch (e) {
+            let err = e as Error;
+            finishWithError('Cloud stream non-SSE response: ' + err.message);
+          }
+          return;
+        }
         closeSeparateReasoning();
         resolved = true;
         let content = contentParts.join('');
         let finalToolCalls = CloudModelClient.compactStreamToolCalls(toolCalls);
         cleanup();
+        if (content.length === 0 && finalToolCalls.length === 0) {
+          AppLogger.warn('CloudModel', 'chat stream completed without content or tool calls: ' +
+            diagnosticsForLog(finalToolCalls.length));
+        } else {
+          AppLogger.info('CloudModel', 'chat stream completed: ' + diagnosticsForLog(finalToolCalls.length));
+        }
         resolve({
           content: content,
           toolCalls: finalToolCalls,
@@ -631,6 +797,7 @@ export class CloudModelClient {
         }
         resolved = true;
         cleanup();
+        AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
         reject(new Error(message));
       };
       let decodeStreamData = (data: ArrayBuffer): string => {
@@ -645,6 +812,9 @@ export class CloudModelClient {
           return;
         }
         try {
+          if (line.trim().startsWith('data:')) {
+            sseLineCount += 1;
+          }
           let chunk = CloudModelClient.parseChatCompletionStreamDataLine(line);
           if (chunk.done) {
             finishWithResult();
@@ -657,6 +827,7 @@ export class CloudModelClient {
             CloudModelClient.applyStreamToolCallDeltas(toolCalls, chunk.toolCallDeltas);
           }
           if (chunk.reasoningDelta.length > 0) {
+            reasoningDeltaChars += chunk.reasoningDelta.length;
             if (!separateReasoningOpen) {
               separateReasoningOpen = true;
               emitRawDelta('<think>');
@@ -664,6 +835,7 @@ export class CloudModelClient {
             emitRawDelta(chunk.reasoningDelta);
           }
           if (chunk.contentDelta.length > 0) {
+            contentDeltaChars += chunk.contentDelta.length;
             closeSeparateReasoning();
             emitRawDelta(chunk.contentDelta);
           }
@@ -694,7 +866,10 @@ export class CloudModelClient {
         if (resolved) {
           return;
         }
-        textBuffer += decodeStreamData(data);
+        receivedBytes += data.byteLength;
+        let decodedText = decodeStreamData(data);
+        appendRawResponseText(decodedText);
+        textBuffer += decodedText;
         processBufferedText(false);
       });
       httpReq.on('dataEnd', () => {
@@ -702,8 +877,14 @@ export class CloudModelClient {
         finishWithResult();
       });
       httpReq.requestInStream(this.normalizeChatUrl(options.baseUrl), requestOptions).then((code: number) => {
+        responseCode = code;
+        AppLogger.info('CloudModel', 'chat stream response status: ' + diagnosticsForLog());
         if (code < 200 || code >= 300) {
-          finishWithError('Cloud HTTP ' + String(code));
+          finishWithError(httpStatusErrorMessage(code));
+          return;
+        }
+        if (finishResultPending) {
+          finishWithResult();
         }
       }).catch((e: Error) => {
         finishWithError(e.message);

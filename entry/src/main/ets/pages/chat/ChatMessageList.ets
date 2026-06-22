@@ -15,12 +15,37 @@ import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 export struct ChatMessageList {
   @Prop messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
+  @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onScrollContent: (yOffset: number) => void = () => {};
+  private messageScroller: Scroller = new Scroller();
+  private lastAutoScrollKey: string = '';
+
+  aboutToAppear(): void {
+    this.scheduleScrollToLatest(true);
+  }
+
+  private onAutoScrollKeyChanged(): void {
+    this.scheduleScrollToLatest(false);
+  }
+
+  private scheduleScrollToLatest(force: boolean): void {
+    if (!force && this.autoScrollKey === this.lastAutoScrollKey) {
+      return;
+    }
+    this.lastAutoScrollKey = this.autoScrollKey;
+    // 消息气泡中有 Markdown/图片等异步布局，延迟两次滚动确保切换会话时落到底部。
+    setTimeout(() => {
+      this.messageScroller.scrollEdge(Edge.Bottom);
+    }, 0);
+    setTimeout(() => {
+      this.messageScroller.scrollEdge(Edge.Bottom);
+    }, 80);
+  }
 
   private isUserMessage(message: ChatMessage): boolean {
     return message.role === 'user';
@@ -356,7 +381,7 @@ export struct ChatMessageList {
   }
 
   build() {
-    Scroll() {
+    Scroll(this.messageScroller) {
       Column() {
         ForEach(this.messages, (message: ChatMessage) => {
           this.MessageRow(message)

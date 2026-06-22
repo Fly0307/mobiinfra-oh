@@ -9,7 +9,7 @@ import {
   chatModePlaceholder,
   chatTimeGreeting
 } from './ChatPageTypes';
-import { ChatMessage, ChatSessionSummary } from './ChatSessionTypes';
+import { ChatMessage, ChatSessionSummary, chatMessagesAutoScrollKey } from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 
@@ -301,6 +301,7 @@ export struct ChatPage {
       ChatMessageList({
         messages: this.messages,
         thinking: this.isBusy(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },

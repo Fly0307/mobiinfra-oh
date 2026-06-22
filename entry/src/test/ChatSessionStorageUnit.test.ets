@@ -8,6 +8,7 @@ import {
   ChatMessage,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessagesAutoScrollKey,
   chatSessionPreview,
   compactChatPreviewText,
   createChatMessage,
@@ -76,6 +77,21 @@ export default function chatSessionStorageUnitTest() {
       ];
 
       expect(chatSessionPreview(messages)).assertEqual('我会先读取最近截图并按主题归纳。');
+    });
+
+    it('buildsAutoScrollKeyFromSessionAndLatestMessage', 0, () => {
+      let messages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '第一条消息', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '最新回答', 1001)
+      ];
+      let sameSessionKey = chatMessagesAutoScrollKey('session-a', messages, false);
+      let changedSessionKey = chatMessagesAutoScrollKey('session-b', messages, false);
+      let streamingKey = chatMessagesAutoScrollKey('session-a', messages, true);
+
+      expect(sameSessionKey.indexOf('session-a') === 0).assertTrue();
+      expect(sameSessionKey.indexOf(chatMessageRenderKey(messages[1])) >= 0).assertTrue();
+      expect(changedSessionKey === sameSessionKey).assertFalse();
+      expect(streamingKey === sameSessionKey).assertFalse();
     });
 
     it('compactsLongPreviewFromPrefixOnly', 0, () => {

@@ -489,6 +489,45 @@ export default function chatReactAgentUnitTest() {
       expect(toolCalls[0].function.arguments).assertEqual('{"range":"');
     });
 
+    it('parsesNonSseStreamFallbackChatCompletion', 0, () => {
+      let parsed = CloudModelClient.parseNonSseStreamFallbackResponse('{"choices":[{"finish_reason":"stop",' +
+        '"message":{"role":"assistant","content":"你好"}}]}');
+
+      expect(parsed.content).assertEqual('你好');
+      expect(parsed.finishReason).assertEqual('stop');
+      expect(parsed.toolCalls.length).assertEqual(0);
+    });
+
+    it('reportsNonSseStreamErrorPayload', 0, () => {
+      let message = '';
+      try {
+        CloudModelClient.parseNonSseStreamFallbackResponse('{"error":{"message":"context length exceeded",' +
+          '"type":"invalid_request_error"}}');
+      } catch (e) {
+        let err = e as Error;
+        message = err.message;
+      }
+
+      expect(message.indexOf('context length exceeded') >= 0).assertTrue();
+    });
+
+    it('formatsCloudStreamDiagnostics', 0, () => {
+      let text = CloudModelClient.formatStreamDiagnosticsForLog({
+        responseCode: 200,
+        receivedBytes: 128,
+        sseLineCount: 3,
+        contentDeltaChars: 12,
+        reasoningDeltaChars: 5,
+        toolCallCount: 1,
+        rawPreview: 'data: test'
+      });
+
+      expect(text.indexOf('status=200') >= 0).assertTrue();
+      expect(text.indexOf('bytes=128') >= 0).assertTrue();
+      expect(text.indexOf('sse_lines=3') >= 0).assertTrue();
+      expect(text.indexOf('tool_calls=1') >= 0).assertTrue();
+    });
+
     it('throwsOnEmptyCloudChoices', 0, () => {
       let message = '';
       try {

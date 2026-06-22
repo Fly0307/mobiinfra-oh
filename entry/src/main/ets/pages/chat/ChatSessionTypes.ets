@@ -288,6 +288,13 @@ export function chatMessageRenderKey(message: ChatMessage): string {
     ':' + chatMessageImagePath(message);
 }
 
+export function chatMessagesAutoScrollKey(sessionId: string, messages: ChatMessage[], thinking: boolean): string {
+  let normalizedSessionId = sessionId.length > 0 ? sessionId : 'no-session';
+  let latestMessageKey = messages.length > 0 ? chatMessageRenderKey(messages[messages.length - 1]) : 'empty';
+  return normalizedSessionId + ':' + String(messages.length) + ':' + latestMessageKey + ':' +
+    (thinking ? 'thinking' : 'idle');
+}
+
 export function buildCloudContextMessages(messages: ChatMessage[]): CloudChatMessage[] {
   let context: CloudChatMessage[] = [];
   for (let i = 0; i < messages.length; i++) {

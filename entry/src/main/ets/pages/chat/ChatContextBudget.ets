@@ -438,12 +438,44 @@ export function contextSummaryMessageCountForCoverage(historyMessages: ChatMessa
 
 export function buildCompressedCloudContextMessages(dateSystemMessage: CloudChatMessage, summary: string,
   retainedMessages: ChatMessage[]): CloudChatMessage[] {
-  let compressed: CloudChatMessage[] = [dateSystemMessage];
+  let systemMessage = mergeSummaryIntoInitialSystemMessage(dateSystemMessage, summary);
+  let compressed: CloudChatMessage[] = [systemMessage];
+  let retainedContext = buildCloudContextMessages(retainedMessages);
+  for (let i = 0; i < retainedContext.length; i++) {
+    let message = retainedContext[i];
+    if (message.role === 'system' && typeof message.content === 'string' && message.content.trim().length > 0) {
+      // 部分 OpenAI-compatible 服务只允许 system 消息出现在第 0 条。
+      // 历史里的系统内容合并进首条 system，避免压缩会话触发 400。
+      compressed[0] = appendTextToSystemMessage(compressed[0], '历史系统上下文：\n' + message.content.trim());
+      continue;
+    }
+    compressed.push(message);
+  }
+  return compressed;
+}
+
+function appendTextToSystemMessage(systemMessage: CloudChatMessage, appendedText: string): CloudChatMessage {
+  let baseContent = typeof systemMessage.content === 'string' ? systemMessage.content.trim() : '';
+  let normalizedText = appendedText.trim();
+  let mergedContent = baseContent.length > 0 ? baseContent : '';
+  if (normalizedText.length > 0) {
+    mergedContent = mergedContent.length > 0 ? mergedContent + '\n\n' + normalizedText : normalizedText;
+  }
+  return {
+    role: 'system',
+    content: mergedContent
+  };
+}
+
+function mergeSummaryIntoInitialSystemMessage(dateSystemMessage: CloudChatMessage, summary: string): CloudChatMessage {
+  let mergedSystemMessage = appendTextToSystemMessage(dateSystemMessage, '');
   let trimmedSummary = summary.trim();
   if (trimmedSummary.length > 0) {
-    compressed.push(buildContextSummarySystemMessage(trimmedSummary));
+    let summaryMessage = buildContextSummarySystemMessage(trimmedSummary);
+    let summaryContent = typeof summaryMessage.content === 'string' ? summaryMessage.content : trimmedSummary;
+    mergedSystemMessage = appendTextToSystemMessage(mergedSystemMessage, summaryContent);
   }
-  return compressed.concat(buildCloudContextMessages(retainedMessages));
+  return mergedSystemMessage;
 }
 
 export function buildCloudContextMessagesWithCurrentRequest(dateSystemMessage: CloudChatMessage, summary: string,

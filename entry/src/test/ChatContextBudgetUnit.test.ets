@@ -222,13 +222,14 @@ export default function chatContextBudgetUnitTest() {
 
       let context = buildCompressedCloudContextMessages(dateMessage, '旧历史摘要', retained);
 
-      expect(context.length).assertEqual(4);
-      expect(context[0].content as string).assertEqual('当前日期: 2026-06-22');
-      expect((context[1].content as string).indexOf('旧历史摘要') >= 0).assertTrue();
-      expect(context[2].role).assertEqual('user');
-      expect(context[2].content as string).assertEqual('最近问题');
-      expect(context[3].role).assertEqual('assistant');
-      expect(context[3].content as string).assertEqual('最近回答');
+      expect(context.length).assertEqual(3);
+      expect(context[0].role).assertEqual('system');
+      expect((context[0].content as string).indexOf('当前日期: 2026-06-22') >= 0).assertTrue();
+      expect((context[0].content as string).indexOf('旧历史摘要') >= 0).assertTrue();
+      expect(context[1].role).assertEqual('user');
+      expect(context[1].content as string).assertEqual('最近问题');
+      expect(context[2].role).assertEqual('assistant');
+      expect(context[2].content as string).assertEqual('最近回答');
     });
 
     it('removesCurrentRequestFromHistoryBeforeCompression', 0, () => {
@@ -259,11 +260,13 @@ export default function chatContextBudgetUnitTest() {
       let context = buildCloudContextMessagesWithCurrentRequest(dateMessage, '旧历史摘要', retained,
         currentRequest);
 
-      expect(context.length).assertEqual(5);
+      expect(context.length).assertEqual(4);
+      expect(context[0].role).assertEqual('system');
+      expect((context[0].content as string).indexOf('旧历史摘要') >= 0).assertTrue();
       expect(context[context.length - 1].role).assertEqual('user');
       expect(context[context.length - 1].content as string).assertEqual('本轮必须回答的问题');
-      expect(context[2].content as string).assertEqual('最近历史问题');
-      expect(context[3].content as string).assertEqual('最近历史回答');
+      expect(context[1].content as string).assertEqual('最近历史问题');
+      expect(context[2].content as string).assertEqual('最近历史回答');
     });
 
     it('keepsCurrentRequestOutOfOlderMessagesWhenHistoryIsSplit', 0, () => {
@@ -304,7 +307,9 @@ export default function chatContextBudgetUnitTest() {
       expect(split.olderMessages.length).assertEqual(4);
       expect(split.retainedMessages.length).assertEqual(0);
       expect(split.retainedRoundCount).assertEqual(0);
-      expect(context.length).assertEqual(3);
+      expect(context.length).assertEqual(2);
+      expect(context[0].role).assertEqual('system');
+      expect((context[0].content as string).indexOf('历史摘要') >= 0).assertTrue();
       expect(context[context.length - 1].role).assertEqual('user');
       expect(context[context.length - 1].content as string).assertEqual('本轮问题');
     });
@@ -325,9 +330,10 @@ export default function chatContextBudgetUnitTest() {
       let summary = buildLocalExtractiveChatSummary(existingSummary, split.olderMessages);
       let context = buildCloudContextMessagesWithCurrentRequest(dateMessage, summary, split.retainedMessages,
         currentRequest);
-      let summaryContent = context[1].content as string;
+      let summaryContent = context[0].content as string;
 
-      expect(context.length).assertEqual(3);
+      expect(context.length).assertEqual(2);
+      expect(context[0].role).assertEqual('system');
       expect(summaryContent.indexOf(existingSummary) >= 0).assertTrue();
       expect(summaryContent.indexOf('历史里新增的用户问题') >= 0).assertTrue();
       expect(summaryContent.indexOf('历史里新增的助手回答') >= 0).assertTrue();

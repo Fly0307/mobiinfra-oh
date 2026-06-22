@@ -149,20 +149,16 @@ export struct MarkdownView {
   }
 
   @Builder QuoteBlock(block: MarkdownBlock, index: number) {
-    Row() {
-      Column()
-        .width(3)
-        .height('100%')
-        .backgroundColor(this.quoteBorderColor())
-        .borderRadius(2)
-      Column() {
-        this.InlineText(block.inlines, block.text, this.secondaryColor(), this.baseFontSize(), this.baseLineHeight())
-      }
-      .layoutWeight(1)
-      .margin({ left: 8 })
+    Column() {
+      this.InlineText(block.inlines, block.text, this.secondaryColor(), this.baseFontSize(), this.baseLineHeight())
     }
     .width('100%')
-    .alignItems(VerticalAlign.Top)
+    // 引用块处在内容自适应容器中，不能用子组件 height('100%')，否则会按外层可用高度撑出大段空白。
+    .padding({ left: 10 })
+    .border({
+      width: { left: 3, right: 0, top: 0, bottom: 0 },
+      color: this.quoteBorderColor()
+    })
     .margin({ top: this.blockTopMargin(index) })
   }
 

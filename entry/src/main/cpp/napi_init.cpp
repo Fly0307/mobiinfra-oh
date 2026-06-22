@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sys/stat.h>
 #include <vector>
 #include <errno.h>
@@ -58,7 +59,27 @@ static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
 
-static void logLlmPerf(const char* label, Llm* llm, int step = -1) {
+static void appLog(const char* fmt, ...);
+
+struct LlmPerfBaseline {
+    int64_t visionUs = 0;
+    int64_t audioUs = 0;
+    float pixelsMp = 0.0f;
+};
+
+static LlmPerfBaseline captureLlmPerfBaseline(Llm* llm) {
+    LlmPerfBaseline baseline;
+    if (llm == nullptr || llm->getContext() == nullptr) {
+        return baseline;
+    }
+    auto context = llm->getContext();
+    baseline.visionUs = context->vision_us;
+    baseline.audioUs = context->audio_us;
+    baseline.pixelsMp = context->pixels_mp;
+    return baseline;
+}
+
+static void logLlmPerf(const char* label, Llm* llm, int step = -1, LlmPerfBaseline baseline = {}) {
     if (!llm) {
         return;
     }
@@ -66,19 +87,42 @@ static void logLlmPerf(const char* label, Llm* llm, int step = -1) {
     if (!context) {
         return;
     }
-    float prefill_s = context->prefill_us / 1e6;
-    float decode_s = context->decode_us / 1e6;
+    int64_t vision_us = context->vision_us - baseline.visionUs;
+    int64_t audio_us = context->audio_us - baseline.audioUs;
+    float pixels_mp = context->pixels_mp - baseline.pixelsMp;
+    if (vision_us < 0) vision_us = context->vision_us;
+    if (audio_us < 0) audio_us = context->audio_us;
+    if (pixels_mp < 0) pixels_mp = context->pixels_mp;
+    float vision_s = vision_us / 1e6f;
+    float audio_s = audio_us / 1e6f;
+    float prefill_s = context->prefill_us / 1e6f;
+    float decode_s = context->decode_us / 1e6f;
+    float total_prefill_s = vision_s + audio_s + prefill_s;
+    float vision_mp_s = vision_s > 0 ? pixels_mp / vision_s : 0;
     float prefill_tps = prefill_s > 0 ? context->prompt_len / prefill_s : 0;
+    float total_prefill_tps = total_prefill_s > 0 ? context->prompt_len / total_prefill_s : 0;
     float decode_tps = decode_s > 0 ? context->gen_seq_len / decode_s : 0;
+    std::ostringstream out;
+    out << label;
     if (step >= 0) {
-        LOGI("%{public}s %{public}d: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
-             label, step, context->prompt_len, context->gen_seq_len, prefill_tps, decode_tps,
-             llm->getCurrentHistory());
-        return;
+        out << " " << step;
     }
-    LOGI("%{public}s: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
-         label, context->prompt_len, context->gen_seq_len, prefill_tps, decode_tps,
-         llm->getCurrentHistory());
+    out << " perf\n"
+        << "  prefill tokens: " << context->prompt_len << " tokens\n"
+        << "  decode tokens: " << context->gen_seq_len << " tokens\n"
+        << "  vision time: " << vision_s << " s\n"
+        << "  image pixels: " << pixels_mp << " MP\n"
+        << "  image throughput: " << vision_mp_s << " MP/s\n"
+        << "  llm prefill time: " << prefill_s << " s\n"
+        << "  llm prefill speed: " << prefill_tps << " tokens/s\n"
+        << "  total prefill time: " << total_prefill_s << " s\n"
+        << "  total prefill speed: " << total_prefill_tps << " tokens/s\n"
+        << "  decode time: " << decode_s << " s\n"
+        << "  decode speed: " << decode_tps << " tokens/s\n"
+        << "  kv cache: " << llm->getCurrentHistory() << " tokens";
+    std::string report = out.str();
+    LOGI("%{public}s", report.c_str());
+    appLog("%{public}s", report.c_str());
 }
 
 // ==================== Runtime log capture ====================
@@ -278,6 +322,15 @@ struct AsyncData {
     std::string outputStr;
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
+};
+
+struct OpProfileStat {
+    std::string type;
+    std::string name;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+    float flopsM = 0.0f;
+    int count = 0;
 };
 
 static std::string joinPath(const std::string& lhs, const std::string& rhs) {
@@ -687,20 +740,48 @@ static void GenerateExecute(napi_env env, void* data) {
 
     std::ostringstream oss;
     dumpLlmRequest("Generate", asyncData->inputStr, g_llm->apply_chat_template(asyncData->inputStr));
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     g_llm->response(asyncData->inputStr, &oss);
     asyncData->outputStr = oss.str();
     dumpLlmResponse("Generate", asyncData->outputStr);
 
     auto context = g_llm->getContext();
     if(context) {
-        logLlmPerf("Generate", g_llm.get());
-        float prefill_s = context->prefill_us / 1e6;
-        float decode_s = context->decode_us / 1e6;
-        char perf[512];
+        logLlmPerf("Generate", g_llm.get(), -1, perfBaseline);
+        int64_t vision_us = context->vision_us - perfBaseline.visionUs;
+        int64_t audio_us = context->audio_us - perfBaseline.audioUs;
+        float pixels_mp = context->pixels_mp - perfBaseline.pixelsMp;
+        if (vision_us < 0) vision_us = context->vision_us;
+        if (audio_us < 0) audio_us = context->audio_us;
+        if (pixels_mp < 0) pixels_mp = context->pixels_mp;
+        float vision_s = vision_us / 1e6f;
+        float audio_s = audio_us / 1e6f;
+        float prefill_s = context->prefill_us / 1e6f;
+        float decode_s = context->decode_us / 1e6f;
+        float total_prefill_s = vision_s + audio_s + prefill_s;
+        float vision_mp_s = vision_s > 0 ? pixels_mp / vision_s : 0;
+        char perf[768];
         snprintf(perf, sizeof(perf),
-            "\n\n--- perf ---\nprompt tokens: %d\ndecode tokens: %d\nprefill: %.2f tok/s\ndecode:%.2f tok/s",
-            context->prompt_len, context->gen_seq_len,
+            "\n\n--- perf ---\n"
+            "prefill tokens: %d tokens (includes image tokens for VLM)\n"
+            "image tokens: not exposed by LlmContext\n"
+            "decode tokens: %d tokens\n"
+            "vision time: %.3f s\n"
+            "vit time: not separated\n"
+            "image pixels: %.3f MP\n"
+            "image throughput: %.2f MP/s\n"
+            "llm prefill time: %.3f s\n"
+            "llm prefill speed: %.2f tokens/s\n"
+            "total prefill time: %.3f s\n"
+            "total prefill speed: %.2f tokens/s\n"
+            "decode time: %.3f s\n"
+            "decode speed: %.2f tokens/s",
+            context->prompt_len, context->gen_seq_len, vision_s, pixels_mp, vision_mp_s,
+            prefill_s,
             prefill_s > 0 ? context->prompt_len / prefill_s : 0,
+            total_prefill_s,
+            total_prefill_s > 0 ? context->prompt_len / total_prefill_s : 0,
+            decode_s,
             decode_s > 0 ? context->gen_seq_len / decode_s : 0);
         asyncData->outputStr += perf;
     }
@@ -725,6 +806,193 @@ static napi_value GenerateAsync(napi_env env, napi_callback_info info) {
     napi_value resourceName;
     napi_create_string_utf8(env, "GenerateAsync", NAPI_AUTO_LENGTH, &resourceName);
     napi_create_async_work(env, nullptr, resourceName, GenerateExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+static std::string formatProfileReport(const std::map<std::string, OpProfileStat>& stats,
+                                       const std::string& response,
+                                       Llm* llm,
+                                       int topK,
+                                       LlmPerfBaseline baseline = {}) {
+    std::vector<OpProfileStat> rows;
+    rows.reserve(stats.size());
+    double totalMs = 0.0;
+    int totalCalls = 0;
+    for (const auto& kv : stats) {
+        rows.push_back(kv.second);
+        totalMs += kv.second.totalMs;
+        totalCalls += kv.second.count;
+    }
+    std::sort(rows.begin(), rows.end(), [](const OpProfileStat& a, const OpProfileStat& b) {
+        return a.totalMs > b.totalMs;
+    });
+    if (topK <= 0) {
+        topK = 30;
+    }
+    if (topK > (int)rows.size()) {
+        topK = (int)rows.size();
+    }
+
+    std::ostringstream out;
+    out << "=== LLM op profile ===\n";
+    out << "op kinds: " << rows.size() << "\n";
+    out << "op calls: " << totalCalls << " calls\n";
+    out << "summed op time: " << totalMs << " ms\n";
+    if (rows.size() <= 1) {
+        out << "op granularity: callback only exposed fused MNN graph/operator level; lower-level kernels may be hidden\n";
+    }
+    if (llm != nullptr && llm->getContext()) {
+        auto context = llm->getContext();
+        int64_t visionUs = context->vision_us - baseline.visionUs;
+        int64_t audioUs = context->audio_us - baseline.audioUs;
+        float pixelsMp = context->pixels_mp - baseline.pixelsMp;
+        if (visionUs < 0) visionUs = context->vision_us;
+        if (audioUs < 0) audioUs = context->audio_us;
+        if (pixelsMp < 0) pixelsMp = context->pixels_mp;
+        float visionS = visionUs / 1e6f;
+        float audioS = audioUs / 1e6f;
+        float prefillS = context->prefill_us / 1e6f;
+        float decodeS = context->decode_us / 1e6f;
+        float totalPrefillS = visionS + audioS + prefillS;
+        out << "\n--- runtime perf ---\n"
+            << "prefill tokens: " << context->prompt_len << " tokens (includes image tokens for VLM)\n"
+            << "image tokens: not exposed by LlmContext\n"
+            << "decode tokens: " << context->gen_seq_len << " tokens\n"
+            << "vision time: " << visionS << " s\n"
+            << "vit time: not separated\n"
+            << "image pixels: " << pixelsMp << " MP\n"
+            << "image throughput: " << (visionS > 0 ? pixelsMp / visionS : 0) << " MP/s\n"
+            << "audio time: " << audioS << " s\n"
+            << "llm prefill time: " << prefillS << " s\n"
+            << "llm prefill speed: " << (prefillS > 0 ? context->prompt_len / prefillS : 0) << " tokens/s\n"
+            << "total prefill time: " << totalPrefillS << " s\n"
+            << "total prefill speed: " << (totalPrefillS > 0 ? context->prompt_len / totalPrefillS : 0) << " tokens/s\n"
+            << "decode time: " << decodeS << " s\n"
+            << "decode speed: " << (decodeS > 0 ? context->gen_seq_len / decodeS : 0) << " tokens/s\n";
+    }
+    out << "response_preview=" << response.substr(0, std::min<size_t>(response.size(), 240)) << "\n\n";
+    out << "rank | total_ms | avg_ms | max_ms | count | flopsM | type | name\n";
+    out << "-----|----------|--------|--------|-------|--------|------|-----\n";
+    for (int i = 0; i < topK; ++i) {
+        const auto& r = rows[i];
+        double avgMs = r.count > 0 ? r.totalMs / r.count : 0.0;
+        out << (i + 1) << " | "
+            << r.totalMs << " | "
+            << avgMs << " | "
+            << r.maxMs << " | "
+            << r.count << " | "
+            << r.flopsM << " | "
+            << r.type << " | "
+            << r.name << "\n";
+    }
+    return out.str();
+}
+
+static void ProfileGenerateExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    std::string prompt = asyncData->inputStr;
+    int topK = 30;
+    auto sep = prompt.rfind("|top=");
+    if (sep != std::string::npos) {
+        std::string topStr = prompt.substr(sep + 5);
+        int parsedTop = std::atoi(topStr.c_str());
+        if (parsedTop > 0) {
+            topK = parsedTop;
+            prompt = prompt.substr(0, sep);
+        }
+    }
+
+    using Clock = std::chrono::high_resolution_clock;
+    std::map<std::string, Clock::time_point> starts;
+    std::map<std::string, OpProfileStat> stats;
+    g_llm->setDebugCallback(
+        [&](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo* info) {
+            if (info == nullptr) {
+                return true;
+            }
+            std::string key = info->type() + ":" + info->name();
+            starts[key] = Clock::now();
+            return true;
+        },
+        [&](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo* info) {
+            if (info == nullptr) {
+                return true;
+            }
+            std::string key = info->type() + ":" + info->name();
+            auto now = Clock::now();
+            auto it = starts.find(key);
+            if (it == starts.end()) {
+                return true;
+            }
+            double ms = std::chrono::duration<double, std::milli>(now - it->second).count();
+            auto& stat = stats[key];
+            stat.type = info->type();
+            stat.name = info->name();
+            stat.flopsM = info->flops();
+            stat.totalMs += ms;
+            stat.maxMs = std::max(stat.maxMs, ms);
+            stat.count += 1;
+            return true;
+        }
+    );
+
+    std::ostringstream response;
+    dumpLlmRequest("ProfileGenerate", prompt, g_llm->apply_chat_template(prompt));
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    g_llm->response(prompt, &response);
+
+    g_llm->setDebugCallback(
+        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; },
+        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; }
+    );
+
+    std::string responseStr = response.str();
+    dumpLlmResponse("ProfileGenerate", responseStr);
+    logLlmPerf("ProfileGenerate", g_llm.get(), -1, perfBaseline);
+    asyncData->outputStr = formatProfileReport(stats, responseStr, g_llm.get(), topK, perfBaseline);
+    asyncData->success = true;
+}
+
+static napi_value ProfileGenerateAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string prompt = "hello";
+    if (argc >= 1) {
+        size_t strLen = 0;
+        napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+        if (strLen > 0) {
+            prompt.resize(strLen);
+            napi_get_value_string_utf8(env, args[0], &prompt[0], strLen + 1, &strLen);
+        }
+    }
+    if (argc >= 2) {
+        int32_t topK = 0;
+        if (napi_get_value_int32(env, args[1], &topK) == napi_ok && topK > 0) {
+            prompt += "|top=" + std::to_string(topK);
+        }
+    }
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(prompt);
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "ProfileGenerateAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, ProfileGenerateExecute, AsyncComplete, asyncData, &asyncData->work);
     napi_queue_async_work(env, asyncData->work);
 
     return promise;
@@ -758,6 +1026,7 @@ static void ChatExecute(napi_env env, void* data) {
     std::ostringstream oss;
     std::string modelInput = g_llm->apply_chat_template(g_messages);
     dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     g_llm->response(g_messages, &oss);
     auto context = g_llm->getContext();
     
@@ -774,7 +1043,7 @@ static void ChatExecute(napi_env env, void* data) {
 
     g_messages.emplace_back("assistant", assistant_str);
     dumpLlmResponse("Chat", assistant_str);
-    logLlmPerf("Chat", g_llm.get());
+    logLlmPerf("Chat", g_llm.get(), -1, perfBaseline);
     asyncData->outputStr = assistant_str;
     asyncData->success = true;
 }
@@ -825,13 +1094,14 @@ static void AgentPrefillExecute(napi_env env, void* data) {
 
     // 只 prefill prefix，不生成新 token；记录 prefix 结束位置供后续 eraseHistory 使用。
     dumpLlmRequest("AgentPrefill", asyncData->inputStr, asyncData->inputStr);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
     g_prefix_pos = g_llm->getCurrentHistory();
     g_agent_mode = true;
     g_agent_step = 0;
 
     LOGI("AgentPrefill: prefix cached at %{public}zu tokens", g_prefix_pos);
-    logLlmPerf("AgentPrefill", g_llm.get());
+    logLlmPerf("AgentPrefill", g_llm.get(), -1, perfBaseline);
     asyncData->success = true;
     asyncData->outputStr = "ok:" + std::to_string(g_prefix_pos);
 }
@@ -886,6 +1156,7 @@ static void AgentStepExecute(napi_env env, void* data) {
     // 预填当前 variable（历史 + 截图标签），随后生成动作 JSON；可选流式回调用于浮窗。
     std::string response;
     dumpLlmRequest("AgentStep", asyncData->inputStr, asyncData->inputStr);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
         std::ostream tokenStream(&buf);
@@ -909,7 +1180,7 @@ static void AgentStepExecute(napi_env env, void* data) {
     }
     dumpLlmResponse("AgentStep", response);
 
-    logLlmPerf("AgentStep", g_llm.get(), g_agent_step);
+    logLlmPerf("AgentStep", g_llm.get(), g_agent_step, perfBaseline);
 
     asyncData->success = true;
     asyncData->outputStr = response;
@@ -4213,6 +4484,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"copyModel",    nullptr, CopyModel,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},

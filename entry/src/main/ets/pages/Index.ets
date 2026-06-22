@@ -183,6 +183,8 @@ interface DownloadedModelItem {
 const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
 const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
 const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
+const PROFILE_MODEL_CONFIG_PATH_KEY: string = 'profileModelConfigPath';
+const SELECTED_MODEL_ID_KEY: string = 'selectedModelId';
 const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
 
 type JsonValue = Object | string | number | boolean | null;
@@ -194,6 +196,8 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
+PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -252,7 +256,7 @@ struct Index {
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
   @State downloadedModels: DownloadedModelItem[] = [];
-  @State selectedModelId: string = 'legacy:model';
+  @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -1441,6 +1445,7 @@ struct Index {
       let parts = repo.split('/');
       if (parts.length === 2) {
         this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+        this.syncProfileModelConfigPath();
         return;
       }
     }
@@ -1453,6 +1458,14 @@ struct Index {
     this.selectedModelVariant = legacyName === 'model' ? '' : legacyName;
     this.selectedModelId = this.legacyModelId(legacyName);
     this.modelDir = this.filesDir + '/' + legacyName;
+    this.syncProfileModelConfigPath();
+  }
+
+  private syncProfileModelConfigPath(): void {
+    if (this.modelDir.length === 0) {
+      return;
+    }
+    AppStorage.setOrCreate(PROFILE_MODEL_CONFIG_PATH_KEY, this.modelDir + '/config.json');
   }
 
   private switchModelVariant(variant: string): void {
@@ -1490,6 +1503,7 @@ struct Index {
     this.selectedModelId = target.id;
     this.selectedModelVariant = target.id.startsWith('legacy:') && target.id !== this.legacyModelId('model') ? target.label : '';
     this.modelDir = target.path;
+    this.syncProfileModelConfigPath();
     this.modelLoaded = false;
     this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
   }
@@ -1527,6 +1541,7 @@ struct Index {
       if (item.id === this.selectedModelId) {
         foundSelected = true;
         this.modelDir = item.path;
+        this.syncProfileModelConfigPath();
         break;
       }
     }
@@ -1564,24 +1579,32 @@ struct Index {
   }
 
   private modelLoadableStatus(path: string): string {
-    let manifestStatus = this.modelManifestLoadableStatus(path);
-    if (manifestStatus.length > 0) {
-      return manifestStatus;
-    }
-
     let hasConfig = false;
     try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
     let hasWeight = this.hasModelWeightFile(path, 0);
-    if (hasConfig && hasWeight) {
-      return '未校验';
-    }
+    let hasComplete = false;
+    try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
     if (!hasConfig && !hasWeight) {
       return '下载未完成';
     }
     if (!hasConfig) {
       return '缺少 config.json';
     }
-    return '缺少模型权重文件';
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+
+    let manifestStatus = this.modelManifestLoadableStatus(path);
+    if (manifestStatus === '可加载') {
+      return manifestStatus;
+    }
+    if (hasComplete) {
+      return '可加载';
+    }
+    if (hasConfig && hasWeight) {
+      return '未校验';
+    }
+    return manifestStatus.length > 0 ? manifestStatus : '未校验';
   }
 
   private modelManifestLoadableStatus(path: string): string {
@@ -1591,16 +1614,13 @@ struct Index {
     let hasComplete = false;
     try { hasManifest = fs.accessSync(manifestPath); } catch (e) { hasManifest = false; }
     try { hasComplete = fs.accessSync(completePath); } catch (e) { hasComplete = false; }
-    if (!hasManifest && !hasComplete) {
+    if (!hasManifest) {
       return '';
-    }
-    if (!hasManifest || !hasComplete) {
-      return '下载未完成';
     }
 
     let manifest = this.readModelDownloadManifest(manifestPath);
     if (manifest === null || manifest.files.length === 0) {
-      return '下载记录损坏';
+      return hasComplete ? '下载记录损坏' : '';
     }
 
     let hasConfig = false;
@@ -2539,10 +2559,17 @@ struct Index {
       totalBytes: totalBytes,
       files: manifestFiles
     };
-    this.writeTextFile(this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE, ArkJSON.stringify(manifest, null, 2));
-    this.writeTextFile(this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE,
+    let manifestPath = this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    AppLogger.info('ModelDownload', 'write markers start manifest=' + manifestPath +
+      ', complete=' + completePath + ', files=' + manifest.fileCount.toString() +
+      ', total=' + totalBytes.toString());
+    this.writeTextFile(manifestPath, ArkJSON.stringify(manifest, null, 2));
+    this.writeTextFile(completePath,
       'repo=' + repo + '\ncompletedAt=' + manifest.completedAt + '\nfileCount=' +
         manifest.fileCount.toString() + '\ntotalBytes=' + totalBytes.toString() + '\n');
+    AppLogger.info('ModelDownload', 'write markers done manifest=' + manifestPath +
+      ', complete=' + completePath);
   }
 
   private ensureDirectoryRecursive(path: string): void {
@@ -2855,6 +2882,7 @@ struct Index {
     this.selectedModelId = nextModelId;
     this.selectedModelVariant = '';
     this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+    this.syncProfileModelConfigPath();
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
     AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
@@ -2911,7 +2939,14 @@ struct Index {
       }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
-        this.writeModelDownloadMarkers(parts[0] + '/' + parts[1], files, totalBytes);
+        try {
+          this.writeModelDownloadMarkers(parts[0] + '/' + parts[1], files, totalBytes);
+        } catch (markerError) {
+          let markerMessage = '写入下载完成标记失败: ' + this.errorMessage(markerError);
+          this.updateModelDownloadMessage(markerMessage);
+          AppLogger.error('ModelDownload', markerMessage);
+          throw markerError;
+        }
         this.refreshDownloadedModels();
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +

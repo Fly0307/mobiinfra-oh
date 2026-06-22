@@ -12,6 +12,7 @@ export interface AgentLoopNativeApi {
 export interface LibEntryNative extends AgentLoopNativeApi {
   loadModel: (configPath: string) => Promise<string>;
   generate: (prompt: string) => Promise<string>;
+  profileGenerate: (prompt: string, topK?: number) => Promise<string>;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
@@ -34,6 +35,7 @@ export default native;
 
 export const loadModel: (configPath: string) => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
+export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
 export const chat: (userMessage: string) => Promise<string>;
 export const reset: () => string;
 export const unloadModel: () => string;

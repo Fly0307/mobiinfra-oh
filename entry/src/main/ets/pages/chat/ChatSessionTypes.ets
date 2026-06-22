@@ -156,15 +156,52 @@ export function chatMessageThinkingCollapsed(message: ChatMessage): boolean {
   return message.thinkingCollapsed === undefined ? true : message.thinkingCollapsed;
 }
 
+function isCompactPreviewWhitespace(ch: string): boolean {
+  return ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\f' || ch === '\v';
+}
+
+export function compactChatPreviewText(content: string, maxLength: number): string {
+  if (maxLength <= 0 || content.length === 0) {
+    return '';
+  }
+  let scanLimit = Math.min(content.length, 4096);
+  let result = '';
+  let pendingSpace = false;
+  for (let i = 0; i < scanLimit; i++) {
+    let ch = content.charAt(i);
+    if (isCompactPreviewWhitespace(ch)) {
+      if (result.length > 0) {
+        pendingSpace = true;
+      }
+      continue;
+    }
+    if (pendingSpace && result.length > 0) {
+      result += ' ';
+      if (result.length > maxLength) {
+        break;
+      }
+    }
+    result += ch;
+    pendingSpace = false;
+    if (result.length > maxLength) {
+      break;
+    }
+  }
+  if (result.length > maxLength) {
+    return result.substring(0, maxLength) + '...';
+  }
+  return result;
+}
+
 export function chatSessionPreview(messages: ChatMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     let message = messages[i];
     if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
       continue;
     }
-    let text = message.content.trim().replace(/\s+/g, ' ');
+    let text = compactChatPreviewText(message.content, 36);
     if (text.length > 0) {
-      return text.length > 36 ? text.substring(0, 36) + '...' : text;
+      return text;
     }
   }
   return '暂无消息';
@@ -173,9 +210,11 @@ export function chatSessionPreview(messages: ChatMessage[]): string {
 export function chatSessionTitleFromMessages(mode: string, messages: ChatMessage[]): string {
   for (let i = 0; i < messages.length; i++) {
     let message = messages[i];
-    if (message.role === 'user' && message.content.trim().length > 0) {
-      let text = message.content.trim().replace(/\s+/g, ' ');
-      return text.length > 18 ? text.substring(0, 18) + '...' : text;
+    if (message.role === 'user') {
+      let text = compactChatPreviewText(message.content, 18);
+      if (text.length > 0) {
+        return text;
+      }
     }
   }
   return defaultChatSessionTitle(mode);

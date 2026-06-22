@@ -9,6 +9,7 @@ import {
   buildCloudContextMessages,
   chatMessageRenderKey,
   chatSessionPreview,
+  compactChatPreviewText,
   createChatMessage,
   createEmptyChatSession,
   defaultChatSessionTitle,
@@ -16,6 +17,14 @@ import {
   toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from '../main/ets/pages/chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_FLUSH_CHAR_DELTA,
+  CHAT_STREAM_FLUSH_INTERVAL_MS,
+  ChatStreamUpdateFlushState,
+  chatStreamUpdateDelayMs,
+  chatStreamUpdateStateAfterFlush,
+  shouldFlushChatStreamUpdate
+} from '../main/ets/pages/chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from '../main/ets/pages/chat/ChatSessionController';
 import { ChatSessionStorage } from '../main/ets/utils/ChatSessionStorage';
 
@@ -67,6 +76,39 @@ export default function chatSessionStorageUnitTest() {
       ];
 
       expect(chatSessionPreview(messages)).assertEqual('我会先读取最近截图并按主题归纳。');
+    });
+
+    it('compactsLongPreviewFromPrefixOnly', 0, () => {
+      let longText = '长文标题\n\n第一段内容' + ' 很长'.repeat(1000) + ' 结尾';
+
+      let preview = compactChatPreviewText(longText, 36);
+
+      expect(preview.indexOf('长文标题 第一段内容') === 0).assertTrue();
+      expect(preview.endsWith('...')).assertTrue();
+      expect(preview.indexOf('结尾')).assertEqual(-1);
+    });
+
+    it('throttlesStreamingContentFlushes', 0, () => {
+      let initial: ChatStreamUpdateFlushState = {
+        lastFlushAt: 0,
+        lastFlushedLength: 0,
+        timerScheduled: false
+      };
+
+      expect(shouldFlushChatStreamUpdate(1000, 1, initial)).assertTrue();
+
+      let flushed = chatStreamUpdateStateAfterFlush(1000, 1, false);
+      expect(shouldFlushChatStreamUpdate(1000 + CHAT_STREAM_FLUSH_INTERVAL_MS - 1, 20, flushed)).assertFalse();
+      expect(shouldFlushChatStreamUpdate(1000 + CHAT_STREAM_FLUSH_INTERVAL_MS, 20, flushed)).assertTrue();
+      expect(shouldFlushChatStreamUpdate(1001, 1 + CHAT_STREAM_FLUSH_CHAR_DELTA, flushed)).assertTrue();
+
+      let waiting: ChatStreamUpdateFlushState = {
+        lastFlushAt: flushed.lastFlushAt,
+        lastFlushedLength: flushed.lastFlushedLength,
+        timerScheduled: true
+      };
+      expect(shouldFlushChatStreamUpdate(1001, 1 + CHAT_STREAM_FLUSH_CHAR_DELTA, waiting)).assertFalse();
+      expect(chatStreamUpdateDelayMs(1000 + 100, flushed)).assertEqual(CHAT_STREAM_FLUSH_INTERVAL_MS - 100);
     });
 
     it('splitsAssistantThinkingFromVisibleAnswer', 0, () => {

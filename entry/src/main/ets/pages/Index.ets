@@ -37,6 +37,12 @@ import {
   shouldCompressCloudContext,
   splitChatMessagesForContextCompression
 } from './chat/ChatContextBudget';
+import {
+  ChatStreamUpdateFlushState,
+  chatStreamUpdateDelayMs,
+  chatStreamUpdateStateAfterFlush,
+  shouldFlushChatStreamUpdate
+} from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
@@ -360,6 +366,12 @@ struct Index {
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
+  private cloudStreamFlushState: ChatStreamUpdateFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+  private cloudStreamFlushTimerId: number = -1;
+  private cloudStreamPendingSessionId: string = '';
+  private cloudStreamPendingMessageId: string = '';
+  private cloudStreamPendingContent: string = '';
+  private cloudStreamPendingTrace: string[] = [];
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -451,6 +463,63 @@ struct Index {
     let state = ChatSessionController.updateMessageContentInSession(this.filesDir, this.currentChatSessionViewState(),
       sessionId, messageId, content, trace);
     this.applyChatSessionViewState(state);
+  }
+
+  private clearCloudStreamFlushTimer(): void {
+    if (this.cloudStreamFlushTimerId !== -1) {
+      clearTimeout(this.cloudStreamFlushTimerId);
+      this.cloudStreamFlushTimerId = -1;
+    }
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamFlushTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamPendingSessionId = '';
+    this.cloudStreamPendingMessageId = '';
+    this.cloudStreamPendingContent = '';
+    this.cloudStreamPendingTrace = [];
+  }
+
+  private flushCloudStreamMessageUpdate(): void {
+    if (this.cloudStreamPendingSessionId.length === 0 || this.cloudStreamPendingMessageId.length === 0) {
+      this.clearCloudStreamFlushTimer();
+      return;
+    }
+    this.clearCloudStreamFlushTimer();
+    let sessionId = this.cloudStreamPendingSessionId;
+    let messageId = this.cloudStreamPendingMessageId;
+    let content = this.cloudStreamPendingContent;
+    let trace = this.cloudStreamPendingTrace.slice();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
+  private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.cloudStreamPendingSessionId = sessionId;
+    this.cloudStreamPendingMessageId = messageId;
+    this.cloudStreamPendingContent = content;
+    this.cloudStreamPendingTrace = trace.slice();
+
+    let now = new Date().getTime();
+    let state: ChatStreamUpdateFlushState = {
+      lastFlushAt: this.cloudStreamFlushState.lastFlushAt,
+      lastFlushedLength: this.cloudStreamFlushState.lastFlushedLength,
+      timerScheduled: this.cloudStreamFlushTimerId !== -1
+    };
+    if (shouldFlushChatStreamUpdate(now, content.length, state)) {
+      this.flushCloudStreamMessageUpdate();
+      return;
+    }
+    if (this.cloudStreamFlushTimerId !== -1) {
+      return;
+    }
+    let delayMs = chatStreamUpdateDelayMs(now, state);
+    this.cloudStreamFlushTimerId = setTimeout(() => {
+      this.cloudStreamFlushTimerId = -1;
+      this.flushCloudStreamMessageUpdate();
+    }, delayMs);
   }
 
   private updateChatContextSummaryForSession(sessionId: string, summary: string, updatedAt: number,
@@ -2899,6 +2968,7 @@ struct Index {
     let enableThinking = this.chatDeepThinkingEnabled;
     let toolTraceLines: string[] = [];
     let streamedContent = '';
+    this.resetCloudStreamMessageUpdate();
     try {
       let sessionWithUser = ChatSessionStorage.loadSession(this.filesDir, chatSessionId);
       if (sessionWithUser === null) {
@@ -2929,18 +2999,20 @@ struct Index {
         enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
         },
         onContentDelta: (delta: string) => {
           streamedContent += delta;
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
         }
       });
       let response = result.content;
+      this.resetCloudStreamMessageUpdate();
       this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, response, toolTraceLines);
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}`);
     } catch (e) {
       let err = e as Error;
+      this.resetCloudStreamMessageUpdate();
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
@@ -2961,6 +3033,7 @@ struct Index {
         this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
       }
     } finally {
+      this.resetCloudStreamMessageUpdate();
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
     }

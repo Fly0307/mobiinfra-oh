@@ -58,6 +58,29 @@ static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
 
+static void logLlmPerf(const char* label, Llm* llm, int step = -1) {
+    if (!llm) {
+        return;
+    }
+    auto context = llm->getContext();
+    if (!context) {
+        return;
+    }
+    float prefill_s = context->prefill_us / 1e6;
+    float decode_s = context->decode_us / 1e6;
+    float prefill_tps = prefill_s > 0 ? context->prompt_len / prefill_s : 0;
+    float decode_tps = decode_s > 0 ? context->gen_seq_len / decode_s : 0;
+    if (step >= 0) {
+        LOGI("%{public}s %{public}d: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
+             label, step, context->prompt_len, context->gen_seq_len, prefill_tps, decode_tps,
+             llm->getCurrentHistory());
+        return;
+    }
+    LOGI("%{public}s: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
+         label, context->prompt_len, context->gen_seq_len, prefill_tps, decode_tps,
+         llm->getCurrentHistory());
+}
+
 // ==================== Runtime log capture ====================
 namespace {
 struct LogCapture {
@@ -670,6 +693,7 @@ static void GenerateExecute(napi_env env, void* data) {
 
     auto context = g_llm->getContext();
     if(context) {
+        logLlmPerf("Generate", g_llm.get());
         float prefill_s = context->prefill_us / 1e6;
         float decode_s = context->decode_us / 1e6;
         char perf[512];
@@ -750,6 +774,7 @@ static void ChatExecute(napi_env env, void* data) {
 
     g_messages.emplace_back("assistant", assistant_str);
     dumpLlmResponse("Chat", assistant_str);
+    logLlmPerf("Chat", g_llm.get());
     asyncData->outputStr = assistant_str;
     asyncData->success = true;
 }
@@ -806,6 +831,7 @@ static void AgentPrefillExecute(napi_env env, void* data) {
     g_agent_step = 0;
 
     LOGI("AgentPrefill: prefix cached at %{public}zu tokens", g_prefix_pos);
+    logLlmPerf("AgentPrefill", g_llm.get());
     asyncData->success = true;
     asyncData->outputStr = "ok:" + std::to_string(g_prefix_pos);
 }
@@ -883,15 +909,7 @@ static void AgentStepExecute(napi_env env, void* data) {
     }
     dumpLlmResponse("AgentStep", response);
 
-    if (context) {
-        float prefill_s = context->prefill_us / 1e6;
-        float decode_s = context->decode_us / 1e6;
-        LOGI("AgentStep %{public}d: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
-             g_agent_step, context->prompt_len, context->gen_seq_len,
-             prefill_s > 0 ? context->prompt_len / prefill_s : 0,
-             decode_s > 0 ? context->gen_seq_len / decode_s : 0,
-             g_llm->getCurrentHistory());
-    }
+    logLlmPerf("AgentStep", g_llm.get(), g_agent_step);
 
     asyncData->success = true;
     asyncData->outputStr = response;

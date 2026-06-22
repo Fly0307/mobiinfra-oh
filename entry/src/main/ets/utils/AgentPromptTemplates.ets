@@ -263,25 +263,49 @@ export const AGENT_PROMPT_PREFIX_FILE: string = 'agent_prompt_prefix.md';
 export const AGENT_PROMPT_VARIABLE_FILE: string = 'agent_prompt_variable.md';
 export const AGENT_PROMPT_PREFIX_NOREASON_FILE: string = 'agent_prompt_prefix_noreason.md';
 export const AGENT_PROMPT_VARIABLE_NOREASON_FILE: string = 'agent_prompt_variable_noreason.md';
+const AGENT_PROMPT_PREFIX_LEGACY_FILE: string = 'agent_prefix.md';
+const AGENT_PROMPT_VARIABLE_LEGACY_FILE: string = 'agent_variable.md';
+const AGENT_PROMPT_PREFIX_NOREASON_LEGACY_FILE: string = 'agent_prefix_noreason.md';
+const AGENT_PROMPT_VARIABLE_NOREASON_LEGACY_FILE: string = 'agent_variable_noreason.md';
 
 export class AgentPromptTemplates {
   static loadFromModelDir(modelDir: string, name: string): string {
-    let fileName = AgentPromptTemplates.modelPromptFileName(name);
-    if (modelDir.length > 0 && fileName.length > 0) {
-      let text = AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName);
-      if (text.trim().length > 0) {
-        return AgentPromptTemplates.normalize(text);
+    let fileNames = AgentPromptTemplates.modelPromptFileNames(name);
+    if (modelDir.length > 0) {
+      for (let fileName of fileNames) {
+        let text = AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName);
+        if (text.trim().length > 0) {
+          return AgentPromptTemplates.normalize(text);
+        }
       }
     }
     return AgentPromptTemplates.load(name);
   }
 
   static hasModelPrompt(modelDir: string, name: string): boolean {
-    let fileName = AgentPromptTemplates.modelPromptFileName(name);
-    if (modelDir.length === 0 || fileName.length === 0) {
+    let fileNames = AgentPromptTemplates.modelPromptFileNames(name);
+    if (modelDir.length === 0 || fileNames.length === 0) {
       return false;
     }
-    return AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName).trim().length > 0;
+    for (let fileName of fileNames) {
+      if (AgentPromptTemplates.readModelPrompt(modelDir + '/' + fileName).trim().length > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static promptSource(modelDir: string, name: string): string {
+    let fileNames = AgentPromptTemplates.modelPromptFileNames(name);
+    if (modelDir.length > 0) {
+      for (let fileName of fileNames) {
+        let path = modelDir + '/' + fileName;
+        if (AgentPromptTemplates.readModelPrompt(path).trim().length > 0) {
+          return path;
+        }
+      }
+    }
+    return 'builtin:' + name;
   }
 
   static load(name: string): string {
@@ -309,20 +333,20 @@ export class AgentPromptTemplates {
     return '';
   }
 
-  private static modelPromptFileName(name: string): string {
+  private static modelPromptFileNames(name: string): string[] {
     if (name === 'e2e_v2_agent_prefix.md') {
-      return AGENT_PROMPT_PREFIX_FILE;
+      return [AGENT_PROMPT_PREFIX_FILE, AGENT_PROMPT_PREFIX_LEGACY_FILE];
     }
     if (name === 'e2e_v2_agent_prefix_noreason.md') {
-      return AGENT_PROMPT_PREFIX_NOREASON_FILE;
+      return [AGENT_PROMPT_PREFIX_NOREASON_FILE, AGENT_PROMPT_PREFIX_NOREASON_LEGACY_FILE];
     }
     if (name === 'e2e_v2_agent_variable.md') {
-      return AGENT_PROMPT_VARIABLE_FILE;
+      return [AGENT_PROMPT_VARIABLE_FILE, AGENT_PROMPT_VARIABLE_LEGACY_FILE];
     }
     if (name === 'e2e_v2_agent_variable_noreason.md') {
-      return AGENT_PROMPT_VARIABLE_NOREASON_FILE;
+      return [AGENT_PROMPT_VARIABLE_NOREASON_FILE, AGENT_PROMPT_VARIABLE_NOREASON_LEGACY_FILE];
     }
-    return '';
+    return [];
   }
 
   private static readModelPrompt(path: string): string {

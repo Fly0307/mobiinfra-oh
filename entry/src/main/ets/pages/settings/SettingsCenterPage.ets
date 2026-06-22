@@ -57,6 +57,7 @@ interface DownloadedModelItem {
   path: string;
   repo: string;
   sizeText: string;
+  statusText: string;
   ready: boolean;
 }
 
@@ -259,7 +260,7 @@ export struct SettingsCenterPage {
   @Builder DownloadedModelList() {
     this.FieldLabel('已下载模型')
     Row() {
-      Text(this.downloadedModels.length > 0 ? '点击模型切换后续本地加载路径' : '未扫描到已下载模型')
+      Text(this.downloadedModels.length > 0 ? '点击可加载模型切换后续本地加载路径' : '未扫描到模型目录')
         .fontSize(12)
         .fontColor('#7B8290')
         .layoutWeight(1)
@@ -287,7 +288,7 @@ export struct SettingsCenterPage {
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .width('100%')
-              Text((item.ready ? '可加载' : '缺少 config.json') + ' · ' + item.sizeText)
+              Text(item.statusText + ' · ' + item.sizeText)
                 .fontSize(11)
                 .fontColor(item.ready ? '#2D9B73' : '#D26B31')
                 .maxLines(1)
@@ -296,13 +297,13 @@ export struct SettingsCenterPage {
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)
-            Button(this.selectedModelId === item.id ? '当前' : '切换')
+            Button(this.selectedModelId === item.id ? '当前' : (item.ready ? '切换' : '未完成'))
               .height(32)
-              .width(64)
+              .width(72)
               .fontSize(12)
-              .backgroundColor(this.selectedModelId === item.id ? '#A9B0BE' : '#4F68FF')
+              .backgroundColor(this.selectedModelId === item.id || !item.ready ? '#A9B0BE' : '#4F68FF')
               .borderRadius(10)
-              .enabled(this.selectedModelId !== item.id)
+              .enabled(this.selectedModelId !== item.id && item.ready)
               .onClick(() => { this.onSwitchDownloadedModel(item.id); })
           }
           .width('100%')

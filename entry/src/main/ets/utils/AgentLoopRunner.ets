@@ -230,6 +230,7 @@ export class AgentLoopRunner {
     let useNoReasonPrompt = this.resolveAgentNoReasonMode();
     let prefixFile = useNoReasonPrompt ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
     this.log(mode, '>> [Agent] prompt mode=' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
+    this.log(mode, '>> [Agent] prefix source=' + AgentPromptTemplates.promptSource(this.modelDirPath, prefixFile));
     let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] prefix template missing, fallback to full prompt mode.');
@@ -248,6 +249,7 @@ export class AgentLoopRunner {
     let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
     let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
+    this.log(mode, '>> [Agent] variable source=' + AgentPromptTemplates.promptSource(this.modelDirPath, variableFile));
     let variableTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, variableFile);
     if (variableTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] variable template missing, fallback to full prompt mode.');

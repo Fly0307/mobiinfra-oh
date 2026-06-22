@@ -115,6 +115,21 @@ interface ModelScopeFileTask {
   sha256?: string;
 }
 
+interface ModelDownloadManifestFile {
+  path: string;
+  size: number;
+  sha256?: string;
+  verified: boolean;
+}
+
+interface ModelDownloadManifest {
+  repo: string;
+  completedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  files: ModelDownloadManifestFile[];
+}
+
 interface HdcConnectRequest {
   target: string;
   kill_others: boolean;
@@ -161,10 +176,13 @@ interface DownloadedModelItem {
   path: string;
   repo: string;
   sizeText: string;
+  statusText: string;
   ready: boolean;
 }
 
 const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
+const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
+const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
 const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
 
 type JsonValue = Object | string | number | boolean | null;
@@ -1460,6 +1478,11 @@ struct Index {
       this.output = '模型不存在或尚未扫描到: ' + modelId;
       return;
     }
+    if (!target.ready) {
+      this.output = '模型尚未下载完成，暂不可加载: ' + target.label + '\n状态: ' + target.statusText +
+        '\n路径: ' + target.path;
+      return;
+    }
     if (this.selectedModelId === target.id && this.modelDir === target.path) {
       return;
     }
@@ -1527,16 +1550,167 @@ struct Index {
   }
 
   private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
-    let ready = false;
-    try { ready = fs.accessSync(path + '/config.json'); } catch (e) { ready = false; }
+    let statusText = this.modelLoadableStatus(path);
+    let ready = statusText === '可加载' || statusText === '未校验';
     return {
       id: id,
       label: label,
       path: path,
       repo: repo,
       sizeText: this.formatSize(this.calcPathSize(path)),
+      statusText: statusText,
       ready: ready
     };
+  }
+
+  private modelLoadableStatus(path: string): string {
+    let manifestStatus = this.modelManifestLoadableStatus(path);
+    if (manifestStatus.length > 0) {
+      return manifestStatus;
+    }
+
+    let hasConfig = false;
+    try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
+    let hasWeight = this.hasModelWeightFile(path, 0);
+    if (hasConfig && hasWeight) {
+      return '未校验';
+    }
+    if (!hasConfig && !hasWeight) {
+      return '下载未完成';
+    }
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    return '缺少模型权重文件';
+  }
+
+  private modelManifestLoadableStatus(path: string): string {
+    let manifestPath = path + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    let hasManifest = false;
+    let hasComplete = false;
+    try { hasManifest = fs.accessSync(manifestPath); } catch (e) { hasManifest = false; }
+    try { hasComplete = fs.accessSync(completePath); } catch (e) { hasComplete = false; }
+    if (!hasManifest && !hasComplete) {
+      return '';
+    }
+    if (!hasManifest || !hasComplete) {
+      return '下载未完成';
+    }
+
+    let manifest = this.readModelDownloadManifest(manifestPath);
+    if (manifest === null || manifest.files.length === 0) {
+      return '下载记录损坏';
+    }
+
+    let hasConfig = false;
+    let hasWeight = false;
+    for (let file of manifest.files) {
+      let normalizedPath = file.path.replace(/\\/g, '/');
+      if (normalizedPath === 'config.json') {
+        hasConfig = true;
+      }
+      if (this.isModelWeightFile(normalizedPath)) {
+        hasWeight = true;
+      }
+      let target = path + '/' + normalizedPath;
+      try {
+        let stat = fs.statSync(target);
+        if (!stat.isFile()) {
+          return '下载未完成';
+        }
+        if (file.size >= 0 && stat.size !== file.size) {
+          return '下载未完成';
+        }
+      } catch (e) {
+        return '下载未完成';
+      }
+    }
+
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+    return '可加载';
+  }
+
+  private readModelDownloadManifest(path: string): ModelDownloadManifest | null {
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(path);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      let content = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      let root = ArkJSON.parse(content) as JsonMap;
+      let filesValue = root['files'];
+      if (!Array.isArray(filesValue)) {
+        return null;
+      }
+      let files: ModelDownloadManifestFile[] = [];
+      for (let itemValue of filesValue as Object[]) {
+        let item = itemValue as JsonMap;
+        let filePath = item['path'] === undefined || item['path'] === null ? '' : String(item['path']);
+        let size = item['size'] === undefined || item['size'] === null ? NaN : Number(item['size']);
+        if (filePath.length === 0 || isNaN(size) || size < 0) {
+          return null;
+        }
+        let entry: ModelDownloadManifestFile = {
+          path: filePath,
+          size: size,
+          verified: item['verified'] === true
+        };
+        let sha256 = item['sha256'];
+        if (sha256 !== undefined && sha256 !== null && String(sha256).length > 0) {
+          entry.sha256 = String(sha256);
+        }
+        files.push(entry);
+      }
+      return {
+        repo: root['repo'] === undefined || root['repo'] === null ? '' : String(root['repo']),
+        completedAt: root['completedAt'] === undefined || root['completedAt'] === null ? '' : String(root['completedAt']),
+        fileCount: root['fileCount'] === undefined || root['fileCount'] === null ? files.length : Number(root['fileCount']),
+        totalBytes: root['totalBytes'] === undefined || root['totalBytes'] === null ? 0 : Number(root['totalBytes']),
+        files: files
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      if (file !== null) {
+        try { fs.closeSync(file); } catch (e) {}
+      }
+    }
+  }
+
+  private hasModelWeightFile(path: string, depth: number): boolean {
+    if (depth > 4) {
+      return false;
+    }
+    try {
+      let stat = fs.statSync(path);
+      if (stat.isFile()) {
+        return stat.size > 0 && this.isModelWeightFile(path);
+      }
+      if (!stat.isDirectory()) {
+        return false;
+      }
+      let children = fs.listFileSync(path);
+      for (let name of children) {
+        if (this.hasModelWeightFile(path + '/' + name, depth + 1)) {
+          return true;
+        }
+      }
+    } catch (e) {
+    }
+    return false;
+  }
+
+  private isModelWeightFile(path: string): boolean {
+    let lower = path.toLowerCase();
+    return lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.safetensors') ||
+      lower.endsWith('.weight');
   }
 
   formatSize(bytes: number): string {
@@ -2330,6 +2504,47 @@ struct Index {
     }
   }
 
+  private removeModelDownloadMarkers(): void {
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) {}
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE); } catch (e) {}
+  }
+
+  private writeTextFile(path: string, content: string): void {
+    let bytes = util.TextEncoder.create('utf-8').encodeInto(content);
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes.buffer);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private writeModelDownloadMarkers(repo: string, files: ModelScopeFileTask[], totalBytes: number): void {
+    let manifestFiles: ModelDownloadManifestFile[] = [];
+    for (let file of files) {
+      let entry: ModelDownloadManifestFile = {
+        path: file.path,
+        size: file.size,
+        verified: true
+      };
+      if (file.sha256 !== undefined && file.sha256.length > 0) {
+        entry.sha256 = file.sha256;
+      }
+      manifestFiles.push(entry);
+    }
+    let manifest: ModelDownloadManifest = {
+      repo: repo,
+      completedAt: new Date().toISOString(),
+      fileCount: manifestFiles.length,
+      totalBytes: totalBytes,
+      files: manifestFiles
+    };
+    this.writeTextFile(this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE, ArkJSON.stringify(manifest, null, 2));
+    this.writeTextFile(this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE,
+      'repo=' + repo + '\ncompletedAt=' + manifest.completedAt + '\nfileCount=' +
+        manifest.fileCount.toString() + '\ntotalBytes=' + totalBytes.toString() + '\n');
+  }
+
   private ensureDirectoryRecursive(path: string): void {
     let parts = path.split('/');
     let current = '';
@@ -2649,6 +2864,8 @@ struct Index {
     this.modelLoaded = false;
     try {
       this.ensureDirectoryRecursive(this.modelDir);
+      this.removeModelDownloadMarkers();
+      this.refreshDownloadedModels();
       this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
       AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
       let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
@@ -2693,12 +2910,14 @@ struct Index {
         }
       }
       this.disableModelThinkingByDefault();
-      this.refreshDownloadedModels();
       if (failed.length === 0) {
+        this.writeModelDownloadMarkers(parts[0] + '/' + parts[1], files, totalBytes);
+        this.refreshDownloadedModels();
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
           this.formatSize(completedBytes));
       } else {
+        this.refreshDownloadedModels();
         this.updateModelDownloadMessage('ModelScope 下载失败：' + failed.join('，'));
         AppLogger.warn('ModelDownload', 'partial failure repo=' + this.modelScopeMnnRepo + ', failed=' +
           failed.length.toString() + ', downloaded=' + this.formatSize(completedBytes));

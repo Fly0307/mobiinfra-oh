@@ -16,6 +16,13 @@ App 会优先从当前模型目录读取标准化 prompt 文件：
 | reason | `agent_prompt_prefix.md` | `agent_prompt_variable.md` |
 | no reason | `agent_prompt_prefix_noreason.md` | `agent_prompt_variable_noreason.md` |
 
+为了兼容已下发的旧模型目录，也会识别下面的 legacy alias。读取优先级始终是标准文件名优先，legacy alias 其次。
+
+| 模式 | legacy prefix 文件 | legacy variable 文件 |
+| --- | --- | --- |
+| reason | `agent_prefix.md` | `agent_variable.md` |
+| no reason | `agent_prefix_noreason.md` | `agent_variable_noreason.md` |
+
 当前模型目录就是本地加载模型使用的 `modelDir`，例如：
 
 - `${filesDir}/model`
@@ -39,13 +46,22 @@ App 会优先从当前模型目录读取标准化 prompt 文件：
 
 这里的“存在”指对应 md 文件可读取且内容非空。选择模式时要求 prefix 和 variable 两个文件都存在，避免只下发半套 prompt 时误切模式。
 
+运行时日志会打印实际选择和加载来源：
+
+- `>> [Agent] prompt mode=reason`
+- `>> [Agent] prefix source=<modelDir>/agent_prompt_prefix.md`
+- `>> [Agent] variable source=<modelDir>/agent_prompt_variable.md`
+
+如果某个文件走 App 内置 fallback，source 会显示为 `builtin:<旧模板名>`，例如 `builtin:e2e_v2_agent_prefix.md`。
+
 ## fallback 规则
 
 读取逻辑在 `AgentPromptTemplates.loadFromModelDir(modelDir, legacyName)`：
 
 1. 根据旧模板名映射到模型目录下的新标准文件名。
-2. 如果模型目录下存在对应 md，且内容非空，就使用模型目录里的文件。
-3. 如果文件不存在、为空、读取失败，就 fallback 到 App 内置旧 prompt。
+2. 如果模型目录下存在对应标准 md，且内容非空，就使用标准文件。
+3. 如果标准 md 不存在、为空或读取失败，再尝试 legacy alias。
+4. 如果 legacy alias 也不可用，就 fallback 到 App 内置旧 prompt。
 
 旧模板名和新文件名映射如下：
 
@@ -55,6 +71,15 @@ App 会优先从当前模型目录读取标准化 prompt 文件：
 | `e2e_v2_agent_variable.md` | `agent_prompt_variable.md` |
 | `e2e_v2_agent_prefix_noreason.md` | `agent_prompt_prefix_noreason.md` |
 | `e2e_v2_agent_variable_noreason.md` | `agent_prompt_variable_noreason.md` |
+
+兼容的 legacy alias 如下：
+
+| 旧模板名 | 模型目录 legacy 文件 |
+| --- | --- |
+| `e2e_v2_agent_prefix.md` | `agent_prefix.md` |
+| `e2e_v2_agent_variable.md` | `agent_variable.md` |
+| `e2e_v2_agent_prefix_noreason.md` | `agent_prefix_noreason.md` |
+| `e2e_v2_agent_variable_noreason.md` | `agent_variable_noreason.md` |
 
 App 内置 fallback 内容来自 `AgentPromptTemplates.ets`，对应原来的 `entry/src/main/python/prompts/*.md` 内容镜像。
 

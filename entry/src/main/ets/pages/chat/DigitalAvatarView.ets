@@ -11,7 +11,7 @@ export struct DigitalAvatarView {
   @Prop @Watch('onAvatarForegroundUriChanged') avatarForegroundUri: string = '';
   @Prop fallbackText: string = '助';
   @Prop fallbackColor: string = '#5968FF';
-  @Prop size: DigitalAvatarSize = 'message';
+  @Prop avatarSize: DigitalAvatarSize = 'message';
   @Prop @Watch('onVisualStateChanged') visualState: DigitalAvatarVisualState = 'idle';
   @State imageLoadFailed: boolean = false;
   @State thinkingPulse: boolean = false;

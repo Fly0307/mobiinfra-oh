@@ -163,7 +163,7 @@ export struct ChatMessageList {
         fallbackText: this.avatarText(message),
         fallbackColor: this.avatarColor(message),
         visualState: visualState,
-        size: 'message'
+        avatarSize: 'message'
       })
     } else {
       Text(this.avatarText(message))
@@ -184,7 +184,7 @@ export struct ChatMessageList {
       fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
       fallbackColor: '#5968FF',
       visualState: 'thinking',
-      size: 'message'
+      avatarSize: 'message'
     })
   }
 

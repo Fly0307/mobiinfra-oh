@@ -1,4 +1,3 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
 import { describe, it, expect } from '@ohos/hypium';
 import {
   createQueryEventsTool,
@@ -11,6 +10,7 @@ import {
   QueryResult
 } from '../main/ets/datamanager/DataManagerTypes';
 import { ChatToolExecutionContext } from '../main/ets/utils/ChatToolRegistry';
+import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
 type TestJsonValue = Object | string | number | boolean | null;
 type TestJsonMap = Record<string, TestJsonValue>;
@@ -160,7 +160,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
       });
 
       let output = await tool.execute('{"keywords":["咖啡"]}', toolContext());
-      let payload = ArkJSON.parse(output) as TestJsonMap;
+      let payload = parseJsonCompat<TestJsonMap>(output);
 
       expect(called).assertFalse();
       expect(payload['ok'] as boolean).assertFalse();
@@ -198,7 +198,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
       });
 
       let output = await tool.execute('{"keywords":["咖啡"],"keyword_operator":"or","limit":1}', toolContext());
-      let payload = ArkJSON.parse(output) as TestJsonMap;
+      let payload = parseJsonCompat<TestJsonMap>(output);
       let events = payload['events'] as TestJsonValue[];
 
       expect(called).assertTrue();
@@ -243,7 +243,7 @@ export default function dataManagerQueryEventsToolUnitTest() {
       let tool = createQueryEventsTool((): boolean => true, (_options: QueryOptions): QueryResult => queryResult);
 
       let output = await tool.execute('{"keywords":["咖啡"]}', toolContext());
-      let payload = ArkJSON.parse(output) as TestJsonMap;
+      let payload = parseJsonCompat<TestJsonMap>(output);
       let events = payload['events'] as TestJsonValue[];
       let eventPayload = events[0] as TestJsonMap;
 

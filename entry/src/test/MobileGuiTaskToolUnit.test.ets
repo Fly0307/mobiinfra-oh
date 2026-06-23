@@ -1,7 +1,9 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
   MOBILE_GUI_TASK_TOOL_NAME,
+  createMobileGuiTaskConfirmationCancelledError,
   createMobileGuiTaskTool,
+  isMobileGuiTaskConfirmationCancelledError,
   mobileGuiTaskToolParameters,
   MobileGuiTaskToolResponse,
   mobileGuiTaskToolResponseFromRunResult,
@@ -324,6 +326,27 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.error_code).assertEqual('workflow_failed');
       expect(payload.recoverable).assertTrue();
       expect(payload.error !== undefined && payload.error!.indexOf('confirm exploded') >= 0).assertTrue();
+    });
+
+    it('returnsCancelledWhenConfirmationDialogIsDismissed', 0, async () => {
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          throw createMobileGuiTaskConfirmationCancelledError('用户关闭确认弹窗');
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          throw new Error('run should not execute');
+        }
+      }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(isMobileGuiTaskConfirmationCancelledError(
+        createMobileGuiTaskConfirmationCancelledError('用户关闭确认弹窗'))).assertTrue();
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('cancelled');
+      expect(payload.error_code).assertEqual('user_cancelled');
+      expect(payload.recoverable).assertTrue();
+      expect(payload.error !== undefined && payload.error!.indexOf('用户关闭确认弹窗') >= 0).assertTrue();
     });
 
     it('returnsStructuredFailureWhenRunnerThrows', 0, async () => {

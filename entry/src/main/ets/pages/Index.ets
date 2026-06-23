@@ -94,7 +94,10 @@ import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
-import { createMobileGuiTaskTool } from '../utils/MobileGuiTaskTool';
+import {
+  createMobileGuiTaskConfirmationCancelledError,
+  createMobileGuiTaskTool
+} from '../utils/MobileGuiTaskTool';
 import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGuiTaskTypes';
 import {
   buildMobileGuiWorkflowTask,
@@ -1024,7 +1027,7 @@ struct Index {
     }
     detailLines.push('最大步骤：' + String(request.maxSteps));
     this.appendCloudLogToSession(sessionId, '等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
-    return new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve, reject) => {
       promptAction.showDialog({
         title: '确认手机 GUI 任务',
         message: detailLines.join('\n') + '\n\n确认后 App 将通过 HDC bridge 执行该任务。',
@@ -1037,8 +1040,8 @@ struct Index {
         this.appendCloudLogToSession(sessionId, approved ? '用户已同意手机 GUI 任务。' : '用户已拒绝手机 GUI 任务。');
         resolve(approved);
       }).catch(() => {
-        this.appendCloudLogToSession(sessionId, '手机 GUI 任务确认弹窗关闭或失败，按拒绝处理。');
-        resolve(false);
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务确认弹窗关闭或失败，按取消处理。');
+        reject(createMobileGuiTaskConfirmationCancelledError('用户取消手机 GUI 任务确认。'));
       });
     });
   }

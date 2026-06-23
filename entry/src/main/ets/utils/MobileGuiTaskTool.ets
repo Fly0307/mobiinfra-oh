@@ -54,6 +54,32 @@ export interface MobileGuiTaskArgumentValidation {
   error: string;
 }
 
+interface MobileGuiTaskConfirmationCancelledError extends Error {
+  code?: string;
+  mobileGuiTaskConfirmationCancelled?: boolean;
+}
+
+const MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_MARKER: string = 'mobile_gui_task_confirmation_cancelled';
+export const MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE: string = 'user_cancelled';
+
+export function createMobileGuiTaskConfirmationCancelledError(message: string = '用户取消手机 GUI 任务确认。'): Error {
+  let error = new Error(message) as MobileGuiTaskConfirmationCancelledError;
+  error.code = MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE;
+  error.mobileGuiTaskConfirmationCancelled = true;
+  error.name = MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_MARKER;
+  return error as Error;
+}
+
+export function isMobileGuiTaskConfirmationCancelledError(value: Object): boolean {
+  if (!(value instanceof Error)) {
+    return false;
+  }
+  let error = value as MobileGuiTaskConfirmationCancelledError;
+  return error.mobileGuiTaskConfirmationCancelled === true ||
+    error.code === MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE ||
+    error.name === MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_MARKER;
+}
+
 export function createMobileGuiTaskTool(): ChatTool {
   return {
     name: MOBILE_GUI_TASK_TOOL_NAME,
@@ -91,6 +117,17 @@ export function createMobileGuiTaskTool(): ChatTool {
         confirmed = await context.confirmMobileGuiTask(validation.request);
       } catch (e) {
         let err = e as Error;
+        if (isMobileGuiTaskConfirmationCancelledError(err)) {
+          return stringifyMobileGuiTaskToolResponse(
+            mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+              false,
+              'cancelled',
+              MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE,
+              err.message,
+              true
+            ))
+          );
+        }
         return stringifyMobileGuiTaskToolResponse(
           mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
             false,

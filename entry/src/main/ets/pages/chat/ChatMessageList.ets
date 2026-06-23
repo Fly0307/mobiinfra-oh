@@ -25,6 +25,9 @@ const STREAM_FOLLOW_DELAY_MS: number = 40;
 const STREAM_FOLLOW_ANIMATION_MS: number = 120;
 const STRUCTURAL_SCROLL_SETTLE_MS: number = 80;
 const BACK_TO_BOTTOM_BUTTON_GAP: number = 12;
+const MESSAGE_BUBBLE_WIDTH: string = '96%';
+const MESSAGE_AVATAR_BUBBLE_GAP: number = 6;
+const MESSAGE_ROW_TOP_MARGIN: number = 14;
 
 @Component
 export struct ChatMessageList {
@@ -493,6 +496,56 @@ export struct ChatMessageList {
     }
   }
 
+  @Builder MessageBubbleBody(message: ChatMessage) {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      this.TraceBubble(message)
+    } else {
+      this.ChatBubble(message)
+    }
+  }
+
+  @Builder MessageAvatarBadge(message: ChatMessage) {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      Column() {
+        this.Avatar(message)
+      }
+      .width(this.avatarColumnWidth(message))
+      .onClick(() => {
+        this.onToggleTaskTrace(message.id);
+      })
+    } else {
+      Column() {
+        this.Avatar(message)
+      }
+      .width(this.avatarColumnWidth(message))
+    }
+  }
+
+  @Builder MessageAvatarHeader(message: ChatMessage) {
+    Row() {
+      if (this.isUserMessage(message)) {
+        Blank()
+          .layoutWeight(1)
+        this.MessageAvatarBadge(message)
+      } else {
+        this.MessageAvatarBadge(message)
+        Blank()
+          .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .margin({ bottom: MESSAGE_AVATAR_BUBBLE_GAP })
+  }
+
+  @Builder MessageContentBlock(message: ChatMessage) {
+    Column() {
+      this.MessageAvatarHeader(message)
+      this.MessageBubbleBody(message)
+    }
+    .width(MESSAGE_BUBBLE_WIDTH)
+  }
+
   @Builder TraceBubble(message: ChatMessage) {
     Column() {
       Row() {
@@ -564,47 +617,16 @@ export struct ChatMessageList {
       if (this.isUserMessage(message)) {
         Blank()
           .layoutWeight(1)
-        Column() {
-          this.ChatBubble(message)
-        }
-        .width('78%')
-        Column() {
-          this.Avatar(message)
-        }
-        .width(TEXT_AVATAR_SIZE)
-        .margin({ left: 10 })
+        this.MessageContentBlock(message)
       } else {
-        if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-          Column() {
-            this.Avatar(message)
-          }
-          .width(this.avatarColumnWidth(message))
-          .margin({ right: 10 })
-          .onClick(() => {
-            this.onToggleTaskTrace(message.id);
-          })
-        } else {
-          Column() {
-            this.Avatar(message)
-          }
-          .width(this.avatarColumnWidth(message))
-          .margin({ right: 10 })
-        }
-        Column() {
-          if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-            this.TraceBubble(message)
-          } else {
-            this.ChatBubble(message)
-          }
-        }
-        .width('78%')
+        this.MessageContentBlock(message)
         Blank()
           .layoutWeight(1)
       }
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
-    .margin({ top: 14 })
+    .margin({ top: MESSAGE_ROW_TOP_MARGIN })
   }
 
   @Builder BackToBottomButton() {

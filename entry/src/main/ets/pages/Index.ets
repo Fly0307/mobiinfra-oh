@@ -1034,6 +1034,7 @@ struct Index {
     this.homeProfile = {
       avatarUri: avatar.avatarUri,
       avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -1112,7 +1113,7 @@ struct Index {
     let pixelMap: image.PixelMap | null = null;
     let packer: image.ImagePacker | null = null;
     try {
-      imageFile = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+      imageFile = await fileIo.open(this.fileIoOpenTarget(uri), fileIo.OpenMode.READ_ONLY);
       imageSource = image.createImageSource(imageFile.fd);
       pixelMap = await imageSource.createPixelMap();
       packer = image.createImagePacker();
@@ -1151,6 +1152,25 @@ struct Index {
         }
       }
     }
+  }
+
+  private fileIoOpenTarget(uri: string): string {
+    let normalized = uri.trim();
+    if (normalized.startsWith('file:///')) {
+      return normalized.substring('file://'.length);
+    }
+    return normalized;
+  }
+
+  private async saveHomeAvatarReferencePhoto(sourceImage: string): Promise<string> {
+    if (this.dataManagerFacade === null) {
+      dataManagerWarn('saveHomeAvatarReferencePhoto skipped: facade is null');
+      throw new Error('数据管理服务未就绪');
+    }
+    let avatar = await this.dataManagerFacade.saveAvatarReferencePhoto(sourceImage);
+    this.mergeHomeAvatarView(avatar);
+    dataManagerInfo('saveHomeAvatarReferencePhoto success');
+    return avatar.avatarReferencePhotoUri;
   }
 
   private async generateHomeAvatar(mode: AvatarGenerationMode, sourceImage: string): Promise<void> {
@@ -4164,6 +4184,9 @@ struct Index {
             },
             onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
               await this.generateHomeAvatar(mode, sourceImage);
+            },
+            onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
+              return await this.saveHomeAvatarReferencePhoto(sourceImage);
             }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Home), mainTabLabel(MainTabIndex.Home), MainTabIndex.Home))

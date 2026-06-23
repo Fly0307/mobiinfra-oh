@@ -21,6 +21,8 @@ export struct HomePage {
   onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
   onGenerateAvatar: (mode: AvatarGenerationMode, sourceImage: string) => Promise<void> =
     async (mode: AvatarGenerationMode, sourceImage: string) => {};
+  onSaveAvatarReferencePhoto: (sourceImage: string) => Promise<string> =
+    async (sourceImage: string) => sourceImage;
   @State recommendationPageIndex: number = 0;
   @State selectedRecommendationId: string = '';
   @State selectedRecommendationCompletedOverrideId: string = '';
@@ -165,6 +167,13 @@ export struct HomePage {
     }
   }
 
+  private selectedAvatarReferencePhotoUri(): string {
+    if (this.selectedAvatarPhotoUri.length > 0) {
+      return this.selectedAvatarPhotoUri;
+    }
+    return this.profile.avatarReferencePhotoUri;
+  }
+
   private async selectAvatarReferencePhoto(): Promise<void> {
     if (this.avatarGenerating) {
       return;
@@ -176,7 +185,9 @@ export struct HomePage {
         showToastSafely('未选择照片', 1200);
         return;
       }
-      this.selectedAvatarPhotoUri = uris[0];
+      let savedUri = await this.onSaveAvatarReferencePhoto(uris[0]);
+      this.selectedAvatarPhotoUri = savedUri.trim().length > 0 ? savedUri : uris[0];
+      showToastSafely('参考照片已保存', 1200);
     } catch (e) {
       let err = e as Error;
       showToastSafely('选择照片失败：' + err.message, 1800);
@@ -187,13 +198,14 @@ export struct HomePage {
     if (this.avatarGenerating) {
       return;
     }
-    if (this.selectedAvatarPhotoUri.length === 0) {
+    let referencePhotoUri = this.selectedAvatarReferencePhotoUri();
+    if (referencePhotoUri.length === 0) {
       showToastSafely('请先选择参考照片', 1200);
       return;
     }
     this.avatarGenerating = true;
     try {
-      await this.onGenerateAvatar('image_to_image', this.selectedAvatarPhotoUri);
+      await this.onGenerateAvatar('image_to_image', referencePhotoUri);
       this.avatarGenerationOpen = false;
     } catch (e) {
       AppLogger.errorCause('Home.Avatar', 'submitAvatarPhotoGeneration failed', e as Error);
@@ -572,12 +584,12 @@ export struct HomePage {
               .fontSize(15)
               .fontWeight(FontWeight.Bold)
               .fontColor('#151A28')
-            Text(this.selectedAvatarPhotoUri.length > 0 ? '已选择照片，可结合画像生成' : '选择一张个人照片作为形象参考')
+            Text(this.selectedAvatarReferencePhotoUri().length > 0 ? '已保存参考照片，可结合画像生成' : '选择一张个人照片作为形象参考')
               .fontSize(12)
               .fontColor('#6F7684')
               .margin({ top: 4 })
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          Text(this.selectedAvatarPhotoUri.length > 0 ? '重选' : '选择')
+          Text(this.selectedAvatarReferencePhotoUri().length > 0 ? '重选' : '选择')
             .fontSize(12)
             .fontColor('#8066FF')
             .padding({ left: 9, right: 9, top: 5, bottom: 5 })
@@ -593,9 +605,9 @@ export struct HomePage {
           this.selectAvatarReferencePhoto();
         })
 
-        if (this.selectedAvatarPhotoUri.length > 0) {
+        if (this.selectedAvatarReferencePhotoUri().length > 0) {
           Column() {
-            Image(this.selectedAvatarPhotoUri)
+            Image(this.selectedAvatarReferencePhotoUri())
               .width('100%')
               .height(160)
               .objectFit(ImageFit.Contain)

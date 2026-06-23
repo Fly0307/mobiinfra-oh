@@ -6,6 +6,7 @@ export type AvatarErrorValue = Error | Object | string | number | boolean | null
 export interface AvatarHomeViewModel {
   avatarUri: string;
   avatarForegroundUri: string;
+  avatarReferencePhotoUri: string;
   avatarStatus: AvatarStatus;
   avatarUpdatedLabel: string;
   avatarActionLabel: string;
@@ -84,6 +85,7 @@ export interface AvatarState {
   last_error_code: string;
   last_error_message: string;
   updated_at: string;
+  reference_photo_path: string;
 }
 
 export interface AvatarProviderConfig {
@@ -127,6 +129,7 @@ export function createEmptyAvatarHomeViewModel(): AvatarHomeViewModel {
   return {
     avatarUri: '',
     avatarForegroundUri: '',
+    avatarReferencePhotoUri: '',
     avatarStatus: 'empty',
     avatarUpdatedLabel: '',
     avatarActionLabel: '生成数字分身',
@@ -141,7 +144,8 @@ export function createEmptyAvatarState(): AvatarState {
     status: 'empty',
     last_error_code: '',
     last_error_message: '',
-    updated_at: ''
+    updated_at: '',
+    reference_photo_path: ''
   };
 }
 

@@ -83,6 +83,7 @@ function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -95,6 +96,7 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -642,7 +644,10 @@ export class DataManagerFacade {
     this.homeRecommendationService.pruneInactiveRecommendationsForToday();
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
-      return createEmptyHomeProfileViewModel();
+      let empty = createEmptyHomeProfileViewModel();
+      let avatar = this.avatarService.currentHomeView();
+      empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
+      return empty;
     }
     let domains = this.homeProfileDomains(profile);
     let recommendations = this.homeRecommendations();
@@ -651,6 +656,7 @@ export class DataManagerFacade {
     return {
       avatarUri: avatar.avatarUri,
       avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -701,6 +707,10 @@ export class DataManagerFacade {
 
   async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
     return this.avatarService.generate(config, request);
+  }
+
+  async saveAvatarReferencePhoto(sourceUri: string): Promise<AvatarHomeViewModel> {
+    return await this.avatarService.saveReferencePhoto(sourceUri);
   }
 
   async ensureCurrentAvatarForeground(): Promise<AvatarHomeViewModel> {

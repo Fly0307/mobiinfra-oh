@@ -2113,6 +2113,7 @@ export default function dataManagerUnitTest() {
       let avatar = createEmptyAvatarHomeViewModel();
       expect(avatar.avatarUri).assertEqual('');
       expect(avatar.avatarForegroundUri).assertEqual('');
+      expect(avatar.avatarReferencePhotoUri).assertEqual('');
       expect(avatar.avatarStatus).assertEqual('empty');
       expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
       expect(avatar.avatarVersionId).assertEqual('');
@@ -2396,6 +2397,65 @@ export default function dataManagerUnitTest() {
       expect(view.avatarUri).assertEqual('file:///tmp/demo-files/workflows/avatar/assets/v1.png');
       expect(view.avatarForegroundUri).assertEqual('');
       expect(view.avatarActionLabel).assertEqual('数字分身已更新');
+    });
+
+    it('avatarStoragePersistsReferencePhotoForHomeView', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-reference-photo';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let bytes: Uint8Array = new Uint8Array([137, 80, 78, 71]);
+      let relativePath = avatarStorage.saveReferencePhotoBytes(bytes, 'file://photo/reference.png');
+      let state = avatarStorage.emptyState();
+      state.reference_photo_path = relativePath;
+      avatarStorage.saveState(state);
+
+      let persistedState = avatarStorage.loadState();
+      let view = avatarStorage.homeViewFromState(persistedState, null);
+
+      expect(relativePath.startsWith('assets/reference-photo-')).assertTrue();
+      expect(relativePath.endsWith('.png')).assertTrue();
+      expect(persistedState.reference_photo_path).assertEqual(relativePath);
+      expect(view.avatarReferencePhotoUri)
+        .assertEqual('file:///tmp/demo-avatar-reference-photo/workflows/avatar/' + relativePath);
+    });
+
+    it('emptyHomeViewModelRestoresSavedAvatarReferencePhoto', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-empty-home-reference-photo';
+      storage.removeTree(root);
+      let facade = new DataManagerFacade(root);
+      facade.ensureReady();
+      let avatarStorage = new AvatarStorage(facade.paths, facade.storage);
+      let bytes: Uint8Array = new Uint8Array([255, 216, 255]);
+      let relativePath = avatarStorage.saveReferencePhotoBytes(bytes, 'reference.jpg');
+      let state = avatarStorage.emptyState();
+      state.reference_photo_path = relativePath;
+      avatarStorage.saveState(state);
+
+      let home = facade.loadHomeViewModel();
+
+      expect(home.empty).assertTrue();
+      expect(home.avatarReferencePhotoUri)
+        .assertEqual('file:///tmp/demo-empty-home-reference-photo/workflows/avatar/' + relativePath);
+    });
+
+    it('avatarStorageUsesFreshReferencePhotoPathForPreviewRefresh', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-reference-refresh';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let firstBytes: Uint8Array = new Uint8Array([1, 2, 3]);
+      let secondBytes: Uint8Array = new Uint8Array([4, 5, 6]);
+
+      let firstPath = avatarStorage.saveReferencePhotoBytes(firstBytes, 'first.jpg');
+      let secondPath = avatarStorage.saveReferencePhotoBytes(secondBytes, 'second.jpg');
+
+      expect(firstPath === secondPath).assertFalse();
+      expect(avatarStorage.referencePhotoDisplayUri(secondPath) === avatarStorage.referencePhotoDisplayUri(firstPath))
+        .assertFalse();
     });
 
     it('avatarStorageSaveAssetBase64ReturnsDisplayableVersionUri', 0, () => {

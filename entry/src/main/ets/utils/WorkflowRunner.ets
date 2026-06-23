@@ -22,8 +22,16 @@ import {
 } from './WorkflowTypes';
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
-const MAX_GUI_STEPS = 20;
+export const DEFAULT_MAX_GUI_STEPS: number = 20;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
+
+export function resolveGuiTaskMaxSteps(step: WorkflowStep): number {
+  let raw = step.max_steps;
+  if (raw === undefined || raw <= 0) {
+    return DEFAULT_MAX_GUI_STEPS;
+  }
+  return Math.floor(raw);
+}
 
 interface PlannerResult {
   appName: string;
@@ -540,7 +548,10 @@ export class WorkflowRunner {
     if (this.currentAppName.length === 0) {
       throw new Error('gui_task after step 1 requires active app context');
     }
-    let stopReason = await this.runDeciderLoop(taskDescription);
+    let stopReason = await this.runDeciderLoop(step, taskDescription);
+    if (stopReason === 'MAX_STEPS_REACHED' && step.fail_on_max_steps === true) {
+      throw new Error('Decider max steps reached: ' + String(resolveGuiTaskMaxSteps(step)));
+    }
     let output: GuiDeciderOutput = {
       step_dir: this.stepDir(actualId),
       task_description: taskDescription,
@@ -665,11 +676,12 @@ export class WorkflowRunner {
     output.source_screenshot = screenshot.source;
   }
 
-  private async runDeciderLoop(taskDescription: string): Promise<string> {
+  private async runDeciderLoop(step: WorkflowStep, taskDescription: string): Promise<string> {
     let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
+    let maxSteps = resolveGuiTaskMaxSteps(step);
     let stopReason = 'MAX_STEPS_REACHED';
-    for (let i = 0; i < MAX_GUI_STEPS; i++) {
+    for (let i = 0; i < maxSteps; i++) {
       if (AgentExecutionController.isCancelRequested()) {
         throw new Error('用户取消 workflow');
       }
@@ -677,7 +689,7 @@ export class WorkflowRunner {
       if (AgentExecutionController.isCancelRequested()) {
         throw new Error('用户取消 workflow');
       }
-      AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + MAX_GUI_STEPS + ': 识别屏幕并决策');
+      AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps + ': 识别屏幕并决策');
       let shot = await this.captureWorkflowScreenshot('decider:' + String(i + 1));
       let imageBase64 = shot.image_b64;
       let width = shot.width;
@@ -694,7 +706,7 @@ export class WorkflowRunner {
       let parsedAction = AgentActionParser.parse(response);
       let parsed = parsedAction.data;
       let action = parsedAction.action;
-      AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
+      AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1, maxSteps));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
         stopReason = 'TASK_COMPLETED_' + action;
         break;
@@ -1530,16 +1542,16 @@ export class WorkflowRunner {
     return 'Step ' + actualId + ': ' + step.type;
   }
 
-  private buildDeciderFloatText(parsed: WorkflowJsonMap, index: number): string {
+  private buildDeciderFloatText(parsed: WorkflowJsonMap, index: number, maxSteps: number): string {
     let action = this.getMapString(parsed, 'action');
     if (action.length === 0) {
-      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': 等待动作';
+      return 'Decider ' + index + '/' + maxSteps + ': 等待动作';
     }
     let text = this.getMapString(parsed, 'text');
     if (text.length > 0) {
-      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action + ' ' + text;
+      return 'Decider ' + index + '/' + maxSteps + ': ' + action + ' ' + text;
     }
-    return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action;
+    return 'Decider ' + index + '/' + maxSteps + ': ' + action;
   }
 
   private toNumber(value: WorkflowJsonValue | undefined, fallback: number): number {

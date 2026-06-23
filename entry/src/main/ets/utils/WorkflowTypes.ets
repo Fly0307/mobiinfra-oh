@@ -56,6 +56,8 @@ export interface WorkflowStep {
   seconds?: number;
   file_name?: string;
   package_name?: string;
+  max_steps?: number;
+  fail_on_max_steps?: boolean;
   tool_name?: string;
   inputs?: WorkflowToolInputs;
   times?: number | string;

@@ -38,7 +38,9 @@ export function buildMobileGuiWorkflowDefinition(request: MobileGuiTaskRequest):
     name: 'execute_task',
     type: 'gui_task',
     task_description: taskDescription,
-    package_name: request.packageName.trim().length > 0 ? request.packageName.trim() : undefined
+    package_name: request.packageName.trim().length > 0 ? request.packageName.trim() : undefined,
+    max_steps: request.maxSteps,
+    fail_on_max_steps: true
   };
   return {
     metadata: {
@@ -72,7 +74,8 @@ export function buildMobileGuiWorkflowTask(request: MobileGuiTaskRequest): Workf
 export function classifyMobileGuiWorkflowFailure(message: string): string {
   let normalized = message.trim().toLowerCase();
   if (normalized.indexOf('timeout') >= 0 || normalized.indexOf('timed out') >= 0 ||
-    normalized.indexOf('超时') >= 0) {
+    normalized.indexOf('超时') >= 0 || normalized.indexOf('max_steps_reached') >= 0 ||
+    normalized.indexOf('max steps reached') >= 0 || normalized.indexOf('步数上限') >= 0) {
     return 'timeout';
   }
   if (normalized.indexOf('mismatch') >= 0 || normalized.indexOf('identity') >= 0 ||

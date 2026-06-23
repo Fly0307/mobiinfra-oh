@@ -8,8 +8,8 @@ import {
 } from '../main/ets/utils/MobileGuiTaskWorkflowAdapter';
 import { MobileGuiTaskRequest } from '../main/ets/utils/MobileGuiTaskTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
-import { resolveWorkflowJsonForRun } from '../main/ets/utils/WorkflowRunner';
-import { WorkflowRunResult, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
+import { DEFAULT_MAX_GUI_STEPS, resolveGuiTaskMaxSteps, resolveWorkflowJsonForRun } from '../main/ets/utils/WorkflowRunner';
+import { WorkflowRunResult, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 
 interface WorkflowJsonObject {
   steps?: WorkflowJsonStep[];
@@ -19,6 +19,8 @@ interface WorkflowJsonStep {
   type?: string;
   task_description?: string;
   package_name?: string;
+  max_steps?: number;
+  fail_on_max_steps?: boolean;
 }
 
 function mobileGuiRequest(): MobileGuiTaskRequest {
@@ -54,6 +56,8 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect((workflow.steps as WorkflowJsonStep[])[1].type).assertEqual('gui_task');
       expect(((workflow.steps as WorkflowJsonStep[])[0].task_description || '').indexOf('com.tencent.mm') >= 0).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[0].package_name).assertEqual('com.tencent.mm');
+      expect((workflow.steps as WorkflowJsonStep[])[1].max_steps).assertEqual(18);
+      expect((workflow.steps as WorkflowJsonStep[])[1].fail_on_max_steps).assertTrue();
     });
 
     it('classifiesWorkflowFailureMessages', 0, () => {
@@ -108,6 +112,16 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(selected.indexOf('"embedded"') >= 0).assertFalse();
     });
 
+    it('resolvesGuiTaskMaxStepsFromStepOrDefault', 0, () => {
+      let defaultStep: WorkflowStep = { id: '1', type: 'gui_task' };
+      let customStep: WorkflowStep = { id: '2', type: 'gui_task', max_steps: 7 };
+      let invalidStep: WorkflowStep = { id: '3', type: 'gui_task', max_steps: 0 };
+
+      expect(resolveGuiTaskMaxSteps(defaultStep)).assertEqual(DEFAULT_MAX_GUI_STEPS);
+      expect(resolveGuiTaskMaxSteps(customStep)).assertEqual(7);
+      expect(resolveGuiTaskMaxSteps(invalidStep)).assertEqual(DEFAULT_MAX_GUI_STEPS);
+    });
+
     it('mapsWorkflowRunResultToMobileGuiRunResult', 0, () => {
       let result: WorkflowRunResult = {
         status: 'failed',
@@ -122,6 +136,21 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(mapped.status).assertEqual('failed');
       expect(mapped.errorCode).assertEqual('timeout');
       expect(mapped.runDir).assertEqual('chat-sessions/tool-runs/session-1/mobile-gui/run-1');
+    });
+
+    it('mapsDeciderMaxStepsReachedToFailureInsteadOfCompleted', 0, () => {
+      let result: WorkflowRunResult = {
+        status: 'failed',
+        message: 'Decider max steps reached: 18',
+        runDir: '/tmp/files/chat-sessions/tool-runs/session-1/mobile-gui/run-3',
+        dailyLogPath: '',
+        returnedToApp: false
+      };
+      let mapped = mobileGuiTaskRunResultFromWorkflowResult('/tmp/files', result);
+
+      expect(mapped.ok).assertFalse();
+      expect(mapped.status).assertEqual('failed');
+      expect(mapped.errorCode).assertEqual('timeout');
     });
 
     it('mapsCancelledWorkflowResultToUserCancelled', 0, () => {

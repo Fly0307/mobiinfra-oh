@@ -937,7 +937,7 @@ struct Index {
   }
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
-  private appendCloudLog(message: string): void {
+  private appendCloudLogToSession(sessionId: string, message: string): void {
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
@@ -949,13 +949,17 @@ struct Index {
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
     let traceLine = this.formatAgentTraceLog(message);
     if (traceLine.length > 0) {
-      this.appendTaskTraceLineForSession(this.cloudTaskSessionId, traceLine);
+      this.appendTaskTraceLineForSession(sessionId, traceLine);
     }
-    if (message.indexOf('Task completed') >= 0) {
-      this.appendChatMessageForSession(this.cloudTaskSessionId,
+    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
+      this.appendChatMessageForSession(sessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
           CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
     }
+  }
+
+  private appendCloudLog(message: string): void {
+    this.appendCloudLogToSession(this.cloudTaskSessionId, message);
   }
 
   private resetCloudLog(message: string): void {
@@ -1010,7 +1014,7 @@ struct Index {
     });
   }
 
-  private async confirmMobileGuiTask(request: MobileGuiTaskRequest): Promise<boolean> {
+  private async confirmMobileGuiTask(sessionId: string, request: MobileGuiTaskRequest): Promise<boolean> {
     let detailLines: string[] = ['任务：' + request.task];
     if (request.appName.trim().length > 0) {
       detailLines.push('应用名称提示：' + request.appName.trim());
@@ -1019,7 +1023,7 @@ struct Index {
       detailLines.push('包名提示：' + request.packageName.trim());
     }
     detailLines.push('最大步骤：' + String(request.maxSteps));
-    this.appendCloudLog('等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
+    this.appendCloudLogToSession(sessionId, '等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
     return new Promise<boolean>((resolve) => {
       promptAction.showDialog({
         title: '确认手机 GUI 任务',
@@ -1030,10 +1034,10 @@ struct Index {
         ]
       }).then((data: promptAction.ShowDialogSuccessResponse) => {
         let approved = data.index === 1;
-        this.appendCloudLog(approved ? '用户已同意手机 GUI 任务。' : '用户已拒绝手机 GUI 任务。');
+        this.appendCloudLogToSession(sessionId, approved ? '用户已同意手机 GUI 任务。' : '用户已拒绝手机 GUI 任务。');
         resolve(approved);
       }).catch(() => {
-        this.appendCloudLog('手机 GUI 任务确认弹窗关闭或失败，按拒绝处理。');
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务确认弹窗关闭或失败，按拒绝处理。');
         resolve(false);
       });
     });
@@ -1050,41 +1054,41 @@ struct Index {
   private async runMobileGuiTaskForChatSession(sessionId: string,
     request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
     if (!this.isMobileGuiTaskCloudConfigReady()) {
-      this.appendCloudLog(this.mobileGuiTaskConfigMissingMessage());
+      this.appendCloudLogToSession(sessionId, this.mobileGuiTaskConfigMissingMessage());
       return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
     }
-    if (!await this.ensureHdcServerReadyForTask(true)) {
+    if (!await this.ensureHdcServerReadyForTask(true, sessionId)) {
       let message = this.hdcAutoStatus.trim().length > 0 ? this.hdcAutoStatus : 'HDC Server 自动发现或连接失败。';
-      this.appendCloudLog('手机 GUI 任务无法启动：' + message);
+      this.appendCloudLogToSession(sessionId, '手机 GUI 任务无法启动：' + message);
       return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
     }
     if (this.hdcServerIp.trim().length === 0) {
       let message = 'HDC Server 未配置，无法执行手机 GUI 任务。';
-      this.appendCloudLog(message);
+      this.appendCloudLogToSession(sessionId, message);
       return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
     }
 
     this.currentTab = MainTabIndex.Chat;
-    this.appendCloudLog('手机 GUI 任务开始执行：' + request.task);
-    this.appendCloudLog('HDC Server=' + this.hdcServerIp);
+    this.appendCloudLogToSession(sessionId, '手机 GUI 任务开始执行：' + request.task);
+    this.appendCloudLogToSession(sessionId, 'HDC Server=' + this.hdcServerIp);
     let runRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(this.filesDir, sessionId);
     let task: WorkflowTask = buildMobileGuiWorkflowTask(request);
     let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
-      this.hdcServerIp, (msg: string) => { this.appendCloudLog(msg); }, runRoot);
+      this.hdcServerIp, (msg: string) => { this.appendCloudLogToSession(sessionId, msg); }, runRoot);
     try {
       let result: WorkflowRunResult = await runner.runTask(task);
       let mapped = mobileGuiTaskRunResultFromWorkflowResult(this.filesDir, result);
       if (mapped.ok) {
-        this.appendCloudLog('手机 GUI 任务执行完成：' + mapped.runDir);
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行完成：' + mapped.runDir);
       } else {
-        this.appendCloudLog('手机 GUI 任务执行失败：' + mapped.errorCode + ' ' + mapped.error);
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行失败：' + mapped.errorCode + ' ' + mapped.error);
       }
       return mapped;
     } catch (e) {
       let err = e as Error;
       let message = err.message || String(e);
       let errorCode = classifyMobileGuiWorkflowFailure(message);
-      this.appendCloudLog('手机 GUI 任务执行异常：' + errorCode + ' ' + message);
+      this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行异常：' + errorCode + ' ' + message);
       return mobileGuiTaskRunResultFromFailure(errorCode, message, true);
     }
   }
@@ -3292,7 +3296,7 @@ struct Index {
         sessionId: chatSessionId,
         userMessage: task,
         confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
-          return await this.confirmMobileGuiTask(request);
+          return await this.confirmMobileGuiTask(chatSessionId, request);
         },
         runMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
           return await this.runMobileGuiTaskForChatSession(chatSessionId, request);
@@ -3687,23 +3691,26 @@ struct Index {
     this.markHdcDisconnected(true, statusPrefix + ': ' + message);
   }
 
-  private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
+  private async connectManualHdcTarget(useCloudLog: boolean, cloudLogSessionId: string = ''): Promise<boolean> {
     let serverUrl = this.manualHdcServerUrl();
     let target = this.wirelessIp.trim();
     AppLogger.debug('HDC', 'manual fallback start server=' + (serverUrl.length > 0 ? serverUrl : '(empty)') +
       ', target=' + (target.length > 0 ? target : '(empty)') + ', useCloudLog=' + String(useCloudLog));
     if (serverUrl.length === 0) {
       AppLogger.debug('HDC', 'manual fallback skipped reason=missing-server');
-      this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.', useCloudLog);
+      this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.',
+        useCloudLog, cloudLogSessionId);
       return false;
     }
     if (target.length === 0) {
       AppLogger.debug('HDC', 'manual fallback skipped reason=missing-target server=' + serverUrl);
-      this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.', useCloudLog);
+      this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.',
+        useCloudLog, cloudLogSessionId);
       return false;
     }
 
-    this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
+    this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target,
+      useCloudLog, cloudLogSessionId);
     this.markHdcDisconnected(true, 'Manual HDC fallback is running...');
     let attempt = await this.requestManualHdcConnect(serverUrl, target);
     AppLogger.debug('HDC', 'manual fallback attempt ok=' + String(attempt.ok) +
@@ -3712,14 +3719,14 @@ struct Index {
       this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
       AppLogger.debug('HDC', 'manual fallback failed selected=' + this.hdcServerIp +
         ', reason=' + attempt.message);
-      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
       return false;
     }
 
     this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC fallback succeeded');
     AppLogger.debug('HDC', 'manual fallback success selected=' + this.hdcServerIp +
       ', health=' + this.hdcHealthDebugText(attempt.health));
-    this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+    this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
     return true;
   }
 
@@ -3734,7 +3741,8 @@ struct Index {
     this.markHdcDisconnected(true, 'Manual HDC pairing is being edited.');
   }
 
-  private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
+  private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false,
+    cloudLogSessionId: string = ''): Promise<boolean> {
     if (this.hdcAutoConnecting && !force) {
       AppLogger.debug('HDC', 'discover skipped: already connecting, connected=' + String(this.hdcConnected) +
         ', current=' + this.hdcServerIp);
@@ -3768,7 +3776,7 @@ struct Index {
           let statusPrefix = this.isAutoHdcUrl(candidate) ? 'Auto HDC connected' : 'HDC Server fallback connected';
           this.markHdcConnected(candidate, health, statusPrefix);
           AppLogger.debug('HDC', 'discover success selected=' + this.hdcServerIp);
-          this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+          this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
           return true;
         }
         lastMessage = candidate + ': ' + attempt.message;
@@ -3777,7 +3785,7 @@ struct Index {
       let detail = attemptMessages.length > 0 ? attemptMessages.join('; ') : lastMessage;
       this.markHdcDisconnected(false, 'Auto HDC discovery failed. Use manual pairing if needed. ' + detail);
       AppLogger.debug('HDC', 'discover failed detail=' + detail);
-      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
       return false;
     } finally {
       AppLogger.debug('HDC', 'discover end connected=' + String(this.hdcConnected) +
@@ -3786,26 +3794,27 @@ struct Index {
     }
   }
 
-  private async ensureHdcServerReadyForTask(useCloudLog: boolean): Promise<boolean> {
+  private async ensureHdcServerReadyForTask(useCloudLog: boolean, cloudLogSessionId: string = ''): Promise<boolean> {
     AppLogger.debug('HDC', 'ensure start useCloudLog=' + String(useCloudLog) + ', current=' + this.hdcServerIp);
-    if (await this.discoverHdcServer(useCloudLog, true)) {
+    if (await this.discoverHdcServer(useCloudLog, true, cloudLogSessionId)) {
       AppLogger.debug('HDC', 'ensure success via=auto selected=' + this.hdcServerIp);
       return true;
     }
 
-    if (await this.connectManualHdcTarget(useCloudLog)) {
+    if (await this.connectManualHdcTarget(useCloudLog, cloudLogSessionId)) {
       AppLogger.debug('HDC', 'ensure success via=manual selected=' + this.hdcServerIp);
       return true;
     }
 
-    this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.', useCloudLog);
+    this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.',
+      useCloudLog, cloudLogSessionId);
     AppLogger.debug('HDC', 'ensure failed selected=' + this.hdcServerIp);
     return false;
   }
 
-  private logAgentLoopReady(message: string, useCloudLog: boolean): void {
+  private logAgentLoopReady(message: string, useCloudLog: boolean, cloudLogSessionId: string = ''): void {
     if (useCloudLog) {
-      this.appendCloudLog(message);
+      this.appendCloudLogToSession(cloudLogSessionId.length > 0 ? cloudLogSessionId : this.cloudTaskSessionId, message);
       return;
     }
     this.output = message;

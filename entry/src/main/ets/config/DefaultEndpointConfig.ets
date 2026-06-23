@@ -50,7 +50,7 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   wirelessHdcTarget: '192.168.137.81:33117',
   modelDownloadServerUrl: 'http://166.111.53.96:9123',
   hdcServerUrl: 'http://192.168.137.1:9124',
-  cloudPlannerBaseUrl: 'http://166.111.53.96:7003',
+  cloudPlannerBaseUrl: 'http://123.60.91.241:9003',
   cloudDeciderBaseUrl: 'http://166.111.53.96:7003',
   cloudApiKey: 'mobiagent-key',
   cloudDeciderModel: '',

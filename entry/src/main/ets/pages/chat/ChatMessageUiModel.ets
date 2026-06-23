@@ -4,6 +4,8 @@ import {
   ChatMessageRole,
   chatMessageImagePath,
   chatMessageStableRenderKey,
+  chatMessageStreamingActive,
+  chatMessageStreamingVersion,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent
 } from './ChatSessionTypes';
@@ -16,6 +18,8 @@ export class ChatMessageDetailUiModel {
   trace: string[] = [];
   collapsed: boolean = false;
   imagePath: string = '';
+  streamingActive: boolean = false;
+  streamingVersion: number = 0;
 
   apply(message: ChatMessage): void {
     if (this.content !== message.content) {
@@ -38,6 +42,14 @@ export class ChatMessageDetailUiModel {
     let nextImagePath = chatMessageImagePath(message);
     if (this.imagePath !== nextImagePath) {
       this.imagePath = nextImagePath;
+    }
+    let nextStreamingActive = chatMessageStreamingActive(message);
+    if (this.streamingActive !== nextStreamingActive) {
+      this.streamingActive = nextStreamingActive;
+    }
+    let nextStreamingVersion = chatMessageStreamingVersion(message);
+    if (this.streamingVersion !== nextStreamingVersion) {
+      this.streamingVersion = nextStreamingVersion;
     }
   }
 
@@ -101,7 +113,9 @@ export class ChatMessageUiModel {
       trace: this.detail.trace.slice(),
       collapsed: this.detail.collapsed,
       createdAt: this.createdAt,
-      imagePath: this.detail.imagePath
+      imagePath: this.detail.imagePath,
+      streamingActive: this.detail.streamingActive,
+      streamingVersion: this.detail.streamingVersion
     };
   }
 }

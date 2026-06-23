@@ -23,8 +23,15 @@ import {
   buildAssistantStreamingRenderContent,
   createChatMessage,
   createChatStreamThinkingState,
-  parseChatStreamThinkingDelta
+  parseChatStreamThinkingDelta,
+  splitAssistantThinkingContent
 } from './chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_DISPLAY_TICK_MS,
+  ChatStreamDisplayPacer,
+  ChatStreamDisplaySnapshot,
+  createEmptyChatStreamDisplaySnapshot
+} from './chat/ChatStreamDisplayPacer';
 import {
   CHAT_CONTEXT_COMPRESSION_NOTICE,
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -389,6 +396,11 @@ struct Index {
   private cloudStreamPendingMessageId: string = '';
   private cloudStreamPendingContent: string = '';
   private cloudStreamPendingTrace: string[] = [];
+  @State cloudStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private cloudStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private cloudStreamDisplayTimerId: number = -1;
+  private cloudStreamDisplayGeneration: number = 0;
+  private cloudStreamDisplayVersion: number = 0;
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -402,6 +414,39 @@ struct Index {
       mode: this.chatMode,
       activeSession: null
     };
+  }
+
+  private chatMessagesForDisplay(): ChatMessage[] {
+    let snapshot = this.cloudStreamDisplaySnapshot;
+    if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
+      return this.activeChatMessages;
+    }
+    let messages: ChatMessage[] = [];
+    let matched = false;
+    let parts = splitAssistantThinkingContent(snapshot.visibleContent);
+    for (let i = 0; i < this.activeChatMessages.length; i++) {
+      let message = this.activeChatMessages[i];
+      if (message.id !== snapshot.messageId) {
+        messages.push(message);
+        continue;
+      }
+      matched = true;
+      messages.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: parts.content,
+        thinkingContent: parts.thinkingContent,
+        thinkingCollapsed: message.thinkingCollapsed,
+        trace: snapshot.visibleTrace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: message.imagePath,
+        streamingActive: snapshot.active,
+        streamingVersion: this.cloudStreamDisplayVersion
+      });
+    }
+    return matched ? messages : this.activeChatMessages;
   }
 
   private applyChatSessionViewState(state: ChatSessionViewState): void {
@@ -489,13 +534,28 @@ struct Index {
     }
   }
 
-  private resetCloudStreamMessageUpdate(): void {
+  private clearCloudStreamDisplayTimer(): void {
+    if (this.cloudStreamDisplayTimerId !== -1) {
+      clearTimeout(this.cloudStreamDisplayTimerId);
+      this.cloudStreamDisplayTimerId = -1;
+    }
+  }
+
+  private clearCloudStreamPendingPersistence(): void {
     this.clearCloudStreamFlushTimer();
-    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
     this.cloudStreamPendingSessionId = '';
     this.cloudStreamPendingMessageId = '';
     this.cloudStreamPendingContent = '';
     this.cloudStreamPendingTrace = [];
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamPendingPersistence();
+    this.clearCloudStreamDisplayTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamDisplayGeneration += 1;
+    this.cloudStreamDisplayPacer.reset();
+    this.publishCloudStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
   }
 
   private flushCloudStreamMessageUpdate(): void {
@@ -512,8 +572,43 @@ struct Index {
     this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
   }
 
+  private publishCloudStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.cloudStreamDisplayVersion += 1;
+    this.cloudStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleCloudStreamDisplayFrame(): void {
+    if (this.cloudStreamDisplayTimerId !== -1 || !this.cloudStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.cloudStreamDisplayGeneration;
+    this.cloudStreamDisplayTimerId = setTimeout(() => {
+      this.cloudStreamDisplayTimerId = -1;
+      if (generation !== this.cloudStreamDisplayGeneration) {
+        return;
+      }
+      this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.advanceFrame());
+      this.scheduleCloudStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private updateCloudStreamDisplayTarget(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.setTarget(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+  }
+
+  private finishCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string, trace: string[]): void {
+    this.clearCloudStreamPendingPersistence();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.beginFinish(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
   private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
     trace: string[]): void {
+    this.updateCloudStreamDisplayTarget(sessionId, messageId, content, trace);
     this.cloudStreamPendingSessionId = sessionId;
     this.cloudStreamPendingMessageId = messageId;
     this.cloudStreamPendingContent = content;
@@ -3220,24 +3315,24 @@ struct Index {
         }
       });
       let response = result.content;
-      this.resetCloudStreamMessageUpdate();
-      let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
+      let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
+      this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
       let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
-      this.resetCloudStreamMessageUpdate();
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+          this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId,
             this.cancelledCloudChatContent(currentStreamRenderContent()), toolTraceLines);
         } else {
+          this.resetCloudStreamMessageUpdate();
           this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
             this.cancelledCloudChatContent(currentStreamRenderContent()), new Date().getTime()));
         }
         this.appendCloudLog('ReAct 云端聊天已取消。');
       } else {
+        this.resetCloudStreamMessageUpdate();
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + err.message,
             toolTraceLines);
@@ -3248,7 +3343,7 @@ struct Index {
         this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
       }
     } finally {
-      this.resetCloudStreamMessageUpdate();
+      this.clearCloudStreamPendingPersistence();
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
     }
@@ -4245,7 +4340,7 @@ struct Index {
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
-            messages: this.activeChatMessages,
+            messages: this.chatMessagesForDisplay(),
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
             sessionDrawerOpen: this.chatSessionDrawerOpen,

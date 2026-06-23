@@ -110,6 +110,30 @@ export default function chatMessageDataSourceUnitTest() {
       expect(streamedModel.detail.imagePath).assertEqual('/tmp/snapshot.png');
     });
 
+    it('reusesUiModelWhenStreamingRenderPhaseChangesWithStableKey', 0, () => {
+      let initial: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001);
+      initial.streamingActive = true;
+      initial.streamingVersion = 1;
+      let completed: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '正在整理完成', 1001);
+      completed.streamingActive = false;
+      completed.streamingVersion = 2;
+      let source: ChatMessageDataSource = new ChatMessageDataSource();
+      let recorder: ChatMessageDataChangeRecorder = new ChatMessageDataChangeRecorder();
+      source.registerDataChangeListener(recorder);
+
+      source.setMessages([initial]);
+      let initialModel = source.getData(0);
+      source.setMessages([completed]);
+      let completedModel = source.getData(0);
+
+      expect(recorder.reloadCount).assertEqual(1);
+      expect(recorder.changedIndexes.length).assertEqual(0);
+      expect(initialModel === completedModel).assertTrue();
+      expect(completedModel.detail.content).assertEqual('正在整理完成');
+      expect(completedModel.detail.streamingActive).assertFalse();
+      expect(completedModel.detail.streamingVersion).assertEqual(2);
+    });
+
     it('reloadsWhenMessageCountOrStableKeyOrderChanges', 0, () => {
       let first: ChatMessage = createChatMessage('m1', 'user', 'chat', 'hello', 1000);
       let second: ChatMessage = createChatMessage('m2', 'assistant', 'chat', 'world', 1001);

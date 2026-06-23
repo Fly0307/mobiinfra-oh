@@ -22,6 +22,8 @@ export interface ChatMessage {
   collapsed: boolean;
   createdAt: number;
   imagePath?: string;
+  streamingActive?: boolean;
+  streamingVersion?: number;
 }
 
 export interface ChatAssistantThinkingParts {
@@ -237,6 +239,14 @@ export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatM
 
 export function chatMessageImagePath(message: ChatMessage): string {
   return message.imagePath === undefined ? '' : message.imagePath;
+}
+
+export function chatMessageStreamingActive(message: ChatMessage): boolean {
+  return message.streamingActive === true;
+}
+
+export function chatMessageStreamingVersion(message: ChatMessage): number {
+  return message.streamingVersion === undefined ? 0 : message.streamingVersion;
 }
 
 export function chatMessageThinkingContent(message: ChatMessage): string {

@@ -14,6 +14,8 @@ import appLoggerUnitTest from './AppLoggerUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
+import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test';
+import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 
@@ -34,6 +36,8 @@ export default function testsuite() {
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
   chatMessageDataSourceUnitTest();
+  chatMessageScrollPolicyUnitTest();
+  chatStreamDisplayPacerUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
 }

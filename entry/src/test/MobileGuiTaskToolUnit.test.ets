@@ -5,12 +5,30 @@ import {
   mobileGuiTaskToolParameters,
   normalizeMobileGuiTaskArguments
 } from '../main/ets/utils/MobileGuiTaskTool';
+import { ChatToolExecutionContext } from '../main/ets/utils/ChatToolRegistry';
+import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
 interface TestSchemaObject {
   type?: string;
   additionalProperties?: boolean;
   required?: string[];
   properties?: Record<string, Object>;
+}
+
+interface TestPayload {
+  ok?: boolean;
+  status?: string;
+  error_code?: string;
+  error?: string;
+  recoverable?: boolean;
+}
+
+function testContext(): ChatToolExecutionContext {
+  return {
+    filesDir: '',
+    sessionId: 'test-session',
+    userMessage: '测试手机 GUI 工具'
+  };
 }
 
 export default function mobileGuiTaskToolUnitTest() {
@@ -44,11 +62,36 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(validation.errorCode).assertEqual('invalid_arguments');
     });
 
+    it('rejectsUnknownFieldsAsInvalidArguments', 0, () => {
+      let validation = normalizeMobileGuiTaskArguments('{"task":"打开微信","foo":"bar"}');
+
+      expect(validation.ok).assertFalse();
+      expect(validation.errorCode).assertEqual('invalid_arguments');
+    });
+
     it('fallsBackToDefaultMaxStepsForNegativeValues', 0, () => {
       let validation = normalizeMobileGuiTaskArguments('{"task":"打开微信","max_steps":-1}');
 
       expect(validation.ok).assertTrue();
       expect(validation.request.maxSteps).assertEqual(20);
+    });
+
+    it('capsMaxStepsAtFiftyForLargeValues', 0, () => {
+      let validation = normalizeMobileGuiTaskArguments('{"task":"打开微信","max_steps":99}');
+
+      expect(validation.ok).assertTrue();
+      expect(validation.request.maxSteps).assertEqual(50);
+    });
+
+    it('returnsUnavailablePayloadForValidExecutionWithoutCallback', 0, async () => {
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContext());
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(payload.ok).assertFalse();
+      expect(payload.error_code).assertEqual('unavailable');
+      expect(payload.recoverable).assertTrue();
+      expect(payload.status).assertEqual('unavailable');
     });
   });
 }

@@ -3,6 +3,7 @@ import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 
 export const MOBILE_GUI_TASK_TOOL_NAME: string = 'run_mobile_gui_task';
 const DEFAULT_MAX_STEPS: number = 20;
+const MAX_MAX_STEPS: number = 50;
 
 type MobileGuiTaskJsonValue = Object | string | number | boolean | null;
 interface MobileGuiTaskArguments {
@@ -11,7 +12,6 @@ interface MobileGuiTaskArguments {
   package_name?: string;
   max_steps?: number;
 }
-type MobileGuiTaskSchemaValue = MobileGuiTaskSchemaField;
 interface MobileGuiTaskToolProperties {
   task: MobileGuiTaskSchemaField;
   app_name: MobileGuiTaskSchemaField;
@@ -19,7 +19,7 @@ interface MobileGuiTaskToolProperties {
   max_steps: MobileGuiTaskSchemaField;
 }
 
-interface MobileGuiTaskToolFailurePayload {
+interface MobileGuiTaskToolResponse {
   ok: boolean;
   status: string;
   error_code: string;
@@ -61,6 +61,8 @@ export interface MobileGuiTaskRunResult {
   error: string;
   recoverable: boolean;
   summary: string;
+  runDir: string;
+  returnedToApp: boolean;
 }
 
 export function createMobileGuiTaskTool(): ChatTool {
@@ -84,7 +86,7 @@ export function mobileGuiTaskToolParameters(): Object {
   let properties: MobileGuiTaskToolProperties = createToolProperties();
   let schema: MobileGuiTaskToolParameters = {
     type: 'object',
-    description: '执行一个需要手机 GUI 操作的高层任务。',
+    description: '执行一个需要手机 GUI 操作的高层任务。未指定 max_steps 或传入非正数时回退默认值 20；超过 50 时会截断到 50。',
     properties: properties,
     required: ['task'],
     additionalProperties: false
@@ -100,6 +102,7 @@ export function normalizeMobileGuiTaskArguments(argsText: string): MobileGuiTask
       throw new Error('Tool arguments must be a JSON object.');
     }
     let args = parsed as MobileGuiTaskArguments;
+    assertAllowedFields(parsed);
 
     let task = readRequiredStringField(args.task, 'task');
     if (task.length === 0) {
@@ -129,7 +132,7 @@ export function normalizeMobileGuiTaskArguments(argsText: string): MobileGuiTask
 }
 
 function mobileGuiTaskFailurePayload(status: string, errorCode: string, error: string, recoverable: boolean): string {
-  let payload: MobileGuiTaskToolFailurePayload = {
+  let payload: MobileGuiTaskToolResponse = {
     ok: false,
     status: status,
     error_code: errorCode,
@@ -137,6 +140,17 @@ function mobileGuiTaskFailurePayload(status: string, errorCode: string, error: s
     recoverable: recoverable
   };
   return stringifyJsonCompat(payload as Object);
+}
+
+function assertAllowedFields(args: Object): void {
+  let allowed: string[] = ['task', 'app_name', 'package_name', 'max_steps'];
+  let keys = Object.keys(args);
+  for (let i = 0; i < keys.length; i++) {
+    let key = keys[i];
+    if (allowed.indexOf(key) < 0) {
+      throw new Error('Unsupported run_mobile_gui_task argument: ' + key);
+    }
+  }
 }
 
 function readRequiredStringField(value: string | undefined, key: string): string {
@@ -160,6 +174,7 @@ function readOptionalStringField(value: string | undefined): string {
 }
 
 function readMaxSteps(value: number | undefined): number {
+  // 非正数回退默认值；过大值截断到上限，避免后续执行器被异常步数拖慢。
   if (value === undefined) {
     return DEFAULT_MAX_STEPS;
   }
@@ -169,6 +184,9 @@ function readMaxSteps(value: number | undefined): number {
   let normalized = Math.floor(value);
   if (normalized <= 0) {
     return DEFAULT_MAX_STEPS;
+  }
+  if (normalized > MAX_MAX_STEPS) {
+    return MAX_MAX_STEPS;
   }
   return normalized;
 }
@@ -203,7 +221,7 @@ function createToolProperties(): MobileGuiTaskToolProperties {
     task: stringSchema('需要执行的手机 GUI 任务。'),
     app_name: stringSchema('可选的目标应用名称。'),
     package_name: stringSchema('可选的目标应用包名。'),
-    max_steps: numberSchema('可选的最大执行步数，省略时默认 20。')
+    max_steps: numberSchema('可选的最大执行步数。非正数回退默认值 20，超过 50 时截断为 50。')
   };
   return properties;
 }

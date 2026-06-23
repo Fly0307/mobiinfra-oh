@@ -1,11 +1,13 @@
 import { http } from '@kit.NetworkKit';
-import { JSON as ArkJSON } from '@kit.ArkTS';
+import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import {
   CLOUD_DECIDER_CURRENT_STEP_PROMPT,
   CLOUD_DECIDER_SYSTEM_PROMPT,
   CLOUD_DECIDER_USER_PROMPT
 } from './CloudDeciderPrompt';
 import { AppLogger } from './AppLogger';
+import { decodeUtf8Compat } from './TextEncodingCompat';
+import { parseJsonCompat } from './JsonCompat';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { GalleryModelJson } from './gallery/GalleryTypes';
 
@@ -60,13 +62,39 @@ export interface CloudImagePart {
 
 export type CloudContentPart = CloudTextPart | CloudImagePart;
 
+export interface CloudToolCallFunction {
+  name: string;
+  arguments: string;
+}
+
+export interface CloudToolCall {
+  id: string;
+  type: string;
+  function: CloudToolCallFunction;
+}
+
 export interface CloudChatMessage {
   role: string;
   content: string | CloudContentPart[];
+  tool_call_id?: string;
+  tool_calls?: CloudToolCall[];
+  name?: string;
 }
 
 export interface CloudChatTemplateKwargs {
   enable_thinking: boolean;
+}
+
+export interface CloudChatToolFunctionDefinition {
+  name: string;
+  description: string;
+  parameters: Object;
+  strict?: boolean;
+}
+
+export interface CloudChatToolDefinition {
+  type: string;
+  function: CloudChatToolFunctionDefinition;
 }
 
 export interface CloudChatCompletionOptions {
@@ -83,6 +111,24 @@ export interface CloudChatCompletionOptions {
   min_p?: number;
   presence_penalty?: number;
   repetition_penalty?: number;
+  tools?: CloudChatToolDefinition[];
+  toolChoice?: string;
+}
+
+export type CloudChatStreamDeltaHandler = (delta: string) => void;
+
+export interface CloudChatCompletionStreamCallbacks {
+  onContentDelta?: CloudChatStreamDeltaHandler;
+}
+
+export interface CloudChatStreamDiagnostics {
+  responseCode: number;
+  receivedBytes: number;
+  sseLineCount: number;
+  contentDeltaChars: number;
+  reasoningDeltaChars: number;
+  toolCallCount: number;
+  rawPreview: string;
 }
 
 interface CloudChatRequest {
@@ -97,6 +143,8 @@ interface CloudChatRequest {
   presence_penalty?: number;
   repetition_penalty?: number;
   chat_template_kwargs?: CloudChatTemplateKwargs;
+  tools?: CloudChatToolDefinition[];
+  tool_choice?: string;
 }
 
 interface CloudChatOptions {
@@ -110,15 +158,73 @@ interface CloudChatOptions {
 }
 
 interface CloudChatMessageResult {
-  content: string;
+  role?: string;
+  content?: string | null;
+  tool_calls?: CloudToolCall[];
 }
 
 interface CloudChatChoice {
   message: CloudChatMessageResult;
+  finish_reason?: string;
 }
 
 interface CloudChatResponse {
   choices: CloudChatChoice[];
+}
+
+interface CloudErrorDetail {
+  message?: string;
+  type?: string;
+  code?: string | number | null;
+}
+
+interface CloudErrorResponse {
+  error?: string | CloudErrorDetail;
+  message?: string;
+  detail?: string;
+}
+
+export interface CloudStreamToolCallFunctionDelta {
+  name?: string | null;
+  arguments?: string | null;
+}
+
+export interface CloudStreamToolCallDelta {
+  index?: number | null;
+  id?: string | null;
+  type?: string | null;
+  function?: CloudStreamToolCallFunctionDelta | null;
+}
+
+interface CloudStreamChoiceDelta {
+  content?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string | null;
+  tool_calls?: CloudStreamToolCallDelta[] | null;
+}
+
+interface CloudStreamChoice {
+  delta?: CloudStreamChoiceDelta;
+  finish_reason?: string | null;
+}
+
+interface CloudStreamResponse {
+  choices?: CloudStreamChoice[];
+}
+
+export interface CloudChatStreamChunk {
+  contentDelta: string;
+  reasoningDelta: string;
+  toolCallDeltas: CloudStreamToolCallDelta[];
+  finishReason: string;
+  done: boolean;
+}
+
+export interface CloudChatCompletionResult {
+  content: string;
+  toolCalls: CloudToolCall[];
+  finishReason: string;
+  assistantMessage: CloudChatMessage;
 }
 
 interface CloudEmbeddingRequest {
@@ -245,11 +351,11 @@ export class CloudModelClient {
     return url + '/v1/embeddings';
   }
 
-  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
+  private buildChatRequestBody(options: CloudChatCompletionOptions, stream: boolean = false): CloudChatRequest {
     let requestBody: CloudChatRequest = {
       messages: options.messages,
       temperature: options.temperature,
-      stream: false
+      stream: stream
     };
     if (options.maxTokens !== undefined) {
       requestBody.max_tokens = options.maxTokens;
@@ -275,6 +381,239 @@ export class CloudModelClient {
     if (options.chatTemplateKwargs !== undefined) {
       requestBody.chat_template_kwargs = options.chatTemplateKwargs;
     }
+    if (options.tools !== undefined && options.tools.length > 0) {
+      requestBody.tools = options.tools;
+      if (options.toolChoice !== undefined && options.toolChoice.length > 0) {
+        requestBody.tool_choice = options.toolChoice;
+      }
+    }
+    return requestBody;
+  }
+
+  static parseChatCompletionStreamDataLine(line: string): CloudChatStreamChunk {
+    let emptyChunk: CloudChatStreamChunk = {
+      contentDelta: '',
+      reasoningDelta: '',
+      toolCallDeltas: [],
+      finishReason: '',
+      done: false
+    };
+    let trimmed = line.trim();
+    if (trimmed.length === 0 || !trimmed.startsWith('data:')) {
+      return emptyChunk;
+    }
+    let payload = trimmed.substring(5).trim();
+    if (payload === '[DONE]') {
+      return {
+        contentDelta: '',
+        reasoningDelta: '',
+        toolCallDeltas: [],
+        finishReason: '',
+        done: true
+      };
+    }
+    let parsed: CloudStreamResponse;
+    try {
+      parsed = parseJsonCompat<CloudStreamResponse>(payload);
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Cloud stream JSON parse failed: ' + err.message);
+    }
+    let choices = parsed.choices === undefined ? [] : parsed.choices;
+    if (choices.length === 0) {
+      return emptyChunk;
+    }
+    let choice = choices[0];
+    let delta = choice.delta;
+    if (delta === undefined) {
+      return {
+        contentDelta: '',
+        reasoningDelta: '',
+        toolCallDeltas: [],
+        finishReason: choice.finish_reason === undefined || choice.finish_reason === null ? '' : choice.finish_reason,
+        done: false
+      };
+    }
+    let rawContent = delta.content;
+    let reasoningContent = delta.reasoning_content === undefined ? delta.reasoning : delta.reasoning_content;
+    return {
+      contentDelta: typeof rawContent === 'string' ? rawContent : '',
+      reasoningDelta: typeof reasoningContent === 'string' ? reasoningContent : '',
+      toolCallDeltas: Array.isArray(delta.tool_calls) ? delta.tool_calls.slice() : [],
+      finishReason: choice.finish_reason === undefined || choice.finish_reason === null ? '' : choice.finish_reason,
+      done: false
+    };
+  }
+
+  static parseChatCompletionResponseText(text: string): CloudChatCompletionResult {
+    let parsed: CloudChatResponse;
+    try {
+      parsed = parseJsonCompat<CloudChatResponse>(text);
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Cloud response JSON parse failed: ' + err.message);
+    }
+    let choices = parsed.choices === undefined ? [] : parsed.choices;
+    if (choices.length === 0) {
+      throw new Error('Cloud response has no choices');
+    }
+    let choice = choices[0];
+    let message = choice.message;
+    let rawContent = message.content;
+    let content = typeof rawContent === 'string' ? rawContent : '';
+    let toolCalls = message.tool_calls === undefined ? [] : message.tool_calls.slice();
+    let assistantMessage: CloudChatMessage = {
+      role: 'assistant',
+      content: content,
+      tool_calls: toolCalls
+    };
+    return {
+      content: content,
+      toolCalls: toolCalls,
+      finishReason: choice.finish_reason === undefined ? '' : choice.finish_reason,
+      assistantMessage: assistantMessage
+    };
+  }
+
+  private static previewTextForLog(text: string, maxLength: number): string {
+    let normalizedMaxLength = maxLength <= 0 ? 512 : Math.floor(maxLength);
+    let singleLine = text.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+    if (singleLine.length <= normalizedMaxLength) {
+      return singleLine;
+    }
+    return singleLine.substring(0, normalizedMaxLength) + '...';
+  }
+
+  private static errorMessageFromNonSsePayload(text: string): string {
+    try {
+      let parsed = parseJsonCompat<CloudErrorResponse>(text);
+      let messages: string[] = [];
+      if (parsed.message !== undefined && parsed.message.length > 0) {
+        messages.push(parsed.message);
+      }
+      if (parsed.detail !== undefined && parsed.detail.length > 0) {
+        messages.push(parsed.detail);
+      }
+      let errorField = parsed.error;
+      if (typeof errorField === 'string' && errorField.length > 0) {
+        messages.push(errorField);
+      } else if (errorField !== undefined && errorField !== null && typeof errorField === 'object' &&
+        !Array.isArray(errorField)) {
+        let detail = errorField as CloudErrorDetail;
+        if (detail.message !== undefined && detail.message.length > 0) {
+          messages.push(detail.message);
+        }
+        if (detail.type !== undefined && detail.type.length > 0) {
+          messages.push('type=' + detail.type);
+        }
+        if (detail.code !== undefined && detail.code !== null) {
+          messages.push('code=' + String(detail.code));
+        }
+      }
+      return messages.join(', ');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // 在 stream=true 时，错误场景不会返回 SSE，而是直接返回普通 JSON。
+  // 该兜底优先尝试按非流式 chat completion 解析；失败时再抽取 error/message，避免上层只看到空回复。
+  static parseNonSseStreamFallbackResponse(text: string): CloudChatCompletionResult {
+    let trimmed = text.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Cloud stream returned empty non-SSE response.');
+    }
+    try {
+      return CloudModelClient.parseChatCompletionResponseText(trimmed);
+    } catch (e) {
+      let err = e as Error;
+      let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(trimmed);
+      if (errorMessage.length > 0) {
+        throw new Error(errorMessage);
+      }
+      throw new Error('Cloud stream returned non-SSE response: ' +
+        CloudModelClient.previewTextForLog(trimmed, 512) + '; parse failed: ' + err.message);
+    }
+  }
+
+  static formatStreamDiagnosticsForLog(diagnostics: CloudChatStreamDiagnostics): string {
+    return 'status=' + String(diagnostics.responseCode) +
+      ', bytes=' + String(diagnostics.receivedBytes) +
+      ', sse_lines=' + String(diagnostics.sseLineCount) +
+      ', content_delta_chars=' + String(diagnostics.contentDeltaChars) +
+      ', reasoning_delta_chars=' + String(diagnostics.reasoningDeltaChars) +
+      ', tool_calls=' + String(diagnostics.toolCallCount) +
+      ', raw_preview=' + diagnostics.rawPreview;
+  }
+
+  private static streamStringDelta(value: string | null | undefined): string {
+    return typeof value === 'string' ? value : '';
+  }
+
+  // 流式工具调用会分片返回，并且部分 OpenAI-compatible 服务会把暂未产生的字段置为 null。
+  // 这里集中做空值归一化，避免在 HTTP dataReceive 回调中访问 null.length 导致 JS crash。
+  static applyStreamToolCallDeltas(toolCalls: CloudToolCall[], deltas: CloudStreamToolCallDelta[]): void {
+    for (let i = 0; i < deltas.length; i++) {
+      let delta = deltas[i];
+      if (delta === undefined || delta === null) {
+        continue;
+      }
+      let index = typeof delta.index === 'number' && delta.index >= 0 ? Math.floor(delta.index) : 0;
+      while (toolCalls.length <= index) {
+        toolCalls.push({
+          id: '',
+          type: 'function',
+          function: {
+            name: '',
+            arguments: ''
+          }
+        });
+      }
+      let target = toolCalls[index];
+      let deltaId = CloudModelClient.streamStringDelta(delta.id);
+      if (deltaId.length > 0) {
+        target.id = deltaId;
+      }
+      let deltaType = CloudModelClient.streamStringDelta(delta.type);
+      if (deltaType.length > 0) {
+        target.type = deltaType;
+      }
+      if (delta.function !== undefined && delta.function !== null) {
+        let functionName = CloudModelClient.streamStringDelta(delta.function.name);
+        if (functionName.length > 0) {
+          target.function.name = functionName;
+        }
+        let functionArguments = CloudModelClient.streamStringDelta(delta.function.arguments);
+        if (functionArguments.length > 0) {
+          target.function.arguments += functionArguments;
+        }
+      }
+      toolCalls[index] = target;
+    }
+  }
+
+  private static compactStreamToolCalls(toolCalls: CloudToolCall[]): CloudToolCall[] {
+    let compacted: CloudToolCall[] = [];
+    for (let i = 0; i < toolCalls.length; i++) {
+      let call = toolCalls[i];
+      let hasPayload = call.id.length > 0 || call.function.name.length > 0 || call.function.arguments.length > 0;
+      if (!hasPayload) {
+        continue;
+      }
+      compacted.push({
+        id: call.id.length > 0 ? call.id : 'stream-tool-call-' + String(i + 1),
+        type: call.type.length > 0 ? call.type : 'function',
+        function: {
+          name: call.function.name,
+          arguments: call.function.arguments
+        }
+      });
+    }
+    return compacted;
+  }
+
+  async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
+    let requestBody = this.buildChatRequestBody(options);
 
     let headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -296,17 +635,7 @@ export class CloudModelClient {
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
-      let parsed: CloudChatResponse;
-      try {
-        parsed = ArkJSON.parse(response.result as string) as CloudChatResponse;
-      } catch (e) {
-        let err = e as Error;
-        throw new Error('Cloud response JSON parse failed: ' + err.message);
-      }
-      if (parsed.choices.length === 0) {
-        throw new Error('Cloud response has no choices');
-      }
-      return parsed.choices[0].message.content;
+      return CloudModelClient.parseChatCompletionResponseText(response.result as string);
     } catch (e) {
       let err = e as Error;
       throw err;
@@ -314,6 +643,258 @@ export class CloudModelClient {
       this.unregisterActiveRequest(httpReq);
       httpReq.destroy();
     }
+  }
+
+  async chatCompletionStream(options: CloudChatCompletionOptions,
+    callbacks: CloudChatCompletionStreamCallbacks = {}): Promise<CloudChatCompletionResult> {
+    let requestBody = this.buildChatRequestBody(options, true);
+    let headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + (options.apiKey.length > 0 ? options.apiKey : 'EMPTY')
+    };
+    let requestOptions: http.HttpRequestOptions = {
+      method: http.RequestMethod.POST,
+      header: headers,
+      extraData: ArkJSON.stringify(requestBody),
+      connectTimeout: 10000,
+      readTimeout: options.readTimeout === undefined ? 120000 : options.readTimeout
+    };
+
+    let httpReq = http.createHttp();
+    this.registerActiveRequest(httpReq);
+    return new Promise<CloudChatCompletionResult>((resolve, reject) => {
+      let self = this;
+      let resolved = false;
+      let textBuffer = '';
+      let rawResponseText = '';
+      let rawResponseTruncated = false;
+      let contentParts: string[] = [];
+      let toolCalls: CloudToolCall[] = [];
+      let finishReason = '';
+      let separateReasoningOpen = false;
+      let responseCode = -1;
+      let receivedBytes = 0;
+      let sseLineCount = 0;
+      let contentDeltaChars = 0;
+      let reasoningDeltaChars = 0;
+      let finishResultPending = false;
+      let textDecoder = util.TextDecoder.create('utf-8');
+      const MAX_RAW_RESPONSE_CHARS: number = 200000;
+
+      let cleanup = (): void => {
+        httpReq.off('dataReceive');
+        httpReq.off('dataEnd');
+        self.unregisterActiveRequest(httpReq);
+        try {
+          httpReq.destroy();
+        } catch (e) {
+          AppLogger.warnCause('CloudModel', 'destroy stream request failed', e as Error);
+        }
+      };
+      let appendRawResponseText = (text: string): void => {
+        if (rawResponseText.length >= MAX_RAW_RESPONSE_CHARS) {
+          rawResponseTruncated = true;
+          return;
+        }
+        let remaining = MAX_RAW_RESPONSE_CHARS - rawResponseText.length;
+        if (text.length <= remaining) {
+          rawResponseText += text;
+          return;
+        }
+        rawResponseText += text.substring(0, remaining);
+        rawResponseTruncated = true;
+      };
+      let buildDiagnostics = (toolCallCountOverride?: number): CloudChatStreamDiagnostics => {
+        let rawPreview = CloudModelClient.previewTextForLog(rawResponseText, 512);
+        if (rawResponseTruncated) {
+          rawPreview += '...<truncated>';
+        }
+        return {
+          responseCode: responseCode,
+          receivedBytes: receivedBytes,
+          sseLineCount: sseLineCount,
+          contentDeltaChars: contentDeltaChars,
+          reasoningDeltaChars: reasoningDeltaChars,
+          toolCallCount: toolCallCountOverride === undefined ?
+            CloudModelClient.compactStreamToolCalls(toolCalls).length : toolCallCountOverride,
+          rawPreview: rawPreview
+        };
+      };
+      let diagnosticsForLog = (toolCallCountOverride?: number): string => {
+        return CloudModelClient.formatStreamDiagnosticsForLog(buildDiagnostics(toolCallCountOverride));
+      };
+      let httpStatusErrorMessage = (code: number): string => {
+        let errorMessage = CloudModelClient.errorMessageFromNonSsePayload(rawResponseText.trim());
+        if (errorMessage.length > 0) {
+          return 'Cloud HTTP ' + String(code) + ': ' + errorMessage;
+        }
+        return 'Cloud HTTP ' + String(code);
+      };
+      let emitRawDelta = (delta: string): void => {
+        if (delta.length === 0) {
+          return;
+        }
+        contentParts.push(delta);
+        if (callbacks.onContentDelta !== undefined) {
+          callbacks.onContentDelta(delta);
+        }
+      };
+      let closeSeparateReasoning = (): void => {
+        if (!separateReasoningOpen) {
+          return;
+        }
+        separateReasoningOpen = false;
+        emitRawDelta('</think>\n\n');
+      };
+      let finishWithResult = (): void => {
+        if (resolved) {
+          return;
+        }
+        if (responseCode < 0) {
+          finishResultPending = true;
+          return;
+        }
+        finishResultPending = false;
+        if (sseLineCount === 0 && rawResponseText.trim().length > 0) {
+          try {
+            let fallbackResult = CloudModelClient.parseNonSseStreamFallbackResponse(rawResponseText);
+            resolved = true;
+            cleanup();
+            AppLogger.warn('CloudModel', 'chat stream received non-SSE response, fallback parsed: ' +
+              diagnosticsForLog(fallbackResult.toolCalls.length));
+            resolve(fallbackResult);
+          } catch (e) {
+            let err = e as Error;
+            finishWithError('Cloud stream non-SSE response: ' + err.message);
+          }
+          return;
+        }
+        closeSeparateReasoning();
+        resolved = true;
+        let content = contentParts.join('');
+        let finalToolCalls = CloudModelClient.compactStreamToolCalls(toolCalls);
+        cleanup();
+        if (content.length === 0 && finalToolCalls.length === 0) {
+          AppLogger.warn('CloudModel', 'chat stream completed without content or tool calls: ' +
+            diagnosticsForLog(finalToolCalls.length));
+        } else {
+          AppLogger.info('CloudModel', 'chat stream completed: ' + diagnosticsForLog(finalToolCalls.length));
+        }
+        resolve({
+          content: content,
+          toolCalls: finalToolCalls,
+          finishReason: finishReason,
+          assistantMessage: {
+            role: 'assistant',
+            content: content,
+            tool_calls: finalToolCalls
+          }
+        });
+      };
+      let finishWithError = (message: string): void => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        cleanup();
+        AppLogger.warn('CloudModel', 'chat stream failed: ' + message + '; ' + diagnosticsForLog());
+        reject(new Error(message));
+      };
+      let decodeStreamData = (data: ArrayBuffer): string => {
+        try {
+          return textDecoder.decodeWithStream(new Uint8Array(data));
+        } catch (e) {
+          return decodeUtf8Compat(new Uint8Array(data));
+        }
+      };
+      let processStreamLine = (line: string): void => {
+        if (resolved) {
+          return;
+        }
+        try {
+          if (line.trim().startsWith('data:')) {
+            sseLineCount += 1;
+          }
+          let chunk = CloudModelClient.parseChatCompletionStreamDataLine(line);
+          if (chunk.done) {
+            finishWithResult();
+            return;
+          }
+          if (chunk.finishReason.length > 0) {
+            finishReason = chunk.finishReason;
+          }
+          if (chunk.toolCallDeltas.length > 0) {
+            CloudModelClient.applyStreamToolCallDeltas(toolCalls, chunk.toolCallDeltas);
+          }
+          if (chunk.reasoningDelta.length > 0) {
+            reasoningDeltaChars += chunk.reasoningDelta.length;
+            if (!separateReasoningOpen) {
+              separateReasoningOpen = true;
+              emitRawDelta('<think>');
+            }
+            emitRawDelta(chunk.reasoningDelta);
+          }
+          if (chunk.contentDelta.length > 0) {
+            contentDeltaChars += chunk.contentDelta.length;
+            closeSeparateReasoning();
+            emitRawDelta(chunk.contentDelta);
+          }
+        } catch (e) {
+          let err = e as Error;
+          finishWithError(err.message);
+          return;
+        }
+      };
+      let processBufferedText = (flushRemaining: boolean): void => {
+        while (!resolved) {
+          let newlineIndex = textBuffer.indexOf('\n');
+          if (newlineIndex < 0) {
+            break;
+          }
+          let line = textBuffer.substring(0, newlineIndex);
+          textBuffer = textBuffer.substring(newlineIndex + 1);
+          processStreamLine(line);
+        }
+        if (flushRemaining && !resolved && textBuffer.trim().length > 0) {
+          let line = textBuffer;
+          textBuffer = '';
+          processStreamLine(line);
+        }
+      };
+
+      httpReq.on('dataReceive', (data: ArrayBuffer) => {
+        if (resolved) {
+          return;
+        }
+        receivedBytes += data.byteLength;
+        let decodedText = decodeStreamData(data);
+        appendRawResponseText(decodedText);
+        textBuffer += decodedText;
+        processBufferedText(false);
+      });
+      httpReq.on('dataEnd', () => {
+        processBufferedText(true);
+        finishWithResult();
+      });
+      httpReq.requestInStream(this.normalizeChatUrl(options.baseUrl), requestOptions).then((code: number) => {
+        responseCode = code;
+        AppLogger.info('CloudModel', 'chat stream response status: ' + diagnosticsForLog());
+        if (code < 200 || code >= 300) {
+          finishWithError(httpStatusErrorMessage(code));
+          return;
+        }
+        if (finishResultPending) {
+          finishWithResult();
+        }
+      }).catch((e: Error) => {
+        finishWithError(e.message);
+      });
+    });
+  }
+
+  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
+    let result = await this.chatCompletion(options);
+    return result.content;
   }
 
   private async chatMessages(baseUrl: string, messages: CloudChatMessage[], apiKey: string,

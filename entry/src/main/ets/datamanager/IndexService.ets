@@ -27,6 +27,7 @@ import {
   NumberMap,
   StringArrayMap,
   StringMap,
+  createJsonMap,
   createDataManagerProgress,
   createStringMap
 } from './DataManagerTypes';
@@ -56,7 +57,14 @@ import {
   stableUniqueNumbers,
   summarizeText
 } from './DataManagerUtils';
-import { workflowSceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import {
+  memorySceneConfigs,
+  normalizeMemorySceneId,
+  normalizeMemorySceneIds,
+  workflowSceneConfigs,
+  WorkflowSceneConfig
+} from '../utils/WorkflowSceneConfig';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 
 export interface IndexBuildResult {
   sourceFiles: number;
@@ -122,6 +130,7 @@ type TemporalDocumentMap = Record<string, TemporalDocument>;
 type ProfileDomainMap = Record<string, ProfileDomainState>;
 
 const DEFAULT_INDEX_SOURCE_CONCURRENCY: number = 4;
+const EVENT_PARTITION_INDEX_FILE_NAME: string = 'partition-index.json';
 
 interface InvertedDocument {
   postings: StringArrayMap;
@@ -143,6 +152,18 @@ interface HomeTodoDocument {
   deadline_postings: StringArrayMap;
   no_deadline_event_ids: string[];
   type_postings: StringArrayMap;
+}
+
+interface QueryTimeScope {
+  hasTime: boolean;
+  lower: string;
+  upper: string;
+}
+
+interface EventPartitionIndex {
+  schema: string;
+  generated_at: string;
+  partition_files: string[];
 }
 
 interface EntityDefinition {
@@ -222,6 +243,23 @@ export function isRecentNoDeadlineHomeTodoEvent(eventDate: string, today: string
   let days = Math.max(0, recentDays);
   let recentLowerBoundExclusive = addDays(today, -days);
   return eventDate > recentLowerBoundExclusive;
+}
+
+export function monthLastDateForTemporalIndex(month: string): string {
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return month + '-31';
+  }
+  let year = Number(month.substring(0, 4));
+  let monthNumber = Number(month.substring(5, 7));
+  if (isNaN(year) || isNaN(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+    return month + '-31';
+  }
+  return new Date(Date.UTC(year, monthNumber, 0)).toISOString().substring(0, 10);
+}
+
+export function normalizeQueryKeywordOperator(value?: string): string {
+  let normalized = normalizeFreeText(value === undefined ? '' : value).toLowerCase();
+  return normalized === 'or' ? 'or' : 'and';
 }
 
 function hasAnySceneId(eventSceneIds: number[], selectedSceneIds: number[]): boolean {
@@ -310,7 +348,7 @@ export class IndexService {
 
   async build(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback): Promise<IndexBuildResult> {
     this.paths.ensureBaseDirs();
-    let statePaths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
+    let statePaths = this.loadOutputStatePaths();
     this.emitProgress(progress, '索引', `发现 ${statePaths.length} 个整理文件`, 0, Math.max(1, statePaths.length), 62);
     dataManagerInfo(`Index build start: stateFiles=${statePaths.length}, outputsRoot=${this.paths.outputsRoot}, modelEnabled=${modelConfig.enabled}`);
     if (statePaths.length === 0) {
@@ -371,6 +409,31 @@ export class IndexService {
       profileClaimCount: profile.claim_count,
       updatedAt: profile.generated_at
     };
+  }
+
+  private loadOutputStatePaths(): string[] {
+    let paths = this.storage.findFiles(this.paths.outputsRoot, '.md.state.json');
+    paths = paths.concat(this.outputStatePathsFromIndex());
+    return stableUnique(paths)
+      .filter((path: string) => path.endsWith('.md.state.json') && this.storage.exists(path))
+      .sort();
+  }
+
+  private outputStatePathsFromIndex(): string[] {
+    let payload = this.storage.readJson<JsonMap>(this.storage.join(this.paths.outputsRoot, 'state-index.json'), createJsonMap());
+    let value = payload['state_paths'];
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    let paths: string[] = [];
+    (value as string[]).forEach((item: string) => {
+      let relativePath = normalizeFreeText(item);
+      if (relativePath.length > 0) {
+        paths.push(this.storage.join(this.paths.outputsRoot, relativePath));
+      }
+    });
+    // 读取整理阶段写出的产物清单，补足单测/沙箱环境无法递归枚举目录时的 state 文件来源。
+    return paths;
   }
 
   private async buildSourcesConcurrently(statePaths: string[], previousManifest: IndexManifest,
@@ -512,18 +575,17 @@ export class IndexService {
 
   queryWithEvents(options: QueryOptions, events: Record<string, IndexedEvent>): QueryResult {
     let ids = Object.keys(events);
-    dataManagerInfo(`Index query: events=${ids.length}, keywords=${options.keywords.join(',')}, domains=${options.domains.join(',')}, limit=${options.limit}`);
+    let keywordOperator = normalizeQueryKeywordOperator(options.keywordOperator);
+    let timeScope = this.queryTimeScope(options);
+    let includeTodoDeadline = this.includeTodoDeadlineInTimeRange(options, timeScope);
+    dataManagerInfo(`Index query: events=${ids.length}, keywords=${options.keywords.join(',')}, keywordOperator=${keywordOperator}, domains=${options.domains.join(',')}, limit=${options.limit}`);
     let matching: BooleanMap = {};
     ids.forEach((id: string) => matching[id] = true);
 
-    if (options.date.length > 0) {
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date === options.date);
-    } else if (options.month.length > 0) {
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date.startsWith(options.month + '-'));
-    } else if (options.startDate.length > 0 || options.endDate.length > 0) {
-      let lower = options.startDate.length > 0 ? options.startDate : '0000-01-01';
-      let upper = options.endDate.length > 0 ? options.endDate : '9999-12-31';
-      ids.forEach((id: string) => matching[id] = matching[id] && events[id].event_date >= lower && events[id].event_date <= upper);
+    if (timeScope.hasTime) {
+      ids.forEach((id: string) => {
+        matching[id] = matching[id] && this.eventMatchesTimeScope(events[id], timeScope, includeTodoDeadline);
+      });
     }
 
     if (options.keywords.length > 0) {
@@ -531,11 +593,23 @@ export class IndexService {
       let sourceDocument = this.storage.readJson<SourceDocument>(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.emptySourceDocument());
       let invertedPostings = inverted.postings || {};
       let sourcePostings = sourceDocument.postings || {};
+      let keywordMatches: BooleanMap = {};
+      if (keywordOperator === 'and') {
+        ids.forEach((id: string) => keywordMatches[id] = true);
+      }
       for (let keyword of options.keywords) {
         let contentIds = this.indexedTextMatchIds(keyword, events, invertedPostings, eventSearchText);
         let sourceIds = this.indexedTextMatchIds(keyword, events, sourcePostings, sourceSearchText);
-        ids.forEach((id: string) => matching[id] = matching[id] && (contentIds[id] === true || sourceIds[id] === true));
+        ids.forEach((id: string) => {
+          let matched = contentIds[id] === true || sourceIds[id] === true;
+          if (keywordOperator === 'or') {
+            keywordMatches[id] = keywordMatches[id] === true || matched;
+          } else {
+            keywordMatches[id] = keywordMatches[id] === true && matched;
+          }
+        });
       }
+      ids.forEach((id: string) => matching[id] = matching[id] && keywordMatches[id] === true);
     }
 
     if (options.domains.length > 0) {
@@ -548,12 +622,12 @@ export class IndexService {
       ids.forEach((id: string) => matching[id] = matching[id] && domainIds[id] === true);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let selectedScenes = this.setFromNumbers(workflowSceneIds);
       ids.forEach((id: string) => {
         let sceneMatch = false;
-        (events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
+        normalizeMemorySceneIds(events[id].workflow_scene_ids || []).forEach((sceneId: number) => {
           if (selectedScenes[String(sceneId)] === true) {
             sceneMatch = true;
           }
@@ -571,8 +645,10 @@ export class IndexService {
       .filter((id: string) => matching[id])
       .map((id: string) => events[id])
       .sort((left: IndexedEvent, right: IndexedEvent) => {
-        if (left.event_date !== right.event_date) {
-          return right.event_date.localeCompare(left.event_date);
+        let leftSortDate = this.querySortDate(left, includeTodoDeadline);
+        let rightSortDate = this.querySortDate(right, includeTodoDeadline);
+        if (leftSortDate !== rightSortDate) {
+          return rightSortDate.localeCompare(leftSortDate);
         }
         return right.event_id.localeCompare(left.event_id);
       });
@@ -591,13 +667,12 @@ export class IndexService {
   loadEvents(): EventMap {
     let result: EventMap = {};
     let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
-    this.storage.listDir(eventDir)
-      .filter((name: string) => name.endsWith('.json'))
+    this.eventPartitionNames()
       .forEach((name: string) => {
         let partition = this.storage.readJson<EventPartition>(this.storage.join(eventDir, name), { month: '', events: [] });
         if (partition && Array.isArray(partition.events)) {
           partition.events.forEach((event: IndexedEvent) => {
-            result[event.event_id] = event;
+            result[event.event_id] = this.copyEvent(event);
           });
         }
       });
@@ -616,17 +691,32 @@ export class IndexService {
     let months = this.eventMonthsForIds(wanted);
     let loadedPartitions: BooleanMap = {};
     let partitionNames = months.length > 0 ? months.map((month: string) => month + '.json') :
-      this.storage.listDir(eventDir).filter((name: string) => name.endsWith('.json'));
+      this.eventPartitionNames();
     partitionNames.forEach((name: string) => {
       loadedPartitions[name] = true;
       this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result);
     });
     if (Object.keys(result).length < uniqueIds.length) {
-      this.storage.listDir(eventDir)
-        .filter((name: string) => name.endsWith('.json') && loadedPartitions[name] !== true)
+      this.eventPartitionNames()
+        .filter((name: string) => loadedPartitions[name] !== true)
         .forEach((name: string) => this.readWantedEventsFromPartition(this.storage.join(eventDir, name), wanted, result));
     }
     return result;
+  }
+
+  private eventPartitionNames(): string[] {
+    let eventDir = this.storage.join(this.paths.indexesRoot, 'events');
+    let names = this.storage.listDir(eventDir)
+      .filter((name: string) => name.endsWith('.json') && name !== EVENT_PARTITION_INDEX_FILE_NAME);
+    let partitionIndex = this.storage.readJson<JsonMap>(this.storage.join(eventDir, EVENT_PARTITION_INDEX_FILE_NAME), createJsonMap());
+    let value = partitionIndex['partition_files'];
+    if (Array.isArray(value)) {
+      names = names.concat((value as string[]).map((item: string): string => normalizeFreeText(item)));
+    }
+    // 事件分区按月写入，清单用于目录枚举不可用的环境；只保留分区文件名，排除清单自身。
+    return stableUnique(names)
+      .filter((name: string) => /^\d{4}-\d{2}\.json$/.test(name))
+      .sort();
   }
 
   loadHomeTodoCandidateEvents(today: string, noDeadlineRecentDays: number): EventMap {
@@ -652,9 +742,14 @@ export class IndexService {
 
   private queryCandidateIds(options: QueryOptions): string[] {
     let candidate: BooleanMap | null = null;
+    let timeScope = this.queryTimeScope(options);
     let temporalIds = this.temporalCandidateIds(options);
     if (temporalIds !== null) {
-      candidate = this.intersectCandidate(candidate, temporalIds);
+      let timeIds = temporalIds;
+      if (this.includeTodoDeadlineInTimeRange(options, timeScope)) {
+        timeIds = this.unionCandidates(timeIds, this.todoDeadlineCandidateIds(timeScope));
+      }
+      candidate = this.intersectCandidate(candidate, timeIds);
     }
 
     if (options.keywords.length > 0) {
@@ -662,11 +757,20 @@ export class IndexService {
       let sourceDocument = this.storage.readJson<SourceDocument>(this.storage.join(this.paths.indexesRoot, 'source', 'index.json'), this.emptySourceDocument());
       let invertedPostings = inverted.postings || {};
       let sourcePostings = sourceDocument.postings || {};
+      let keywordOperator = normalizeQueryKeywordOperator(options.keywordOperator);
+      let keywordCandidate: BooleanMap | null = null;
       for (let keyword of options.keywords) {
         let keywordIds = this.keywordCandidateIds(keyword, invertedPostings, sourcePostings);
         if (keywordIds !== null) {
-          candidate = this.intersectCandidate(candidate, keywordIds);
+          if (keywordOperator === 'or') {
+            keywordCandidate = this.unionCandidates(keywordCandidate, keywordIds);
+          } else {
+            keywordCandidate = this.intersectCandidate(keywordCandidate, keywordIds);
+          }
         }
+      }
+      if (keywordCandidate !== null) {
+        candidate = this.intersectCandidate(candidate, keywordCandidate);
       }
     }
 
@@ -680,13 +784,18 @@ export class IndexService {
       candidate = this.intersectCandidate(candidate, domainIds);
     }
 
-    let workflowSceneIds = options.workflowSceneIds || [];
+    let workflowSceneIds = normalizeMemorySceneIds(options.workflowSceneIds || []);
     if (workflowSceneIds.length > 0) {
       let sceneDocument = this.storage.readJson<WorkflowSceneDocument>(this.storage.join(this.paths.indexesRoot, 'workflow-scene', 'index.json'), this.emptyWorkflowSceneDocument());
       let postings = sceneDocument.postings || {};
+      let selectedScenes = this.setFromNumbers(workflowSceneIds);
       let sceneIds: BooleanMap = {};
-      workflowSceneIds.forEach((sceneId: number) => {
-        (postings[String(sceneId)] || []).forEach((id: string) => sceneIds[id] = true);
+      Object.keys(postings).forEach((sceneKey: string) => {
+        let numericSceneId = Number(sceneKey);
+        if (isNaN(numericSceneId) || selectedScenes[String(normalizeMemorySceneId(numericSceneId))] !== true) {
+          return;
+        }
+        (postings[sceneKey] || []).forEach((id: string) => sceneIds[id] = true);
       });
       candidate = this.intersectCandidate(candidate, sceneIds);
     }
@@ -727,7 +836,8 @@ export class IndexService {
   }
 
   private temporalCandidateIds(options: QueryOptions): BooleanMap | null {
-    if (options.date.length === 0 && options.month.length === 0 && options.startDate.length === 0 && options.endDate.length === 0) {
+    let scope = this.queryTimeScope(options);
+    if (!scope.hasTime) {
       return null;
     }
     let documents = this.loadTemporalDocuments();
@@ -741,25 +851,94 @@ export class IndexService {
       let document = documents[options.month];
       return this.setFromIds(document ? (document.event_ids || []) : []);
     }
-    let lower = options.startDate.length > 0 ? options.startDate : '0000-01-01';
-    let upper = options.endDate.length > 0 ? options.endDate : '9999-12-31';
     let ids: string[] = [];
     Object.keys(documents).sort().forEach((month: string) => {
       let document = documents[month];
       let days = this.temporalDays(document);
       if (days.length === 0) {
-        if (this.monthOverlapsRange(month, lower, upper)) {
+        if (this.monthOverlapsRange(month, scope.lower, scope.upper)) {
           ids = ids.concat(document.event_ids || []);
         }
         return;
       }
       days.forEach((day: TemporalDayNode) => {
-        if (day.date >= lower && day.date <= upper) {
+        if (day.date >= scope.lower && day.date <= scope.upper) {
           ids = ids.concat(day.event_ids || []);
         }
       });
     });
     return this.setFromIds(ids);
+  }
+
+  private queryTimeScope(options: QueryOptions): QueryTimeScope {
+    if (options.date.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.date,
+        upper: options.date
+      };
+    }
+    if (options.month.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.month + '-01',
+        upper: this.monthLastDate(options.month)
+      };
+    }
+    if (options.startDate.length > 0 || options.endDate.length > 0) {
+      return {
+        hasTime: true,
+        lower: options.startDate.length > 0 ? options.startDate : '0000-01-01',
+        upper: options.endDate.length > 0 ? options.endDate : '9999-12-31'
+      };
+    }
+    return {
+      hasTime: false,
+      lower: '',
+      upper: ''
+    };
+  }
+
+  private includeTodoDeadlineInTimeRange(options: QueryOptions, scope: QueryTimeScope): boolean {
+    return options.includeTodoDeadlineInTimeRange === true && scope.hasTime;
+  }
+
+  private eventMatchesTimeScope(event: IndexedEvent, scope: QueryTimeScope, includeTodoDeadline: boolean): boolean {
+    if (!scope.hasTime) {
+      return true;
+    }
+    if (event.event_date >= scope.lower && event.event_date <= scope.upper) {
+      return true;
+    }
+    if (!includeTodoDeadline) {
+      return false;
+    }
+    let deadline = normalizeFreeText(event.todo.deadline);
+    return isIsoDate(deadline) && deadline >= scope.lower && deadline <= scope.upper;
+  }
+
+  private querySortDate(event: IndexedEvent, preferTodoDeadline: boolean): string {
+    let deadline = normalizeFreeText(event.todo.deadline);
+    if (preferTodoDeadline && isIsoDate(deadline)) {
+      return deadline;
+    }
+    return event.event_date;
+  }
+
+  private todoDeadlineCandidateIds(scope: QueryTimeScope): BooleanMap {
+    if (!scope.hasTime) {
+      return {};
+    }
+    let document = this.storage.readJson<HomeTodoDocument>(
+      this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.emptyHomeTodoDocument());
+    let ids: string[] = [];
+    let deadlinePostings = document.deadline_postings || {};
+    Object.keys(deadlinePostings).sort().forEach((deadline: string) => {
+      if (isIsoDate(deadline) && deadline >= scope.lower && deadline <= scope.upper) {
+        ids = ids.concat(deadlinePostings[deadline] || []);
+      }
+    });
+    return this.setFromIds(stableUnique(ids));
   }
 
   private eventIdsForDate(date: string, documents: TemporalDocumentMap): string[] {
@@ -826,7 +1005,7 @@ export class IndexService {
     }
     partition.events.forEach((event: IndexedEvent) => {
       if (wanted[event.event_id] === true) {
-        out[event.event_id] = event;
+        out[event.event_id] = this.copyEvent(event);
       }
     });
   }
@@ -944,9 +1123,9 @@ export class IndexService {
       tags: (event.tags || []).slice(),
       source_refs: (event.source_refs || []).slice(),
       sources: (event.sources || []).slice(),
-      workflow_scene_ids: (event.workflow_scene_ids || []).slice(),
+      workflow_scene_ids: normalizeMemorySceneIds(event.workflow_scene_ids || []),
       image_paths: (event.image_paths || []).slice(),
-      todo: this.copyTodo(event.todo),
+      todo: this.copyTodo(event.todo || this.emptyTodo()),
       keywords: (event.keywords || []).slice(),
       domains: (event.domains || []).slice(),
       entity_mentions: (event.entity_mentions || []).slice(),
@@ -1022,7 +1201,7 @@ export class IndexService {
         tags: stableUnique(record.tags || []),
         source_refs: stableUnique(record.source_refs || []),
         sources: eventSourceNames(record.source_refs || [], relativePath),
-        workflow_scene_ids: stableUniqueNumbers(record.workflow_scene_ids || []),
+        workflow_scene_ids: normalizeMemorySceneIds(stableUniqueNumbers(record.workflow_scene_ids || [])),
         image_paths: this.imagePathsForSourceRefs(record.source_refs || [], imageReferences),
         todo: this.emptyTodo(),
         keywords: [],
@@ -1318,6 +1497,7 @@ export class IndexService {
     sourceRefs.forEach((sourceRef: string) => {
       paths = paths.concat(imageReferences[sourceRef] || []);
     });
+    paths = paths.concat(GalleryMemorySync.imageRefsForSourceRefs(this.paths.filesDir, this.paths.dailyLogRoot, sourceRefs));
     return stableUnique(paths);
   }
 
@@ -1354,6 +1534,13 @@ export class IndexService {
       };
       desired[month + '.json'] = partition as Object;
     });
+    let partitionIndex: EventPartitionIndex = {
+      schema: 'datamanager-event-partition-index-v1',
+      generated_at: nowIsoLocal(),
+      partition_files: Object.keys(partitions).sort().map((month: string): string => month + '.json')
+    };
+    // 记录事件分区清单，避免查询阶段因目录枚举失败而读不到刚写入的图库事件。
+    desired[EVENT_PARTITION_INDEX_FILE_NAME] = partitionIndex as Object;
     this.storage.syncJsonDirectory(this.storage.join(this.paths.indexesRoot, 'events'), desired);
   }
 
@@ -1468,12 +1655,12 @@ export class IndexService {
 
   private buildWorkflowSceneDocument(events: EventMap): WorkflowSceneDocument {
     let postings: StringArrayMap = {};
-    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+    memorySceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
       postings[key] = [];
     });
     Object.keys(events).sort().forEach((eventId: string) => {
-      let sceneIds = stableUniqueNumbers(events[eventId].workflow_scene_ids || []);
+      let sceneIds = normalizeMemorySceneIds(stableUniqueNumbers(events[eventId].workflow_scene_ids || []));
       sceneIds.forEach((sceneId: number) => {
         let key = String(sceneId);
         if (!postings[key]) {
@@ -2121,14 +2308,7 @@ export class IndexService {
   }
 
   private monthLastDate(month: string): string {
-    let first = dateToTime(month + '-01');
-    if (first <= 0) {
-      return month + '-31';
-    }
-    let date = new Date(first);
-    let year = date.getUTCFullYear();
-    let monthIndex = date.getUTCMonth();
-    return new Date(Date.UTC(year, monthIndex + 1, 0)).toISOString().substring(0, 10);
+    return monthLastDateForTemporalIndex(month);
   }
 
   private eventDateRange(events: IndexedEvent[]): StringMap {
@@ -2241,7 +2421,7 @@ export class IndexService {
 
   private emptyWorkflowSceneDocument(): WorkflowSceneDocument {
     let postings: StringArrayMap = {};
-    workflowSceneConfigs().forEach((scene: WorkflowSceneConfig) => {
+    memorySceneConfigs().forEach((scene: WorkflowSceneConfig) => {
       let key = String(scene.sceneId);
       postings[key] = [];
     });

@@ -31,6 +31,10 @@ export function chatModeActionLabel(mode: string): string {
   return '发送';
 }
 
+export function chatDeepThinkingToggleVisible(mode: string): boolean {
+  return mode !== CHAT_MODE_LOCAL_INFERENCE;
+}
+
 export function chatInputAfterAcceptedSend(currentInput: string, accepted: boolean): string {
   return accepted ? '' : currentInput;
 }

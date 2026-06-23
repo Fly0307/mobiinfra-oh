@@ -1,13 +1,14 @@
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
-import { ConsolidationService } from './ConsolidationService';
+import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
 import { IndexService } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -35,6 +36,8 @@ import {
   ProfileClaim,
   ProfileDomainState,
   ProfileState,
+  QueryOptions,
+  QueryResult,
   RefreshSummary,
   DataManagerProgressCallback,
   NumberMap,
@@ -54,7 +57,8 @@ import {
   sourceRef,
   stableUnique,
   addDays,
-  isIsoDate
+  isIsoDate,
+  workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -79,6 +83,8 @@ function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -91,6 +97,8 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -106,6 +114,27 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
 
 export function createEmptyCollectionViewModels(): CollectionViewModel[] {
   return collectionTabSpecs().map((spec) => emptyCollectionViewModel(spec.tabIndex));
+}
+
+// 汇总页的 tabIndex 是稳定 sceneId，不保证从 0 连续递增；这里统一把 sceneId 映射到 viewModels 数组位置。
+export function collectionViewModelByTabIndex(viewModels: CollectionViewModel[], tabIndex: number): CollectionViewModel {
+  let specs = collectionTabSpecs();
+  let targetSpec = collectionTabSpecByIndex(tabIndex);
+  let targetIndex = 0;
+  for (let index = 0; index < specs.length; index++) {
+    if (specs[index].tabIndex === targetSpec.tabIndex) {
+      targetIndex = index;
+      break;
+    }
+  }
+  if (targetIndex < viewModels.length) {
+    return viewModels[targetIndex];
+  }
+  let emptyViews = createEmptyCollectionViewModels();
+  if (targetIndex < emptyViews.length) {
+    return emptyViews[targetIndex];
+  }
+  return emptyViews[0];
 }
 
 function defaultHomeDomains(): HomeDomainViewModel[] {
@@ -254,6 +283,16 @@ export class DataManagerFacade {
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
   }
 
+  hasBuiltIndexes(): boolean {
+    this.ensureReady();
+    return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json'));
+  }
+
+  queryIndexedEvents(options: QueryOptions): QueryResult {
+    this.ensureReady();
+    return this.indexService.query(options);
+  }
+
   hasDailyLogData(): boolean {
     this.ensureReady();
     let files = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
@@ -272,6 +311,7 @@ export class DataManagerFacade {
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
     dataManagerInfo(`DataManagerFacade refresh start: modelEnabled=${modelConfig.enabled}, groupingModelEnabled=${groupingConfig.enabled}, dailyRoot=${this.paths.dailyLogRoot}`);
+    GalleryMemorySync.sync(this.paths.filesDir);
     let currentSnapshot = this.buildDailyLogSnapshot();
     let previousSnapshot = this.loadDailyLogSnapshot();
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
@@ -381,7 +421,11 @@ export class DataManagerFacade {
 
   private buildDailyLogSnapshot(): DailyLogSnapshot {
     let files: DailyLogSnapshotFile[] = [];
-    this.storage.findFiles(this.paths.dailyLogRoot, '.md').forEach((path: string) => {
+    let paths = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
+    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
+    });
+    stableUnique(paths).forEach((path: string) => {
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
       let content = this.storage.readText(path, '');
       let document = parseDailyLogDocument(content);
@@ -490,7 +534,16 @@ export class DataManagerFacade {
             continue;
           }
           let ref = sourceRef(day, fileName, index);
-          let currentHash = this.storage.sha256Text(text);
+          let metadata = document.workflow_metadata;
+          let currentHash = sourceEntryProcessingHash(this.storage, {
+            source_date: day,
+            file_name: fileName,
+            entry_index: index,
+            entry_text: text,
+            workflow_metadata: metadata,
+            workflow_scene_id: workflowSceneIdFromMetadata(metadata),
+            source_ref: ref
+          });
           let previousHash = processed[ref] || '';
           let covered = previousHash.length > 0 ? previousHash === currentHash : processedRefs[ref] === true;
           if (!covered) {
@@ -593,7 +646,11 @@ export class DataManagerFacade {
     this.homeRecommendationService.pruneInactiveRecommendationsForToday();
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
-      return createEmptyHomeProfileViewModel();
+      let empty = createEmptyHomeProfileViewModel();
+      let avatar = this.avatarService.currentHomeView();
+      empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
+      empty.avatarMessageForegroundUri = avatar.avatarMessageForegroundUri;
+      return empty;
     }
     let domains = this.homeProfileDomains(profile);
     let recommendations = this.homeRecommendations();
@@ -602,6 +659,8 @@ export class DataManagerFacade {
     return {
       avatarUri: avatar.avatarUri,
       avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+      avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -652,6 +711,10 @@ export class DataManagerFacade {
 
   async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
     return this.avatarService.generate(config, request);
+  }
+
+  async saveAvatarReferencePhoto(sourceUri: string): Promise<AvatarHomeViewModel> {
+    return await this.avatarService.saveReferencePhoto(sourceUri);
   }
 
   async ensureCurrentAvatarForeground(): Promise<AvatarHomeViewModel> {
@@ -758,6 +821,7 @@ export class DataManagerFacade {
       status: '已整理',
       domain: primaryDomain,
       imageRefs: images,
+      galleryDetails: GalleryMemorySync.detailsForSourceRefs(this.paths.filesDir, this.paths.dailyLogRoot, event.source_refs || []),
       thumbnailUri: thumbnailUri
     };
     return row;

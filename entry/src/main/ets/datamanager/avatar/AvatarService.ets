@@ -1,3 +1,5 @@
+import { image } from '@kit.ImageKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { DataManagerPaths } from '../DataManagerPaths';
 import { DataManagerStorage } from '../DataManagerStorage';
 import { dataManagerWarn } from '../DataManagerLog';
@@ -73,7 +75,8 @@ export class AvatarService {
       status: 'current',
       last_error_code: '',
       last_error_message: '',
-      updated_at: latestVersion.created_at
+      updated_at: latestVersion.created_at,
+      reference_photo_path: state.reference_photo_path
     };
     // 兼容旧版本 bug：主图已写入历史版本后，派生前景抠图失败曾把状态误写为 failed。
     this.avatarStorage.saveState(recoveredState);
@@ -99,13 +102,36 @@ export class AvatarService {
     return this.avatarStorage.listVersionViewModels();
   }
 
+  currentHomeView(): AvatarHomeViewModel {
+    this.ensureReady();
+    return this.avatarStorage.currentHomeView();
+  }
+
+  async saveReferencePhoto(sourceUri: string): Promise<AvatarHomeViewModel> {
+    this.ensureReady();
+    let normalized = sourceUri.trim();
+    if (normalized.length === 0) {
+      throw new Error('请先选择参考照片');
+    }
+    // 选择器 URI 的读权限不一定长期有效，保存时转成应用沙箱内的 JPEG 缓存供下次打开复用。
+    let bytes = await this.encodeReferencePhotoToJpeg(normalized);
+    let relativePath = this.avatarStorage.saveReferencePhotoBytes(bytes, 'reference.jpg');
+    let state = this.avatarStorage.loadState();
+    state.reference_photo_path = relativePath;
+    this.avatarStorage.saveState(state);
+    return this.avatarStorage.homeViewFromState(state, this.avatarStorage.loadVersion(state.current_version_id));
+  }
+
   async ensureCurrentForeground(): Promise<AvatarHomeViewModel> {
     this.ensureReady();
     let state = this.avatarStorage.loadState();
     let currentVersion = this.avatarStorage.loadVersion(state.current_version_id);
-    if (currentVersion !== null && currentVersion.image_path.length > 0 &&
-      !this.avatarStorage.foregroundExists(currentVersion.version_id)) {
-      await this.ensureForegroundBestEffort(currentVersion);
+    if (currentVersion !== null && currentVersion.image_path.length > 0) {
+      let foregroundMissing: boolean = !this.avatarStorage.foregroundExists(currentVersion.version_id);
+      let messageForegroundMissing: boolean = !this.avatarStorage.messageForegroundExists(currentVersion.version_id);
+      if (foregroundMissing || messageForegroundMissing) {
+        await this.ensureForegroundBestEffort(currentVersion);
+      }
     }
     let latestState = this.avatarStorage.loadState();
     let latestVersion = this.avatarStorage.loadVersion(latestState.current_version_id);
@@ -140,7 +166,8 @@ export class AvatarService {
       status: 'generating',
       last_error_code: '',
       last_error_message: '',
-      updated_at: nowIsoLocal()
+      updated_at: nowIsoLocal(),
+      reference_photo_path: previousState.reference_photo_path
     };
     this.avatarStorage.saveState(generatingState);
 
@@ -191,7 +218,8 @@ export class AvatarService {
         status: 'current',
         last_error_code: '',
         last_error_message: '',
-        updated_at: createdAt
+        updated_at: createdAt,
+        reference_photo_path: previousState.reference_photo_path
       };
       this.avatarStorage.saveState(currentState);
       await this.ensureForegroundBestEffort(version);
@@ -205,7 +233,8 @@ export class AvatarService {
         status: 'failed',
         last_error_code: 'AVATAR_GENERATE_FAILED',
         last_error_message: message,
-        updated_at: nowIsoLocal()
+        updated_at: nowIsoLocal(),
+        reference_photo_path: previousState.reference_photo_path
       };
       this.avatarStorage.saveState(failedState);
       throw new Error(message);
@@ -221,6 +250,60 @@ export class AvatarService {
         avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
           'unknown foreground error'));
     }
+  }
+
+  private async encodeReferencePhotoToJpeg(uri: string): Promise<Uint8Array> {
+    let imageFile: fileIo.File | null = null;
+    let imageSource: image.ImageSource | null = null;
+    let pixelMap: image.PixelMap | null = null;
+    let packer: image.ImagePacker | null = null;
+    try {
+      imageFile = await fileIo.open(this.fileIoOpenTarget(uri), fileIo.OpenMode.READ_ONLY);
+      imageSource = image.createImageSource(imageFile.fd);
+      pixelMap = await imageSource.createPixelMap();
+      packer = image.createImagePacker();
+      let data = await packer.packToData(pixelMap, {
+        format: 'image/jpeg',
+        quality: 92
+      });
+      return new Uint8Array(data);
+    } catch (e) {
+      let err = e as Error;
+      throw err;
+    } finally {
+      if (packer !== null) {
+        try {
+          await packer.release();
+        } catch (e) {
+        }
+      }
+      if (pixelMap !== null) {
+        try {
+          await pixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (imageSource !== null) {
+        try {
+          await imageSource.release();
+        } catch (e) {
+        }
+      }
+      if (imageFile !== null) {
+        try {
+          await fileIo.close(imageFile);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  private fileIoOpenTarget(uri: string): string {
+    let normalized = uri.trim();
+    if (normalized.startsWith('file:///')) {
+      return normalized.substring('file://'.length);
+    }
+    return normalized;
   }
 
   private nextVersionId(): string {

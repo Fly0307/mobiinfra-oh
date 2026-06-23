@@ -18,6 +18,9 @@ import {
   applyIncrementalCollectionGroupAssignments,
   collectionGroupEventInputFingerprint,
   collectionGroupSourceInputFingerprint,
+  CollectionTabSpec,
+  collectionTabSpecs,
+  collectionTabSpecByIndex,
   heuristicCollectionGroups,
   normalizeCollectionGroups,
   prepareIncrementalCollectionGroups
@@ -31,11 +34,14 @@ import {
   recommendationTodoDeadlineMeta
 } from '../main/ets/datamanager/HomeRecommendationService';
 import {
+  IndexService,
   eventEnrichInputFingerprint,
   isEventEnrichInputReusable,
   isHomeTodoIndexCandidate,
   isRecentNoDeadlineHomeTodoEvent,
   isQueryResultTruncated,
+  monthLastDateForTemporalIndex,
+  normalizeQueryKeywordOperator,
   resolveQueryLimit,
   buildProfileDomainStateFromPayload,
   isProfileDomainStateReusable
@@ -47,6 +53,8 @@ import {
   shouldKeepTodoAgentTask
 } from '../main/ets/datamanager/DataPipelineModelClient';
 import {
+  collectionViewModelByTabIndex,
+  createEmptyCollectionViewModels,
   homeProfileCompleteness,
   homeProfileDomainDescription,
   homeProfileDomainFullDescription,
@@ -54,10 +62,16 @@ import {
   shouldShowHomeRecommendationInView
 } from '../main/ets/datamanager/DataManagerFacade';
 import {
+  GalleryMemorySync,
+  GalleryMemorySyncResult,
+  galleryMemorySceneIdForCategory
+} from '../main/ets/utils/gallery/GalleryMemorySync';
+import {
   AggregatedRecord,
   CandidateFact,
   CollectionGroupAssignment,
   CollectionGroupState,
+  CollectionViewModel,
   HomeRecommendationsDocument,
   HomeRecommendationState,
   HomeDomainViewModel,
@@ -65,14 +79,30 @@ import {
   IndexedEventTodo,
   HomeRecommendationPlannerEvent,
   DataManagerModelConfig,
+  CollectionGalleryDetailViewModel,
+  EventPartition,
+  JsonMap,
   ProfileClaim,
   ProfileDomainState,
   ProfileModelPayload,
   ProfileState,
+  QueryOptions,
+  QueryResult,
+  NumberedEntry,
   SourceEntry,
+  StringArrayMap,
   createJsonMap,
   createStringMap
 } from '../main/ets/datamanager/DataManagerTypes';
+import { GalleryAnalysisResult } from '../main/ets/utils/gallery/GalleryTypes';
+import {
+  memorySceneConfigs,
+  memorySceneLabel,
+  normalizeMemorySceneIds,
+  workflowSceneConfigs,
+  WorkflowSceneConfig
+} from '../main/ets/utils/WorkflowSceneConfig';
+import { parseJsonCompat, stringifyJsonCompat } from '../main/ets/utils/JsonCompat';
 import { AvatarPromptBuilder } from '../main/ets/datamanager/avatar/AvatarPromptBuilder';
 import { AvatarService } from '../main/ets/datamanager/avatar/AvatarService';
 import { AvatarStorage } from '../main/ets/datamanager/avatar/AvatarStorage';
@@ -89,6 +119,101 @@ import {
 import { DataManagerFacade } from '../main/ets/datamanager/DataManagerFacade';
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
+import { sourceEntryProcessingHash } from '../main/ets/datamanager/ConsolidationService';
+
+interface TestTemporalSummary {
+  text: string;
+  input_hash: string;
+  generation: string;
+}
+
+interface TestTemporalDocument {
+  month: string;
+  event_ids: string[];
+  summary: TestTemporalSummary;
+  weeks: Object[];
+}
+
+interface TestStringArrayDocument {
+  postings: Record<string, string[]>;
+}
+
+interface TestHomeTodoDocument {
+  deadline_postings: Record<string, string[]>;
+  no_deadline_event_ids: string[];
+  type_postings: Record<string, string[]>;
+}
+
+class MemoryDataManagerStorage extends DataManagerStorage {
+  private documents: Record<string, Object> = new Object() as Record<string, Object>;
+  private directories: Record<string, boolean> = new Object() as Record<string, boolean>;
+
+  ensureDir(path: string): void {
+    if (path.length > 0) {
+      this.directories[path] = true;
+    }
+  }
+
+  listDir(path: string): string[] {
+    let names: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let prefix = path.length > 0 ? path + '/' : '';
+    Object.keys(this.directories).forEach((directory: string) => {
+      this.addListDirChild(directory, prefix, names);
+    });
+    Object.keys(this.documents).forEach((document: string) => {
+      this.addListDirChild(document, prefix, names);
+    });
+    return Object.keys(names).sort();
+  }
+
+  readJson<T>(path: string, fallback: T): T {
+    let document = this.documents[path];
+    if (document === undefined) {
+      return fallback;
+    }
+    return document as T;
+  }
+
+  writeJsonAtomic(path: string, payload: Object): void {
+    let parent = this.dirname(path);
+    if (parent.length > 0) {
+      this.ensureDir(parent);
+    }
+    this.documents[path] = payload;
+  }
+
+  removeTree(path: string): void {
+    let nextDocuments: Record<string, Object> = new Object() as Record<string, Object>;
+    Object.keys(this.documents).forEach((document: string) => {
+      if (document !== path && !document.startsWith(path + '/')) {
+        nextDocuments[document] = this.documents[document];
+      }
+    });
+    this.documents = nextDocuments;
+    let nextDirectories: Record<string, boolean> = new Object() as Record<string, boolean>;
+    Object.keys(this.directories).forEach((directory: string) => {
+      if (directory !== path && !directory.startsWith(path + '/')) {
+        nextDirectories[directory] = this.directories[directory];
+      }
+    });
+    this.directories = nextDirectories;
+  }
+
+  private addListDirChild(path: string, prefix: string, names: Record<string, boolean>): void {
+    if (!path.startsWith(prefix)) {
+      return;
+    }
+    let rest = path.substring(prefix.length);
+    if (rest.length === 0) {
+      return;
+    }
+    let slash = rest.indexOf('/');
+    let child = slash >= 0 ? rest.substring(0, slash) : rest;
+    if (child.length > 0) {
+      names[child] = true;
+    }
+  }
+}
 
 function demoIndexedEvent(id: string, summary: string, source: string, domain: string, keyword: string): IndexedEvent {
   return {
@@ -254,6 +379,169 @@ function demoEventMap(events: IndexedEvent[]): Record<string, IndexedEvent> {
   return map;
 }
 
+function demoQueryOptions(): QueryOptions {
+  return {
+    keywords: [],
+    keywordOperator: 'and',
+    includeTodoDeadlineInTimeRange: false,
+    domains: [],
+    entities: [],
+    date: '',
+    month: '',
+    startDate: '',
+    endDate: '',
+    workflowSceneIds: [],
+    limit: 0
+  };
+}
+
+function demoIndexService(filesDir: string): IndexService {
+  let storage = new DataManagerStorage();
+  let paths = new DataManagerPaths(filesDir, storage);
+  return new IndexService(paths, storage, new DataPipelineModelClient());
+}
+
+function demoTemporalSummary(text: string): TestTemporalSummary {
+  return {
+    text: text,
+    input_hash: 'hash-' + text,
+    generation: 'test'
+  };
+}
+
+let galleryMemoryRootCounter: number = 0;
+
+interface GalleryMemoryItemsIndexDocument {
+  items: string[];
+}
+
+interface TestWorkflowSceneDocument {
+  postings: StringArrayMap;
+}
+
+interface TestEventPartitionIndex {
+  schema: string;
+  generated_at: string;
+  partition_files: string[];
+}
+
+function nextGalleryMemoryRoot(name: string): string {
+  galleryMemoryRootCounter += 1;
+  return '/tmp/gallery-memory-sync-' + name + '-' + String(new Date().getTime()) + '-' +
+    String(galleryMemoryRootCounter);
+}
+
+function galleryMemoryStorage(): DataManagerStorage {
+  return new DataManagerStorage();
+}
+
+function galleryMemoryWriteItem(root: string, result: GalleryAnalysisResult): void {
+  let storage = galleryMemoryStorage();
+  let path = root + '/gallery-log/items/' + result.date + '/' + result.id + '.json';
+  storage.writeText(path, stringifyJsonCompat(galleryMemoryResultJson(result), 2));
+  galleryMemoryUpsertIndex(root, 'gallery-log/items/' + result.date + '/' + result.id + '.json');
+}
+
+function galleryMemoryUpsertIndex(root: string, relativePath: string): void {
+  let storage = galleryMemoryStorage();
+  let indexPath = root + '/gallery-log/items-index.json';
+  let document: GalleryMemoryItemsIndexDocument = { items: [] };
+  let content = storage.readText(indexPath, '');
+  if (content.length > 0) {
+    try {
+      document = parseJsonCompat<GalleryMemoryItemsIndexDocument>(content);
+    } catch (e) {
+      document = { items: [] };
+    }
+  }
+  if (!Array.isArray(document.items)) {
+    document.items = [];
+  }
+  if (document.items.indexOf(relativePath) < 0) {
+    document.items.push(relativePath);
+  }
+  storage.writeText(indexPath, stringifyJsonCompat(document as Object, 2));
+}
+
+function galleryMemoryResultJson(result: GalleryAnalysisResult): JsonMap {
+  let record = createJsonMap();
+  record['id'] = result.id;
+  record['uri'] = result.uri;
+  record['thumbnailUri'] = result.thumbnailUri ? result.thumbnailUri : '';
+  record['title'] = result.title;
+  record['category'] = result.category;
+  record['summary'] = result.summary;
+  record['details'] = result.details as Object;
+  record['tags'] = result.tags as Object;
+  record['ocrText'] = result.ocrText;
+  record['rawModelText'] = result.rawModelText;
+  record['keywords'] = result.keywords as Object;
+  record['date'] = result.date;
+  record['embeddingRef'] = result.embeddingRef;
+  record['embeddingStatus'] = result.embeddingStatus;
+  record['embeddingDimension'] = result.embeddingDimension;
+  record['error'] = result.error;
+  if (result.latitude !== undefined) {
+    record['latitude'] = result.latitude;
+  }
+  if (result.longitude !== undefined) {
+    record['longitude'] = result.longitude;
+  }
+  if (result.exif) {
+    record['exif'] = result.exif as Object;
+  }
+  if (result.location) {
+    record['location'] = result.location as Object;
+  }
+  record['createdAt'] = result.createdAt;
+  return record;
+}
+
+function galleryMemoryItem(id: string, category: string, title: string, summary: string): GalleryAnalysisResult {
+  return {
+    id: id,
+    uri: 'file://gallery/' + id + '.jpg',
+    thumbnailUri: '',
+    title: title,
+    category: category,
+    summary: summary,
+    details: ['画面主体清晰', '包含可用于记忆的场景细节'],
+    tags: ['图库', category],
+    ocrText: 'OCR-' + id,
+    rawModelText: '',
+    keywords: ['图库'],
+    date: '2026-06-01',
+    embeddingRef: '',
+    embeddingStatus: '',
+    embeddingDimension: 0,
+    error: '',
+    latitude: 31.024267,
+    longitude: 121.437828,
+    exif: {
+      dateTimeOriginal: '2026:06:01 09:08:07',
+      deviceMake: 'Huawei',
+      deviceModel: 'Pura 80'
+    },
+    location: {
+      key: '31.024267,121.437828',
+      provider: 'amap',
+      rawLatitude: 31.024267,
+      rawLongitude: 121.437828,
+      amapLatitude: 31.024267,
+      amapLongitude: 121.437828,
+      formattedAddress: '上海市闵行区东川路 800 号',
+      province: '上海市',
+      city: '上海市',
+      district: '闵行区',
+      township: '江川路街道',
+      street: '东川路',
+      poiName: '上海交通大学',
+      updatedAt: 1760000000000
+    },
+    createdAt: 1760000000000
+  };
+}
+
 function demoCollectionGroupState(id: string, title: string, events: IndexedEvent[]): CollectionGroupState {
   let eventMap = demoEventMap(events);
   let hashes = createStringMap();
@@ -347,6 +635,284 @@ export default function dataManagerUnitTest() {
       expect(entries[1].index).assertEqual(2);
     });
 
+    it('galleryMemorySyncWritesParseableDailyLogWithMetadata', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('daily-log');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('food-001', '餐饮', '牛肉面照片', '午餐吃了牛肉面'));
+      let failed = galleryMemoryItem('failed-001', '餐饮', '失败照片', '失败摘要');
+      failed.error = 'model error';
+      galleryMemoryWriteItem(root, failed);
+      let empty = galleryMemoryItem('empty-001', '餐饮', '', '');
+      empty.details = [];
+      empty.ocrText = '';
+      galleryMemoryWriteItem(root, empty);
+
+      let result: GalleryMemorySyncResult = GalleryMemorySync.sync(root);
+
+      expect(result.scannedItemCount).assertEqual(3);
+      expect(result.exportedEntryCount).assertEqual(1);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let doc = parseDailyLogDocument(storage.readText(path, ''));
+      expect(Number(doc.workflow_metadata['task_scene_id'])).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+      expect(String(doc.workflow_metadata['source_kind'])).assertEqual('gallery');
+      expect(String(doc.workflow_metadata['gallery_category'])).assertEqual('餐饮');
+      expect(doc.latest_entry_index > 0).assertTrue();
+      let entries = parseNumberedEntries(doc.body);
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].text.indexOf('牛肉面照片') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('OCR-food-001') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncRecoversFieldsFromLegacyRawModelText', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('legacy-raw-model');
+      storage.removeTree(root);
+      let legacy = galleryMemoryItem('legacy-001', '其他', '图库图片', '{ "title": "生活记忆", "category": "餐饮", "summary": 这张图展示了与饮食相关的照片和日常使用场景。');
+      legacy.details = [];
+      legacy.tags = [];
+      legacy.rawModelText = '{\n' +
+        '  "title": "生活记忆",\n' +
+        '  "category": "餐饮",\n' +
+        '  "summary": 这张图展示了与饮食相关的照片和日常使用场景。",\n' +
+        '  "details": [\n' +
+        '    "桌上有咖啡杯和咖啡壶，表明餐饮活动",\n' +
+        '    "近期积极购入手冲咖啡器具"\n' +
+        '  ],\n' +
+        '  "tags": ["饮食", "外卖", "餐饮"]\n' +
+        '}';
+      galleryMemoryWriteItem(root, legacy);
+
+      GalleryMemorySync.sync(root);
+
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let doc = parseDailyLogDocument(storage.readText(path, ''));
+      expect(Number(doc.workflow_metadata['task_scene_id'])).assertEqual(galleryMemorySceneIdForCategory('餐饮'));
+      expect(String(doc.workflow_metadata['gallery_category'])).assertEqual('餐饮');
+      let entries = parseNumberedEntries(doc.body);
+      expect(entries.length).assertEqual(1);
+      expect(entries[0].text.indexOf('生活记忆') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('这张图展示了与饮食相关') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('手冲咖啡器具') >= 0).assertTrue();
+      expect(entries[0].text.indexOf('饮食、外卖、餐饮') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySceneConfigsKeepWorkflowScenesStable', 0, () => {
+      expect(galleryMemorySceneIdForCategory('聊天')).assertEqual(3);
+      expect(galleryMemorySceneIdForCategory('购物')).assertEqual(0);
+      expect(galleryMemorySceneIdForCategory('出行')).assertEqual(6);
+      expect(galleryMemorySceneIdForCategory('餐饮')).assertEqual(1);
+      expect(galleryMemorySceneIdForCategory('文档')).assertEqual(8);
+      expect(galleryMemorySceneIdForCategory('健康')).assertEqual(9);
+      expect(galleryMemorySceneIdForCategory('工作')).assertEqual(10);
+      expect(galleryMemorySceneIdForCategory('其他')).assertEqual(11);
+
+      expect(workflowSceneConfigs().length).assertEqual(7);
+      let memoryScenes: WorkflowSceneConfig[] = memorySceneConfigs();
+      expect(memoryScenes.length > workflowSceneConfigs().length).assertTrue();
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '餐饮').length).assertEqual(0);
+      expect(collectionTabSpecs().filter((spec: CollectionTabSpec): boolean => spec.title === '餐饮记录').length).assertEqual(0);
+      expect(memoryScenes.filter((scene: WorkflowSceneConfig): boolean => scene.label === '图库').length).assertEqual(1);
+      let foodSpec = collectionTabSpecByIndex(galleryMemorySceneIdForCategory('餐饮'));
+      expect(foodSpec.title).assertEqual('外卖记录');
+      expect(foodSpec.query.workflowSceneIds[0]).assertEqual(1);
+      expect(collectionTabSpecByIndex(7).title).assertEqual('外卖记录');
+      expect(memorySceneLabel(7)).assertEqual('外卖');
+      let normalizedLegacyScenes = normalizeMemorySceneIds([7, 1]);
+      expect(normalizedLegacyScenes.length).assertEqual(1);
+      expect(normalizedLegacyScenes[0]).assertEqual(1);
+    });
+
+    it('collectionViewModelByTabIndexUsesSceneIdInsteadOfArrayOffset', 0, () => {
+      let emptyViews: CollectionViewModel[] = createEmptyCollectionViewModels();
+
+      expect(collectionViewModelByTabIndex(emptyViews, 8).title).assertEqual('文档记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 9).title).assertEqual('健康记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 10).title).assertEqual('办公记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 11).title).assertEqual('图库记录');
+      expect(collectionViewModelByTabIndex(emptyViews, 7).title).assertEqual('外卖记录');
+    });
+
+    it('indexQueryMatchesLegacyGalleryFoodSceneSeven', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('legacy-scene-query');
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      paths.ensureBaseDirs();
+      let service = new IndexService(paths, storage, new DataPipelineModelClient());
+      let legacyEvent: IndexedEvent = demoIndexedEvent('e7', '图库餐饮记录', 'photos', 'eat', '餐饮');
+      legacyEvent.event_date = '2026-06-01';
+      legacyEvent.last_seen_date = '2026-06-01';
+      legacyEvent.workflow_scene_ids = [7];
+      let partition: EventPartition = {
+        month: '2026-06',
+        events: [legacyEvent]
+      };
+      let partitionIndex: TestEventPartitionIndex = {
+        schema: 'datamanager-event-partition-index-v1',
+        generated_at: '2026-06-18T21:07:00',
+        partition_files: ['2026-06.json']
+      };
+      let postings: StringArrayMap = {};
+      postings['7'] = ['e7'];
+      let workflowSceneDocument: TestWorkflowSceneDocument = {
+        postings: postings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'events', '2026-06.json'), partition as Object);
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'events', 'partition-index.json'), partitionIndex as Object);
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'workflow-scene', 'index.json'), workflowSceneDocument as Object);
+
+      let foodQuery: QueryResult = service.query({
+        keywords: [],
+        domains: [],
+        entities: [],
+        date: '',
+        month: '',
+        startDate: '',
+        endDate: '',
+        workflowSceneIds: [1],
+        limit: 0
+      });
+      let legacyQuery: QueryResult = service.query({
+        keywords: [],
+        domains: [],
+        entities: [],
+        date: '',
+        month: '',
+        startDate: '',
+        endDate: '',
+        workflowSceneIds: [7],
+        limit: 0
+      });
+
+      expect(foodQuery.total_events).assertEqual(1);
+      expect(foodQuery.events[0].workflow_scene_ids[0]).assertEqual(1);
+      expect(legacyQuery.total_events).assertEqual(1);
+      storage.removeTree(root);
+    });
+
+    it('sourceEntryProcessingHashChangesWhenWorkflowSceneChanges', 0, () => {
+      let storage = galleryMemoryStorage();
+      let entry: SourceEntry = {
+        source_date: '2026-06-01',
+        file_name: 'com.huawei.photos__gallery-analysis__餐饮.md',
+        entry_index: 1,
+        entry_text: '同一张餐饮图片的分析结果',
+        workflow_metadata: createJsonMap(),
+        workflow_scene_id: 7,
+        source_ref: '2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md#1'
+      };
+      let oldHash = sourceEntryProcessingHash(storage, entry);
+      entry.workflow_scene_id = galleryMemorySceneIdForCategory('餐饮');
+      let nextHash = sourceEntryProcessingHash(storage, entry);
+
+      expect(oldHash === nextHash).assertFalse();
+    });
+
+    it('galleryMemorySyncKeepsEntryIndexStableWhenNewItemsArrive', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('stable-index');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('stable-001', '餐饮', '第一张餐饮图', '第一条摘要'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__餐饮.md';
+      let firstEntries: NumberedEntry[] = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body);
+      let firstIndex: number = firstEntries[0].index;
+
+      galleryMemoryWriteItem(root, galleryMemoryItem('stable-999', '餐饮', '第二张餐饮图', '第二条摘要'));
+      GalleryMemorySync.sync(root);
+      let secondEntries: NumberedEntry[] = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body);
+      let stableEntry: NumberedEntry = secondEntries.filter((entry: NumberedEntry): boolean =>
+        entry.text.indexOf('第一张餐饮图') >= 0)[0];
+
+      expect(stableEntry.index).assertEqual(firstIndex);
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncDeletesOldExportsWhenGalleryIsEmpty', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('clear');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('clear-001', '文档', '文档截图', '一张文档截图'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__文档.md';
+      expect(storage.exists(path)).assertTrue();
+
+      storage.removeTree(root + '/gallery-log/items');
+      let result: GalleryMemorySyncResult = GalleryMemorySync.sync(root);
+
+      expect(result.exportedFileCount).assertEqual(0);
+      expect(storage.exists(path)).assertFalse();
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncResolvesImageRefsForSourceRefs', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('image-refs');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('image-001', '文档', '报告截图', '报告内容截图'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__文档.md';
+      let entry = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body)[0];
+      let refs: string[] = GalleryMemorySync.imageRefsForSourceRefs(root, root + '/workflows/daily-log',
+        ['2026-06-01/com.huawei.photos__gallery-analysis__文档.md#' + String(entry.index)]);
+
+      expect(refs.length).assertEqual(1);
+      expect(refs[0]).assertEqual('gallery-log/items/2026-06-01/image-001.json#uri');
+      storage.removeTree(root);
+    });
+
+    it('galleryMemorySyncReturnsDetailsForSourceRefs', 0, () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('details');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('detail-001', '健康', '跑步记录', '晨跑后的健康记录'));
+      GalleryMemorySync.sync(root);
+      let path = root + '/workflows/daily-log/2026-06-01/com.huawei.photos__gallery-analysis__健康.md';
+      let entry = parseNumberedEntries(parseDailyLogDocument(storage.readText(path, '')).body)[0];
+      let details: CollectionGalleryDetailViewModel[] = GalleryMemorySync.detailsForSourceRefs(root, root + '/workflows/daily-log',
+        ['2026-06-01/com.huawei.photos__gallery-analysis__健康.md#' + String(entry.index)]);
+
+      expect(details.length).assertEqual(1);
+      expect(details[0].id).assertEqual('detail-001');
+      expect(details[0].uri).assertEqual('file://gallery/detail-001.jpg');
+      expect(details[0].ocrText).assertEqual('OCR-detail-001');
+      expect(details[0].captureTime).assertEqual('2026-06-01 09:08:07');
+      expect(details[0].captureDevice).assertEqual('Huawei Pura 80');
+      expect(details[0].captureLocation).assertEqual('北纬 31.024267，东经 121.437828');
+      expect(details[0].address).assertEqual('上海市闵行区东川路 800 号');
+      expect(details[0].poiName).assertEqual('上海交通大学');
+      expect(details[0].mapUrl.indexOf('position=121.437828,31.024267') >= 0).assertTrue();
+      storage.removeTree(root);
+    });
+
+    it('dataManagerRefreshIndexesGalleryMemoryEventsWithImagesAndDetails', 0, async () => {
+      let storage = galleryMemoryStorage();
+      let root = nextGalleryMemoryRoot('facade-refresh');
+      storage.removeTree(root);
+      galleryMemoryWriteItem(root, galleryMemoryItem('health-001', '健康', '晨跑健康记录', '晨跑后保存了一张健康记录截图'));
+
+      let facade = new DataManagerFacade(root);
+      await facade.refresh(disabledModelConfig());
+      let view: CollectionViewModel = facade.loadCollectionViewModel(galleryMemorySceneIdForCategory('健康'));
+
+      expect(view.empty).assertFalse();
+      expect(view.groups.length > 0).assertTrue();
+      expect(view.groups[0].events.length > 0).assertTrue();
+      let event = view.groups[0].events[0];
+      expect(event.summary.indexOf('晨跑') >= 0).assertTrue();
+      expect(event.imageRefs.length).assertEqual(1);
+      expect(event.imageRefs[0].ref).assertEqual('gallery-log/items/2026-06-01/health-001.json#uri');
+      expect(event.imageRefs[0].uri).assertEqual('file://gallery/health-001.jpg');
+      expect(event.thumbnailUri).assertEqual('file://gallery/health-001.jpg');
+      expect(event.galleryDetails.length).assertEqual(1);
+      expect(event.galleryDetails[0].id).assertEqual('health-001');
+      expect(event.galleryDetails[0].ocrText).assertEqual('OCR-health-001');
+      storage.removeTree(root);
+    });
+
     it('sourceDisplayName', 0, () => {
       let source = sourceDisplayName('2026-05/com.tencent.wechat__01_basic_gui_task_weixin__WAIC-数据归家.md.state.json#1');
       expect(source).assertEqual('WAIC-数据归家');
@@ -368,6 +934,39 @@ export default function dataManagerUnitTest() {
       expect(xhsNames[0]).assertEqual('小红书');
     });
 
+    it('eventSourceNamesSkipsCollectorRunIdAndGalleryCategoryContext', 0, () => {
+      let wechatAutoNames = eventSourceNames(
+        ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'],
+        '2026-06/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md.state.json'
+      );
+      expect(wechatAutoNames.length).assertEqual(1);
+      expect(wechatAutoNames[0]).assertEqual('微信');
+
+      let galleryNames = eventSourceNames(
+        ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#574201189'],
+        '2026-06/com.huawei.photos__gallery-analysis__聊天.md.state.json'
+      );
+      expect(galleryNames.length).assertEqual(1);
+      expect(galleryNames[0]).assertEqual('图库');
+    });
+
+    it('eventSourceNamesUsesBusinessPackageDisplayNames', 0, () => {
+      let names = eventSourceNames([
+        '2026-06-04/com.jd.harmony__basic-gui-task.md#1',
+        '2026-06-06/com.ctrip.harmony__basic-gui-task.md#1',
+        '2026-06-04/com.sankuai.meituan__basic-gui-task.md#1',
+        '2026-06-07/com.meituan.waimai__basic-gui-task.md#1',
+        '2026-06-10/tv.danmaku.bili__basic-gui-task.md#1'
+      ], '');
+      expect(names.indexOf('京东') >= 0).assertTrue();
+      expect(names.indexOf('携程') >= 0).assertTrue();
+      expect(names.indexOf('美团') >= 0).assertTrue();
+      expect(names.indexOf('美团外卖') >= 0).assertTrue();
+      expect(names.indexOf('哔哩哔哩') >= 0).assertTrue();
+      expect(names.indexOf('harmony') < 0).assertTrue();
+      expect(names.indexOf('meituan') < 0).assertTrue();
+    });
+
     it('indexTerms', 0, () => {
       let terms = indexTerms('高德顺风车订单');
       expect(terms.indexOf('顺风') >= 0).assertTrue();
@@ -378,6 +977,20 @@ export default function dataManagerUnitTest() {
       expect(weekdayLabelFromDate('2026-06-06')).assertEqual('星期六');
       expect(weekdayLabelFromDate('bad-date')).assertEqual('');
       expect(weekdayLabelFromDate('2026-02-31')).assertEqual('');
+    });
+
+    it('monthLastDateForTemporalIndex', 0, () => {
+      expect(monthLastDateForTemporalIndex('2026-05')).assertEqual('2026-05-31');
+      expect(monthLastDateForTemporalIndex('2026-06')).assertEqual('2026-06-30');
+      expect(monthLastDateForTemporalIndex('2024-02')).assertEqual('2024-02-29');
+    });
+
+    it('normalizeQueryKeywordOperator', 0, () => {
+      expect(normalizeQueryKeywordOperator()).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('AND')).assertEqual('and');
+      expect(normalizeQueryKeywordOperator('OR')).assertEqual('or');
+      expect(normalizeQueryKeywordOperator('xor')).assertEqual('and');
     });
 
     it('profileShortSummaryNormalization', 0, () => {
@@ -605,6 +1218,259 @@ export default function dataManagerUnitTest() {
       expect(groups[0].event_ids.length).assertEqual(2);
     });
 
+    it('heuristicChatGroupsPreferWechatAutoContactOverRunId', 0, () => {
+      let xz = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务及高德相关代码/信息', '微信', 'work', 'UI');
+      xz.sources = ['微信', 'wechat-20260618T105024'];
+      xz.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      xz.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      xz.entities = ['person:小赵'];
+      let xm = demoIndexedEvent('e2', '用户于2026-06-16与联系人小铭讨论图片标签解析异常和模型参数配置', '微信', 'work', '模型');
+      xm.sources = ['微信', 'wechat-20260618T105024'];
+      xm.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#2'];
+      xm.entity_mentions = [{ type: 'person', name: '小铭', aliases: [] }];
+      xm.entities = ['person:小铭'];
+      let transfer = demoIndexedEvent('e3', '## 微信联系人「文件传输助手」当前可见页面消息采集 - 联系人：文件传输助手 - 会话标题：文件传输助手 - 消息数：0', '微信', 'other', '文件传输助手');
+      transfer.sources = ['微信', 'wechat-20260618T105024'];
+      transfer.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#4'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [xz, xm, transfer]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(groups.length).assertEqual(3);
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-UI') >= 0 || titles.indexOf('小赵-工作UI优化任务') >= 0).assertTrue();
+      expect(titles.indexOf('小铭-模型') >= 0 || titles.indexOf('小铭-图片标签解析异常') >= 0).assertTrue();
+      expect(titles.indexOf('文件传输助手-微信联系人') >= 0 || titles.indexOf('文件传输助手-聊天记录') >= 0).assertTrue();
+    });
+
+    it('normalizesChatGroupTitlesToConversationAndTopic', 0, () => {
+      let bug = demoIndexedEvent('e101', '小赵要求明天下午两点前修复bug并提交PR', '微信', 'work', 'bug');
+      bug.sources = ['微信', '小赵'];
+      bug.source_refs = ['2026-06-11/com.tencent.wechat__basic-gui-task__小赵.md#6'];
+      bug.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      bug.entities = ['person:小赵'];
+      let register = demoIndexedEvent('e102', '小赵提醒明天上午领取注册条', '微信', 'work', '领取注册条');
+      register.sources = ['微信', '小赵'];
+      register.source_refs = ['2026-06-11/com.tencent.wechat__basic-gui-task__小赵.md#7'];
+      register.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      register.entities = ['person:小赵'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [bug, register], [
+        demoCollectionGroupState('g-bug', 'Bug修复与PR', [bug]),
+        demoCollectionGroupState('g-register', '领取注册条', [register])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('小赵-Bug修复与PR') >= 0).assertTrue();
+      expect(titles.indexOf('小赵-领取注册条') >= 0).assertTrue();
+      expect(titles.indexOf('与小赵的对话') < 0).assertTrue();
+    });
+
+    it('normalizesChatTitlesWithoutUsingPlaceOrMerchantAsConversation', 0, () => {
+      let travel = demoIndexedEvent('e103', '小赵计划周末去苏州看展', '微信', 'travel', '苏州看展');
+      travel.sources = ['微信', '小赵'];
+      travel.source_refs = ['2026-06-02/com.tencent.wechat__basic-gui-task__小赵.md#3'];
+      travel.entity_mentions = [{ type: 'place', name: '苏州', aliases: [] }];
+      travel.entities = ['place:苏州'];
+      let takeout = demoIndexedEvent('e104', '小赵提及上周饿了么订单需补充发票抬头', '微信', 'other', '发票需求');
+      takeout.sources = ['微信', '小赵'];
+      takeout.source_refs = ['2026-06-02/com.tencent.wechat__basic-gui-task__小赵.md#2'];
+      takeout.entity_mentions = [{ type: 'merchant', name: '饿了么', aliases: ['饿了么订单'] }];
+      takeout.entities = ['merchant:饿了么'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [travel, takeout], [
+        demoCollectionGroupState('g-travel', '与苏州的对话', [travel]),
+        demoCollectionGroupState('g-takeout', '与饿了么的对话', [takeout])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('小赵-苏州看展') >= 0).assertTrue();
+      expect(titles.indexOf('小赵-发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('与苏州的对话') < 0).assertTrue();
+      expect(titles.indexOf('与饿了么的对话') < 0).assertTrue();
+    });
+
+    it('normalizesGroupChatTitlesToGroupAndTopic', 0, () => {
+      let hdc = demoIndexedEvent('e105', '群成员讨论HDC导入脚本，建议默认使用bundle alias路径', '微信', 'other', 'HDC脚本优化');
+      hdc.sources = ['微信', '产品群'];
+      hdc.source_refs = ['2026-06-05/com.tencent.wechat__basic-gui-task__产品群.md#4'];
+      hdc.entity_mentions = [{ type: 'place', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      hdc.entities = ['place:HDC导入脚本'];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [hdc], [
+        demoCollectionGroupState('g-hdc', '与HDC导入脚本的对话', [hdc])
+      ]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title).assertEqual('产品群-HDC脚本优化');
+    });
+
+    it('normalizesChatTitlesRejectsObjectLikeSourceDetailAndGenericContact', 0, () => {
+      let sourceObject = demoIndexedEvent('e109', '当前页面显示群成员在讨论 HDC 导入脚本，建议默认使用 bundle alias 路径。', '微信', 'other', 'HDC脚本优化');
+      sourceObject.sources = ['微信', 'HDC导入脚本'];
+      sourceObject.source_refs = ['2026-06-05/com.tencent.wechat__basic-gui-task__产品群.md#4'];
+      sourceObject.entity_mentions = [{ type: 'place', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      sourceObject.entities = ['place:HDC导入脚本'];
+      let genericMerchant = demoIndexedEvent('e110', '用户与饿了么沟通上周订单发票抬头。', '微信', 'other', '发票需求');
+      genericMerchant.sources = ['微信'];
+      genericMerchant.entity_mentions = [{ type: 'merchant', name: '饿了么', aliases: ['饿了么订单'] }];
+      genericMerchant.entities = ['merchant:饿了么'];
+      let sourcePlaceWithoutEntity = demoIndexedEvent('e111', '用户讨论苏州周末路线。', '微信', 'travel', '周末路线');
+      sourcePlaceWithoutEntity.sources = ['微信', '苏州'];
+      let sourceMerchantWithoutEntity = demoIndexedEvent('e112', '用户讨论饿了么订单发票。', '微信', 'other', '发票需求');
+      sourceMerchantWithoutEntity.sources = ['微信', '饿了么'];
+      let directMetadataObject = demoIndexedEvent('e117',
+        '微信联系人「HDC导入脚本」当前页面显示 HDC 导入脚本配置 - 联系人：HDC导入脚本 - 会话标题：HDC导入脚本',
+        '微信', 'other', '脚本配置优化');
+      directMetadataObject.sources = ['微信'];
+      directMetadataObject.entity_mentions = [{ type: 'tool', name: 'HDC导入脚本', aliases: ['脚本'] }];
+      directMetadataObject.entities = ['tool:HDC导入脚本'];
+      let legacySourcePlaceGroup = demoCollectionGroupState('g-source-place', '周末路线', [sourcePlaceWithoutEntity]);
+      legacySourcePlaceGroup.source = '苏州';
+      let legacySourceMerchantGroup = demoCollectionGroupState('g-source-merchant', '发票需求', [sourceMerchantWithoutEntity]);
+      legacySourceMerchantGroup.source = '饿了么';
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录',
+        [sourceObject, genericMerchant, sourcePlaceWithoutEntity, sourceMerchantWithoutEntity, directMetadataObject], [
+        demoCollectionGroupState('g-source-object', 'HDC脚本优化', [sourceObject]),
+        demoCollectionGroupState('g-merchant', '发票需求', [genericMerchant]),
+        legacySourcePlaceGroup,
+        legacySourceMerchantGroup,
+        demoCollectionGroupState('g-direct-object', '脚本配置优化', [directMetadataObject])
+      ]);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('HDC导入脚本-HDC脚本优化') < 0).assertTrue();
+      expect(titles.indexOf('HDC导入脚本-脚本配置优化') < 0).assertTrue();
+      expect(titles.indexOf('饿了么-发票需求') < 0).assertTrue();
+      expect(titles.indexOf('苏州-周末路线') < 0).assertTrue();
+      expect(titles.indexOf('微信-HDC脚本优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信-脚本配置优化') >= 0).assertTrue();
+      expect(titles.indexOf('微信-发票需求') >= 0).assertTrue();
+      expect(titles.indexOf('微信-周末路线') >= 0).assertTrue();
+    });
+
+    it('normalizesBusinessTabTitlesToSourceAndTopic', 0, () => {
+      let shoe = demoIndexedEvent('e106', '浏览耐克官方店铺Air Zoom Pegasus跑鞋详情', 'taobao', 'wear', '耐克跑鞋浏览');
+      shoe.sources = ['taobao'];
+      shoe.entity_mentions = [{ type: 'merchant', name: '耐克', aliases: ['Nike Official Store'] }];
+      shoe.entities = ['merchant:耐克'];
+      let takeout = demoIndexedEvent('e107', '中午在美团外卖下单黄焖鸡米饭', 'waimai', 'eat', '黄焖鸡');
+      takeout.sources = ['waimai', 'llm-takeout-美团外卖'];
+      takeout.entity_mentions = [{ type: 'merchant', name: '美团外卖', aliases: [] }];
+      takeout.entities = ['merchant:美团外卖'];
+      let video = demoIndexedEvent('e108', '浏览苏州旅行 Vlog', 'bili', 'travel', '苏州旅行Vlog');
+      video.sources = ['bili'];
+
+      let shoppingGroups = normalizeCollectionGroups('shopping', '购物记录', [shoe], [
+        demoCollectionGroupState('g-shoe', '耐克跑鞋浏览', [shoe])
+      ]);
+      let takeoutGroups = normalizeCollectionGroups('takeout', '外卖记录', [takeout], [
+        demoCollectionGroupState('g-chicken', '黄焖鸡', [takeout])
+      ]);
+      let entertainmentGroups = normalizeCollectionGroups('entertainment', '娱乐记录', [video], [
+        demoCollectionGroupState('g-vlog', '苏州旅行 Vlog', [video])
+      ]);
+
+      expect(shoppingGroups[0].title).assertEqual('淘宝-耐克跑鞋浏览');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行Vlog');
+    });
+
+    it('normalizesGroupTitleSeparatorsAfterSourcePrefixRemoval', 0, () => {
+      let video = demoIndexedEvent('e117', '浏览苏州旅行与咖啡测评视频', 'bili', 'travel', '苏州旅行与咖啡测评');
+      video.sources = ['bili'];
+      let chat = demoIndexedEvent('e118', '小赵讨论注册条领取安排', '微信', 'work', '注册条领取安排');
+      chat.sources = ['微信', '小赵'];
+      chat.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      chat.entities = ['person:小赵'];
+
+      let entertainmentGroups = normalizeCollectionGroups('entertainment', '娱乐记录', [video], [
+        demoCollectionGroupState('g-video', '哔哩哔哩：苏州旅行与咖啡测评', [video])
+      ]);
+      let chatGroups = normalizeCollectionGroups('chat', '聊天记录', [chat], [
+        demoCollectionGroupState('g-chat', '小赵：注册条领取安排', [chat])
+      ]);
+
+      expect(entertainmentGroups[0].title).assertEqual('哔哩哔哩-苏州旅行与咖啡测评');
+      expect(chatGroups[0].title).assertEqual('小赵-注册条领取安排');
+      expect(entertainmentGroups[0].title.indexOf('-：') < 0).assertTrue();
+      expect(chatGroups[0].title.indexOf('-：') < 0).assertTrue();
+    });
+
+    it('normalizesBusinessTabTitlesUsingSourceStatePackageContext', 0, () => {
+      let jd = demoIndexedEvent('e113', '京东键盘退换货', 'raw-source', 'other', '键盘退换货');
+      jd.sources = ['raw-source'];
+      jd.source_state_file = '2026-06/raw-source.md.state.json';
+      jd.source_refs = ['2026-06-04/com.jd.harmony__basic-gui-task.md#1'];
+      let ctrip = demoIndexedEvent('e114', '携程显示上海至苏州高铁票订单', 'raw-source', 'travel', '上海至苏州高铁');
+      ctrip.sources = ['raw-source'];
+      ctrip.source_state_file = '2026-06/raw-source.md.state.json';
+      ctrip.source_refs = ['2026-06-06/com.ctrip.harmony__basic-gui-task.md#1'];
+      let meituanLife = demoIndexedEvent('e115', '美团生活服务页面显示理发店和按摩店收藏', 'raw-source', 'live', '生活服务');
+      meituanLife.sources = ['raw-source'];
+      meituanLife.source_state_file = '2026-06/raw-source.md.state.json';
+      meituanLife.source_refs = ['2026-06-04/com.sankuai.meituan__basic-gui-task.md#1'];
+      let meituanTakeout = demoIndexedEvent('e116', '美团外卖订单 #88291045 已送达', 'raw-source', 'eat', '黄焖鸡');
+      meituanTakeout.sources = ['raw-source'];
+      meituanTakeout.source_state_file = '2026-06/raw-source.md.state.json';
+      meituanTakeout.source_refs = ['2026-06-07/com.sankuai.meituan__basic-gui-task__llm-takeout-Meituan.md#1'];
+
+      let shoppingGroups = normalizeCollectionGroups('shopping', '购物记录', [jd], [
+        demoCollectionGroupState('g-jd', '键盘退换货', [jd])
+      ]);
+      let travelGroups = normalizeCollectionGroups('travel', '差旅记录', [ctrip], [
+        demoCollectionGroupState('g-ctrip', '上海至苏州高铁', [ctrip])
+      ]);
+      let lifeGroups = normalizeCollectionGroups('life', '生活记录', [meituanLife], [
+        demoCollectionGroupState('g-life', '生活服务', [meituanLife])
+      ]);
+      let takeoutGroups = normalizeCollectionGroups('takeout', '外卖记录', [meituanTakeout], [
+        demoCollectionGroupState('g-takeout', '黄焖鸡', [meituanTakeout])
+      ]);
+
+      expect(shoppingGroups[0].title).assertEqual('京东-键盘退换货');
+      expect(travelGroups[0].title).assertEqual('携程-上海至苏州高铁');
+      expect(lifeGroups[0].title).assertEqual('美团-生活服务');
+      expect(takeoutGroups[0].title).assertEqual('美团外卖-黄焖鸡');
+    });
+
+    it('heuristicChatGroupsDescribeGalleryChatImagesWithoutFakeContact', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 手机桌面生活记忆记录：手机屏幕显示生活记忆，包含多个应用图标和文字信息。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('heuristicChatGroupsKeepGalleryChatAsScreenshotWhenPersonDetected', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 与联系人小赵沟通当前修复进度的微信截图。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      galleryEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      galleryEvent.entities = ['person:小赵'];
+
+      let groups = heuristicCollectionGroups('chat', '聊天记录', [galleryEvent]);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('collectionGroupFingerprintIncludesTitleSourceSignals', 0, () => {
+      let base = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      let sourceRefChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      sourceRefChanged.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let stateFileChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      stateFileChanged.source_state_file = '2026-06/com.huawei.photos__gallery-analysis__聊天.md.state.json';
+      let entityMentionChanged = demoIndexedEvent('e1', '用户查看一张聊天截图。', 'photos', 'other', '聊天记录');
+      entityMentionChanged.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+
+      let baseHash = collectionGroupEventInputFingerprint(base);
+      expect(collectionGroupEventInputFingerprint(sourceRefChanged) !== baseHash).assertTrue();
+      expect(collectionGroupEventInputFingerprint(stateFileChanged) !== baseHash).assertTrue();
+      expect(collectionGroupEventInputFingerprint(entityMentionChanged) !== baseHash).assertTrue();
+    });
+
     it('normalizeChatGroupsUsesGenericFallbackForLowInformationTitles', 0, () => {
       let events = [
         demoIndexedEvent('e1', '联系人甲讨论一个待处理事项，后续需要继续确认。', '联系人甲', 'work', '12'),
@@ -621,9 +1487,72 @@ export default function dataManagerUnitTest() {
       expect(titles.indexOf('12讨论') < 0).assertTrue();
       expect(titles.indexOf('截图讨论') < 0).assertTrue();
       expect(titles.indexOf('API讨论') < 0).assertTrue();
-      expect(titles.indexOf('与联系人甲的对话') >= 0).assertTrue();
-      expect(titles.indexOf('与联系人乙的对话') >= 0).assertTrue();
-      expect(titles.indexOf('与联系人丙的对话') >= 0).assertTrue();
+      expect(titles.indexOf('联系人甲-') >= 0).assertTrue();
+      expect(titles.indexOf('联系人乙-') >= 0).assertTrue();
+      expect(titles.indexOf('联系人丙-') >= 0).assertTrue();
+    });
+
+    it('normalizeChatGroupsRefreshesLegacyRunIdAndCategoryTitles', 0, () => {
+      let wechatEvent = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务', '微信', 'work', 'UI');
+      wechatEvent.sources = ['微信', 'wechat-20260618T105024'];
+      wechatEvent.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      wechatEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      wechatEvent.entities = ['person:小赵'];
+      let galleryEvent = demoIndexedEvent('e2', '[gallery-item:gallery_438498275] 手机桌面生活记忆记录。', 'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let candidates: CollectionGroupState[] = [
+        { group_id: 'legacy-wechat', title: '与wechat-20260618T105024的对话', source: '微信', time: '', meta: '', status: '', domain: 'work', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() },
+        { group_id: 'legacy-gallery', title: '与聊天的对话', source: 'photos', time: '', meta: '', status: '', domain: 'other', event_ids: ['e2'], source_input_hash: '', event_input_hashes: createStringMap() }
+      ];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [wechatEvent, galleryEvent], candidates);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
+    });
+
+    it('normalizeChatGroupsOverridesGalleryChatContactTitle', 0, () => {
+      let galleryEvent = demoIndexedEvent('e1',
+        '[gallery-item:gallery_438498275] 与联系人小赵沟通当前修复进度的微信截图。',
+        'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      galleryEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      galleryEvent.entities = ['person:小赵'];
+      let candidates: CollectionGroupState[] = [
+        { group_id: 'gallery-contact', title: '与小赵的对话', source: 'photos', time: '', meta: '', status: '', domain: 'other', event_ids: ['e1'], source_input_hash: '', event_input_hashes: createStringMap() }
+      ];
+
+      let groups = normalizeCollectionGroups('chat', '聊天记录', [galleryEvent], candidates);
+      expect(groups.length).assertEqual(1);
+      expect(groups[0].title.indexOf('图库聊天-') === 0 || groups[0].title.indexOf('图库-') === 0).assertTrue();
+    });
+
+    it('incrementalChatGroupsRefreshLegacyRunIdAndCategoryTitles', 0, () => {
+      let wechatEvent = demoIndexedEvent('e1', '用户于2026-06-15与联系人小赵沟通工作UI优化任务', '微信', 'work', 'UI');
+      wechatEvent.sources = ['微信', 'wechat-20260618T105024'];
+      wechatEvent.source_refs = ['2026-06-18/com.tencent.mm__wechat_auto_summary__wechat-20260618T105024.md#1'];
+      wechatEvent.entity_mentions = [{ type: 'person', name: '小赵', aliases: [] }];
+      wechatEvent.entities = ['person:小赵'];
+      let galleryEvent = demoIndexedEvent('e2', '[gallery-item:gallery_438498275] 手机桌面生活记忆记录。', 'photos', 'other', '聊天记录');
+      galleryEvent.sources = ['photos', '聊天'];
+      galleryEvent.source_refs = ['2026-06-11/com.huawei.photos__gallery-analysis__聊天.md#613086288'];
+      let previous = [
+        demoCollectionGroupState('legacy-wechat', '与wechat-20260618T105024的对话', [wechatEvent]),
+        demoCollectionGroupState('legacy-gallery', '与聊天的对话', [galleryEvent])
+      ];
+
+      let plan = prepareIncrementalCollectionGroups('chat', '聊天记录', [wechatEvent, galleryEvent], previous);
+      let groups = applyIncrementalCollectionGroupAssignments('chat', '聊天记录', [wechatEvent, galleryEvent],
+        plan.reusedGroups, plan.pendingEvents, []);
+      let titles = groups.map((group: CollectionGroupState): string => group.title).join('|');
+      expect(titles.indexOf('与wechat-20260618T105024的对话') < 0).assertTrue();
+      expect(titles.indexOf('与聊天的对话') < 0).assertTrue();
+      expect(titles.indexOf('小赵-') >= 0).assertTrue();
+      expect(titles.indexOf('图库聊天-') >= 0 || titles.indexOf('图库-') >= 0).assertTrue();
     });
 
     it('incrementalCollectionGroupsReusesOldGroupAndFallsBackForUnrelatedNewEvent', 0, () => {
@@ -639,7 +1568,7 @@ export default function dataManagerUnitTest() {
 
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2, e3], plan.reusedGroups, plan.pendingEvents, []);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('晚餐计划');
+      expect(oldGroup.title).assertEqual('微信-晚餐计划');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
@@ -692,7 +1621,7 @@ export default function dataManagerUnitTest() {
       }];
       let groups = applyIncrementalCollectionGroupAssignments('chat', '最近聊天', [e1, e2], plan.reusedGroups, plan.pendingEvents, assignments);
       let oldGroup = groups.filter((group: CollectionGroupState): boolean => group.group_id === 'old-dinner')[0];
-      expect(oldGroup.title).assertEqual('稳定晚餐标题');
+      expect(oldGroup.title).assertEqual('微信-稳定晚餐标题');
       expect(oldGroup.event_ids.length).assertEqual(2);
       expect(oldGroup.event_ids.indexOf('e1') >= 0).assertTrue();
       expect(oldGroup.event_ids.indexOf('e2') >= 0).assertTrue();
@@ -750,6 +1679,150 @@ export default function dataManagerUnitTest() {
       expect(isQueryResultTruncated(2, 0)).assertFalse();
       expect(resolveQueryLimit(2, 1)).assertEqual(1);
       expect(isQueryResultTruncated(2, 1)).assertTrue();
+    });
+
+    it('indexQueryWithEventsCanIncludeTodoDeadlineInTimeRange', 0, () => {
+      let service = demoIndexService('/tmp/index-query-with-events-deadline');
+      let eventDateMatch = demoIndexedEvent('e1', '六月三日完成周报', '微信', 'work', '周报');
+      eventDateMatch.event_date = '2026-06-03';
+      let deadlineEarly = demoIndexedEvent('e2', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      deadlineEarly.event_date = '2026-05-20';
+      deadlineEarly.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let deadlineLate = demoIndexedEvent('e3', '五月创建的酒店待办', '微信', 'travel', '酒店');
+      deadlineLate.event_date = '2026-05-21';
+      deadlineLate.todo = {
+        type: 'buy',
+        deadline: '2026-06-05',
+        text: '预订酒店',
+        agent_task: ''
+      };
+      let outside = demoIndexedEvent('e4', '七月待办', '微信', 'work', '七月');
+      outside.event_date = '2026-05-22';
+      outside.todo = {
+        type: 'buy',
+        deadline: '2026-07-01',
+        text: '七月处理',
+        agent_task: ''
+      };
+      let events = demoEventMap([eventDateMatch, deadlineEarly, deadlineLate, outside]);
+      let query = demoQueryOptions();
+      query.startDate = '2026-06-01';
+      query.endDate = '2026-06-30';
+
+      let defaultResult = service.queryWithEvents(query, events);
+      expect(defaultResult.total_events).assertEqual(1);
+      expect(defaultResult.events[0].event_id).assertEqual('e1');
+
+      query.includeTodoDeadlineInTimeRange = true;
+      let expandedResult = service.queryWithEvents(query, events);
+      expect(expandedResult.total_events).assertEqual(3);
+      expect(expandedResult.events[0].event_id).assertEqual('e3');
+      expect(expandedResult.events[1].event_id).assertEqual('e1');
+      expect(expandedResult.events[2].event_id).assertEqual('e2');
+    });
+
+    it('indexQueryUsesHomeTodoDeadlineCandidatesWhenEnabled', 0, () => {
+      let storage = new MemoryDataManagerStorage();
+      let filesDir = 'memory/index-query-home-todo-deadline';
+      storage.removeTree(filesDir);
+      let paths = new DataManagerPaths(filesDir, storage);
+      paths.ensureBaseDirs();
+      storage.ensureDir(storage.join(paths.indexesRoot, 'home-todo'));
+      let service = new IndexService(paths, storage, new DataPipelineModelClient());
+      let eventDateOnly = demoIndexedEvent('e1', '五月普通记录', '微信', 'work', '普通');
+      eventDateOnly.event_date = '2026-05-29';
+      let deadlineCoffee = demoIndexedEvent('e2', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      deadlineCoffee.event_date = '2026-05-20';
+      deadlineCoffee.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let deadlineHotel = demoIndexedEvent('e3', '五月创建的酒店待办', '微信', 'travel', '酒店');
+      deadlineHotel.event_date = '2026-05-21';
+      deadlineHotel.todo = {
+        type: 'buy',
+        deadline: '2026-06-05',
+        text: '预订酒店',
+        agent_task: ''
+      };
+      let partition: EventPartition = {
+        month: '2026-05',
+        events: [eventDateOnly, deadlineCoffee, deadlineHotel]
+      };
+      storage.writeJsonAtomic(paths.eventPartitionPath('2026-05'), partition as Object);
+      let temporalWeeks: Object[] = [];
+      let temporalDocument: TestTemporalDocument = {
+        month: '2026-06',
+        event_ids: [],
+        summary: demoTemporalSummary('month'),
+        weeks: temporalWeeks
+      };
+      storage.writeJsonAtomic(paths.temporalPath('2026-06'), temporalDocument as Object);
+      let deadlinePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      deadlinePostings['2026-06-02'] = ['e2'];
+      deadlinePostings['2026-06-05'] = ['e3'];
+      let typePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      typePostings.buy = ['e2', 'e3'];
+      let homeTodoDocument: TestHomeTodoDocument = {
+        deadline_postings: deadlinePostings,
+        no_deadline_event_ids: [],
+        type_postings: typePostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'home-todo', 'index.json'), homeTodoDocument as Object);
+      let invertedPostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      invertedPostings['咖啡'] = ['e2'];
+      let invertedDocument: TestStringArrayDocument = {
+        postings: invertedPostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'inverted', 'index.json'), invertedDocument as Object);
+      let sourcePostings: Record<string, string[]> = new Object() as Record<string, string[]>;
+      let sourceDocument: TestStringArrayDocument = {
+        postings: sourcePostings
+      };
+      storage.writeJsonAtomic(storage.join(paths.indexesRoot, 'source', 'index.json'), sourceDocument as Object);
+      let query = demoQueryOptions();
+      query.startDate = '2026-06-01';
+      query.endDate = '2026-06-30';
+
+      let defaultResult = service.query(query);
+      expect(defaultResult.total_events).assertEqual(0);
+
+      query.includeTodoDeadlineInTimeRange = true;
+      let expandedResult = service.query(query);
+      expect(expandedResult.total_events).assertEqual(2);
+      expect(expandedResult.events[0].event_id).assertEqual('e3');
+      expect(expandedResult.events[1].event_id).assertEqual('e2');
+
+      query.keywords = ['咖啡'];
+      let keywordResult = service.query(query);
+      expect(keywordResult.total_events).assertEqual(1);
+      expect(keywordResult.events[0].event_id).assertEqual('e2');
+      storage.removeTree(filesDir);
+    });
+
+    it('indexQueryDoesNotExpandTodoDeadlineWithoutTimeRange', 0, () => {
+      let service = demoIndexService('/tmp/index-query-no-time-deadline');
+      let event = demoIndexedEvent('e1', '五月创建的咖啡待办', '微信', 'work', '咖啡');
+      event.event_date = '2026-05-20';
+      event.workflow_scene_ids = [3];
+      event.todo = {
+        type: 'buy',
+        deadline: '2026-06-02',
+        text: '购买咖啡豆',
+        agent_task: ''
+      };
+      let query = demoQueryOptions();
+      query.includeTodoDeadlineInTimeRange = true;
+      query.workflowSceneIds = [99];
+      let result = service.queryWithEvents(query, demoEventMap([event]));
+      expect(result.total_events).assertEqual(0);
     });
 
     it('galleryExifCoordinateParsesDmsAndRef', 0, () => {
@@ -961,7 +2034,10 @@ export default function dataManagerUnitTest() {
       expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('source_ref：输入 entry 的唯一引用标识') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('source_date：daily-log 文件日期') >= 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('workflow_scene_label：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_label：采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、餐饮、文档') < 0).assertTrue();
       expect(preview.systemPrompt.indexOf('entry_text：原始日志条目正文') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"items"') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('"facts"') >= 0).assertTrue();
@@ -984,7 +2060,10 @@ export default function dataManagerUnitTest() {
       expect(preview.userPrompt.indexOf('微信里提到这周六要买咖啡豆') >= 0).assertTrue();
       expect(preview.userPrompt.indexOf('与朋友聊天时提到这周六要在淘宝购买咖啡豆') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('输入字段说明') >= 0).assertTrue();
-      expect(preview.systemPrompt.indexOf('workflow_scene_labels：工作流采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('workflow_scene_labels：采集场景提示') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('工作流采集场景提示') < 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、文档、健康、办公、图库') >= 0).assertTrue();
+      expect(preview.systemPrompt.indexOf('差旅、餐饮、文档') < 0).assertTrue();
       expect(preview.systemPrompt.indexOf('keywords 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('domains 规则') >= 0).assertTrue();
       expect(preview.systemPrompt.indexOf('eat|wear|live|travel|work|other') >= 0).assertTrue();
@@ -1034,6 +2113,8 @@ export default function dataManagerUnitTest() {
       let avatar = createEmptyAvatarHomeViewModel();
       expect(avatar.avatarUri).assertEqual('');
       expect(avatar.avatarForegroundUri).assertEqual('');
+      expect(avatar.avatarMessageForegroundUri).assertEqual('');
+      expect(avatar.avatarReferencePhotoUri).assertEqual('');
       expect(avatar.avatarStatus).assertEqual('empty');
       expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
       expect(avatar.avatarVersionId).assertEqual('');
@@ -1219,6 +2300,64 @@ export default function dataManagerUnitTest() {
       expect(persistedState.last_error_message).assertEqual('');
     });
 
+    it('avatarServiceBackfillsMessageForegroundWhenFullForegroundAlreadyExists', 0, async () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-foreground-backfill';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let onePixelPng = new Uint8Array([
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 224, 18,
+        145, 251, 15, 0, 1, 164, 1, 60, 147, 139, 14, 183, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+        66, 96, 130
+      ]);
+      avatarStorage.saveForegroundPng('v-existing', onePixelPng);
+      avatarStorage.saveVersion({
+        version_id: 'v-existing',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v-existing.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v-existing';
+      state.profile_snapshot_hash = 'hash';
+      avatarStorage.saveState(state);
+
+      expect(avatarStorage.foregroundExists('v-existing')).assertTrue();
+      expect(avatarStorage.messageForegroundExists('v-existing')).assertFalse();
+
+      let view = await service.ensureCurrentForeground();
+
+      expect(view.avatarForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-foreground-backfill/workflows/avatar/assets/v-existing-foreground.png');
+      expect(view.avatarMessageForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-foreground-backfill/workflows/avatar/assets/v-existing-message-foreground.png');
+      expect(avatarStorage.messageForegroundExists('v-existing')).assertTrue();
+    });
+
     it('avatarGenerateRequestKeepsOriginalPhotoSourceInConsent', 0, () => {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);
@@ -1319,6 +2458,65 @@ export default function dataManagerUnitTest() {
       expect(view.avatarActionLabel).assertEqual('数字分身已更新');
     });
 
+    it('avatarStoragePersistsReferencePhotoForHomeView', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-reference-photo';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let bytes: Uint8Array = new Uint8Array([137, 80, 78, 71]);
+      let relativePath = avatarStorage.saveReferencePhotoBytes(bytes, 'file://photo/reference.png');
+      let state = avatarStorage.emptyState();
+      state.reference_photo_path = relativePath;
+      avatarStorage.saveState(state);
+
+      let persistedState = avatarStorage.loadState();
+      let view = avatarStorage.homeViewFromState(persistedState, null);
+
+      expect(relativePath.startsWith('assets/reference-photo-')).assertTrue();
+      expect(relativePath.endsWith('.png')).assertTrue();
+      expect(persistedState.reference_photo_path).assertEqual(relativePath);
+      expect(view.avatarReferencePhotoUri)
+        .assertEqual('file:///tmp/demo-avatar-reference-photo/workflows/avatar/' + relativePath);
+    });
+
+    it('emptyHomeViewModelRestoresSavedAvatarReferencePhoto', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-empty-home-reference-photo';
+      storage.removeTree(root);
+      let facade = new DataManagerFacade(root);
+      facade.ensureReady();
+      let avatarStorage = new AvatarStorage(facade.paths, facade.storage);
+      let bytes: Uint8Array = new Uint8Array([255, 216, 255]);
+      let relativePath = avatarStorage.saveReferencePhotoBytes(bytes, 'reference.jpg');
+      let state = avatarStorage.emptyState();
+      state.reference_photo_path = relativePath;
+      avatarStorage.saveState(state);
+
+      let home = facade.loadHomeViewModel();
+
+      expect(home.empty).assertTrue();
+      expect(home.avatarReferencePhotoUri)
+        .assertEqual('file:///tmp/demo-empty-home-reference-photo/workflows/avatar/' + relativePath);
+    });
+
+    it('avatarStorageUsesFreshReferencePhotoPathForPreviewRefresh', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-reference-refresh';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let firstBytes: Uint8Array = new Uint8Array([1, 2, 3]);
+      let secondBytes: Uint8Array = new Uint8Array([4, 5, 6]);
+
+      let firstPath = avatarStorage.saveReferencePhotoBytes(firstBytes, 'first.jpg');
+      let secondPath = avatarStorage.saveReferencePhotoBytes(secondBytes, 'second.jpg');
+
+      expect(firstPath === secondPath).assertFalse();
+      expect(avatarStorage.referencePhotoDisplayUri(secondPath) === avatarStorage.referencePhotoDisplayUri(firstPath))
+        .assertFalse();
+    });
+
     it('avatarStorageSaveAssetBase64ReturnsDisplayableVersionUri', 0, () => {
       let storage = new DataManagerStorage();
       let paths = new DataManagerPaths('/tmp/demo-files', storage);
@@ -1349,6 +2547,68 @@ export default function dataManagerUnitTest() {
       avatarStorage.saveForegroundPng('v-main', new Uint8Array([137, 80, 78, 71]));
       expect(avatarStorage.foregroundExists('v-main')).assertTrue();
       expect(avatarStorage.foregroundDisplayUri('v-main')).assertEqual('file:///tmp/demo-avatar-foreground/workflows/avatar/assets/v-main-foreground.png');
+    });
+
+    it('avatarStorageBuildsMessageForegroundCachePathAndUri', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-foreground';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      expect(avatarStorage.messageForegroundAssetPath('v-main'))
+        .assertEqual('/tmp/demo-avatar-message-foreground/workflows/avatar/assets/v-main-message-foreground.png');
+      expect(avatarStorage.relativeAvatarMessageForegroundPath('v-main'))
+        .assertEqual('assets/v-main-message-foreground.png');
+      expect(avatarStorage.messageForegroundExists('v-main')).assertFalse();
+      avatarStorage.saveMessageForegroundPng('v-main', new Uint8Array([137, 80, 78, 71]));
+      expect(avatarStorage.messageForegroundExists('v-main')).assertTrue();
+      expect(avatarStorage.messageForegroundDisplayUri('v-main'))
+        .assertEqual('file:///tmp/demo-avatar-message-foreground/workflows/avatar/assets/v-main-message-foreground.png');
+    });
+
+    it('avatarHomeViewUsesMessageForegroundWhenCacheExists', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-home-view';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      avatarStorage.saveForegroundPng('v1', new Uint8Array([137, 80, 78, 71]));
+      avatarStorage.saveMessageForegroundPng('v1', new Uint8Array([137, 80, 78, 71]));
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v1';
+
+      let view = avatarStorage.homeViewFromState(state, {
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+
+      expect(view.avatarForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-home-view/workflows/avatar/assets/v1-foreground.png');
+      expect(view.avatarMessageForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-home-view/workflows/avatar/assets/v1-message-foreground.png');
     });
 
     it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {

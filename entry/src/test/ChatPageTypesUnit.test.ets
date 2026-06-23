@@ -10,6 +10,7 @@ import {
   chatModePlaceholder,
   chatModeSwitcherVisibleAfterScroll,
   chatTimeGreeting,
+  chatDeepThinkingToggleVisible,
   cloudAgentDisplayText,
   hasCloudAgentDisplayOutput,
   isSupportedChatMode
@@ -69,6 +70,11 @@ export default function chatPageTypesUnitTest() {
       expect(chatModeSwitcherVisibleAfterScroll(false, -8)).assertTrue();
       expect(chatModeSwitcherVisibleAfterScroll(true, 2)).assertTrue();
       expect(chatModeSwitcherVisibleAfterScroll(false, -2)).assertFalse();
+    });
+
+    it('showsDeepThinkingToggleOnlyForCloudChat', 0, () => {
+      expect(chatDeepThinkingToggleVisible(CHAT_MODE_CLOUD_AGENT)).assertTrue();
+      expect(chatDeepThinkingToggleVisible(CHAT_MODE_LOCAL_INFERENCE)).assertFalse();
     });
   });
 }

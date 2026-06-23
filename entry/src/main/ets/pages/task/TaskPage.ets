@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
+import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
@@ -93,6 +94,7 @@ const ROOT_BRANCH = 'root';
 const CHILD_BRANCH_STEPS = 'steps';
 const CHILD_BRANCH_THEN = 'then';
 const CHILD_BRANCH_ELSE = 'else';
+const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 
 // 定时任务页从 App 沙箱中的 workflow JSON 加载任务配置。
 // 新增的图编辑器只改变前端展示和编辑方式，保存结果仍然是一份可执行的 workflow JSON。
@@ -114,6 +116,8 @@ export struct TaskPage {
   @State flowRenderSteps: WorkflowStep[] = [];
   @State flowStructureBusy: boolean = false;
   @State editorContextText: string = '{}';
+  @State cardContextDrafts: Record<string, string> = {};
+  @State cardContextRenderVersion: number = 0;
   @State workflowNameDraft: string = '';
   @State workflowDescriptionDraft: string = '';
   @State toolSchemaText: string = '';
@@ -134,6 +138,9 @@ export struct TaskPage {
   @State breakOperatorDraft: string = '==';
   @State breakRightDraft: string = '';
   @State runningTaskId: string = '';
+  @State configViewOpen: boolean = false;
+  @State batchRunning: boolean = false;
+  @State batchRunStatusText: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
   @State configManagedFiles: WorkflowManagedFile[] = [];
   @State dailyLogManagedFiles: WorkflowManagedFile[] = [];
@@ -144,10 +151,12 @@ export struct TaskPage {
   @State fileViewerFiles: WorkflowManagedFile[] = [];
   @State fileViewerSelectedName: string = '';
   @State fileViewerText: string = '';
+  @State fileViewerPreviewMode: boolean = false;
 
   private filesDir: string = '';
   private pendingStructureSelectionPath: string = '';
   private pendingTemplateInsertKeys: string[] = [];
+  private cardContextSaveTimerIds: Record<string, number> = {};
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -159,12 +168,26 @@ export struct TaskPage {
     this.reloadTasks();
   }
 
+  aboutToDisappear(): void {
+    if (this.filesDir.length > 0) {
+      this.flushTaskContextDrafts();
+    }
+    this.clearAllTaskContextSaveTimers();
+  }
+
   private reloadTasks(): void {
     if (this.filesDir.length === 0) {
       return;
     }
+    this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
     this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    this.refreshCardContextInputs();
     this.refreshStatsText();
+  }
+
+  private refreshCardContextInputs(): void {
+    this.cardContextRenderVersion = this.cardContextRenderVersion + 1;
   }
 
   private refreshStatsText(): void {
@@ -212,13 +235,73 @@ export struct TaskPage {
   }
 
   private sceneTasks(): WorkflowTask[] {
+    return this.tasksForScene(this.taskScene);
+  }
+
+  private tasksForScene(sceneId: number): WorkflowTask[] {
     let filtered: WorkflowTask[] = [];
     for (let i = 0; i < this.tasks.length; i++) {
-      if (this.tasks[i].sceneId === this.taskScene) {
+      if (this.tasks[i].sceneId === sceneId) {
         filtered.push(this.tasks[i]);
       }
     }
     return filtered;
+  }
+
+  private enabledTasks(): WorkflowTask[] {
+    let enabled: WorkflowTask[] = [];
+    let scenes = workflowSceneConfigs();
+    for (let sceneIndex = 0; sceneIndex < scenes.length; sceneIndex++) {
+      let sceneTasks = this.tasksForScene(scenes[sceneIndex].sceneId);
+      for (let taskIndex = 0; taskIndex < sceneTasks.length; taskIndex++) {
+        if (sceneTasks[taskIndex].enabled) {
+          enabled.push(sceneTasks[taskIndex]);
+        }
+      }
+    }
+    return enabled;
+  }
+
+  private enabledTaskCount(): number {
+    let count = 0;
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].enabled) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private enabledTaskCountForScene(sceneId: number): number {
+    let count = 0;
+    for (let i = 0; i < this.tasks.length; i++) {
+      if (this.tasks[i].sceneId === sceneId && this.tasks[i].enabled) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private isTaskExecutionBusy(): boolean {
+    return this.batchRunning || this.runningTaskId.length > 0;
+  }
+
+  private isWorkflowCancelledStatus(status: string, message: string): boolean {
+    let normalizedStatus = status.trim().toLowerCase();
+    if (normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') {
+      return true;
+    }
+    let normalizedMessage = message.trim().toLowerCase();
+    return normalizedMessage.indexOf('用户取消') >= 0 || normalizedMessage.indexOf('已终止') >= 0 ||
+      normalizedMessage.indexOf('task cancelled') >= 0 || normalizedMessage.indexOf('task canceled') >= 0;
+  }
+
+  private isTaskCancelled(taskId: string): boolean {
+    let task = this.findTask(taskId);
+    if (!task) {
+      return false;
+    }
+    return this.isWorkflowCancelledStatus(task.lastStatus, task.lastMessage);
   }
 
   private taskCardRenderKey(task: WorkflowTask): string {
@@ -229,9 +312,192 @@ export struct TaskPage {
       task.enabled ? '1' : '0',
       task.lastStatus,
       task.lastRun,
-      task.lastMessage
+      task.lastMessage,
+      String(this.cardContextRenderVersion)
     ];
     return ArkJSON.stringify(keyParts);
+  }
+
+  private taskRowRenderKey(task: WorkflowTask): string {
+    return this.taskCardRenderKey(task) + '|' + (this.runningTaskId === task.id ? 'running' : 'idle');
+  }
+
+  private taskContextMap(task: WorkflowTask): WorkflowJsonMap | null {
+    try {
+      let workflow = WorkflowStorage.validateWorkflowJson(task.workflowJson, false);
+      if (!workflow.context) {
+        return null;
+      }
+      if (Object.keys(workflow.context).length === 0) {
+        return null;
+      }
+      return workflow.context;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private taskHasContext(task: WorkflowTask): boolean {
+    let context = this.taskContextMap(task);
+    return context !== null && context['contact_name'] !== undefined;
+  }
+
+  private taskContactNameOriginalText(task: WorkflowTask): string {
+    let context = this.taskContextMap(task);
+    if (!context) {
+      return '';
+    }
+    let value = context['contact_name'];
+    if (value === undefined || value === null) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    return ArkJSON.stringify(value);
+  }
+
+  private taskContactNameDraftForTask(task: WorkflowTask): string {
+    let draft = this.cardContextDrafts[task.id];
+    if (draft !== undefined) {
+      return draft;
+    }
+    return this.taskContactNameOriginalText(task);
+  }
+
+  private setTaskContextDraft(taskId: string, value: string): void {
+    let next: Record<string, string> = {};
+    let keys = Object.keys(this.cardContextDrafts);
+    for (let i = 0; i < keys.length; i++) {
+      next[keys[i]] = this.cardContextDrafts[keys[i]];
+    }
+    next[taskId] = value;
+    this.cardContextDrafts = next;
+  }
+
+  private removeTaskContextDraft(taskId: string): void {
+    let next: Record<string, string> = {};
+    let keys = Object.keys(this.cardContextDrafts);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== taskId) {
+        next[keys[i]] = this.cardContextDrafts[keys[i]];
+      }
+    }
+    this.cardContextDrafts = next;
+  }
+
+  private taskContextSaveTimerId(taskId: string): number {
+    let timerId = this.cardContextSaveTimerIds[taskId];
+    if (timerId === undefined) {
+      return -1;
+    }
+    return timerId;
+  }
+
+  private setTaskContextSaveTimerId(taskId: string, timerId: number): void {
+    let next: Record<string, number> = {};
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      next[keys[i]] = this.cardContextSaveTimerIds[keys[i]];
+    }
+    next[taskId] = timerId;
+    this.cardContextSaveTimerIds = next;
+  }
+
+  private removeTaskContextSaveTimerId(taskId: string): void {
+    let next: Record<string, number> = {};
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== taskId) {
+        next[keys[i]] = this.cardContextSaveTimerIds[keys[i]];
+      }
+    }
+    this.cardContextSaveTimerIds = next;
+  }
+
+  private clearTaskContextSaveTimer(taskId: string): void {
+    let timerId = this.taskContextSaveTimerId(taskId);
+    if (timerId !== -1) {
+      clearTimeout(timerId);
+    }
+    this.removeTaskContextSaveTimerId(taskId);
+  }
+
+  private clearAllTaskContextSaveTimers(): void {
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      let timerId = this.cardContextSaveTimerIds[keys[i]];
+      if (timerId !== undefined && timerId !== -1) {
+        clearTimeout(timerId);
+      }
+    }
+    this.cardContextSaveTimerIds = {};
+  }
+
+  private flushTaskContextDrafts(): boolean {
+    let keys = Object.keys(this.cardContextDrafts);
+    let flushed = keys.length > 0;
+    for (let i = 0; i < keys.length; i++) {
+      let taskId = keys[i];
+      let value = this.cardContextDrafts[taskId];
+      this.clearTaskContextSaveTimer(taskId);
+      this.persistTaskContextDraft(taskId, value);
+    }
+    return flushed;
+  }
+
+  private syncTaskContextDraft(task: WorkflowTask, value: string): void {
+    this.setTaskContextDraft(task.id, value);
+    this.clearTaskContextSaveTimer(task.id);
+    if (this.isTaskExecutionBusy()) {
+      return;
+    }
+    let taskId = task.id;
+    let timerId = setTimeout(() => {
+      this.removeTaskContextSaveTimerId(taskId);
+      this.persistTaskContextDraft(taskId, value);
+    }, CARD_CONTEXT_SAVE_DELAY_MS);
+    this.setTaskContextSaveTimerId(taskId, timerId);
+  }
+
+  private persistTaskContextDraft(taskId: string, value: string): void {
+    if (this.filesDir.length === 0) {
+      return;
+    }
+    try {
+      this.tasks = WorkflowStorage.updateTaskContextValue(this.filesDir, taskId, 'contact_name', value);
+      this.refreshStatsText();
+    } catch (e) {
+      let err = e as Error;
+      this.removeTaskContextDraft(taskId);
+      try {
+        this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      } catch (innerError) {
+      }
+      this.refreshCardContextInputs();
+      showToastSafely('上下文变量保存失败：' + err.message, 2500);
+    }
+  }
+
+  private openConfigView(): void {
+    this.reloadTasks();
+    this.configViewOpen = true;
+  }
+
+  private closeConfigView(): void {
+    this.reloadTasks();
+    this.configViewOpen = false;
+  }
+
+  private batchRunButtonText(): string {
+    if (this.batchRunning) {
+      return '执行中';
+    }
+    let count = this.enabledTaskCount();
+    if (count === 0) {
+      return '暂无开启任务';
+    }
+    return '一键执行已开启任务（' + count + '）';
   }
 
   private openCreateEditor(mode: string = 'graph'): void {
@@ -245,7 +511,12 @@ export struct TaskPage {
   }
 
   private openEditEditor(taskId: string, mode: string = 'graph'): void {
-    this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    }
+    this.refreshCardContextInputs();
     let task = this.findTask(taskId);
     if (!task) {
       showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
@@ -328,6 +599,11 @@ export struct TaskPage {
         }
       }
       this.tasks = WorkflowStorage.upsertTask(this.filesDir, task);
+      if (this.editingTaskId.length > 0) {
+        this.clearTaskContextSaveTimer(this.editingTaskId);
+        this.removeTaskContextDraft(this.editingTaskId);
+        this.refreshCardContextInputs();
+      }
       this.editorOpen = false;
       this.selectedPath = '';
       this.taskScene = this.editorSceneId;
@@ -384,27 +660,25 @@ export struct TaskPage {
   }
 
   private setTaskEnabled(task: WorkflowTask, enabled: boolean): void {
-    let next: WorkflowTask = {
-      id: task.id,
-      sceneId: task.sceneId,
-      icon: task.icon,
-      iconColor: task.iconColor,
-      title: task.title,
-      source: task.source,
-      enabled: enabled,
-      configFileName: task.configFileName,
-      workflowJson: task.workflowJson,
-      lastStatus: task.lastStatus,
-      lastRun: task.lastRun,
-      lastMessage: task.lastMessage,
-      isUserModified: task.isUserModified
-    };
-    this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
-    this.refreshStatsText();
+    if (this.isTaskExecutionBusy()) {
+      showToastSafely('Workflow 正在执行，请稍后再调整任务开关', 1500);
+      return;
+    }
+    this.tasks = WorkflowStorage.updateTaskEnabled(this.filesDir, task.id, enabled);
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
-    this.reloadTasks();
+    if (this.isTaskExecutionBusy()) {
+      showToastSafely('已有 workflow 正在执行', 1500);
+      return;
+    }
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    } else {
+      this.refreshCardContextInputs();
+    }
     let currentTask = this.findTask(task.id);
     if (!currentTask) {
       showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
@@ -414,19 +688,74 @@ export struct TaskPage {
       showToastSafely('任务已停用，请先打开开关', 1500);
       return;
     }
-    if (this.runningTaskId.length > 0) {
+    this.runningTaskId = currentTask.id;
+    this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
+    try {
+      await this.onRunWorkflow(currentTask);
+    } finally {
+      this.runningTaskId = '';
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      this.refreshStatsText();
+    }
+  }
+
+  private async runEnabledTasks(): Promise<void> {
+    if (this.isTaskExecutionBusy()) {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
-    this.runningTaskId = currentTask.id;
-    WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
-    this.reloadTasks();
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    } else {
+      this.refreshCardContextInputs();
+    }
+    let queue = this.enabledTasks();
+    if (queue.length === 0) {
+      showToastSafely('请先开启至少一个任务', 1500);
+      return;
+    }
+    this.batchRunning = true;
+    this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
+    let stoppedByError = false;
+    let stoppedByCancel = false;
     try {
-      await this.onRunWorkflow(currentTask);
-      this.reloadTasks();
+      for (let i = 0; i < queue.length; i++) {
+        let currentTask = this.findTask(queue[i].id);
+        if (!currentTask || !currentTask.enabled) {
+          continue;
+        }
+        this.runningTaskId = currentTask.id;
+        this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
+        this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
+        try {
+          await this.onRunWorkflow(currentTask);
+          this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+          if (this.isTaskCancelled(currentTask.id)) {
+            stoppedByCancel = true;
+            showToastSafely('批量执行已终止', 1500);
+            break;
+          }
+        } catch (e) {
+          let err = e as Error;
+          stoppedByError = true;
+          this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
+          showToastSafely('任务执行中断：' + err.message, 2500);
+          break;
+        } finally {
+          this.runningTaskId = '';
+        }
+      }
+      if (!stoppedByError && !stoppedByCancel) {
+        showToastSafely('已完成开启任务的依次执行', 1500);
+      }
     } finally {
+      this.batchRunning = false;
       this.runningTaskId = '';
-      this.reloadTasks();
+      this.batchRunStatusText = '';
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      this.refreshStatsText();
     }
   }
 
@@ -519,6 +848,7 @@ export struct TaskPage {
   }
 
   private openConfigFileViewer(): void {
+    this.fileViewerCategory = 'config';
     this.fileViewerTitle = 'Workflow 配置文件';
     this.fileViewerFiles = WorkflowStorage.listConfigFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -527,10 +857,12 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无 workflow 配置文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openDailyLogFileViewer(): void {
+    this.fileViewerCategory = 'daily';
     this.fileViewerTitle = 'daily-log 文件';
     this.fileViewerFiles = WorkflowStorage.listDailyLogFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -539,10 +871,12 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无 daily-log 文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openRunFileViewer(): void {
+    this.fileViewerCategory = 'run';
     this.fileViewerTitle = '运行文件';
     this.fileViewerFiles = WorkflowStorage.listRunFiles(this.filesDir);
     this.fileViewerOpen = true;
@@ -551,17 +885,28 @@ export struct TaskPage {
     } else {
       this.fileViewerSelectedName = '';
       this.fileViewerText = '暂无运行文件';
+      this.fileViewerPreviewMode = false;
     }
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
     this.fileViewerSelectedName = file.name;
+    this.fileViewerPreviewMode = this.defaultFileViewerPreviewMode(file);
     try {
       this.fileViewerText = WorkflowStorage.readText(file.path);
     } catch (e) {
       let err = e as Error;
       this.fileViewerText = '读取失败：' + (err.message || String(e));
     }
+  }
+
+  private defaultFileViewerPreviewMode(file: WorkflowManagedFile): boolean {
+    // 内联文件面板沿用独立查看页的默认规则，保证后续入口恢复时预览/原文行为一致。
+    let lowerName = file.name.toLowerCase();
+    if (this.fileViewerCategory === 'daily') {
+      return true;
+    }
+    return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
   }
 
   private contextToText(context: WorkflowJsonMap | undefined): string {
@@ -3179,6 +3524,236 @@ export struct TaskPage {
     }
   }
 
+  @Builder TaskExecutionHeaderPanel() {
+    Column() {
+      Row() {
+        Column() {
+          Text('任务执行')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .maxLines(1)
+          Text('已开启 ' + this.enabledTaskCount() + ' / 全部 ' + this.tasks.length)
+            .fontSize(12)
+            .fontColor('#6F7584')
+            .margin({ top: 7 })
+            .maxLines(1)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Button('配置任务')
+          .width(92)
+          .height(36)
+          .fontSize(12)
+          .fontColor(Color.White)
+          .backgroundColor('#276EF1')
+          .borderRadius(10)
+          .enabled(!this.isTaskExecutionBusy())
+          .onClick(() => { this.openConfigView(); })
+      }
+      .width('100%')
+    }
+    .width('86%')
+    .padding(18)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 24, bottom: 18 })
+  }
+
+  @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
+    Row() {
+      Text(task.icon)
+        .fontSize(12)
+        .fontColor(task.enabled ? scene.color : '#8E95A3')
+        .fontWeight(FontWeight.Bold)
+        .width(40)
+        .height(40)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
+        .borderRadius(12)
+      Column() {
+        Text(task.title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#11182F')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
+          .fontSize(11)
+          .fontColor(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3')
+          .margin({ top: 5 })
+          .maxLines(1)
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 12 })
+      Toggle({ type: ToggleType.Switch, isOn: task.enabled })
+        .selectedColor(scene.color)
+        .width(44)
+        .height(26)
+        .enabled(!this.isTaskExecutionBusy())
+        .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
+    }
+    .width('100%')
+    .constraintSize({ minHeight: 66 })
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .backgroundColor(Color.White)
+    .borderRadius(12)
+    .border({ width: 1, color: this.runningTaskId === task.id ? scene.color : '#E8EDF5' })
+    .margin({ top: 10 })
+  }
+
+  @Builder TaskExecutionSceneSection(scene: WorkflowSceneConfig) {
+    if (this.tasksForScene(scene.sceneId).length > 0) {
+      Column() {
+        Row() {
+          Text(scene.label)
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#11182F')
+            .layoutWeight(1)
+            .maxLines(1)
+          Text(this.enabledTaskCountForScene(scene.sceneId) + '/' + this.tasksForScene(scene.sceneId).length + ' 开启')
+            .fontSize(11)
+            .fontColor(scene.color)
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+            .backgroundColor('#F8F9FE')
+            .borderRadius(8)
+            .maxLines(1)
+        }
+        .width('100%')
+        ForEach(this.tasksForScene(scene.sceneId), (task: WorkflowTask) => {
+          this.SimpleTaskRow(task, scene)
+        }, (task: WorkflowTask) => this.taskRowRenderKey(task))
+      }
+      .width('86%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ bottom: 18 })
+    }
+  }
+
+  @Builder TaskExecutionList() {
+    if (this.tasks.length === 0) {
+      Column() {
+        Text('暂无任务')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+        Button('配置任务')
+          .height(36)
+          .fontSize(12)
+          .backgroundColor('#276EF1')
+          .borderRadius(10)
+          .margin({ top: 14 })
+          .onClick(() => { this.openConfigView(); })
+      }
+      .width('86%')
+      .padding(22)
+      .backgroundColor(Color.White)
+      .borderRadius(14)
+      .margin({ bottom: 18 })
+    } else {
+      ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+        this.TaskExecutionSceneSection(scene)
+      }, (scene: WorkflowSceneConfig) => scene.tabId)
+    }
+  }
+
+  @Builder BatchRunPanel() {
+    Column() {
+      if (this.batchRunStatusText.length > 0) {
+        Text(this.batchRunStatusText)
+          .fontSize(12)
+          .fontColor('#4E5666')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ bottom: 10 })
+      }
+      Button(this.batchRunButtonText())
+        .width('100%')
+        .height(46)
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .backgroundColor(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy() ? '#276EF1' : '#A9B7E9')
+        .borderRadius(12)
+        .enabled(this.enabledTaskCount() > 0 && !this.isTaskExecutionBusy())
+        .onClick(() => { this.runEnabledTasks(); })
+    }
+    .width('86%')
+    .padding(14)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 2, bottom: 18 })
+  }
+
+  @Builder ConfigHeaderPanel() {
+    Row() {
+      Button('返回任务')
+        .width(88)
+        .height(34)
+        .fontSize(12)
+        .fontColor('#4E5666')
+        .backgroundColor('#F2F5FA')
+        .borderRadius(10)
+        .onClick(() => { this.closeConfigView(); })
+      Blank()
+      Button('刷新')
+        .width(64)
+        .height(34)
+        .fontSize(12)
+        .fontColor(Color.White)
+        .backgroundColor('#4E5666')
+        .borderRadius(10)
+        .onClick(() => { this.reloadTasks(); })
+    }
+    .width('86%')
+    .margin({ top: 18 })
+  }
+
+  @Builder TaskContextPanel(task: WorkflowTask) {
+    Column() {
+      Row() {
+        Text('上下文变量')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .layoutWeight(1)
+          .maxLines(1)
+        Text('contact_name')
+          .fontSize(11)
+          .fontColor('#276EF1')
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor('#EAF2FF')
+          .borderRadius(8)
+          .maxLines(1)
+      }
+      .width('100%')
+      TextInput({ placeholder: '请输入联系人名称', text: this.taskContactNameDraftForTask(task) })
+        .width('100%')
+        .height(40)
+        .fontSize(13)
+        .fontColor('#222B3D')
+        .backgroundColor(Color.White)
+        .borderRadius(10)
+        .border({ width: 1, color: '#E3E8F1' })
+        .padding({ left: 10, right: 10 })
+        .margin({ top: 10 })
+        .enabled(!this.isTaskExecutionBusy())
+        .onChange((val: string) => { this.syncTaskContextDraft(task, val); })
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#F8FAFD')
+    .borderRadius(12)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 14 })
+  }
+
   @Builder TaskCard(task: WorkflowTask) {
     Column() {
       Row() {
@@ -3232,18 +3807,24 @@ export struct TaskPage {
           .selectedColor('#276EF1')
           .width(44)
           .height(26)
+          .enabled(!this.isTaskExecutionBusy())
           .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
       }
       .width('100%')
+      if (this.taskHasContext(task)) {
+        this.TaskContextPanel(task)
+      }
       Scroll() {
         Row() {
           Button(this.runningTaskId === task.id ? '执行中' : '运行')
             .width(82)
             .height(36)
             .fontSize(12)
-            .backgroundColor(this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1')
+            .backgroundColor(this.isTaskExecutionBusy() && this.runningTaskId !== task.id ? '#A9B7E9' :
+              this.runningTaskId === task.id ? '#A9B7E9' : '#276EF1')
             .borderRadius(10)
             .margin({ right: 8 })
+            .enabled(!this.isTaskExecutionBusy())
             .onClick(() => { this.runTask(task); })
           Button('图编辑')
             .width(86)
@@ -3543,12 +4124,37 @@ export struct TaskPage {
             .width('100%')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Row() {
+            Button('预览')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(this.fileViewerPreviewMode ? Color.White : '#5968FF')
+              .backgroundColor(this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .onClick(() => { this.fileViewerPreviewMode = true; })
+            Button('原文')
+              .width(54)
+              .height(30)
+              .fontSize(12)
+              .fontColor(!this.fileViewerPreviewMode ? Color.White : '#5968FF')
+              .backgroundColor(!this.fileViewerPreviewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ left: 8 })
+              .onClick(() => { this.fileViewerPreviewMode = false; })
+          }
+          .width('100%')
+          .margin({ top: 8 })
           Scroll() {
-            Text(this.fileViewerText)
-              .fontSize(11)
-              .fontFamily('monospace')
-              .fontColor('#2F3645')
-              .width('100%')
+            if (this.fileViewerPreviewMode) {
+              MarkdownView({ text: this.fileViewerText, variant: 'file_preview' })
+            } else {
+              Text(this.fileViewerText)
+                .fontSize(11)
+                .fontFamily('monospace')
+                .fontColor('#2F3645')
+                .width('100%')
+            }
           }
           .width('100%')
           .height(280)
@@ -3575,28 +4181,36 @@ export struct TaskPage {
   build() {
     Scroll() {
       Column() {
-        AppHeader({ title: '定时任务', subtitle: '可视化 workflow 编排' })
-        this.CreatePanel()
-        if (this.editorOpen && this.editingTaskId.length === 0) {
-          this.EditorPanel()
-        }
-
-        Scroll() {
-          Row() {
-            ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
-              this.TaskSceneTab(scene)
-            }, (scene: WorkflowSceneConfig) => scene.tabId)
+        if (this.configViewOpen) {
+          AppHeader({ title: '配置任务', subtitle: 'Workflow 编排与文件管理' })
+          this.ConfigHeaderPanel()
+          this.CreatePanel()
+          if (this.editorOpen && this.editingTaskId.length === 0) {
+            this.EditorPanel()
           }
-          .padding({ left: 24, right: 24 })
-        }
-        .width('100%')
-        .height(42)
-        .scrollable(ScrollDirection.Horizontal)
-        .scrollBar(BarState.Off)
-        .margin({ top: 20, bottom: 16 })
 
-        this.TaskSceneList()
-        this.FileManagerPanel()
+          Scroll() {
+            Row() {
+              ForEach(workflowSceneConfigs(), (scene: WorkflowSceneConfig) => {
+                this.TaskSceneTab(scene)
+              }, (scene: WorkflowSceneConfig) => scene.tabId)
+            }
+            .padding({ left: 24, right: 24 })
+          }
+          .width('100%')
+          .height(42)
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .margin({ top: 20, bottom: 16 })
+
+          this.TaskSceneList()
+          this.FileManagerPanel()
+        } else {
+          AppHeader({ title: '定时任务', subtitle: '任务队列' })
+          this.TaskExecutionHeaderPanel()
+          this.TaskExecutionList()
+          this.BatchRunPanel()
+        }
         Blank().height(110)
       }
       .width('100%')

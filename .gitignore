@@ -34,3 +34,6 @@ build-profile.json5*
 /mobile_file_example/
 /.agents/
 .agents
+/**/__pycache__/
+/**/.DS_Store
+/screenshot-Harmony.jpg

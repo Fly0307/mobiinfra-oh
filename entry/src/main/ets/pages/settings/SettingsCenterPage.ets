@@ -3,6 +3,12 @@ import { AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
+  CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
+  CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT,
+  normalizeChatContextCompressionThresholdPercent,
+  normalizeChatContextRecentRounds
+} from '../chat/ChatContextBudget';
+import {
   DEFAULT_GALLERY_AMAP_WEB_KEY,
   DEFAULT_GALLERY_API_BASE_URL,
   DEFAULT_GALLERY_API_KEY,
@@ -95,6 +101,10 @@ export struct SettingsCenterPage {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
+    String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
+  @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string =
+    String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
   @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
@@ -711,6 +721,17 @@ export struct SettingsCenterPage {
         (value: string) => { this.cloudApiKey = value; })
       this.SettingInput('Decider Model', this.cloudDeciderModel, '留空则不传 model',
         (value: string) => { this.cloudDeciderModel = value; })
+      this.WechatAutoSummaryInput('上下文压缩阈值(%)', this.chatContextCompressionThresholdPercent, '默认 85，范围 50-95',
+        (value: string) => { this.chatContextCompressionThresholdPercent = value; },
+        () => {
+          this.chatContextCompressionThresholdPercent =
+            String(normalizeChatContextCompressionThresholdPercent(this.chatContextCompressionThresholdPercent));
+        })
+      this.WechatAutoSummaryInput('压缩保留轮数', this.chatContextRecentRounds, '默认 8，范围 2-20',
+        (value: string) => { this.chatContextRecentRounds = value; },
+        () => {
+          this.chatContextRecentRounds = String(normalizeChatContextRecentRounds(this.chatContextRecentRounds));
+        })
       this.SettingInput('模型下载服务', this.serverIp, '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
         (value: string) => { this.serverIp = value; })
 

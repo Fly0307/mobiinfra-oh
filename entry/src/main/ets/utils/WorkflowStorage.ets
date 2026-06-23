@@ -713,6 +713,11 @@ export class WorkflowStorage {
     for (let i = 0; i < tasks.length; i++) {
       WorkflowStorage.writeConfig(filesDir, tasks[i]);
     }
+    WorkflowStorage.writeTaskIndex(filesDir, tasks);
+  }
+
+  private static writeTaskIndex(filesDir: string, tasks: WorkflowTask[]): void {
+    WorkflowStorage.ensureWorkspace(filesDir);
     let index: WorkflowTaskIndex = {
       version: 1,
       tasks: tasks
@@ -721,33 +726,49 @@ export class WorkflowStorage {
   }
 
   static writeConfig(filesDir: string, task: WorkflowTask): void {
+    if (task.configFileName.length === 0) {
+      return;
+    }
     WorkflowStorage.ensureWorkspace(filesDir);
     WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, task.configFileName), task.workflowJson);
   }
 
-  static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
-    let tasks = WorkflowStorage.loadTasks(filesDir);
+  private static prepareTaskForUpsert(filesDir: string, task: WorkflowTask): WorkflowTask {
     let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
     if (defaultTask) {
       WorkflowStorage.unmarkDefaultTaskDeleted(filesDir, task.id);
       if (task.isUserModified !== true && task.workflowJson !== defaultTask.workflowJson) {
         task.isUserModified = true;
       }
-      task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
+      return WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
     }
+    return task;
+  }
+
+  private static replaceTaskInList(tasks: WorkflowTask[], task: WorkflowTask): WorkflowTask[] {
+    let nextTasks: WorkflowTask[] = [];
     let found = false;
     for (let i = 0; i < tasks.length; i++) {
       if (tasks[i].id === task.id) {
-        tasks[i] = task;
+        nextTasks.push(task);
         found = true;
-        break;
+      } else {
+        nextTasks.push(tasks[i]);
       }
     }
     if (!found) {
-      tasks.push(task);
+      nextTasks.push(task);
     }
-    WorkflowStorage.saveTasks(filesDir, tasks);
-    return WorkflowStorage.loadTasks(filesDir);
+    return nextTasks;
+  }
+
+  static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let preparedTask = WorkflowStorage.prepareTaskForUpsert(filesDir, task);
+    let nextTasks = WorkflowStorage.replaceTaskInList(tasks, preparedTask);
+    WorkflowStorage.writeConfig(filesDir, preparedTask);
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
+    return nextTasks;
   }
 
   static deleteTask(filesDir: string, taskId: string): WorkflowTask[] {
@@ -762,27 +783,79 @@ export class WorkflowStorage {
       }
     }
     WorkflowStorage.markDefaultTaskDeleted(filesDir, taskId);
-    WorkflowStorage.saveTasks(filesDir, nextTasks);
     if (configFileName.length > 0) {
       try {
         fs.unlinkSync(WorkflowStorage.configPath(filesDir, configFileName));
       } catch (e) {
       }
     }
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
     return nextTasks;
   }
 
-  static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): void {
+  static updateTaskEnabled(filesDir: string, taskId: string, enabled: boolean): WorkflowTask[] {
     let tasks = WorkflowStorage.loadTasks(filesDir);
+    let changed = false;
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        tasks[i].enabled = enabled;
+        changed = true;
+        break;
+      }
+    }
+    if (changed) {
+      WorkflowStorage.writeTaskIndex(filesDir, tasks);
+    }
+    return tasks;
+  }
+
+  static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let changed = false;
     for (let i = 0; i < tasks.length; i++) {
       if (tasks[i].id === taskId) {
         tasks[i].lastStatus = status;
         tasks[i].lastRun = nowText();
         tasks[i].lastMessage = message;
+        changed = true;
         break;
       }
     }
-    WorkflowStorage.saveTasks(filesDir, tasks);
+    if (changed) {
+      WorkflowStorage.writeTaskIndex(filesDir, tasks);
+    }
+    return tasks;
+  }
+
+  static updateTaskContextValue(filesDir: string, taskId: string, key: string, value: WorkflowJsonValue): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let currentTask: WorkflowTask | null = null;
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        currentTask = tasks[i];
+        break;
+      }
+    }
+    if (!currentTask) {
+      throw new Error('Workflow 已不存在');
+    }
+    let workflow = WorkflowStorage.validateWorkflowJson(WorkflowStorage.readTaskWorkflowJson(filesDir, currentTask), false);
+    let context: WorkflowJsonMap = workflow.context ? workflow.context : {};
+    context[key] = value;
+    workflow.context = context;
+    let rawJson = stringifyJsonCompat(workflow as Object, 2);
+    let nextTask = WorkflowStorage.createTaskFromJson(filesDir, currentTask.sceneId, rawJson, currentTask.id);
+    nextTask.enabled = currentTask.enabled;
+    nextTask.lastStatus = currentTask.lastStatus;
+    nextTask.lastRun = currentTask.lastRun;
+    nextTask.lastMessage = currentTask.lastMessage;
+    nextTask.configFileName = currentTask.configFileName;
+    nextTask.isUserModified = currentTask.isUserModified;
+    let preparedTask = WorkflowStorage.prepareTaskForUpsert(filesDir, nextTask);
+    let nextTasks = WorkflowStorage.replaceTaskInList(tasks, preparedTask);
+    WorkflowStorage.writeConfig(filesDir, preparedTask);
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
+    return nextTasks;
   }
 
   private static titleForWorkflow(workflow: WorkflowDefinition): string {
@@ -899,7 +972,8 @@ export class WorkflowStorage {
     copyTask.lastRun = '尚未执行';
     copyTask.lastMessage = '复制自“' + sourceTask.title + '”';
     tasks.push(copyTask);
-    WorkflowStorage.saveTasks(filesDir, tasks);
+    WorkflowStorage.writeConfig(filesDir, copyTask);
+    WorkflowStorage.writeTaskIndex(filesDir, tasks);
     return copyTask;
   }
 

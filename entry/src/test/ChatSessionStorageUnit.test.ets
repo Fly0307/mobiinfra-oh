@@ -8,11 +8,16 @@ import {
   ChatMessage,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessageStableRenderKey,
   chatMessagesAutoScrollKey,
+  chatMessagesStreamFollowKey,
+  buildAssistantStreamingRenderContent,
   chatSessionPreview,
   compactChatPreviewText,
+  createChatStreamThinkingState,
   createChatMessage,
   createEmptyChatSession,
+  parseChatStreamThinkingDelta,
   defaultChatSessionTitle,
   splitAssistantThinkingContent,
   toggleChatMessageThinkingCollapsed,
@@ -89,9 +94,94 @@ export default function chatSessionStorageUnitTest() {
       let streamingKey = chatMessagesAutoScrollKey('session-a', messages, true);
 
       expect(sameSessionKey.indexOf('session-a') === 0).assertTrue();
-      expect(sameSessionKey.indexOf(chatMessageRenderKey(messages[1])) >= 0).assertTrue();
+      expect(sameSessionKey.indexOf(chatMessageStableRenderKey(messages[1])) >= 0).assertTrue();
       expect(changedSessionKey === sameSessionKey).assertFalse();
       expect(streamingKey === sameSessionKey).assertFalse();
+    });
+
+    it('keepsStableRenderKeyWhenStreamingContentGrows', 0, () => {
+      let initial = createChatMessage('m1', 'assistant', 'chat', '正在整理', 1000);
+      let streamed = createChatMessage('m1', 'assistant', 'chat', '正在整理更多内容', 1000);
+
+      expect(chatMessageStableRenderKey(initial)).assertEqual(chatMessageStableRenderKey(streamed));
+      expect(chatMessageRenderKey(initial) === chatMessageRenderKey(streamed)).assertFalse();
+    });
+
+    it('updatesRenderKeyWhenSameLengthContentChangesWithoutAutoScroll', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', 'hello', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001)
+      ];
+      let changedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙戊', 1001)
+      ];
+
+      expect(chatMessageRenderKey(initialMessages[1]) === chatMessageRenderKey(changedMessages[1])).assertFalse();
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true))
+        .assertEqual(chatMessagesAutoScrollKey('session-a', changedMessages, true));
+    });
+
+    it('keepsAutoScrollKeyStableForStreamingContentGrowth', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001)
+      ];
+      let streamedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '正在整理更多内容', 1001)
+      ];
+      let newMessageMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m3', 'assistant', 'chat', '新的回答', 1002)
+      ];
+
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true))
+        .assertEqual(chatMessagesAutoScrollKey('session-a', streamedMessages, true));
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true) ===
+        chatMessagesAutoScrollKey('session-a', newMessageMessages, true)).assertFalse();
+      expect(chatMessagesAutoScrollKey('session-a', initialMessages, true) ===
+        chatMessagesAutoScrollKey('session-a', initialMessages, false)).assertFalse();
+    });
+
+    it('buildsStreamFollowKeyFromLatestStreamingContent', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001)
+      ];
+      let streamedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '正在整理更多内容', 1001)
+      ];
+
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', streamedMessages, true)).assertFalse();
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', initialMessages, false)).assertFalse();
+    });
+
+    it('buildsStreamFollowKeyFromSameLengthContentChanges', 0, () => {
+      let initialMessages: ChatMessage[] = [
+        createChatMessage('m1', 'user', 'chat', '查一下最近一个月干了啥', 1000),
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001)
+      ];
+      let changedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙戊', 1001)
+      ];
+      let traceInitialMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001, ['工具 A 完成'])
+      ];
+      let traceChangedMessages: ChatMessage[] = [
+        initialMessages[0],
+        createChatMessage('m2', 'assistant', 'chat', '甲乙丙丁', 1001, ['工具 B 完成'])
+      ];
+
+      expect(chatMessagesStreamFollowKey('session-a', initialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', changedMessages, true)).assertFalse();
+      expect(chatMessagesStreamFollowKey('session-a', traceInitialMessages, true) ===
+        chatMessagesStreamFollowKey('session-a', traceChangedMessages, true)).assertFalse();
     });
 
     it('compactsLongPreviewFromPrefixOnly', 0, () => {
@@ -146,6 +236,69 @@ export default function chatSessionStorageUnitTest() {
 
       expect(parts.thinkingContent).assertEqual('正在分析第一步');
       expect(parts.content).assertEqual('');
+    });
+
+    it('streamsThinkingContentBeforeClosingTagWhenThinkingEnabled', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let thinking = '';
+      let content = '';
+
+      let first = parseChatStreamThinkingDelta('先分析问题。', state);
+      state = first.state;
+      thinking += first.thinkingDelta;
+      content += first.contentDelta;
+      let rendered = splitAssistantThinkingContent(buildAssistantStreamingRenderContent(content, thinking));
+
+      expect(first.thinkingDelta).assertEqual('先分析问题。');
+      expect(first.contentDelta).assertEqual('');
+      expect(rendered.thinkingContent).assertEqual('先分析问题。');
+      expect(rendered.content).assertEqual('');
+    });
+
+    it('streamsVisibleContentAfterSplitClosingThinkTag', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let thinking = '';
+      let content = '';
+
+      let first = parseChatStreamThinkingDelta('先分析</thi', state);
+      state = first.state;
+      thinking += first.thinkingDelta;
+      content += first.contentDelta;
+      let second = parseChatStreamThinkingDelta('nk>\n最终回答。', state);
+      state = second.state;
+      thinking += second.thinkingDelta;
+      content += second.contentDelta;
+
+      expect(first.thinkingDelta).assertEqual('先分析');
+      expect(first.contentDelta).assertEqual('');
+      expect(second.thinkingDelta).assertEqual('');
+      expect(second.contentDelta).assertEqual('\n最终回答。');
+      expect(state.inThinking).assertFalse();
+      expect(state.pendingTag).assertEqual('');
+      let rendered = splitAssistantThinkingContent(buildAssistantStreamingRenderContent(content, thinking));
+      expect(rendered.thinkingContent).assertEqual('先分析');
+      expect(rendered.content).assertEqual('最终回答。');
+    });
+
+    it('doesNotTreatContentAsThinkingWhenThinkingDisabled', 0, () => {
+      let state = createChatStreamThinkingState(false);
+
+      let parsed = parseChatStreamThinkingDelta('先分析</think>最终回答。', state);
+
+      expect(parsed.thinkingDelta).assertEqual('');
+      expect(parsed.contentDelta).assertEqual('先分析</think>最终回答。');
+      expect(parsed.state.inThinking).assertFalse();
+    });
+
+    it('dropsSplitOpeningThinkTagDuringThinkingStream', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let first = parseChatStreamThinkingDelta('<thi', state);
+      let second = parseChatStreamThinkingDelta('nk>先分析', first.state);
+
+      expect(first.thinkingDelta).assertEqual('');
+      expect(first.contentDelta).assertEqual('');
+      expect(second.thinkingDelta).assertEqual('先分析');
+      expect(second.contentDelta).assertEqual('');
     });
 
     it('createsAssistantMessageWithCollapsedThinkingModule', 0, () => {
@@ -350,6 +503,37 @@ export default function chatSessionStorageUnitTest() {
       expect(reloaded !== null).assertTrue();
       if (reloaded !== null) {
         expect(reloaded.messages[0].content).assertEqual('最终回答。');
+      }
+
+      cleanupPath(root);
+    });
+
+    it('expandsThinkingModuleWhenStreamingThinkingStarts', 0, () => {
+      let root = nextTestRoot('stream-thinking-expanded');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let assistant = createChatMessage('assistant-1', 'assistant', 'chat', '', 1001);
+      let saved = ChatSessionStorage.appendMessage(root, session.id, assistant);
+      expect(saved !== null).assertTrue();
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: session.id,
+        activeMessages: [assistant],
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: saved
+      };
+
+      let next = ChatSessionController.updateMessageContent(root, state, 'assistant-1',
+        '<think>正在分析问题。', []);
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(next.activeMessages[0].content).assertEqual('');
+      expect(next.activeMessages[0].thinkingContent).assertEqual('正在分析问题。');
+      expect(next.activeMessages[0].thinkingCollapsed).assertFalse();
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.messages[0].thinkingCollapsed).assertFalse();
       }
 
       cleanupPath(root);

@@ -4,47 +4,240 @@ import {
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
   chatMessageImagePath,
+  chatMessageRenderKey,
   chatMessageThinkingCollapsed,
-  chatMessageThinkingContent,
-  chatMessageRenderKey
+  chatMessageThinkingContent
 } from './ChatSessionTypes';
+import { DigitalAvatarView } from './DigitalAvatarView';
+import {
+  chatAvatarRenderModel,
+  digitalAvatarContainerWidth,
+  DigitalAvatarVisualState,
+  TEXT_AVATAR_SIZE,
+  useDigitalAvatarForMessage
+} from './DigitalAvatarTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
+import { AppLogger } from '../../utils/AppLogger';
+
+const STREAM_FOLLOW_STEP: number = 96;
+const STREAM_FOLLOW_DELAY_MS: number = 40;
+const STREAM_FOLLOW_ANIMATION_MS: number = 120;
+const STRUCTURAL_SCROLL_SETTLE_MS: number = 80;
+const BACK_TO_BOTTOM_BUTTON_GAP: number = 12;
+const MESSAGE_BUBBLE_WIDTH: string = '96%';
+const MESSAGE_AVATAR_BUBBLE_GAP: number = 6;
+const MESSAGE_ROW_TOP_MARGIN: number = 14;
 
 @Component
 export struct ChatMessageList {
   @Prop messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
   @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
+  @Prop @Watch('onStreamFollowKeyChanged') streamFollowKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop bottomOverlayInset: number = 122;
+  @State autoFollowEnabled: boolean = true;
+  @State backToBottomVisible: boolean = false;
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onScrollContent: (yOffset: number) => void = () => {};
   private messageScroller: Scroller = new Scroller();
   private lastAutoScrollKey: string = '';
+  private lastStreamFollowKey: string = '';
+  private structuralScrollTimerId: number = -1;
+  private structuralSettleTimerId: number = -1;
+  private streamFollowTimerId: number = -1;
 
   aboutToAppear(): void {
     this.scheduleScrollToLatest(true);
+  }
+
+  aboutToDisappear(): void {
+    this.clearScrollTimers();
   }
 
   private onAutoScrollKeyChanged(): void {
     this.scheduleScrollToLatest(false);
   }
 
+  private onStreamFollowKeyChanged(): void {
+    if (this.streamFollowKey === this.lastStreamFollowKey) {
+      return;
+    }
+    this.lastStreamFollowKey = this.streamFollowKey;
+    if (!this.autoFollowEnabled) {
+      this.markPendingBottomContent('stream-follow-deferred');
+      return;
+    }
+    this.scheduleStreamFollow();
+  }
+
+  private clearStructuralScrollTimers(): void {
+    if (this.structuralScrollTimerId !== -1) {
+      clearTimeout(this.structuralScrollTimerId);
+      this.structuralScrollTimerId = -1;
+    }
+    if (this.structuralSettleTimerId !== -1) {
+      clearTimeout(this.structuralSettleTimerId);
+      this.structuralSettleTimerId = -1;
+    }
+  }
+
+  private clearStreamFollowTimer(): void {
+    if (this.streamFollowTimerId !== -1) {
+      clearTimeout(this.streamFollowTimerId);
+      this.streamFollowTimerId = -1;
+    }
+  }
+
+  private clearScrollTimers(): void {
+    this.clearStructuralScrollTimers();
+    this.clearStreamFollowTimer();
+  }
+
+  private sessionPart(scrollKey: string): string {
+    let delimiterIndex = scrollKey.indexOf(':');
+    if (delimiterIndex < 0) {
+      return scrollKey;
+    }
+    return scrollKey.substring(0, delimiterIndex);
+  }
+
+  private isSessionScopeChanged(previousKey: string, nextKey: string): boolean {
+    if (previousKey.length === 0 || nextKey.length === 0) {
+      return false;
+    }
+    return this.sessionPart(previousKey) !== this.sessionPart(nextKey);
+  }
+
+  private logScroll(message: string): void {
+    AppLogger.info('Chat.Scroll', message + ' autoFollow=' + String(this.autoFollowEnabled) +
+      ', showBackButton=' + String(this.backToBottomVisible) +
+      ', autoKeyLength=' + String(this.autoScrollKey.length) +
+      ', streamKeyLength=' + String(this.streamFollowKey.length));
+  }
+
+  private logScrollDebug(message: string): void {
+    AppLogger.debug('Chat.Scroll', message + ' autoFollow=' + String(this.autoFollowEnabled) +
+      ', showBackButton=' + String(this.backToBottomVisible) +
+      ', autoKeyLength=' + String(this.autoScrollKey.length) +
+      ', streamKeyLength=' + String(this.streamFollowKey.length));
+  }
+
+  private markPendingBottomContent(reason: string): void {
+    this.backToBottomVisible = true;
+    this.logScroll(reason);
+  }
+
   private scheduleScrollToLatest(force: boolean): void {
     if (!force && this.autoScrollKey === this.lastAutoScrollKey) {
       return;
     }
+    let previousKey = this.lastAutoScrollKey;
     this.lastAutoScrollKey = this.autoScrollKey;
-    // 消息气泡中有 Markdown/图片等异步布局，延迟两次滚动确保切换会话时落到底部。
-    setTimeout(() => {
-      this.messageScroller.scrollEdge(Edge.Bottom);
+    if (force || this.isSessionScopeChanged(previousKey, this.autoScrollKey)) {
+      this.autoFollowEnabled = true;
+      this.backToBottomVisible = false;
+    }
+    if (!this.autoFollowEnabled) {
+      this.markPendingBottomContent('structural-scroll-deferred');
+      return;
+    }
+    this.clearStructuralScrollTimers();
+    this.logScroll(force ? 'structural-scroll-initial' : 'structural-scroll');
+    // 消息气泡中有 Markdown/图片等异步布局，保留一次延迟兜底，但先取消旧任务避免流式更新堆积。
+    this.structuralScrollTimerId = setTimeout(() => {
+      this.structuralScrollTimerId = -1;
+      this.scrollToBottomEdge('structural-scroll');
     }, 0);
-    setTimeout(() => {
+    this.structuralSettleTimerId = setTimeout(() => {
+      this.structuralSettleTimerId = -1;
+      this.scrollToBottomEdge('structural-scroll-settle');
+    }, STRUCTURAL_SCROLL_SETTLE_MS);
+  }
+
+  private scheduleStreamFollow(): void {
+    this.clearStreamFollowTimer();
+    this.streamFollowTimerId = setTimeout(() => {
+      this.streamFollowTimerId = -1;
+      this.followStreamingContent();
+    }, STREAM_FOLLOW_DELAY_MS);
+  }
+
+  private scrollToBottomEdge(reason: string): void {
+    if (!this.autoFollowEnabled) {
+      this.markPendingBottomContent(reason + '-blocked');
+      return;
+    }
+    try {
       this.messageScroller.scrollEdge(Edge.Bottom);
-    }, 80);
+      this.backToBottomVisible = false;
+      this.logScroll(reason + '-edge');
+    } catch (e) {
+      AppLogger.warnCause('Chat.Scroll', reason + ' failed', e as Error);
+    }
+  }
+
+  private followStreamingContent(): void {
+    if (!this.autoFollowEnabled) {
+      this.markPendingBottomContent('stream-follow-skipped');
+      return;
+    }
+    try {
+      let offset = this.messageScroller.currentOffset();
+      this.messageScroller.scrollTo({
+        xOffset: offset.xOffset,
+        yOffset: Math.max(0, offset.yOffset + STREAM_FOLLOW_STEP),
+        animation: {
+          duration: STREAM_FOLLOW_ANIMATION_MS,
+          curve: Curve.Smooth,
+          canOverScroll: false
+        },
+        canOverScroll: false
+      });
+      this.logScrollDebug('stream-follow');
+    } catch (e) {
+      AppLogger.warnCause('Chat.Scroll', 'stream-follow failed', e as Error);
+    }
+  }
+
+  private isUserScrollSource(scrollSource: ScrollSource): boolean {
+    return scrollSource === ScrollSource.DRAG || scrollSource === ScrollSource.OTHER_USER_INPUT ||
+      scrollSource === ScrollSource.SCROLL_BAR || scrollSource === ScrollSource.FLING ||
+      scrollSource === ScrollSource.SCROLL_BAR_FLING;
+  }
+
+  private onScrollWillMove(_xOffset: number, yOffset: number, _scrollState: ScrollState, scrollSource: ScrollSource): void {
+    this.onScrollContent(yOffset);
+    if (this.autoFollowEnabled && this.isUserScrollSource(scrollSource) && yOffset > 0) {
+      this.autoFollowEnabled = false;
+      this.backToBottomVisible = true;
+      this.clearScrollTimers();
+      this.logScroll('auto-follow-paused');
+    }
+  }
+
+  private onReachBottom(): void {
+    if (!this.autoFollowEnabled || this.backToBottomVisible) {
+      this.autoFollowEnabled = true;
+      this.backToBottomVisible = false;
+      this.logScroll('reach-end');
+    }
+  }
+
+  private handleBackToBottom(): void {
+    this.autoFollowEnabled = true;
+    this.backToBottomVisible = false;
+    this.clearScrollTimers();
+    this.scrollToBottomEdge('back-to-bottom');
+  }
+
+  private backToBottomButtonBottomOffset(): number {
+    return this.bottomOverlayInset + BACK_TO_BOTTOM_BUTTON_GAP;
   }
 
   private isUserMessage(message: ChatMessage): boolean {
@@ -71,32 +264,37 @@ export struct ChatMessageList {
   }
 
   private avatarText(message: ChatMessage): string {
-    if (message.role === 'user') {
-      return '我';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '压';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT || message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '任';
-    }
-    return this.modeMark.length > 0 ? this.modeMark : '助';
+    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackText;
   }
 
   private avatarColor(message: ChatMessage): string {
-    if (message.role === 'user') {
-      return '#111827';
+    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackColor;
+  }
+
+  private shouldUseDigitalAvatar(message: ChatMessage): boolean {
+    return useDigitalAvatarForMessage(message);
+  }
+
+  private avatarColumnWidth(message: ChatMessage): number {
+    if (this.shouldUseDigitalAvatar(message) && this.avatarForegroundUri.length > 0) {
+      return digitalAvatarContainerWidth('message', true);
     }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '#F59E0B';
+    return TEXT_AVATAR_SIZE;
+  }
+
+  private thinkingAvatarColumnWidth(): number {
+    if (this.avatarForegroundUri.length > 0) {
+      return digitalAvatarContainerWidth('message', true);
     }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
-      return '#059669';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '#7C3AED';
-    }
-    return '#5968FF';
+    return TEXT_AVATAR_SIZE;
+  }
+
+  private avatarDebugSource(message: ChatMessage): string {
+    return 'message id=' + message.id + ', role=' + message.role + ', kind=' + message.kind;
+  }
+
+  private thinkingAvatarDebugSource(): string {
+    return 'thinking-row modeMark=' + (this.modeMark.length > 0 ? this.modeMark : '助');
   }
 
   private bubbleColor(message: ChatMessage): string {
@@ -147,15 +345,41 @@ export struct ChatMessageList {
   }
 
   @Builder Avatar(message: ChatMessage) {
-    Text(this.avatarText(message))
-      .fontSize(13)
-      .fontWeight(FontWeight.Bold)
-      .fontColor(Color.White)
-      .width(34)
-      .height(34)
-      .textAlign(TextAlign.Center)
-      .backgroundColor(this.avatarColor(message))
-      .borderRadius(13)
+    this.AvatarWithState(message, 'idle');
+  }
+
+  @Builder AvatarWithState(message: ChatMessage, visualState: DigitalAvatarVisualState) {
+    if (this.shouldUseDigitalAvatar(message)) {
+      DigitalAvatarView({
+        avatarForegroundUri: this.avatarForegroundUri,
+        fallbackText: this.avatarText(message),
+        fallbackColor: this.avatarColor(message),
+        visualState: visualState,
+        avatarSize: 'message',
+        debugSource: this.avatarDebugSource(message)
+      })
+    } else {
+      Text(this.avatarText(message))
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(TEXT_AVATAR_SIZE)
+        .height(TEXT_AVATAR_SIZE)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(this.avatarColor(message))
+        .borderRadius(13)
+    }
+  }
+
+  @Builder ThinkingAvatar() {
+    DigitalAvatarView({
+      avatarForegroundUri: this.avatarForegroundUri,
+      fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
+      fallbackColor: '#5968FF',
+      visualState: 'thinking',
+      avatarSize: 'message',
+      debugSource: this.thinkingAvatarDebugSource()
+    })
   }
 
   @Builder ChatBubble(message: ChatMessage) {
@@ -272,6 +496,56 @@ export struct ChatMessageList {
     }
   }
 
+  @Builder MessageBubbleBody(message: ChatMessage) {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      this.TraceBubble(message)
+    } else {
+      this.ChatBubble(message)
+    }
+  }
+
+  @Builder MessageAvatarBadge(message: ChatMessage) {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      Column() {
+        this.Avatar(message)
+      }
+      .width(this.avatarColumnWidth(message))
+      .onClick(() => {
+        this.onToggleTaskTrace(message.id);
+      })
+    } else {
+      Column() {
+        this.Avatar(message)
+      }
+      .width(this.avatarColumnWidth(message))
+    }
+  }
+
+  @Builder MessageAvatarHeader(message: ChatMessage) {
+    Row() {
+      if (this.isUserMessage(message)) {
+        Blank()
+          .layoutWeight(1)
+        this.MessageAvatarBadge(message)
+      } else {
+        this.MessageAvatarBadge(message)
+        Blank()
+          .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .margin({ bottom: MESSAGE_AVATAR_BUBBLE_GAP })
+  }
+
+  @Builder MessageContentBlock(message: ChatMessage) {
+    Column() {
+      this.MessageAvatarHeader(message)
+      this.MessageBubbleBody(message)
+    }
+    .width(MESSAGE_BUBBLE_WIDTH)
+  }
+
   @Builder TraceBubble(message: ChatMessage) {
     Column() {
       Row() {
@@ -343,86 +617,82 @@ export struct ChatMessageList {
       if (this.isUserMessage(message)) {
         Blank()
           .layoutWeight(1)
-        Column() {
-          this.ChatBubble(message)
-        }
-        .width('78%')
-        Column() {
-          this.Avatar(message)
-        }
-        .width(34)
-        .margin({ left: 10 })
+        this.MessageContentBlock(message)
       } else {
-        Column() {
-          this.Avatar(message)
-        }
-        .width(34)
-        .margin({ right: 10 })
-        .onClick(() => {
-          if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-            this.onToggleTaskTrace(message.id);
-          }
-        })
-        Column() {
-          if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-            this.TraceBubble(message)
-          } else {
-            this.ChatBubble(message)
-          }
-        }
-        .width('78%')
+        this.MessageContentBlock(message)
         Blank()
           .layoutWeight(1)
       }
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
-    .margin({ top: 14 })
+    .margin({ top: MESSAGE_ROW_TOP_MARGIN })
+  }
+
+  @Builder BackToBottomButton() {
+    Text('↓ 回到底部')
+      .fontSize(12)
+      .fontWeight(FontWeight.Medium)
+      .fontColor(Color.White)
+      .height(34)
+      .padding({ left: 14, right: 14 })
+      .backgroundColor('#111827')
+      .borderRadius(17)
+      .shadow({ radius: 10, color: '#24000000', offsetX: 0, offsetY: 3 })
+      .margin({ right: 4, bottom: this.backToBottomButtonBottomOffset() })
+      .onClick(() => {
+        this.handleBackToBottom();
+      })
   }
 
   build() {
-    Scroll(this.messageScroller) {
-      Column() {
-        ForEach(this.messages, (message: ChatMessage) => {
-          this.MessageRow(message)
-        }, (message: ChatMessage) => chatMessageRenderKey(message))
+    Stack({ alignContent: Alignment.BottomEnd }) {
+      Scroll(this.messageScroller) {
+        Column() {
+          ForEach(this.messages, (message: ChatMessage) => {
+            this.MessageRow(message)
+          }, (message: ChatMessage) => chatMessageRenderKey(message))
 
-        if (this.thinking) {
-          Row() {
-            Text(this.modeMark.length > 0 ? this.modeMark : '助')
-              .fontSize(13)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .width(34)
-              .height(34)
-              .textAlign(TextAlign.Center)
-              .backgroundColor('#5968FF')
-              .borderRadius(13)
-              .margin({ right: 10 })
-            Text('处理中...')
-              .fontSize(13)
-              .fontColor('#6B7280')
-              .height(36)
-              .padding({ left: 14, right: 14 })
-              .backgroundColor('#F8FAFD')
-              .borderRadius(18)
-              .border({ width: 1, color: '#E8ECF3' })
-            Blank()
-              .layoutWeight(1)
+          if (this.thinking) {
+            Row() {
+              Column() {
+                this.ThinkingAvatar()
+              }
+              .width(this.thinkingAvatarColumnWidth())
+                .margin({ right: 10 })
+              Text('处理中...')
+                .fontSize(13)
+                .fontColor('#6B7280')
+                .height(36)
+                .padding({ left: 14, right: 14 })
+                .backgroundColor('#F8FAFD')
+                .borderRadius(18)
+                .border({ width: 1, color: '#E8ECF3' })
+              Blank()
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+            .margin({ top: 14 })
           }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .margin({ top: 14 })
-        }
 
-        Blank()
-          .height(150)
+          Blank()
+            .height(150)
+        }
+        .width('100%')
       }
+      .onWillScroll((xOffset: number, yOffset: number, scrollState: ScrollState, scrollSource: ScrollSource) => {
+        this.onScrollWillMove(xOffset, yOffset, scrollState, scrollSource);
+      })
+      .onReachEnd(() => {
+        this.onReachBottom();
+      })
+      .height('100%')
       .width('100%')
+      if (this.backToBottomVisible) {
+        this.BackToBottomButton()
+      }
     }
-    .onScroll((_xOffset: number, yOffset: number) => {
-      this.onScrollContent(yOffset);
-    })
     .layoutWeight(1)
     .width('100%')
   }

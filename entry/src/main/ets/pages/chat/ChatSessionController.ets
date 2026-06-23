@@ -300,10 +300,15 @@ export class ChatSessionController {
       }
       let visibleContent = content;
       let thinkingContent = chatMessageThinkingContent(message);
+      let thinkingCollapsed = chatMessageThinkingCollapsed(message);
       if (message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+        let previousThinkingContent = chatMessageThinkingContent(message);
         let parts: ChatAssistantThinkingParts = splitAssistantThinkingContent(content);
         visibleContent = parts.content;
         thinkingContent = parts.thinkingContent;
+        if (previousThinkingContent.length === 0 && thinkingContent.length > 0) {
+          thinkingCollapsed = false;
+        }
       }
       messages[i] = {
         id: message.id,
@@ -311,7 +316,7 @@ export class ChatSessionController {
         kind: message.kind,
         content: visibleContent,
         thinkingContent: thinkingContent,
-        thinkingCollapsed: chatMessageThinkingCollapsed(message),
+        thinkingCollapsed: thinkingCollapsed,
         trace: trace === undefined ? message.trace.slice() : trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,

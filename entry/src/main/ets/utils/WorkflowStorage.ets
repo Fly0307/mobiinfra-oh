@@ -441,23 +441,36 @@ export class WorkflowStorage {
     }
   }
 
+  private static assertSafeWorkflowPath(root: string, normalized: string): void {
+    if (normalized.length === 0) {
+      throw new Error('Path is empty');
+    }
+    let segments = normalized.split('/');
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i] === '.' || segments[i] === '..') {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+    if (normalized.startsWith('/')) {
+      if (normalized !== root && !normalized.startsWith(root + '/')) {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+  }
+
   private static workflowAbsolutePath(filesDir: string, path: string): string {
     let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
     let normalized = path.trim().replace(/\\/g, '/');
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
-    if (normalized.startsWith('chat-sessions/')) {
-      return root + '/' + normalized;
-    }
+    WorkflowStorage.assertSafeWorkflowPath(root, normalized);
     if (normalized.startsWith('/')) {
       return normalized;
     }
-    if (normalized.startsWith('workflows/')) {
+    if (normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/')) {
       return root + '/' + normalized;
-    }
-    if (normalized.startsWith('runs/')) {
-      return WorkflowStorage.rootDir(root) + '/' + normalized;
     }
     return root + '/' + normalized;
   }

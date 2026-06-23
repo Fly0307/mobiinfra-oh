@@ -177,6 +177,53 @@ export default function workflowStorageUnitTest() {
         .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/screenshot.png');
     });
 
+    it('resolveWorkflowImageInputAsBase64RejectsPathEscapeAndOutsideAbsolutePaths', 0, () => {
+      let filesDir = nextTestRoot('resolve-path-safety');
+      try {
+        prepareTestRoot(filesDir);
+
+        let escaped = false;
+        try {
+          WorkflowStorage.resolveWorkflowImageInputAsBase64(filesDir, '../../secret.png');
+        } catch (e) {
+          escaped = true;
+        }
+        expect(escaped).assertTrue();
+
+        let outside = false;
+        try {
+          WorkflowStorage.resolveWorkflowImageInputAsBase64(filesDir, '/outside/secret.png');
+        } catch (e) {
+          outside = true;
+        }
+        expect(outside).assertTrue();
+      } finally {
+        cleanupPath(filesDir);
+      }
+    });
+
+    it('resolveWorkflowImageInputAsBase64ReadsChatSessionRelativePath', 0, () => {
+      let filesDir = nextTestRoot('resolve-chat-session-path');
+      try {
+        prepareTestRoot(filesDir);
+        let relativePath = 'chat-sessions/tool-runs/session-abc/mobile-gui/run-1/screenshot.png';
+        let absolutePath = filesDir + '/' + relativePath;
+        WorkflowStorage.ensureDirectoryTree(filesDir + '/chat-sessions/tool-runs/session-abc/mobile-gui/run-1');
+        WorkflowStorage.writeBase64Image(absolutePath,
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=');
+
+        let threw = false;
+        try {
+          WorkflowStorage.resolveWorkflowImageInputAsBase64(filesDir, relativePath);
+        } catch (e) {
+          threw = true;
+        }
+        expect(threw).assertFalse();
+      } finally {
+        cleanupPath(filesDir);
+      }
+    });
+
     it('runDirectoryRootPrefersOverride', 0, () => {
       expect(WorkflowRunner.runDirectoryRoot('/tmp/files', '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui'))
         .assertEqual('/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui');

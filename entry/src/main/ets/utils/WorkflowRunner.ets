@@ -358,7 +358,7 @@ export class WorkflowRunner {
     let stamp = this.formatTimestamp(this.runStartedAt);
     let safeName = this.sanitizeFileName(task.source || task.id);
     let dir = runRoot + '/' + stamp + '-' + safeName;
-    WorkflowStorage.ensureDirectory(dir);
+    WorkflowStorage.ensureDirectoryTree(dir);
     return dir;
   }
 

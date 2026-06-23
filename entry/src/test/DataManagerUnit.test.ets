@@ -2113,6 +2113,7 @@ export default function dataManagerUnitTest() {
       let avatar = createEmptyAvatarHomeViewModel();
       expect(avatar.avatarUri).assertEqual('');
       expect(avatar.avatarForegroundUri).assertEqual('');
+      expect(avatar.avatarMessageForegroundUri).assertEqual('');
       expect(avatar.avatarReferencePhotoUri).assertEqual('');
       expect(avatar.avatarStatus).assertEqual('empty');
       expect(avatar.avatarActionLabel).assertEqual('生成数字分身');
@@ -2297,6 +2298,64 @@ export default function dataManagerUnitTest() {
       expect(persistedState.current_version_id).assertEqual('v-orphan');
       expect(persistedState.profile_snapshot_hash).assertEqual(latestHash);
       expect(persistedState.last_error_message).assertEqual('');
+    });
+
+    it('avatarServiceBackfillsMessageForegroundWhenFullForegroundAlreadyExists', 0, async () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-foreground-backfill';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let service = new AvatarService(paths, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      let onePixelPng = new Uint8Array([
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 224, 18,
+        145, 251, 15, 0, 1, 164, 1, 60, 147, 139, 14, 183, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+        66, 96, 130
+      ]);
+      avatarStorage.saveForegroundPng('v-existing', onePixelPng);
+      avatarStorage.saveVersion({
+        version_id: 'v-existing',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v-existing.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v-existing';
+      state.profile_snapshot_hash = 'hash';
+      avatarStorage.saveState(state);
+
+      expect(avatarStorage.foregroundExists('v-existing')).assertTrue();
+      expect(avatarStorage.messageForegroundExists('v-existing')).assertFalse();
+
+      let view = await service.ensureCurrentForeground();
+
+      expect(view.avatarForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-foreground-backfill/workflows/avatar/assets/v-existing-foreground.png');
+      expect(view.avatarMessageForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-foreground-backfill/workflows/avatar/assets/v-existing-message-foreground.png');
+      expect(avatarStorage.messageForegroundExists('v-existing')).assertTrue();
     });
 
     it('avatarGenerateRequestKeepsOriginalPhotoSourceInConsent', 0, () => {
@@ -2488,6 +2547,68 @@ export default function dataManagerUnitTest() {
       avatarStorage.saveForegroundPng('v-main', new Uint8Array([137, 80, 78, 71]));
       expect(avatarStorage.foregroundExists('v-main')).assertTrue();
       expect(avatarStorage.foregroundDisplayUri('v-main')).assertEqual('file:///tmp/demo-avatar-foreground/workflows/avatar/assets/v-main-foreground.png');
+    });
+
+    it('avatarStorageBuildsMessageForegroundCachePathAndUri', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-foreground';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      expect(avatarStorage.messageForegroundAssetPath('v-main'))
+        .assertEqual('/tmp/demo-avatar-message-foreground/workflows/avatar/assets/v-main-message-foreground.png');
+      expect(avatarStorage.relativeAvatarMessageForegroundPath('v-main'))
+        .assertEqual('assets/v-main-message-foreground.png');
+      expect(avatarStorage.messageForegroundExists('v-main')).assertFalse();
+      avatarStorage.saveMessageForegroundPng('v-main', new Uint8Array([137, 80, 78, 71]));
+      expect(avatarStorage.messageForegroundExists('v-main')).assertTrue();
+      expect(avatarStorage.messageForegroundDisplayUri('v-main'))
+        .assertEqual('file:///tmp/demo-avatar-message-foreground/workflows/avatar/assets/v-main-message-foreground.png');
+    });
+
+    it('avatarHomeViewUsesMessageForegroundWhenCacheExists', 0, () => {
+      let storage = new DataManagerStorage();
+      let root = '/tmp/demo-avatar-message-home-view';
+      storage.removeTree(root);
+      let paths = new DataManagerPaths(root, storage);
+      let avatarStorage = new AvatarStorage(paths, storage);
+      avatarStorage.saveForegroundPng('v1', new Uint8Array([137, 80, 78, 71]));
+      avatarStorage.saveMessageForegroundPng('v1', new Uint8Array([137, 80, 78, 71]));
+      let state = avatarStorage.emptyState();
+      state.status = 'current';
+      state.current_version_id = 'v1';
+
+      let view = avatarStorage.homeViewFromState(state, {
+        version_id: 'v1',
+        created_at: '2026-06-10 10:07:00',
+        image_path: 'assets/v1.png',
+        thumbnail_path: '',
+        mode: 'text_to_image',
+        provider: 'seedream',
+        model: 'doubao-seedream-4-5-251128',
+        generation_params: {
+          size: '2K',
+          response_format: 'url',
+          output_format: 'jpeg',
+          sequential_image_generation: 'disabled',
+          stream: false,
+          watermark: true
+        },
+        prompt_snapshot: 'prompt',
+        profile_snapshot: new AvatarPromptBuilder(storage).buildSnapshot(demoProfileStateForAvatar(), 100),
+        profile_snapshot_hash: 'hash',
+        consent_snapshot: {
+          mode: 'text_to_image',
+          photo_used: false,
+          consented_at: '',
+          photo_source: ''
+        }
+      });
+
+      expect(view.avatarForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-home-view/workflows/avatar/assets/v1-foreground.png');
+      expect(view.avatarMessageForegroundUri)
+        .assertEqual('file:///tmp/demo-avatar-message-home-view/workflows/avatar/assets/v1-message-foreground.png');
     });
 
     it('dataManagerStorageWriteBytesOnlyWritesProvidedViewRange', 0, () => {

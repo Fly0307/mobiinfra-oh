@@ -11,6 +11,11 @@ import {
   cropRgbaToAlphaBounds,
   findAlphaCropBounds
 } from './AvatarForegroundCrop';
+import {
+  AvatarForegroundThumbnailRgba,
+  createAvatarForegroundMessageRgba,
+  encodeAvatarForegroundMessagePng
+} from './AvatarForegroundThumbnail';
 import { avatarErrorMessage } from './AvatarTypes';
 
 const AVATAR_FOREGROUND_SEGMENT_MAX_COUNT: number = 1;
@@ -33,8 +38,22 @@ export class AvatarForegroundService {
     if (versionId.length === 0 || imagePath.trim().length === 0) {
       return '';
     }
-    if (this.avatarStorage.foregroundExists(versionId)) {
+    if (this.avatarStorage.foregroundExists(versionId) && this.avatarStorage.messageForegroundExists(versionId)) {
       return this.avatarStorage.foregroundDisplayUri(versionId);
+    }
+    if (this.avatarStorage.foregroundExists(versionId)) {
+      let task = this.foregroundQueue.then(async (): Promise<string> => {
+        if (!this.avatarStorage.messageForegroundExists(versionId)) {
+          await this.createMessageForegroundFromExisting(versionId);
+        }
+        return this.avatarStorage.foregroundDisplayUri(versionId);
+      });
+      this.foregroundQueue = task.then((_value: string): string => {
+        return '';
+      }).catch((): string => {
+        return '';
+      });
+      return await task;
     }
     let sourcePath = this.sourceImagePath(imagePath);
     if (sourcePath.length === 0) {
@@ -44,6 +63,9 @@ export class AvatarForegroundService {
     // subjectSegmentation 是模块级视觉服务；串行化可避免多个头像前景任务交错 init/release。
     let task = this.foregroundQueue.then(async (): Promise<string> => {
       if (this.avatarStorage.foregroundExists(versionId)) {
+        if (!this.avatarStorage.messageForegroundExists(versionId)) {
+          await this.createMessageForegroundFromExisting(versionId);
+        }
         return this.avatarStorage.foregroundDisplayUri(versionId);
       }
       return await this.createForeground(versionId, sourcePath);
@@ -54,6 +76,41 @@ export class AvatarForegroundService {
       return '';
     });
     return await task;
+  }
+
+  private async createMessageForegroundFromExisting(versionId: string): Promise<void> {
+    let imageFile: fileIo.File | null = null;
+    let imageSource: image.ImageSource | null = null;
+    let foregroundPixelMap: image.PixelMap | null = null;
+    try {
+      imageFile = await fileIo.open(this.avatarStorage.foregroundAssetPath(versionId), fileIo.OpenMode.READ_ONLY);
+      imageSource = image.createImageSource(imageFile.fd);
+      foregroundPixelMap = await imageSource.createPixelMap();
+      await this.saveMessageForegroundPng(versionId, foregroundPixelMap);
+    } catch (e) {
+      dataManagerWarn('Avatar message foreground backfill failed: ' +
+        avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+          'unknown message foreground backfill error'));
+    } finally {
+      if (foregroundPixelMap !== null) {
+        try {
+          await foregroundPixelMap.release();
+        } catch (e) {
+        }
+      }
+      if (imageSource !== null) {
+        try {
+          await imageSource.release();
+        } catch (e) {
+        }
+      }
+      if (imageFile !== null) {
+        try {
+          await fileIo.close(imageFile);
+        } catch (e) {
+        }
+      }
+    }
   }
 
   private async createForeground(versionId: string, sourcePath: string): Promise<string> {
@@ -95,6 +152,7 @@ export class AvatarForegroundService {
         quality: 100
       });
       this.avatarStorage.saveForegroundPng(versionId, new Uint8Array(data));
+      await this.saveMessageForegroundPng(versionId, pngPixelMap);
       return this.avatarStorage.foregroundDisplayUri(versionId);
     } catch (e) {
       dataManagerWarn('Avatar foreground failed: ' +
@@ -141,6 +199,33 @@ export class AvatarForegroundService {
       }
       await this.release();
     }
+  }
+
+  private async saveMessageForegroundPng(versionId: string, pixelMap: image.PixelMap): Promise<void> {
+    try {
+      let thumbnail: AvatarForegroundThumbnailRgba = await this.createMessageForegroundThumbnail(pixelMap);
+      // 消息头像使用固定透明画布缓存；这里直接写标准 PNG，避免二次 PixelMap 创建在
+      // 单测或低内存环境下失败，同时保证透明边距和人物比例稳定。
+      this.avatarStorage.saveMessageForegroundPng(versionId, encodeAvatarForegroundMessagePng(thumbnail));
+    } catch (e) {
+      dataManagerWarn('Avatar message foreground failed: ' +
+        avatarErrorMessage(e as Error | Object | string | number | boolean | null | undefined,
+          'unknown message foreground error'));
+    }
+  }
+
+  private async createMessageForegroundThumbnail(pixelMap: image.PixelMap): Promise<AvatarForegroundThumbnailRgba> {
+    let info: image.ImageInfo = await pixelMap.getImageInfo();
+    let width: number = info.size.width;
+    let height: number = info.size.height;
+    if (width <= 0 || height <= 0) {
+      return createAvatarForegroundMessageRgba(new Uint8Array(0), 0, 0);
+    }
+    let tightStride: number = width * 4;
+    let sourceStride: number = info.stride > tightStride ? info.stride : tightStride;
+    let buffer: ArrayBuffer = new ArrayBuffer(sourceStride * height);
+    await pixelMap.readPixelsToBuffer(buffer);
+    return createAvatarForegroundMessageRgba(new Uint8Array(buffer), width, height, sourceStride);
   }
 
   private async cropForegroundAlphaBounds(pixelMap: image.PixelMap): Promise<image.PixelMap | null> {

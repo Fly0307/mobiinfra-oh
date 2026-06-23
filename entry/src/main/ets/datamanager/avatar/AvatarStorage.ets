@@ -99,6 +99,18 @@ export class AvatarStorage {
     return this.displayUri(this.relativeAvatarForegroundPath(versionId));
   }
 
+  messageForegroundAssetPath(versionId: string): string {
+    return this.storage.join(this.paths.avatarAssetsRoot, versionId + '-message-foreground.png');
+  }
+
+  relativeAvatarMessageForegroundPath(versionId: string): string {
+    return 'assets/' + versionId + '-message-foreground.png';
+  }
+
+  messageForegroundDisplayUri(versionId: string): string {
+    return this.displayUri(this.relativeAvatarMessageForegroundPath(versionId));
+  }
+
   foregroundExists(versionId: string): boolean {
     if (versionId.length === 0) {
       return false;
@@ -106,10 +118,23 @@ export class AvatarStorage {
     return this.storage.exists(this.foregroundAssetPath(versionId));
   }
 
+  messageForegroundExists(versionId: string): boolean {
+    if (versionId.length === 0) {
+      return false;
+    }
+    return this.storage.exists(this.messageForegroundAssetPath(versionId));
+  }
+
   saveForegroundPng(versionId: string, bytes: Uint8Array): string {
     this.ensureReady();
     this.storage.writeBytesAtomic(this.foregroundAssetPath(versionId), bytes);
     return this.relativeAvatarForegroundPath(versionId);
+  }
+
+  saveMessageForegroundPng(versionId: string, bytes: Uint8Array): string {
+    this.ensureReady();
+    this.storage.writeBytesAtomic(this.messageForegroundAssetPath(versionId), bytes);
+    return this.relativeAvatarMessageForegroundPath(versionId);
   }
 
   saveAssetBase64(versionId: string, base64Text: string, outputFormat?: string): string {
@@ -174,6 +199,9 @@ export class AvatarStorage {
       view.avatarUri = this.displayUri(currentVersion.image_path);
       if (this.foregroundExists(currentVersion.version_id)) {
         view.avatarForegroundUri = this.foregroundDisplayUri(currentVersion.version_id);
+      }
+      if (this.messageForegroundExists(currentVersion.version_id)) {
+        view.avatarMessageForegroundUri = this.messageForegroundDisplayUri(currentVersion.version_id);
       }
     }
     return view;

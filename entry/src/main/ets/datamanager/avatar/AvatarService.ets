@@ -126,9 +126,12 @@ export class AvatarService {
     this.ensureReady();
     let state = this.avatarStorage.loadState();
     let currentVersion = this.avatarStorage.loadVersion(state.current_version_id);
-    if (currentVersion !== null && currentVersion.image_path.length > 0 &&
-      !this.avatarStorage.foregroundExists(currentVersion.version_id)) {
-      await this.ensureForegroundBestEffort(currentVersion);
+    if (currentVersion !== null && currentVersion.image_path.length > 0) {
+      let foregroundMissing: boolean = !this.avatarStorage.foregroundExists(currentVersion.version_id);
+      let messageForegroundMissing: boolean = !this.avatarStorage.messageForegroundExists(currentVersion.version_id);
+      if (foregroundMissing || messageForegroundMissing) {
+        await this.ensureForegroundBestEffort(currentVersion);
+      }
     }
     let latestState = this.avatarStorage.loadState();
     let latestVersion = this.avatarStorage.loadVersion(latestState.current_version_id);

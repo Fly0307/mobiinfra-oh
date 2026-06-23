@@ -64,10 +64,10 @@ export default function chatMessageDataSourceUnitTest() {
 
       expect(source.stableKeyFor(initial)).assertEqual(chatMessageStableRenderKey(initial));
       expect(source.stableKeyFor(initial)).assertEqual(source.stableKeyFor(streamed));
-      expect(source.keyFor(initial) === source.keyFor(streamed)).assertFalse();
+      expect(source.keyFor(initial)).assertEqual(source.keyFor(streamed));
     });
 
-    it('notifiesDataChangeWhenStreamingContentUpdatesWithStableKey', 0, () => {
+    it('reusesUiModelWhenStreamingContentUpdatesWithStableKey', 0, () => {
       let initial: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '', 1001);
       let streamed: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '正在整理更多内容', 1001);
       let source: ChatMessageDataSource = new ChatMessageDataSource();
@@ -75,11 +75,39 @@ export default function chatMessageDataSourceUnitTest() {
       source.registerDataChangeListener(recorder);
 
       source.setMessages([initial]);
+      let initialModel = source.getData(0);
       source.setMessages([streamed]);
+      let streamedModel = source.getData(0);
 
       expect(recorder.reloadCount).assertEqual(1);
-      expect(recorder.changedIndexes.length).assertEqual(1);
-      expect(recorder.changedIndexes[0]).assertEqual(0);
+      expect(recorder.changedIndexes.length).assertEqual(0);
+      expect(initialModel === streamedModel).assertTrue();
+      expect(streamedModel.detail.content).assertEqual('正在整理更多内容');
+    });
+
+    it('reusesUiModelWhenObservedDetailFieldsUpdateWithStableKey', 0, () => {
+      let initial: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '', 1001, [], '');
+      let streamed: ChatMessage = createChatMessage('m2', 'assistant', 'chat',
+        '<think>先分析问题</think>最终回答', 1001, ['工具调用完成'], '/tmp/snapshot.png');
+      streamed.thinkingCollapsed = false;
+      let source: ChatMessageDataSource = new ChatMessageDataSource();
+      let recorder: ChatMessageDataChangeRecorder = new ChatMessageDataChangeRecorder();
+      source.registerDataChangeListener(recorder);
+
+      source.setMessages([initial]);
+      let initialModel = source.getData(0);
+      source.setMessages([streamed]);
+      let streamedModel = source.getData(0);
+
+      expect(recorder.reloadCount).assertEqual(1);
+      expect(recorder.changedIndexes.length).assertEqual(0);
+      expect(initialModel === streamedModel).assertTrue();
+      expect(streamedModel.detail.content).assertEqual('最终回答');
+      expect(streamedModel.detail.thinkingContent).assertEqual('先分析问题');
+      expect(streamedModel.detail.thinkingCollapsed).assertFalse();
+      expect(streamedModel.detail.trace.length).assertEqual(1);
+      expect(streamedModel.detail.trace[0]).assertEqual('工具调用完成');
+      expect(streamedModel.detail.imagePath).assertEqual('/tmp/snapshot.png');
     });
 
     it('reloadsWhenMessageCountOrStableKeyOrderChanges', 0, () => {

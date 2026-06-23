@@ -1,33 +1,37 @@
-import { ChatMessage, chatMessageRenderKey, chatMessageStableRenderKey } from './ChatSessionTypes';
+import { ChatMessage, chatMessageStableRenderKey } from './ChatSessionTypes';
+import {
+  ChatMessageUiModel,
+  chatMessageUiModelRawStableKey,
+  chatMessageUiModelStableKey
+} from './ChatMessageUiModel';
 
 export class ChatMessageDataSource implements IDataSource {
-  private messages: ChatMessage[] = [];
+  private messages: ChatMessageUiModel[] = [];
   private listeners: DataChangeListener[] = [];
 
   setMessages(messages: ChatMessage[]): void {
-    let previousMessages: ChatMessage[] = this.messages;
-    this.messages = messages.slice();
-    if (this.shouldReload(previousMessages, this.messages)) {
+    let previousMessages: ChatMessageUiModel[] = this.messages;
+    let shouldReload = this.shouldReload(previousMessages, messages);
+    this.messages = this.reconcileMessages(previousMessages, messages);
+    if (shouldReload) {
       this.notifyDataReloaded();
-      return;
     }
-    this.notifyChangedMessages(previousMessages, this.messages);
   }
 
   totalCount(): number {
     return this.messages.length;
   }
 
-  getData(index: number): ChatMessage {
+  getData(index: number): ChatMessageUiModel {
     return this.messages[index];
   }
 
-  keyFor(message: ChatMessage): string {
-    return chatMessageRenderKey(message);
+  keyFor(message: ChatMessage | ChatMessageUiModel): string {
+    return message.id + ':' + message.kind;
   }
 
-  stableKeyFor(message: ChatMessage): string {
-    return chatMessageStableRenderKey(message);
+  stableKeyFor(message: ChatMessage | ChatMessageUiModel): string {
+    return message.id + ':' + message.kind;
   }
 
   registerDataChangeListener(listener: DataChangeListener): void {
@@ -54,27 +58,50 @@ export class ChatMessageDataSource implements IDataSource {
     }
   }
 
-  private shouldReload(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): boolean {
+  private shouldReload(previousMessages: ChatMessageUiModel[], nextMessages: ChatMessage[]): boolean {
     if (previousMessages.length !== nextMessages.length) {
       return true;
     }
     for (let i = 0; i < nextMessages.length; i++) {
-      if (this.stableKeyFor(previousMessages[i]) !== this.stableKeyFor(nextMessages[i])) {
+      if (chatMessageUiModelStableKey(previousMessages[i]) !== chatMessageStableRenderKey(nextMessages[i])) {
         return true;
       }
     }
     return false;
   }
 
-  private notifyChangedMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): void {
-    // 结构比较使用稳定 key；实际 LazyForEach key 带内容签名，保证流式内容更新能重建当前消息正文。
+  private reconcileMessages(previousMessages: ChatMessageUiModel[], nextMessages: ChatMessage[]): ChatMessageUiModel[] {
+    let usedPreviousIndexes: boolean[] = [];
+    for (let i = 0; i < previousMessages.length; i++) {
+      usedPreviousIndexes.push(false);
+    }
+    let nextModels: ChatMessageUiModel[] = [];
     for (let index = 0; index < nextMessages.length; index++) {
-      if (previousMessages[index] === nextMessages[index]) {
+      let message = nextMessages[index];
+      let model = this.reusableModelForMessage(previousMessages, usedPreviousIndexes, message, index);
+      model.apply(message);
+      nextModels.push(model);
+    }
+    return nextModels;
+  }
+
+  private reusableModelForMessage(previousMessages: ChatMessageUiModel[], usedPreviousIndexes: boolean[],
+    message: ChatMessage, preferredIndex: number): ChatMessageUiModel {
+    let messageKey = chatMessageUiModelRawStableKey(message);
+    if (preferredIndex < previousMessages.length && !usedPreviousIndexes[preferredIndex] &&
+      chatMessageUiModelStableKey(previousMessages[preferredIndex]) === messageKey) {
+      usedPreviousIndexes[preferredIndex] = true;
+      return previousMessages[preferredIndex];
+    }
+    for (let index = 0; index < previousMessages.length; index++) {
+      if (usedPreviousIndexes[index]) {
         continue;
       }
-      for (let listenerIndex = 0; listenerIndex < this.listeners.length; listenerIndex++) {
-        this.listeners[listenerIndex].onDataChange(index);
+      if (chatMessageUiModelStableKey(previousMessages[index]) === messageKey) {
+        usedPreviousIndexes[index] = true;
+        return previousMessages[index];
       }
     }
+    return new ChatMessageUiModel(message);
   }
 }

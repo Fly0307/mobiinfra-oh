@@ -3,7 +3,11 @@ import {
   MOBILE_GUI_TASK_TOOL_NAME,
   createMobileGuiTaskTool,
   mobileGuiTaskToolParameters,
-  normalizeMobileGuiTaskArguments
+  MobileGuiTaskRunResult,
+  MobileGuiTaskToolResponse,
+  mobileGuiTaskToolResponseFromRunResult,
+  normalizeMobileGuiTaskArguments,
+  stringifyMobileGuiTaskToolResponse
 } from '../main/ets/utils/MobileGuiTaskTool';
 import { ChatToolExecutionContext } from '../main/ets/utils/ChatToolRegistry';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
@@ -18,6 +22,9 @@ interface TestSchemaObject {
 interface TestPayload {
   ok?: boolean;
   status?: string;
+  summary?: string;
+  run_dir?: string;
+  returned_to_app?: boolean;
   error_code?: string;
   error?: string;
   recoverable?: boolean;
@@ -81,6 +88,53 @@ export default function mobileGuiTaskToolUnitTest() {
 
       expect(validation.ok).assertTrue();
       expect(validation.request.maxSteps).assertEqual(50);
+    });
+
+    it('mapsSuccessfulRunResultToSnakeCaseWirePayload', 0, () => {
+      let result: MobileGuiTaskRunResult = {
+        ok: true,
+        status: 'success',
+        errorCode: '',
+        error: '',
+        recoverable: false,
+        summary: '已完成',
+        runDir: '/tmp/run-1',
+        returnedToApp: true
+      };
+
+      let response: MobileGuiTaskToolResponse = mobileGuiTaskToolResponseFromRunResult(result);
+      let payload = parseJsonCompat<TestPayload>(stringifyMobileGuiTaskToolResponse(response));
+
+      expect(payload.ok).assertTrue();
+      expect(payload.status).assertEqual('success');
+      expect(payload.summary).assertEqual('已完成');
+      expect(payload.run_dir).assertEqual('/tmp/run-1');
+      expect(payload.returned_to_app).assertTrue();
+      expect(payload.error_code === undefined).assertTrue();
+      expect(payload.error === undefined).assertTrue();
+      expect(payload.recoverable === undefined).assertTrue();
+    });
+
+    it('mapsFailedRunResultToSnakeCaseWirePayload', 0, () => {
+      let result: MobileGuiTaskRunResult = {
+        ok: false,
+        status: 'failed',
+        errorCode: 'tool_failed',
+        error: '执行失败',
+        recoverable: true,
+        summary: '',
+        runDir: '/tmp/run-2',
+        returnedToApp: false
+      };
+
+      let response: MobileGuiTaskToolResponse = mobileGuiTaskToolResponseFromRunResult(result);
+      let payload = parseJsonCompat<TestPayload>(stringifyMobileGuiTaskToolResponse(response));
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('failed');
+      expect(payload.error_code).assertEqual('tool_failed');
+      expect(payload.error).assertEqual('执行失败');
+      expect(payload.recoverable).assertTrue();
     });
 
     it('returnsUnavailablePayloadForValidExecutionWithoutCallback', 0, async () => {

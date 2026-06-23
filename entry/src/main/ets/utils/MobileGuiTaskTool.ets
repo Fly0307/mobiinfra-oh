@@ -19,12 +19,15 @@ interface MobileGuiTaskToolProperties {
   max_steps: MobileGuiTaskSchemaField;
 }
 
-interface MobileGuiTaskToolResponse {
+export interface MobileGuiTaskToolResponse {
   ok: boolean;
   status: string;
-  error_code: string;
-  error: string;
-  recoverable: boolean;
+  summary?: string;
+  run_dir?: string;
+  returned_to_app?: boolean;
+  error_code?: string;
+  error?: string;
+  recoverable?: boolean;
 }
 
 interface MobileGuiTaskToolParameters {
@@ -74,10 +77,14 @@ export function createMobileGuiTaskTool(): ChatTool {
     execute: async (argsText: string, _context: ChatToolExecutionContext): Promise<string> => {
       let validation = normalizeMobileGuiTaskArguments(argsText);
       if (!validation.ok) {
-        return mobileGuiTaskFailurePayload('failed', 'invalid_arguments', validation.error, false);
+        return stringifyMobileGuiTaskToolResponse(
+          mobileGuiTaskToolErrorResponse('failed', 'invalid_arguments', validation.error, false)
+        );
       }
-      return mobileGuiTaskFailurePayload('unavailable', 'unavailable',
-        '当前版本尚未接入手机 GUI 任务执行回调。', true);
+      return stringifyMobileGuiTaskToolResponse(
+        mobileGuiTaskToolErrorResponse('unavailable', 'unavailable',
+          '当前版本尚未接入手机 GUI 任务执行回调。', true)
+      );
     }
   };
 }
@@ -131,15 +138,36 @@ export function normalizeMobileGuiTaskArguments(argsText: string): MobileGuiTask
   }
 }
 
-function mobileGuiTaskFailurePayload(status: string, errorCode: string, error: string, recoverable: boolean): string {
-  let payload: MobileGuiTaskToolResponse = {
+export function mobileGuiTaskToolResponseFromRunResult(result: MobileGuiTaskRunResult): MobileGuiTaskToolResponse {
+  let response: MobileGuiTaskToolResponse = {
+    ok: result.ok,
+    status: result.status,
+    summary: result.summary.length > 0 ? result.summary : undefined,
+    run_dir: result.runDir.length > 0 ? result.runDir : undefined,
+    returned_to_app: result.returnedToApp
+  };
+  if (!result.ok) {
+    response.error_code = result.errorCode;
+    response.error = result.error;
+    response.recoverable = result.recoverable;
+  }
+  return response;
+}
+
+export function stringifyMobileGuiTaskToolResponse(response: MobileGuiTaskToolResponse): string {
+  return stringifyJsonCompat(response as Object);
+}
+
+function mobileGuiTaskToolErrorResponse(status: string, errorCode: string, error: string, recoverable: boolean):
+  MobileGuiTaskToolResponse {
+  let response: MobileGuiTaskToolResponse = {
     ok: false,
     status: status,
     error_code: errorCode,
     error: error,
     recoverable: recoverable
   };
-  return stringifyJsonCompat(payload as Object);
+  return response;
 }
 
 function assertAllowedFields(args: Object): void {

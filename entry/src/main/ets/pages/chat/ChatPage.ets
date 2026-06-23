@@ -10,6 +10,12 @@ import {
   chatTimeGreeting
 } from './ChatPageTypes';
 import {
+  chatAttachmentComposerExtraHeight,
+  chatAttachmentPreviewHeight,
+  chatCanSendMessage,
+  hasChatImageAttachment
+} from './ChatAttachmentPolicy';
+import {
   ChatMessage,
   ChatSessionSummary,
   chatMessagesAutoScrollKey,
@@ -41,6 +47,7 @@ export struct ChatPage {
   // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
   @Prop avatarForegroundUri: string = '';
   @Prop avatarMessageForegroundUri: string = '';
+  @Prop pendingImageAttachmentUri: string = '';
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
@@ -56,6 +63,8 @@ export struct ChatPage {
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
+  onPickImageAttachment: () => Promise<void> = async () => {};
+  onClearImageAttachment: () => void = () => {};
   onClearCloudDebugImage: () => void = () => {};
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
@@ -76,8 +85,16 @@ export struct ChatPage {
     return chatComposerTextAreaHeight(this.activeInput());
   }
 
+  private attachmentComposerExtraHeight(): number {
+    return chatAttachmentComposerExtraHeight(this.composerTextAreaHeight(), this.pendingImageAttachmentUri);
+  }
+
+  private attachmentPreviewHeight(): number {
+    return chatAttachmentPreviewHeight(this.composerTextAreaHeight());
+  }
+
   private bottomOverlayInset(): number {
-    return this.composerBarHeight() + 64;
+    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + 64;
   }
 
   private welcomeGreeting(): string {
@@ -113,6 +130,10 @@ export struct ChatPage {
 
   private hasConversationContent(): boolean {
     return this.messages.length > 0 || this.isBusy();
+  }
+
+  private hasPendingImageAttachment(): boolean {
+    return hasChatImageAttachment(this.pendingImageAttachmentUri);
   }
 
   private openDebugImagePreview(path: string): void {
@@ -283,7 +304,7 @@ export struct ChatPage {
         .margin({ top: 14 })
 
         Blank()
-          .height(124)
+          .height(this.bottomOverlayInset())
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
@@ -353,7 +374,7 @@ export struct ChatPage {
           }
 
           Blank()
-            .height(150)
+            .height(this.bottomOverlayInset())
         }
         .width('100%')
       }
@@ -369,7 +390,10 @@ export struct ChatPage {
       }
       return;
     }
-    if (this.activeInput().trim().length > 0 && !this.isBusy()) {
+    if (!chatCanSendMessage(this.activeInput(), this.pendingImageAttachmentUri)) {
+      return;
+    }
+    if (!this.isBusy()) {
       this.dismissChatInput();
     }
     if (this.isCloudMode()) {
@@ -399,6 +423,53 @@ export struct ChatPage {
     try {
       this.getUIContext().getFocusController().clearFocus();
     } catch (e) {
+    }
+  }
+
+  @Builder PendingImageAttachmentPreview() {
+    if (this.hasPendingImageAttachment()) {
+      Row() {
+        Image(this.pendingImageAttachmentUri)
+          .width(this.attachmentPreviewHeight() * 0.9)
+          .height(this.attachmentPreviewHeight())
+          .objectFit(ImageFit.Cover)
+          .borderRadius(10)
+          .backgroundColor('#F3F4F6')
+        Column() {
+          Text('图片附件')
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#111827')
+            .maxLines(1)
+          Text('将随下一条消息发送')
+            .fontSize(10)
+            .fontColor('#7B8392')
+            .margin({ top: 2 })
+            .maxLines(1)
+        }
+        .layoutWeight(1)
+        .margin({ left: 10 })
+        .alignItems(HorizontalAlign.Start)
+        Text('×')
+          .fontSize(18)
+          .fontColor('#6B7280')
+          .width(this.attachmentPreviewHeight() * 0.72)
+          .height(this.attachmentPreviewHeight() * 0.72)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#F3F4F6')
+          .borderRadius(this.attachmentPreviewHeight() * 0.36)
+          .onClick(() => {
+            this.onClearImageAttachment();
+          })
+      }
+      .width('100%')
+      .height(this.attachmentPreviewHeight())
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 8, right: 8 })
+      .margin({ left: 22, right: 22, bottom: Math.round(this.composerTextAreaHeight() * 0.18) })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 10, color: '#12000000', offsetX: 0, offsetY: 3 })
     }
   }
 
@@ -503,6 +574,8 @@ export struct ChatPage {
       .backgroundColor(this.hasConversationContent() ? Color.White : '#F4F8FF')
 
       Column() {
+        this.PendingImageAttachmentPreview()
+
         Row() {
           if (chatDeepThinkingToggleVisible(this.chatMode)) {
             Text(this.chatDeepThinkingEnabled ? '深度思考 开' : '深度思考 关')
@@ -532,18 +605,16 @@ export struct ChatPage {
         .margin({ bottom: 8 })
 
         Row() {
-          if (!this.hasConversationContent()) {
-            Text('+')
-              .fontSize(30)
-              .fontColor('#111827')
-              .width(40)
-              .height(40)
-              .textAlign(TextAlign.Center)
-              .backgroundColor(Color.White)
-              .borderRadius(20)
-              .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
-              .onClick(async () => { await this.runTaskAction(); })
-          }
+          Text('+')
+            .fontSize(30)
+            .fontColor('#111827')
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(Color.White)
+            .borderRadius(20)
+            .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
+            .onClick(async () => { await this.onPickImageAttachment(); })
           TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
@@ -551,8 +622,8 @@ export struct ChatPage {
             .lineHeight(20)
             .fontColor('#4B5563')
             .backgroundColor('#00FFFFFF')
-            .padding({ left: this.hasConversationContent() ? 12 : 14, right: 12, top: 8, bottom: 8 })
-            .margin({ left: this.hasConversationContent() ? 0 : 8 })
+            .padding({ left: 14, right: 12, top: 8, bottom: 8 })
+            .margin({ left: 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
           Button(this.primaryButtonText())
             .width(68)

@@ -12,6 +12,12 @@ import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
 import {
+  chatCanSendMessage,
+  chatCloudUserContentWithImage,
+  chatMessageTextForSend,
+  hasChatImageAttachment
+} from './chat/ChatAttachmentPolicy';
+import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
@@ -101,6 +107,7 @@ import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
+import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -284,6 +291,7 @@ struct Index {
   @State output: string = '请先检查服务器连接';
   @State chatHistory: string = '';
   @State userInput: string = '';
+  @State localPendingChatImageUri: string = '';
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -348,6 +356,7 @@ struct Index {
   @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
+  @State cloudPendingChatImageUri: string = '';
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
@@ -1261,6 +1270,78 @@ struct Index {
       return normalized.substring('file://'.length);
     }
     return normalized;
+  }
+
+  private activePendingChatImageUri(): string {
+    return this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? this.localPendingChatImageUri : this.cloudPendingChatImageUri;
+  }
+
+  private setActivePendingChatImageUri(uri: string): void {
+    if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
+      this.localPendingChatImageUri = uri;
+      return;
+    }
+    this.cloudPendingChatImageUri = uri;
+  }
+
+  private clearActivePendingChatImageUri(): void {
+    this.setActivePendingChatImageUri('');
+  }
+
+  // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
+  private async pickChatImageAttachment(): Promise<void> {
+    try {
+      let picker = new GalleryPhotoPicker();
+      let uris = await picker.selectImageUris(1);
+      if (uris.length === 0) {
+        return;
+      }
+      this.setActivePendingChatImageUri(uris[0]);
+      showToastSafely('已添加图片附件，将随下一条消息发送', 1600);
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'pick image attachment failed', err);
+      showToastSafely('选择图片失败：' + err.message, 1800);
+    }
+  }
+
+  private adoptedChatImageForSession(sessionId: string, imageUri: string): string {
+    if (!hasChatImageAttachment(imageUri)) {
+      return '';
+    }
+    return ChatSessionStorage.adoptImageForSession(this.filesDir, sessionId, imageUri);
+  }
+
+  // 当前请求的图片只注入最后一条用户消息，历史图片仍按纯文本摘要/上下文处理，避免上下文膨胀。
+  private async attachCurrentImageToCloudContext(messages: CloudChatMessage[],
+    currentUserMessage: ChatMessage): Promise<CloudChatMessage[]> {
+    let imagePath = currentUserMessage.imagePath === undefined ? '' : currentUserMessage.imagePath;
+    if (!hasChatImageAttachment(imagePath)) {
+      return messages;
+    }
+    let imageDataUrl = await this.imageUriToJpegDataUrl(imagePath);
+    let targetIndex = messages.length - 1;
+    if (targetIndex < 0) {
+      return messages;
+    }
+    if (messages[targetIndex].role !== 'user') {
+      targetIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      return messages;
+    }
+    let next = messages.slice();
+    next[targetIndex] = {
+      role: 'user',
+      content: chatCloudUserContentWithImage(currentUserMessage.content, imageDataUrl)
+    };
+    return next;
   }
 
   private async saveHomeAvatarReferencePhoto(sourceImage: string): Promise<string> {
@@ -3225,22 +3306,24 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
+    let pendingImageUri = this.cloudPendingChatImageUri;
+    if (!chatCanSendMessage(this.cloudUserInput, pendingImageUri) || this.cloudThinking) {
       return;
     }
-    let task = this.cloudUserInput.trim();
-    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
-    this.cloudThinking = true;
-    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
-      this.cloudThinking = false;
       return;
     }
-    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
-      new Date().getTime());
+    let task = chatMessageTextForSend(this.cloudUserInput, pendingImageUri);
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudPendingChatImageUri = '';
+    this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let chatSessionId = activeSession.id;
+    let adoptedImageUri = this.adoptedChatImageForSession(chatSessionId, pendingImageUri);
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime(), [], adoptedImageUri);
     this.appendChatMessageToExactSession(chatSessionId, userMessage);
     let assistantMessageId = this.nextChatMessageId('assistant');
     let assistantMessageCreated = false;
@@ -3263,7 +3346,7 @@ struct Index {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
       let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = contextPreparation.messages;
+      let contextMessages = await this.attachCurrentImageToCloudContext(contextPreparation.messages, userMessage);
       if (contextPreparation.summaryUpdated) {
         this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
           contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
@@ -4056,17 +4139,28 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    if (this.userInput.length === 0 || this.isThinking) {
+    let pendingImageUri = this.localPendingChatImageUri;
+    if (!chatCanSendMessage(this.userInput, pendingImageUri) || this.isThinking) {
+      return;
+    }
+    if (hasChatImageAttachment(pendingImageUri)) {
+      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
       return;
     }
     if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
       return;
     }
-    let msg = this.userInput;
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      return;
+    }
+    let msg = chatMessageTextForSend(this.userInput, pendingImageUri);
+    let adoptedImageUri = this.adoptedChatImageForSession(activeSession.id, pendingImageUri);
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.localPendingChatImageUri = '';
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
-    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
-      msg, new Date().getTime()));
+    this.appendChatMessageToExactSession(activeSession.id, createChatMessage(this.nextChatMessageId('user'), 'user',
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], adoptedImageUri));
     this.isThinking = true;
     try {
       let reply: string = await mnnllm.chat(msg);
@@ -4343,6 +4437,7 @@ struct Index {
             messages: this.chatMessagesForDisplay(),
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+            pendingImageAttachmentUri: this.activePendingChatImageUri(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
@@ -4358,6 +4453,8 @@ struct Index {
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onPickImageAttachment: async () => { await this.pickChatImageAttachment(); },
+            onClearImageAttachment: () => { this.clearActivePendingChatImageUri(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }

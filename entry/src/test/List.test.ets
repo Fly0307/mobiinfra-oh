@@ -16,6 +16,7 @@ import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test';
 import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
+import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 
@@ -38,6 +39,7 @@ export default function testsuite() {
   chatMessageDataSourceUnitTest();
   chatMessageScrollPolicyUnitTest();
   chatStreamDisplayPacerUnitTest();
+  chatAttachmentPolicyUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
 }

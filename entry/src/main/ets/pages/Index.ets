@@ -2093,7 +2093,7 @@ struct Index {
 
   private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
     let statusText = this.modelLoadableStatus(path);
-    let ready = statusText === '可加载' || statusText === '未校验';
+    let ready = statusText === '下载完成' || statusText === '可加载';
     return {
       id: id,
       label: label,
@@ -2106,11 +2106,12 @@ struct Index {
   }
 
   private modelLoadableStatus(path: string): string {
+    let hasComplete = false;
+    try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
+
     let hasConfig = false;
     try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
     let hasWeight = this.hasModelWeightFile(path, 0);
-    let hasComplete = false;
-    try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
     if (!hasConfig && !hasWeight) {
       return '下载未完成';
     }
@@ -2123,15 +2124,18 @@ struct Index {
 
     let manifestStatus = this.modelManifestLoadableStatus(path);
     if (manifestStatus === '可加载') {
+      return '下载完成';
+    }
+    if (manifestStatus.length > 0) {
       return manifestStatus;
     }
     if (hasComplete) {
-      return '可加载';
+      return '下载完成';
     }
     if (hasConfig && hasWeight) {
-      return '未校验';
+      return '可加载';
     }
-    return manifestStatus.length > 0 ? manifestStatus : '未校验';
+    return '下载未完成';
   }
 
   private modelManifestLoadableStatus(path: string): string {
@@ -2161,12 +2165,13 @@ struct Index {
         hasWeight = true;
       }
       let target = path + '/' + normalizedPath;
+      let allowLocalConfigChange = normalizedPath === 'config.json';
       try {
         let stat = fs.statSync(target);
         if (!stat.isFile()) {
           return '下载未完成';
         }
-        if (file.size >= 0 && stat.size !== file.size) {
+        if (!allowLocalConfigChange && file.size >= 0 && stat.size !== file.size) {
           return '下载未完成';
         }
       } catch (e) {
@@ -4194,6 +4199,11 @@ struct Index {
     }
 
     let cfg = this.modelDir + '/config.json';
+    let modelStatus = this.modelLoadableStatus(this.modelDir);
+    if (modelStatus !== '下载完成' && modelStatus !== '可加载') {
+      this.reportLocalAgentStartupStatus('模型暂不可加载: ' + modelStatus + '\n路径: ' + this.modelDir, true, true);
+      return false;
+    }
     if (!this.prepareCustomOpp()) {
       let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
       this.reportLocalAgentStartupStatus(reason, true, true);

@@ -307,7 +307,8 @@ export struct SettingsCenterPage {
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)
-            Button(this.selectedModelId === item.id ? '当前' : (item.ready ? '切换' : '未完成'))
+            Button(this.selectedModelId === item.id ? (item.statusText === '下载完成' ? '已完成' : '当前') :
+              (item.ready ? '切换' : '未完成'))
               .height(32)
               .width(72)
               .fontSize(12)
@@ -322,7 +323,7 @@ export struct SettingsCenterPage {
           .borderRadius(12)
           .border({ width: 1, color: this.selectedModelId === item.id ? '#BFD3FF' : '#E6EAF2' })
           .margin({ bottom: 8 })
-        }, (item: DownloadedModelItem) => item.id)
+        }, (item: DownloadedModelItem) => item.id + ':' + item.statusText + ':' + item.sizeText + ':' + String(item.ready))
       }
       .width('100%')
     }

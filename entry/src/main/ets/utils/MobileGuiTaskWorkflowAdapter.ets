@@ -64,7 +64,8 @@ export function buildMobileGuiWorkflowTask(request: MobileGuiTaskRequest): Workf
     lastStatus: '',
     lastRun: '',
     lastMessage: '',
-    isUserModified: false
+    isUserModified: false,
+    useEmbeddedWorkflowJson: true
   };
 }
 

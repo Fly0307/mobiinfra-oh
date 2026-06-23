@@ -177,6 +177,22 @@ interface RawResponseMap {
   raw_response: string;
 }
 
+export function resolveWorkflowJsonForRun(filesDir: string, task: WorkflowTask,
+  readLatest: (filesDir: string, task: WorkflowTask) => string = WorkflowStorage.readTaskWorkflowJson,
+  logHandler: (message: string) => void = (_message: string): void => {
+  }): string {
+  if (task.useEmbeddedWorkflowJson === true) {
+    return task.workflowJson;
+  }
+  try {
+    return readLatest(filesDir, task);
+  } catch (e) {
+    let err = e as Error;
+    logHandler('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
+    return task.workflowJson;
+  }
+}
+
 export class WorkflowRunner {
   private static readonly APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
@@ -219,13 +235,8 @@ export class WorkflowRunner {
   }
 
   private workflowJsonForRun(task: WorkflowTask): string {
-    try {
-      return WorkflowStorage.readTaskWorkflowJson(this.filesDir, task);
-    } catch (e) {
-      let err = e as Error;
-      this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
-      return task.workflowJson;
-    }
+    return resolveWorkflowJsonForRun(this.filesDir, task, WorkflowStorage.readTaskWorkflowJson,
+      (message: string): void => { this.log(message); });
   }
 
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
@@ -558,7 +569,7 @@ export class WorkflowRunner {
       let err = e as Error;
       this.debug('Planner request failed durationMs=' + this.elapsedMs(plannerStartedAt) +
         ', message=' + (err.message || String(e)));
-      throw err;
+      throw new Error('Planner request failed: ' + (err.message || String(e)));
     }
     this.log('Planner response:\n' + response);
     let data = this.extractJsonMap(response, true);
@@ -672,7 +683,13 @@ export class WorkflowRunner {
       let width = shot.width;
       let height = shot.height;
       this.log('Decider 截图完成：' + width + 'x' + height);
-      let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
+      let response = '';
+      try {
+        response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
+      } catch (e) {
+        let err = e as Error;
+        throw new Error('Decider request failed: ' + (err.message || String(e)));
+      }
       this.log('Decider response:\n' + response);
       let parsedAction = AgentActionParser.parse(response);
       let parsed = parsedAction.data;

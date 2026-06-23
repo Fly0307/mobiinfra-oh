@@ -8,6 +8,7 @@ import {
 } from '../main/ets/utils/MobileGuiTaskWorkflowAdapter';
 import { MobileGuiTaskRequest } from '../main/ets/utils/MobileGuiTaskTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
+import { resolveWorkflowJsonForRun } from '../main/ets/utils/WorkflowRunner';
 import { WorkflowRunResult, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 
 interface WorkflowJsonObject {
@@ -46,6 +47,7 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
 
       expect(task.id).assertEqual('chat-mobile-gui-task');
       expect(task.configFileName).assertEqual('__chat_mobile_gui_task.json');
+      expect(task.useEmbeddedWorkflowJson).assertTrue();
       expect(workflow.steps !== undefined).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[]).length).assertEqual(2);
       expect((workflow.steps as WorkflowJsonStep[])[0].type).assertEqual('gui_task');
@@ -61,7 +63,49 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(classifyMobileGuiWorkflowFailure('HDC bridge 返回失败：app_start failed')).assertEqual('app_start_failed');
       expect(classifyMobileGuiWorkflowFailure('current app identity mismatch: expected com.tencent.mm')).assertEqual(
         'app_identity_mismatch');
+      expect(classifyMobileGuiWorkflowFailure('Planner request failed: Cloud HTTP 503 service unavailable')).assertEqual(
+        'planner_unavailable');
+      expect(classifyMobileGuiWorkflowFailure('Decider request failed: Cloud HTTP 502 bad gateway')).assertEqual(
+        'decider_unavailable');
+      expect(classifyMobileGuiWorkflowFailure('Planner request failed: connect ECONNREFUSED 127.0.0.1:8000')).assertEqual(
+        'planner_unavailable');
+      expect(classifyMobileGuiWorkflowFailure('Decider request failed: socket hang up')).assertEqual(
+        'decider_unavailable');
       expect(classifyMobileGuiWorkflowFailure('unknown failure')).assertEqual('workflow_failed');
+    });
+
+    it('prefersEmbeddedWorkflowJsonOverDiskConfigForChatTask', 0, () => {
+      let task: WorkflowTask = buildMobileGuiWorkflowTask(mobileGuiRequest());
+      let selected = resolveWorkflowJsonForRun('/tmp/files', task, (_filesDir: string, _task: WorkflowTask): string => {
+        return '{"steps":[{"id":"1","type":"gui_action","action":"tap"}]}';
+      });
+
+      expect(selected).assertEqual(task.workflowJson);
+      expect(selected.indexOf('"gui_task"') >= 0).assertTrue();
+      expect(selected.indexOf('"gui_action"') >= 0).assertFalse();
+    });
+
+    it('readsLatestDiskWorkflowForNormalTask', 0, () => {
+      let task: WorkflowTask = {
+        id: 'normal-task',
+        sceneId: 0,
+        icon: 'List',
+        iconColor: '#000000',
+        title: '普通任务',
+        source: 'normal',
+        enabled: true,
+        configFileName: 'normal.json',
+        workflowJson: '{"steps":[{"id":"1","type":"gui_task","task_description":"embedded"}]}',
+        lastStatus: '',
+        lastRun: '',
+        lastMessage: ''
+      };
+      let selected = resolveWorkflowJsonForRun('/tmp/files', task, (_filesDir: string, _task: WorkflowTask): string => {
+        return '{"steps":[{"id":"1","type":"gui_task","task_description":"latest"}]}';
+      });
+
+      expect(selected.indexOf('"latest"') >= 0).assertTrue();
+      expect(selected.indexOf('"embedded"') >= 0).assertFalse();
     });
 
     it('mapsWorkflowRunResultToMobileGuiRunResult', 0, () => {

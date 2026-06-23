@@ -470,6 +470,9 @@ export class WorkflowStorage {
     }
     if (normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
       normalized.startsWith('runs/')) {
+      if (normalized.startsWith('runs/')) {
+        return WorkflowStorage.rootDir(root) + '/' + normalized;
+      }
       return root + '/' + normalized;
     }
     return root + '/' + normalized;

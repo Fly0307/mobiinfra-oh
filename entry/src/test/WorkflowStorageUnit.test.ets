@@ -224,6 +224,28 @@ export default function workflowStorageUnitTest() {
       }
     });
 
+    it('resolveWorkflowImageInputAsBase64ReadsRunsRelativePath', 0, () => {
+      let filesDir = nextTestRoot('resolve-runs-path');
+      try {
+        prepareTestRoot(filesDir);
+        let relativePath = 'runs/demo/steps/1/screenshot.png';
+        let absolutePath = filesDir + '/workflows/' + relativePath;
+        WorkflowStorage.ensureDirectoryTree(filesDir + '/workflows/runs/demo/steps/1');
+        WorkflowStorage.writeBase64Image(absolutePath,
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=');
+
+        let threw = false;
+        try {
+          WorkflowStorage.resolveWorkflowImageInputAsBase64(filesDir, relativePath);
+        } catch (e) {
+          threw = true;
+        }
+        expect(threw).assertFalse();
+      } finally {
+        cleanupPath(filesDir);
+      }
+    });
+
     it('runDirectoryRootPrefersOverride', 0, () => {
       expect(WorkflowRunner.runDirectoryRoot('/tmp/files', '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui'))
         .assertEqual('/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui');

@@ -367,7 +367,8 @@ export class WorkflowStorage {
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
-    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('runs/') ||
+    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/') ||
       /\.(jpg|jpeg|png|webp|gif)$/i.test(normalized)) {
       return 'path';
     }
@@ -396,7 +397,11 @@ export class WorkflowStorage {
     if (text.length === 0) {
       return 'unknown';
     }
-    return text.replace(/[^A-Za-z0-9._-]/g, '_');
+    let sanitized = text.replace(/[^A-Za-z0-9_-]/g, '_').replace(/[.]/g, '_');
+    if (sanitized.replace(/_/g, '').length === 0) {
+      return 'unknown';
+    }
+    return sanitized;
   }
 
   static ensureDirectoryTree(path: string): void {
@@ -419,6 +424,20 @@ export class WorkflowStorage {
         current += '/' + parts[i];
       }
       WorkflowStorage.ensureDirectory(current);
+      WorkflowStorage.assertDirectoryExists(current);
+    }
+    WorkflowStorage.assertDirectoryExists(normalized);
+  }
+
+  private static assertDirectoryExists(path: string): void {
+    try {
+      let stat = fs.statSync(path);
+      if (!stat.isDirectory()) {
+        throw new Error('Path is not a directory: ' + path);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Failed to ensure directory: ' + path + ', ' + (err.message || String(e)));
     }
   }
 
@@ -427,6 +446,9 @@ export class WorkflowStorage {
     let normalized = path.trim().replace(/\\/g, '/');
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('chat-sessions/')) {
+      return root + '/' + normalized;
     }
     if (normalized.startsWith('/')) {
       return normalized;

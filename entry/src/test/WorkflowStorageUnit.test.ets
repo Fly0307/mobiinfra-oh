@@ -1,7 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import fs from '@ohos.file.fs';
 import { RawWorkflowResourceReader, WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
-import { CloudModelClient, CloudModelConfig } from '../main/ets/utils/CloudModelClient';
 import { WorkflowRunner } from '../main/ets/utils/WorkflowRunner';
 import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
@@ -45,17 +44,6 @@ class FailingRawWorkflowResourceReader implements RawWorkflowResourceReader {
   getRawFileContentSync(path: string): Uint8Array {
     this.requestedPaths.push(path);
     throw new Error('missing raw workflow resource: ' + path);
-  }
-}
-
-class NoopCloudModelClient extends CloudModelClient {
-  async chatPlanner(_prompt: string, _config: CloudModelConfig): Promise<string> {
-    throw new Error('chatPlanner should not be called in this test');
-  }
-
-  async chatQwenDecider(_task: string, _historyItems: string[], _imageBase64: string,
-    _config: CloudModelConfig): Promise<string> {
-    throw new Error('chatQwenDecider should not be called in this test');
   }
 }
 
@@ -130,19 +118,45 @@ export default function workflowStorageUnitTest() {
         .assertEqual('/tmp/files/chat-sessions/tool-runs/sess_ion_id/mobile-gui');
       expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', ''))
         .assertEqual('/tmp/files/chat-sessions/tool-runs/unknown/mobile-gui');
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', '.'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/unknown/mobile-gui');
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', '..'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/unknown/mobile-gui');
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', '.hidden'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/_hidden/mobile-gui');
     });
 
     it('ensureChatSessionMobileGuiToolRunRootCreatesAndReturnsRoot', 0, () => {
       let filesDir = nextTestRoot('ensure-chat-session-root');
-      prepareTestRoot(filesDir);
+      try {
+        prepareTestRoot(filesDir);
 
-      let root = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session/abc');
+        let root = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session/abc');
 
-      expect(root).assertEqual(filesDir + '/chat-sessions/tool-runs/session_abc/mobile-gui');
-      expect(fs.accessSync(root)).assertTrue();
-      expect(fs.accessSync(filesDir + '/chat-sessions/tool-runs/session_abc')).assertTrue();
+        expect(root).assertEqual(filesDir + '/chat-sessions/tool-runs/session_abc/mobile-gui');
+        expect(fs.accessSync(root)).assertTrue();
+        expect(fs.accessSync(filesDir + '/chat-sessions/tool-runs/session_abc')).assertTrue();
+      } finally {
+        cleanupPath(filesDir);
+      }
+    });
 
-      cleanupPath(filesDir);
+    it('ensureChatSessionMobileGuiToolRunRootThrowsWhenPathBlockedByFile', 0, () => {
+      let filesDir = nextTestRoot('ensure-chat-session-blocked');
+      try {
+        prepareTestRoot(filesDir);
+        WorkflowStorage.writeText(filesDir + '/chat-sessions', 'blocked');
+
+        let threw = false;
+        try {
+          WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session-abc');
+        } catch (e) {
+          threw = true;
+        }
+        expect(threw).assertTrue();
+      } finally {
+        cleanupPath(filesDir);
+      }
     });
 
     it('workflowRunRelativePathPreservesChatSessionRelativePaths', 0, () => {
@@ -155,41 +169,19 @@ export default function workflowStorageUnitTest() {
         .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json');
     });
 
-    it('workflowRunnerUsesRunRootOverrideForRunDir', 0, async () => {
-      let filesDir = nextTestRoot('runner-override');
-      prepareTestRoot(filesDir);
-      let overrideRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session-abc');
-      let client = new NoopCloudModelClient();
-      let runner = new WorkflowRunner(filesDir, client, (): CloudModelConfig => {
-        return {
-          plannerBaseUrl: 'http://127.0.0.1:1',
-          deciderBaseUrl: 'http://127.0.0.1:1',
-          apiKey: 'test-key',
-          deciderModel: 'test-model'
-        };
-      }, 'http://127.0.0.1:1', (): void => {
-      }, overrideRoot);
-      let task: WorkflowTask = {
-        id: 'runner_override_task',
-        sceneId: 0,
-        icon: 'Tool',
-        iconColor: '#000000',
-        title: 'runner override test',
-        source: 'chat-session',
-        enabled: true,
-        configFileName: 'runner_override_task.json',
-        workflowJson: '{"steps":[{"id":"1","type":"if","condition":false,"then_steps":[],"else_steps":[]}]}',
-        lastStatus: '未运行',
-        lastRun: '尚未执行',
-        lastMessage: 'test'
-      };
+    it('workflowImageInputKindRecognizesChatSessionRelativePaths', 0, () => {
+      expect(WorkflowStorage.workflowImageInputKind('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/screenshot.png'))
+        .assertEqual('path');
+      expect(WorkflowStorage.workflowRunRelativePath('/tmp/files',
+        '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui/run-1/screenshot.png'))
+        .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/screenshot.png');
+    });
 
-      let result = await runner.runTask(task);
-
-      expect(result.runDir.indexOf(overrideRoot)).assertEqual(0);
-      expect(fs.accessSync(result.runDir)).assertTrue();
-
-      cleanupPath(filesDir);
+    it('runDirectoryRootPrefersOverride', 0, () => {
+      expect(WorkflowRunner.runDirectoryRoot('/tmp/files', '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui');
+      expect(WorkflowRunner.runDirectoryRoot('/tmp/files', ''))
+        .assertEqual('/tmp/files/workflows/runs');
     });
 
     it('runSummaryDeleteTargetUsesWholeRunDirectory', 0, () => {

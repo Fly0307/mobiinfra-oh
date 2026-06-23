@@ -214,6 +214,10 @@ export class WorkflowRunner {
     this.runRootOverride = runRootOverride;
   }
 
+  static runDirectoryRoot(filesDir: string, runRootOverride: string): string {
+    return runRootOverride.length > 0 ? runRootOverride : WorkflowStorage.runsDir(filesDir);
+  }
+
   private workflowJsonForRun(task: WorkflowTask): string {
     try {
       return WorkflowStorage.readTaskWorkflowJson(this.filesDir, task);
@@ -349,7 +353,7 @@ export class WorkflowRunner {
 
   private createRunDir(task: WorkflowTask): string {
     WorkflowStorage.ensureWorkspace(this.filesDir);
-    let runRoot = this.runRootOverride.length > 0 ? this.runRootOverride : WorkflowStorage.runsDir(this.filesDir);
+    let runRoot = WorkflowRunner.runDirectoryRoot(this.filesDir, this.runRootOverride);
     WorkflowStorage.ensureDirectoryTree(runRoot);
     let stamp = this.formatTimestamp(this.runStartedAt);
     let safeName = this.sanitizeFileName(task.source || task.id);

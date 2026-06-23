@@ -83,6 +83,7 @@ function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
     avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
@@ -96,6 +97,7 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
   return {
     avatarUri: avatar.avatarUri,
     avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
     avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
@@ -647,6 +649,7 @@ export class DataManagerFacade {
       let empty = createEmptyHomeProfileViewModel();
       let avatar = this.avatarService.currentHomeView();
       empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
+      empty.avatarMessageForegroundUri = avatar.avatarMessageForegroundUri;
       return empty;
     }
     let domains = this.homeProfileDomains(profile);
@@ -656,6 +659,7 @@ export class DataManagerFacade {
     return {
       avatarUri: avatar.avatarUri,
       avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
       avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,

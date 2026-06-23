@@ -6,6 +6,7 @@ export type AvatarErrorValue = Error | Object | string | number | boolean | null
 export interface AvatarHomeViewModel {
   avatarUri: string;
   avatarForegroundUri: string;
+  avatarMessageForegroundUri: string;
   avatarReferencePhotoUri: string;
   avatarStatus: AvatarStatus;
   avatarUpdatedLabel: string;
@@ -129,6 +130,7 @@ export function createEmptyAvatarHomeViewModel(): AvatarHomeViewModel {
   return {
     avatarUri: '',
     avatarForegroundUri: '',
+    avatarMessageForegroundUri: '',
     avatarReferencePhotoUri: '',
     avatarStatus: 'empty',
     avatarUpdatedLabel: '',

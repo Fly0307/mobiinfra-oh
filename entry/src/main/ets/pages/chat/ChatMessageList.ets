@@ -1,20 +1,20 @@
 import {
+  CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   ChatMessage,
-  chatMessageImagePath,
-  chatMessageRenderKey,
-  chatMessageThinkingCollapsed,
-  chatMessageThinkingContent
+  ChatMessageKind,
+  ChatMessageRole,
+  compactChatPreviewText
 } from './ChatSessionTypes';
+import { ChatMessageDataSource } from './ChatMessageDataSource';
+import { ChatMessageDetailUiModel, ChatMessageUiModel } from './ChatMessageUiModel';
 import { DigitalAvatarView } from './DigitalAvatarView';
 import {
-  chatAvatarRenderModel,
   digitalAvatarContainerWidth,
   DigitalAvatarVisualState,
-  TEXT_AVATAR_SIZE,
-  useDigitalAvatarForMessage
+  TEXT_AVATAR_SIZE
 } from './DigitalAvatarTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
@@ -23,24 +23,736 @@ import { AppLogger } from '../../utils/AppLogger';
 const STREAM_FOLLOW_STEP: number = 96;
 const STREAM_FOLLOW_DELAY_MS: number = 40;
 const STREAM_FOLLOW_ANIMATION_MS: number = 120;
+const STRUCTURAL_SCROLL_FRAME_DELAY_MS: number = 16;
 const STRUCTURAL_SCROLL_SETTLE_MS: number = 80;
 const BACK_TO_BOTTOM_BUTTON_GAP: number = 12;
 const MESSAGE_BUBBLE_WIDTH: string = '96%';
 const MESSAGE_AVATAR_BUBBLE_GAP: number = 6;
 const MESSAGE_ROW_TOP_MARGIN: number = 14;
+const FIRST_FRAME_FULL_MARKDOWN_COUNT: number = 8;
+const LIGHTWEIGHT_PREVIEW_MAX_LENGTH: number = 90;
+const MESSAGE_LIST_CACHED_COUNT: number = 6;
+const MESSAGE_LIST_BOTTOM_SPACER_HEIGHT: number = 150;
+
+function chatIsUserRole(role: ChatMessageRole): boolean {
+  return role === 'user';
+}
+
+function chatRoleLabelFor(role: ChatMessageRole, kind: ChatMessageKind, modeLabel: string): string {
+  if (role === 'user') {
+    return '你';
+  }
+  if (kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+    return '上下文';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
+    return '任务结果';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return '任务过程';
+  }
+  if (role === 'system') {
+    return '系统';
+  }
+  return modeLabel.length > 0 ? modeLabel : '助手';
+}
+
+function chatResolvedMessageAvatarUri(avatarForegroundUri: string, avatarMessageForegroundUri: string): string {
+  return avatarMessageForegroundUri.length > 0 ? avatarMessageForegroundUri : avatarForegroundUri;
+}
+
+function chatAvatarTextFor(role: ChatMessageRole, kind: ChatMessageKind, modeMark: string): string {
+  if (role === 'user') {
+    return '我';
+  }
+  if (kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+    return '压';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
+    return '任';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return '任';
+  }
+  return modeMark.length > 0 ? modeMark : '助';
+}
+
+function chatAvatarColorFor(role: ChatMessageRole, kind: ChatMessageKind): string {
+  if (role === 'user') {
+    return '#111827';
+  }
+  if (kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+    return '#F59E0B';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
+    return '#059669';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return '#7C3AED';
+  }
+  return '#5968FF';
+}
+
+function chatShouldUseDigitalAvatarFor(role: ChatMessageRole, kind: ChatMessageKind): boolean {
+  return role === 'assistant' && kind === CHAT_MESSAGE_KIND_CHAT;
+}
+
+function chatAvatarColumnWidthFor(role: ChatMessageRole, kind: ChatMessageKind, avatarForegroundUri: string,
+  avatarMessageForegroundUri: string): number {
+  if (chatShouldUseDigitalAvatarFor(role, kind) &&
+    chatResolvedMessageAvatarUri(avatarForegroundUri, avatarMessageForegroundUri).length > 0) {
+    return digitalAvatarContainerWidth('message', true);
+  }
+  return TEXT_AVATAR_SIZE;
+}
+
+function chatBubbleColorFor(role: ChatMessageRole, kind: ChatMessageKind): string {
+  if (chatIsUserRole(role)) {
+    return '#111827';
+  }
+  if (kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
+    return '#FFFBEB';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
+    return '#ECFDF5';
+  }
+  if (kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return '#F5F3FF';
+  }
+  return '#F8FAFD';
+}
+
+function chatMarkdownVariantFor(role: ChatMessageRole): MarkdownViewVariant {
+  return chatIsUserRole(role) ? 'chat_user' : 'chat_assistant';
+}
+
+function chatTraceTitle(detail: ChatMessageDetailUiModel): string {
+  let title = markdownTitleText(detail.content);
+  if (title.length > 0) {
+    return title;
+  }
+  return detail.content.length > 0 ? detail.content : '任务执行过程';
+}
+
+function chatLightweightPreviewText(kind: ChatMessageKind, detail: ChatMessageDetailUiModel): string {
+  if (kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return chatTraceTitle(detail);
+  }
+  let preview = compactChatPreviewText(detail.content, LIGHTWEIGHT_PREVIEW_MAX_LENGTH);
+  if (preview.length > 0) {
+    return preview;
+  }
+  if (detail.imagePath.length > 0) {
+    return '图片消息';
+  }
+  if (detail.thinkingContent.length > 0) {
+    return '思考内容';
+  }
+  return '历史消息';
+}
+
+function chatToolCallCount(role: ChatMessageRole, kind: ChatMessageKind, detail: ChatMessageDetailUiModel): number {
+  if (role !== 'assistant' || kind === CHAT_MESSAGE_KIND_TASK_RESULT || kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+    return 0;
+  }
+  return detail.trace.length;
+}
+
+function chatHasVisibleContent(detail: ChatMessageDetailUiModel): boolean {
+  return detail.content.trim().length > 0;
+}
+
+function chatFormatMessageTime(time: number): string {
+  if (time <= 0) {
+    return '';
+  }
+  return new Date(time).toLocaleString();
+}
+
+function chatAvatarDebugSourceFor(id: string, role: ChatMessageRole, kind: ChatMessageKind): string {
+  return 'message id=' + id + ', role=' + role + ', kind=' + kind;
+}
+
+@Component
+struct ChatMessageAvatarView {
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  @Prop visualState: DigitalAvatarVisualState = 'idle';
+
+  build() {
+    if (chatShouldUseDigitalAvatarFor(this.role, this.kind)) {
+      DigitalAvatarView({
+        avatarForegroundUri: chatResolvedMessageAvatarUri(this.avatarForegroundUri, this.avatarMessageForegroundUri),
+        fallbackText: chatAvatarTextFor(this.role, this.kind, this.modeMark),
+        fallbackColor: chatAvatarColorFor(this.role, this.kind),
+        visualState: this.visualState,
+        avatarSize: 'message',
+        debugSource: chatAvatarDebugSourceFor(this.messageId, this.role, this.kind)
+      })
+    } else {
+      Text(chatAvatarTextFor(this.role, this.kind, this.modeMark))
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(TEXT_AVATAR_SIZE)
+        .height(TEXT_AVATAR_SIZE)
+        .textAlign(TextAlign.Center)
+        .backgroundColor(chatAvatarColorFor(this.role, this.kind))
+        .borderRadius(13)
+    }
+  }
+}
+
+@Component
+struct ChatMessageAvatarBadge {
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+
+  @Builder AvatarContent() {
+    ChatMessageAvatarView({
+      messageId: this.messageId,
+      role: this.role,
+      kind: this.kind,
+      modeMark: this.modeMark,
+      avatarForegroundUri: this.avatarForegroundUri,
+      avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+      visualState: 'idle'
+    })
+  }
+
+  build() {
+    if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      Column() {
+        this.AvatarContent()
+      }
+      .width(chatAvatarColumnWidthFor(this.role, this.kind, this.avatarForegroundUri, this.avatarMessageForegroundUri))
+      .onClick(() => {
+        this.onToggleTaskTrace(this.messageId);
+      })
+    } else {
+      Column() {
+        this.AvatarContent()
+      }
+      .width(chatAvatarColumnWidthFor(this.role, this.kind, this.avatarForegroundUri, this.avatarMessageForegroundUri))
+    }
+  }
+}
+
+@Component
+struct ChatMessageAvatarHeader {
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+
+  build() {
+    Row() {
+      if (chatIsUserRole(this.role)) {
+        Blank()
+          .layoutWeight(1)
+        ChatMessageAvatarBadge({
+          messageId: this.messageId,
+          role: this.role,
+          kind: this.kind,
+          modeMark: this.modeMark,
+          avatarForegroundUri: this.avatarForegroundUri,
+          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          onToggleTaskTrace: this.onToggleTaskTrace
+        })
+      } else {
+        ChatMessageAvatarBadge({
+          messageId: this.messageId,
+          role: this.role,
+          kind: this.kind,
+          modeMark: this.modeMark,
+          avatarForegroundUri: this.avatarForegroundUri,
+          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          onToggleTaskTrace: this.onToggleTaskTrace
+        })
+        Blank()
+          .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .margin({ bottom: MESSAGE_AVATAR_BUBBLE_GAP })
+  }
+}
+
+@Component
+struct ChatToolCallSummaryView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+
+  build() {
+    if (chatToolCallCount(this.role, this.kind, this.detail) > 0) {
+      Text('已执行 ' + String(chatToolCallCount(this.role, this.kind, this.detail)) + ' 次工具调用')
+        .fontSize(12)
+        .fontColor('#9CA3AF')
+        .lineHeight(18)
+        .width('100%')
+        .margin({ top: 6 })
+    }
+  }
+}
+
+@Component
+struct ChatThinkingModuleView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  onToggleThinking: (id: string) => void = () => {};
+
+  build() {
+    if (this.role === 'assistant' && this.detail.thinkingContent.length > 0) {
+      Column() {
+        Row() {
+          Text(this.detail.thinkingCollapsed ? '▶' : '▼')
+            .fontSize(11)
+            .fontColor('#6B7280')
+            .width(20)
+            .height(20)
+            .textAlign(TextAlign.Center)
+          Column() {
+            Text('Think 思考过程')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#4B5563')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.detail.thinkingCollapsed ? '已折叠，点击查看' : '点击收起')
+              .fontSize(10)
+              .fontColor('#8B95A5')
+              .margin({ top: 2 })
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        if (!this.detail.thinkingCollapsed) {
+          Text(this.detail.thinkingContent)
+            .fontSize(12)
+            .fontColor('#4B5563')
+            .lineHeight(18)
+            .width('100%')
+            .margin({ top: 8 })
+        }
+      }
+      .width('100%')
+      .padding({ left: 10, right: 10, top: 9, bottom: 9 })
+      .margin({ top: 8 })
+      .backgroundColor('#F3F4F6')
+      .borderRadius(12)
+      .border({ width: 1, color: '#E5E7EB' })
+      .onClick(() => {
+        this.onToggleThinking(this.messageId);
+      })
+    }
+  }
+}
+
+@Component
+struct ChatMarkdownContentView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop role: ChatMessageRole = 'assistant';
+
+  build() {
+    if (chatHasVisibleContent(this.detail)) {
+      MarkdownView({ text: this.detail.content, variant: chatMarkdownVariantFor(this.role) })
+        .width('100%')
+        .margin({ top: 6 })
+    }
+  }
+}
+
+@Component
+struct ChatMessageImagePreviewView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  onPreviewDebugImage: (path: string) => void = () => {};
+
+  build() {
+    if (this.detail.imagePath.length > 0) {
+      Image(this.detail.imagePath)
+        .width(96)
+        .height(132)
+        .objectFit(ImageFit.Contain)
+        .backgroundColor(Color.Black)
+        .borderRadius(12)
+        .margin({ top: 12 })
+        .onClick(() => {
+          this.onPreviewDebugImage(this.detail.imagePath);
+        })
+    }
+  }
+}
+
+@Component
+struct ChatBubbleView {
+  @ObjectLink message: ChatMessageUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop createdAt: number = 0;
+  @Prop modeLabel: string = '';
+  onToggleThinking: (id: string) => void = () => {};
+  onPreviewDebugImage: (path: string) => void = () => {};
+
+  build() {
+    Column() {
+      Row() {
+        Text(chatRoleLabelFor(this.role, this.kind, this.modeLabel))
+          .fontSize(11)
+          .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(chatFormatMessageTime(this.createdAt))
+          .fontSize(10)
+          .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ left: 8 })
+      }
+      .width('100%')
+
+      ChatToolCallSummaryView({ detail: this.message.detail, role: this.role, kind: this.kind })
+      ChatThinkingModuleView({
+        detail: this.message.detail,
+        messageId: this.messageId,
+        role: this.role,
+        onToggleThinking: this.onToggleThinking
+      })
+      ChatMarkdownContentView({ detail: this.message.detail, role: this.role })
+      ChatMessageImagePreviewView({ detail: this.message.detail, onPreviewDebugImage: this.onPreviewDebugImage })
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .borderRadius(17)
+    .border({
+      width: chatIsUserRole(this.role) ? 0 : 1,
+      color: this.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
+        (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')
+    })
+  }
+}
+
+@Component
+struct ChatLightweightBubbleView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop createdAt: number = 0;
+  @Prop modeLabel: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+
+  build() {
+    Column() {
+      Row() {
+        Text(chatRoleLabelFor(this.role, this.kind, this.modeLabel))
+          .fontSize(11)
+          .fontColor(chatIsUserRole(this.role) ? '#E5E7EB' : '#6B7280')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(chatFormatMessageTime(this.createdAt))
+          .fontSize(10)
+          .fontColor(chatIsUserRole(this.role) ? '#D1D5DB' : '#9CA3AF')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ left: 8 })
+      }
+      .width('100%')
+
+      Text(chatLightweightPreviewText(this.kind, this.detail))
+        .fontSize(13)
+        .fontColor(chatIsUserRole(this.role) ? '#F3F4F6' : '#4B5563')
+        .lineHeight(20)
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .margin({ top: 6 })
+
+      if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+        Text(String(this.detail.trace.length) + ' 步操作')
+          .fontSize(11)
+          .fontColor('#7C3AED')
+          .margin({ top: 4 })
+      }
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .borderRadius(17)
+    .border({
+      width: chatIsUserRole(this.role) ? 0 : 1,
+      color: this.kind === CHAT_MESSAGE_KIND_TASK_TRACE ? '#DDD6FE' :
+        (this.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
+          (this.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3'))
+    })
+    .onClick(() => {
+      if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+        this.onToggleTaskTrace(this.messageId);
+      }
+    })
+  }
+}
+
+@Component
+struct ChatTraceBubbleView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_TASK_TRACE;
+  onToggleTaskTrace: (id: string) => void = () => {};
+
+  build() {
+    Column() {
+      Row() {
+        Text(this.detail.collapsed ? '▶' : '▼')
+          .fontSize(12)
+          .fontColor('#7C3AED')
+          .width(22)
+          .height(22)
+          .textAlign(TextAlign.Center)
+        Column() {
+          Text(chatTraceTitle(this.detail))
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#4C1D95')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(String(this.detail.trace.length) + ' 步操作')
+            .fontSize(11)
+            .fontColor('#7C3AED')
+            .margin({ top: 3 })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (!this.detail.collapsed) {
+        Column() {
+          if (this.detail.trace.length === 0) {
+            Text('暂无步骤')
+              .fontSize(12)
+              .fontColor('#8B5CF6')
+              .width('100%')
+          } else {
+            ForEach(this.detail.trace, (line: string, index?: number) => {
+              Row() {
+                Text(String((index === undefined ? 0 : index) + 1))
+                  .fontSize(10)
+                  .fontColor('#8B5CF6')
+                  .width(28)
+                Text(line)
+                  .fontSize(12)
+                  .fontColor('#4B5563')
+                  .lineHeight(18)
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Top)
+              .margin({ top: 8 })
+            }, (line: string, index?: number) => String(index === undefined ? 0 : index) + line)
+          }
+        }
+        .width('100%')
+        .padding({ left: 4, right: 4, top: 10 })
+      }
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+    .backgroundColor(chatBubbleColorFor(this.role, this.kind))
+    .borderRadius(17)
+    .border({ width: 1, color: '#DDD6FE' })
+    .onClick(() => {
+      this.onToggleTaskTrace(this.messageId);
+    })
+  }
+}
+
+@Component
+struct ChatMessageBubbleBody {
+  @ObjectLink message: ChatMessageUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop createdAt: number = 0;
+  @Prop shouldRenderFull: boolean = true;
+  @Prop modeLabel: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
+  onPreviewDebugImage: (path: string) => void = () => {};
+
+  build() {
+    if (!this.shouldRenderFull) {
+      ChatLightweightBubbleView({
+        detail: this.message.detail,
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        createdAt: this.createdAt,
+        modeLabel: this.modeLabel,
+        onToggleTaskTrace: this.onToggleTaskTrace
+      })
+    } else if (this.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
+      ChatTraceBubbleView({
+        detail: this.message.detail,
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        onToggleTaskTrace: this.onToggleTaskTrace
+      })
+    } else {
+      ChatBubbleView({
+        message: this.message,
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        createdAt: this.createdAt,
+        modeLabel: this.modeLabel,
+        onToggleThinking: this.onToggleThinking,
+        onPreviewDebugImage: this.onPreviewDebugImage
+      })
+    }
+  }
+}
+
+@Component
+struct ChatMessageContentBlock {
+  @ObjectLink message: ChatMessageUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop createdAt: number = 0;
+  @Prop shouldRenderFull: boolean = true;
+  @Prop modeLabel: string = '';
+  @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
+  onPreviewDebugImage: (path: string) => void = () => {};
+
+  build() {
+    Column() {
+      ChatMessageAvatarHeader({
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        modeMark: this.modeMark,
+        avatarForegroundUri: this.avatarForegroundUri,
+        avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+        onToggleTaskTrace: this.onToggleTaskTrace
+      })
+      ChatMessageBubbleBody({
+        message: this.message,
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        createdAt: this.createdAt,
+        shouldRenderFull: this.shouldRenderFull,
+        modeLabel: this.modeLabel,
+        onToggleTaskTrace: this.onToggleTaskTrace,
+        onToggleThinking: this.onToggleThinking,
+        onPreviewDebugImage: this.onPreviewDebugImage
+      })
+    }
+    .width(MESSAGE_BUBBLE_WIDTH)
+  }
+}
+
+@Component
+struct ChatMessageRow {
+  @ObjectLink message: ChatMessageUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop createdAt: number = 0;
+  @Prop shouldRenderFull: boolean = true;
+  @Prop modeLabel: string = '';
+  @Prop modeMark: string = '';
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
+  onPreviewDebugImage: (path: string) => void = () => {};
+
+  build() {
+    Row() {
+      if (chatIsUserRole(this.role)) {
+        Blank()
+          .layoutWeight(1)
+        ChatMessageContentBlock({
+          message: this.message,
+          messageId: this.messageId,
+          role: this.role,
+          kind: this.kind,
+          createdAt: this.createdAt,
+          shouldRenderFull: this.shouldRenderFull,
+          modeLabel: this.modeLabel,
+          modeMark: this.modeMark,
+          avatarForegroundUri: this.avatarForegroundUri,
+          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          onToggleTaskTrace: this.onToggleTaskTrace,
+          onToggleThinking: this.onToggleThinking,
+          onPreviewDebugImage: this.onPreviewDebugImage
+        })
+      } else {
+        ChatMessageContentBlock({
+          message: this.message,
+          messageId: this.messageId,
+          role: this.role,
+          kind: this.kind,
+          createdAt: this.createdAt,
+          shouldRenderFull: this.shouldRenderFull,
+          modeLabel: this.modeLabel,
+          modeMark: this.modeMark,
+          avatarForegroundUri: this.avatarForegroundUri,
+          avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          onToggleTaskTrace: this.onToggleTaskTrace,
+          onToggleThinking: this.onToggleThinking,
+          onPreviewDebugImage: this.onPreviewDebugImage
+        })
+        Blank()
+          .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .margin({ top: MESSAGE_ROW_TOP_MARGIN })
+  }
+}
 
 @Component
 export struct ChatMessageList {
-  @Prop messages: ChatMessage[] = [];
+  @Prop @Watch('onMessagesChanged') messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
   @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
   @Prop @Watch('onStreamFollowKeyChanged') streamFollowKey: string = '';
   @Prop modeLabel: string = '';
   @Prop modeMark: string = '';
   @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
   @Prop bottomOverlayInset: number = 122;
   @State autoFollowEnabled: boolean = true;
   @State backToBottomVisible: boolean = false;
+  @State sessionFirstFrameLightweight: boolean = false;
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
@@ -51,8 +763,10 @@ export struct ChatMessageList {
   private structuralScrollTimerId: number = -1;
   private structuralSettleTimerId: number = -1;
   private streamFollowTimerId: number = -1;
+  private messageDataSource: ChatMessageDataSource = new ChatMessageDataSource();
 
   aboutToAppear(): void {
+    this.syncMessageDataSource();
     this.scheduleScrollToLatest(true);
   }
 
@@ -64,11 +778,19 @@ export struct ChatMessageList {
     this.scheduleScrollToLatest(false);
   }
 
+  private onMessagesChanged(): void {
+    this.syncMessageDataSource();
+  }
+
   private onStreamFollowKeyChanged(): void {
     if (this.streamFollowKey === this.lastStreamFollowKey) {
       return;
     }
     this.lastStreamFollowKey = this.streamFollowKey;
+    if (this.sessionFirstFrameLightweight) {
+      this.logScrollDebug('stream-follow-skipped-first-frame');
+      return;
+    }
     if (!this.autoFollowEnabled) {
       this.markPendingBottomContent('stream-follow-deferred');
       return;
@@ -97,6 +819,10 @@ export struct ChatMessageList {
   private clearScrollTimers(): void {
     this.clearStructuralScrollTimers();
     this.clearStreamFollowTimer();
+  }
+
+  private syncMessageDataSource(): void {
+    this.messageDataSource.setMessages(this.messages);
   }
 
   private sessionPart(scrollKey: string): string {
@@ -139,9 +865,15 @@ export struct ChatMessageList {
     }
     let previousKey = this.lastAutoScrollKey;
     this.lastAutoScrollKey = this.autoScrollKey;
-    if (force || this.isSessionScopeChanged(previousKey, this.autoScrollKey)) {
+    let sessionChanged = this.isSessionScopeChanged(previousKey, this.autoScrollKey);
+    if (force || sessionChanged) {
       this.autoFollowEnabled = true;
       this.backToBottomVisible = false;
+    }
+    if ((force || sessionChanged) && this.messages.length > FIRST_FRAME_FULL_MARKDOWN_COUNT) {
+      this.startSessionFirstFrame();
+    } else if (force || sessionChanged) {
+      this.sessionFirstFrameLightweight = false;
     }
     if (!this.autoFollowEnabled) {
       this.markPendingBottomContent('structural-scroll-deferred');
@@ -152,11 +884,12 @@ export struct ChatMessageList {
     // 消息气泡中有 Markdown/图片等异步布局，保留一次延迟兜底，但先取消旧任务避免流式更新堆积。
     this.structuralScrollTimerId = setTimeout(() => {
       this.structuralScrollTimerId = -1;
-      this.scrollToBottomEdge('structural-scroll');
-    }, 0);
+      this.scrollToLatestContentIndex('structural-scroll');
+    }, STRUCTURAL_SCROLL_FRAME_DELAY_MS);
     this.structuralSettleTimerId = setTimeout(() => {
       this.structuralSettleTimerId = -1;
       this.scrollToBottomEdge('structural-scroll-settle');
+      this.completeSessionFirstFrame('structural-scroll-settle');
     }, STRUCTURAL_SCROLL_SETTLE_MS);
   }
 
@@ -179,6 +912,33 @@ export struct ChatMessageList {
       this.logScroll(reason + '-edge');
     } catch (e) {
       AppLogger.warnCause('Chat.Scroll', reason + ' failed', e as Error);
+    }
+  }
+
+  private latestContentIndex(): number {
+    if (this.thinking) {
+      return this.messages.length;
+    }
+    return this.messages.length - 1;
+  }
+
+  private scrollToLatestContentIndex(reason: string): void {
+    if (!this.autoFollowEnabled) {
+      this.markPendingBottomContent(reason + '-blocked');
+      return;
+    }
+    let lastIndex = this.latestContentIndex();
+    if (lastIndex < 0) {
+      this.scrollToBottomEdge(reason + '-empty');
+      return;
+    }
+    try {
+      this.messageScroller.scrollToIndex(lastIndex, false, ScrollAlign.END);
+      this.backToBottomVisible = false;
+      this.logScroll(reason + '-index');
+    } catch (e) {
+      AppLogger.warnCause('Chat.Scroll', reason + ' index failed', e as Error);
+      this.scrollToBottomEdge(reason + '-index-fallback');
     }
   }
 
@@ -211,9 +971,10 @@ export struct ChatMessageList {
       scrollSource === ScrollSource.SCROLL_BAR_FLING;
   }
 
-  private onScrollWillMove(_xOffset: number, yOffset: number, _scrollState: ScrollState, scrollSource: ScrollSource): void {
-    this.onScrollContent(yOffset);
-    if (this.autoFollowEnabled && this.isUserScrollSource(scrollSource) && yOffset > 0) {
+  private onScrollWillMove(scrollOffset: number, _scrollState: ScrollState, scrollSource: ScrollSource): void {
+    this.onScrollContent(scrollOffset);
+    if (this.autoFollowEnabled && this.isUserScrollSource(scrollSource) && scrollOffset > 0) {
+      this.completeSessionFirstFrame('user-scroll');
       this.autoFollowEnabled = false;
       this.backToBottomVisible = true;
       this.clearScrollTimers();
@@ -233,400 +994,58 @@ export struct ChatMessageList {
     this.autoFollowEnabled = true;
     this.backToBottomVisible = false;
     this.clearScrollTimers();
+    this.completeSessionFirstFrame('back-to-bottom');
     this.scrollToBottomEdge('back-to-bottom');
+  }
+
+  private startSessionFirstFrame(): void {
+    // 切换会话时先只完整渲染最近消息，避免历史 Markdown 拖慢首帧。
+    this.sessionFirstFrameLightweight = true;
+  }
+
+  private completeSessionFirstFrame(reason: string): void {
+    if (!this.sessionFirstFrameLightweight) {
+      return;
+    }
+    this.sessionFirstFrameLightweight = false;
+    this.logScrollDebug(reason + '-restore-full-render');
+  }
+
+  private shouldRenderFullMessage(index: number): boolean {
+    if (!this.sessionFirstFrameLightweight) {
+      return true;
+    }
+    return index >= Math.max(0, this.messages.length - FIRST_FRAME_FULL_MARKDOWN_COUNT);
   }
 
   private backToBottomButtonBottomOffset(): number {
     return this.bottomOverlayInset + BACK_TO_BOTTOM_BUTTON_GAP;
   }
 
-  private isUserMessage(message: ChatMessage): boolean {
-    return message.role === 'user';
-  }
-
-  private roleLabel(message: ChatMessage): string {
-    if (message.role === 'user') {
-      return '你';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '上下文';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
-      return '任务结果';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '任务过程';
-    }
-    if (message.role === 'system') {
-      return '系统';
-    }
-    return this.modeLabel.length > 0 ? this.modeLabel : '助手';
-  }
-
-  private avatarText(message: ChatMessage): string {
-    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackText;
-  }
-
-  private avatarColor(message: ChatMessage): string {
-    return chatAvatarRenderModel(message, this.modeMark, 'idle').fallbackColor;
-  }
-
-  private shouldUseDigitalAvatar(message: ChatMessage): boolean {
-    return useDigitalAvatarForMessage(message);
-  }
-
-  private avatarColumnWidth(message: ChatMessage): number {
-    if (this.shouldUseDigitalAvatar(message) && this.avatarForegroundUri.length > 0) {
-      return digitalAvatarContainerWidth('message', true);
-    }
-    return TEXT_AVATAR_SIZE;
+  private messageAvatarForegroundUri(): string {
+    return this.avatarMessageForegroundUri.length > 0 ? this.avatarMessageForegroundUri : this.avatarForegroundUri;
   }
 
   private thinkingAvatarColumnWidth(): number {
-    if (this.avatarForegroundUri.length > 0) {
+    if (this.messageAvatarForegroundUri().length > 0) {
       return digitalAvatarContainerWidth('message', true);
     }
     return TEXT_AVATAR_SIZE;
-  }
-
-  private avatarDebugSource(message: ChatMessage): string {
-    return 'message id=' + message.id + ', role=' + message.role + ', kind=' + message.kind;
   }
 
   private thinkingAvatarDebugSource(): string {
     return 'thinking-row modeMark=' + (this.modeMark.length > 0 ? this.modeMark : '助');
   }
 
-  private bubbleColor(message: ChatMessage): string {
-    if (this.isUserMessage(message)) {
-      return '#111827';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE) {
-      return '#FFFBEB';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_RESULT) {
-      return '#ECFDF5';
-    }
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return '#F5F3FF';
-    }
-    return '#F8FAFD';
-  }
-
-  private markdownVariant(message: ChatMessage): MarkdownViewVariant {
-    return this.isUserMessage(message) ? 'chat_user' : 'chat_assistant';
-  }
-
-  private traceTitle(message: ChatMessage): string {
-    let title = markdownTitleText(message.content);
-    if (title.length > 0) {
-      return title;
-    }
-    return message.content.length > 0 ? message.content : '任务执行过程';
-  }
-
-  private toolCallCount(message: ChatMessage): number {
-    if (message.role !== 'assistant' || message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ||
-      message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      return 0;
-    }
-    return message.trace.length;
-  }
-
-  private hasVisibleContent(message: ChatMessage): boolean {
-    return message.content.trim().length > 0;
-  }
-
-  private formatMessageTime(time: number): string {
-    if (time <= 0) {
-      return '';
-    }
-    return new Date(time).toLocaleString();
-  }
-
-  @Builder Avatar(message: ChatMessage) {
-    this.AvatarWithState(message, 'idle');
-  }
-
-  @Builder AvatarWithState(message: ChatMessage, visualState: DigitalAvatarVisualState) {
-    if (this.shouldUseDigitalAvatar(message)) {
-      DigitalAvatarView({
-        avatarForegroundUri: this.avatarForegroundUri,
-        fallbackText: this.avatarText(message),
-        fallbackColor: this.avatarColor(message),
-        visualState: visualState,
-        avatarSize: 'message',
-        debugSource: this.avatarDebugSource(message)
-      })
-    } else {
-      Text(this.avatarText(message))
-        .fontSize(13)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .width(TEXT_AVATAR_SIZE)
-        .height(TEXT_AVATAR_SIZE)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(this.avatarColor(message))
-        .borderRadius(13)
-    }
-  }
-
   @Builder ThinkingAvatar() {
     DigitalAvatarView({
-      avatarForegroundUri: this.avatarForegroundUri,
+      avatarForegroundUri: this.messageAvatarForegroundUri(),
       fallbackText: this.modeMark.length > 0 ? this.modeMark : '助',
       fallbackColor: '#5968FF',
       visualState: 'thinking',
       avatarSize: 'message',
       debugSource: this.thinkingAvatarDebugSource()
     })
-  }
-
-  @Builder ChatBubble(message: ChatMessage) {
-    Column() {
-      Row() {
-        Text(this.roleLabel(message))
-          .fontSize(11)
-          .fontColor(this.isUserMessage(message) ? '#E5E7EB' : '#6B7280')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.formatMessageTime(message.createdAt))
-          .fontSize(10)
-          .fontColor(this.isUserMessage(message) ? '#D1D5DB' : '#9CA3AF')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ left: 8 })
-      }
-      .width('100%')
-
-      this.ToolCallSummary(message)
-
-      this.ThinkingModule(message)
-
-      if (this.hasVisibleContent(message)) {
-        MarkdownView({ text: message.content, variant: this.markdownVariant(message) })
-          .width('100%')
-          .margin({ top: 6 })
-      }
-
-      this.MessageImagePreview(message)
-    }
-    .width('100%')
-    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    .backgroundColor(this.bubbleColor(message))
-    .borderRadius(17)
-    .border({
-      width: this.isUserMessage(message) ? 0 : 1,
-      color: message.kind === CHAT_MESSAGE_KIND_TASK_RESULT ? '#A7F3D0' :
-        (message.kind === CHAT_MESSAGE_KIND_CONTEXT_NOTICE ? '#FDE68A' : '#E8ECF3')
-    })
-  }
-
-  @Builder ToolCallSummary(message: ChatMessage) {
-    if (this.toolCallCount(message) > 0) {
-      Text('已执行 ' + String(this.toolCallCount(message)) + ' 次工具调用')
-        .fontSize(12)
-        .fontColor('#9CA3AF')
-        .lineHeight(18)
-        .width('100%')
-        .margin({ top: 6 })
-    }
-  }
-
-  @Builder ThinkingModule(message: ChatMessage) {
-    if (message.role === 'assistant' && chatMessageThinkingContent(message).length > 0) {
-      Column() {
-        Row() {
-          Text(chatMessageThinkingCollapsed(message) ? '▶' : '▼')
-            .fontSize(11)
-            .fontColor('#6B7280')
-            .width(20)
-            .height(20)
-            .textAlign(TextAlign.Center)
-          Column() {
-            Text('Think 思考过程')
-              .fontSize(12)
-              .fontWeight(FontWeight.Medium)
-              .fontColor('#4B5563')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(chatMessageThinkingCollapsed(message) ? '已折叠，点击查看' : '点击收起')
-              .fontSize(10)
-              .fontColor('#8B95A5')
-              .margin({ top: 2 })
-          }
-          .layoutWeight(1)
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-
-        if (!chatMessageThinkingCollapsed(message)) {
-          Text(chatMessageThinkingContent(message))
-            .fontSize(12)
-            .fontColor('#4B5563')
-            .lineHeight(18)
-            .width('100%')
-            .margin({ top: 8 })
-        }
-      }
-      .width('100%')
-      .padding({ left: 10, right: 10, top: 9, bottom: 9 })
-      .margin({ top: 8 })
-      .backgroundColor('#F3F4F6')
-      .borderRadius(12)
-      .border({ width: 1, color: '#E5E7EB' })
-      .onClick(() => {
-        this.onToggleThinking(message.id);
-      })
-    }
-  }
-
-  @Builder MessageImagePreview(message: ChatMessage) {
-    if (chatMessageImagePath(message).length > 0) {
-      Image(chatMessageImagePath(message))
-        .width(96)
-        .height(132)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Black)
-        .borderRadius(12)
-        .margin({ top: 12 })
-        .onClick(() => {
-          this.onPreviewDebugImage(chatMessageImagePath(message));
-        })
-    }
-  }
-
-  @Builder MessageBubbleBody(message: ChatMessage) {
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      this.TraceBubble(message)
-    } else {
-      this.ChatBubble(message)
-    }
-  }
-
-  @Builder MessageAvatarBadge(message: ChatMessage) {
-    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      Column() {
-        this.Avatar(message)
-      }
-      .width(this.avatarColumnWidth(message))
-      .onClick(() => {
-        this.onToggleTaskTrace(message.id);
-      })
-    } else {
-      Column() {
-        this.Avatar(message)
-      }
-      .width(this.avatarColumnWidth(message))
-    }
-  }
-
-  @Builder MessageAvatarHeader(message: ChatMessage) {
-    Row() {
-      if (this.isUserMessage(message)) {
-        Blank()
-          .layoutWeight(1)
-        this.MessageAvatarBadge(message)
-      } else {
-        this.MessageAvatarBadge(message)
-        Blank()
-          .layoutWeight(1)
-      }
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Top)
-    .margin({ bottom: MESSAGE_AVATAR_BUBBLE_GAP })
-  }
-
-  @Builder MessageContentBlock(message: ChatMessage) {
-    Column() {
-      this.MessageAvatarHeader(message)
-      this.MessageBubbleBody(message)
-    }
-    .width(MESSAGE_BUBBLE_WIDTH)
-  }
-
-  @Builder TraceBubble(message: ChatMessage) {
-    Column() {
-      Row() {
-        Text(message.collapsed ? '▶' : '▼')
-          .fontSize(12)
-          .fontColor('#7C3AED')
-          .width(22)
-          .height(22)
-          .textAlign(TextAlign.Center)
-        Column() {
-          Text(this.traceTitle(message))
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#4C1D95')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(String(message.trace.length) + ' 步操作')
-            .fontSize(11)
-            .fontColor('#7C3AED')
-            .margin({ top: 3 })
-        }
-        .layoutWeight(1)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      if (!message.collapsed) {
-        Column() {
-          if (message.trace.length === 0) {
-            Text('暂无步骤')
-              .fontSize(12)
-              .fontColor('#8B5CF6')
-              .width('100%')
-          } else {
-            ForEach(message.trace, (line: string, index?: number) => {
-              Row() {
-                Text(String((index === undefined ? 0 : index) + 1))
-                  .fontSize(10)
-                  .fontColor('#8B5CF6')
-                  .width(28)
-                Text(line)
-                  .fontSize(12)
-                  .fontColor('#4B5563')
-                  .lineHeight(18)
-                  .layoutWeight(1)
-              }
-              .width('100%')
-              .alignItems(VerticalAlign.Top)
-              .margin({ top: 8 })
-            }, (line: string, index?: number) => String(index === undefined ? 0 : index) + line)
-          }
-        }
-        .width('100%')
-        .padding({ left: 4, right: 4, top: 10 })
-      }
-    }
-    .width('100%')
-    .padding({ left: 12, right: 12, top: 12, bottom: 12 })
-    .backgroundColor(this.bubbleColor(message))
-    .borderRadius(17)
-    .border({ width: 1, color: '#DDD6FE' })
-    .onClick(() => {
-      this.onToggleTaskTrace(message.id);
-    })
-  }
-
-  @Builder MessageRow(message: ChatMessage) {
-    Row() {
-      if (this.isUserMessage(message)) {
-        Blank()
-          .layoutWeight(1)
-        this.MessageContentBlock(message)
-      } else {
-        this.MessageContentBlock(message)
-        Blank()
-          .layoutWeight(1)
-      }
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Top)
-    .margin({ top: MESSAGE_ROW_TOP_MARGIN })
   }
 
   @Builder BackToBottomButton() {
@@ -645,48 +1064,76 @@ export struct ChatMessageList {
       })
   }
 
+  @Builder ThinkingRow() {
+    Row() {
+      Column() {
+        this.ThinkingAvatar()
+      }
+      .width(this.thinkingAvatarColumnWidth())
+      .margin({ right: 10 })
+      Text('处理中...')
+        .fontSize(13)
+        .fontColor('#6B7280')
+        .height(36)
+        .padding({ left: 14, right: 14 })
+        .backgroundColor('#F8FAFD')
+        .borderRadius(18)
+        .border({ width: 1, color: '#E8ECF3' })
+      Blank()
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+    .margin({ top: 14 })
+  }
+
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
-      Scroll(this.messageScroller) {
-        Column() {
-          ForEach(this.messages, (message: ChatMessage) => {
-            this.MessageRow(message)
-          }, (message: ChatMessage) => chatMessageRenderKey(message))
-
-          if (this.thinking) {
-            Row() {
-              Column() {
-                this.ThinkingAvatar()
-              }
-              .width(this.thinkingAvatarColumnWidth())
-                .margin({ right: 10 })
-              Text('处理中...')
-                .fontSize(13)
-                .fontColor('#6B7280')
-                .height(36)
-                .padding({ left: 14, right: 14 })
-                .backgroundColor('#F8FAFD')
-                .borderRadius(18)
-                .border({ width: 1, color: '#E8ECF3' })
-              Blank()
-                .layoutWeight(1)
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-            .margin({ top: 14 })
+      List({ scroller: this.messageScroller }) {
+        LazyForEach(this.messageDataSource, (message: ChatMessageUiModel, index: number) => {
+          ListItem() {
+            ChatMessageRow({
+              message: message,
+              messageId: message.id,
+              role: message.role,
+              kind: message.kind,
+              createdAt: message.createdAt,
+              shouldRenderFull: this.shouldRenderFullMessage(index),
+              modeLabel: this.modeLabel,
+              modeMark: this.modeMark,
+              avatarForegroundUri: this.avatarForegroundUri,
+              avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+              onToggleTaskTrace: this.onToggleTaskTrace,
+              onToggleThinking: this.onToggleThinking,
+              onPreviewDebugImage: this.onPreviewDebugImage
+            })
           }
+          .selectable(false)
+        }, (message: ChatMessageUiModel, _index: number) => this.messageDataSource.keyFor(message))
 
-          Blank()
-            .height(150)
+        if (this.thinking) {
+          ListItem() {
+            this.ThinkingRow()
+          }
+          .selectable(false)
         }
-        .width('100%')
+
+        ListItem() {
+          Column() {
+            Blank()
+              .height(MESSAGE_LIST_BOTTOM_SPACER_HEIGHT)
+          }
+          .width('100%')
+        }
+        .selectable(false)
       }
-      .onWillScroll((xOffset: number, yOffset: number, scrollState: ScrollState, scrollSource: ScrollSource) => {
-        this.onScrollWillMove(xOffset, yOffset, scrollState, scrollSource);
+      .onWillScroll((scrollOffset: number, scrollState: ScrollState, scrollSource: ScrollSource) => {
+        this.onScrollWillMove(scrollOffset, scrollState, scrollSource);
       })
       .onReachEnd(() => {
         this.onReachBottom();
       })
+      .cachedCount(MESSAGE_LIST_CACHED_COUNT)
       .height('100%')
       .width('100%')
       if (this.backToBottomVisible) {

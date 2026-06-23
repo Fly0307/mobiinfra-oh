@@ -40,6 +40,7 @@ export struct ChatPage {
   @Prop messages: ChatMessage[] = [];
   // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
   @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
@@ -302,6 +303,7 @@ export struct ChatPage {
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         avatarForegroundUri: this.avatarForegroundUri,
+        avatarMessageForegroundUri: this.avatarMessageForegroundUri,
         bottomOverlayInset: this.bottomOverlayInset(),
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },

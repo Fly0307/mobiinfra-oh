@@ -1037,6 +1037,7 @@ struct Index {
     this.homeProfile = {
       avatarUri: avatar.avatarUri,
       avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
       avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
@@ -1053,8 +1054,10 @@ struct Index {
 
   private ensureCurrentAvatarForegroundCache(): void {
     let versionId = this.homeProfile.avatarVersionId;
+    let hasFullForeground: boolean = this.homeProfile.avatarForegroundUri.length > 0;
+    let hasMessageForeground: boolean = this.homeProfile.avatarMessageForegroundUri.length > 0;
     if (this.dataManagerFacade === null || this.avatarForegroundEnsuring ||
-      versionId.length === 0 || this.homeProfile.avatarForegroundUri.length > 0 ||
+      versionId.length === 0 || (hasFullForeground && hasMessageForeground) ||
       this.avatarForegroundAttemptedVersionId === versionId) {
       return;
     }
@@ -1066,7 +1069,7 @@ struct Index {
         this.avatarForegroundEnsuring = false;
         return;
       }
-      if (avatar.avatarForegroundUri.length > 0) {
+      if (avatar.avatarForegroundUri.length > 0 && avatar.avatarMessageForegroundUri.length > 0) {
         this.avatarForegroundAttemptedVersionId = versionId;
       }
       this.mergeHomeAvatarView(avatar);
@@ -4244,6 +4247,7 @@ struct Index {
             activeSessionId: this.activeChatSessionId,
             messages: this.activeChatMessages,
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
+            avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },

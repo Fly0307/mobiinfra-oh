@@ -13,6 +13,7 @@ import dataManagerQueryEventsToolUnitTest from './DataManagerQueryEventsToolUnit
 import appLoggerUnitTest from './AppLoggerUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
+import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 
@@ -32,6 +33,7 @@ export default function testsuite() {
   appLoggerUnitTest();
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
+  chatMessageDataSourceUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
 }

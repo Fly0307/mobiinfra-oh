@@ -16,6 +16,7 @@ import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
+import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -36,4 +37,5 @@ export default function testsuite() {
   chatMessageDataSourceUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
+  mobileGuiTaskToolUnitTest();
 }

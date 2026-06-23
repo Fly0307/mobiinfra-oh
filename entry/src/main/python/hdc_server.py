@@ -818,7 +818,7 @@ def discover_hdc_candidates():
         trusted = source in ("cache-last", "cache", "HDC_TARGET", "HDC_AUTO_TARGETS")
         candidate = try_hdc_tconn_target(parsed["target"], source, precheck=not trusted)
         if candidate:
-            candidates.append(candidate)
+            return [candidate]
     candidates = unique_candidates(candidates)
     if candidates:
         return candidates
@@ -829,7 +829,7 @@ def discover_hdc_candidates():
         source = str(candidate.get("source", "")) or "hdc-discover"
         connected_candidate = try_hdc_tconn_target(target, source, precheck=False)
         if connected_candidate:
-            candidates.append(connected_candidate)
+            return [connected_candidate]
     candidates = unique_candidates(candidates)
     if candidates:
         return candidates
@@ -862,10 +862,7 @@ def discover_hdc_candidates():
                 for target in open_targets:
                     candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
                     if candidate:
-                        candidates.append(candidate)
-                candidates = unique_candidates(candidates)
-                if candidates:
-                    return candidates
+                        return [candidate]
     return unique_candidates(candidates)
 
 def ensure_auto_hdc_connected(force=False, prompt_user=False, reason=""):

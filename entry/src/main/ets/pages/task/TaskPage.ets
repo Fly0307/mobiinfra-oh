@@ -94,6 +94,7 @@ const ROOT_BRANCH = 'root';
 const CHILD_BRANCH_STEPS = 'steps';
 const CHILD_BRANCH_THEN = 'then';
 const CHILD_BRANCH_ELSE = 'else';
+const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 
 // 定时任务页从 App 沙箱中的 workflow JSON 加载任务配置。
 // 新增的图编辑器只改变前端展示和编辑方式，保存结果仍然是一份可执行的 workflow JSON。
@@ -115,6 +116,8 @@ export struct TaskPage {
   @State flowRenderSteps: WorkflowStep[] = [];
   @State flowStructureBusy: boolean = false;
   @State editorContextText: string = '{}';
+  @State cardContextDrafts: Record<string, string> = {};
+  @State cardContextRenderVersion: number = 0;
   @State workflowNameDraft: string = '';
   @State workflowDescriptionDraft: string = '';
   @State toolSchemaText: string = '';
@@ -153,6 +156,7 @@ export struct TaskPage {
   private filesDir: string = '';
   private pendingStructureSelectionPath: string = '';
   private pendingTemplateInsertKeys: string[] = [];
+  private cardContextSaveTimerIds: Record<string, number> = {};
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -164,12 +168,26 @@ export struct TaskPage {
     this.reloadTasks();
   }
 
+  aboutToDisappear(): void {
+    if (this.filesDir.length > 0) {
+      this.flushTaskContextDrafts();
+    }
+    this.clearAllTaskContextSaveTimers();
+  }
+
   private reloadTasks(): void {
     if (this.filesDir.length === 0) {
       return;
     }
+    this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
     this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    this.refreshCardContextInputs();
     this.refreshStatsText();
+  }
+
+  private refreshCardContextInputs(): void {
+    this.cardContextRenderVersion = this.cardContextRenderVersion + 1;
   }
 
   private refreshStatsText(): void {
@@ -294,13 +312,171 @@ export struct TaskPage {
       task.enabled ? '1' : '0',
       task.lastStatus,
       task.lastRun,
-      task.lastMessage
+      task.lastMessage,
+      String(this.cardContextRenderVersion)
     ];
     return ArkJSON.stringify(keyParts);
   }
 
   private taskRowRenderKey(task: WorkflowTask): string {
     return this.taskCardRenderKey(task) + '|' + (this.runningTaskId === task.id ? 'running' : 'idle');
+  }
+
+  private taskContextMap(task: WorkflowTask): WorkflowJsonMap | null {
+    try {
+      let workflow = WorkflowStorage.validateWorkflowJson(task.workflowJson, false);
+      if (!workflow.context) {
+        return null;
+      }
+      if (Object.keys(workflow.context).length === 0) {
+        return null;
+      }
+      return workflow.context;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private taskHasContext(task: WorkflowTask): boolean {
+    let context = this.taskContextMap(task);
+    return context !== null && context['contact_name'] !== undefined;
+  }
+
+  private taskContactNameOriginalText(task: WorkflowTask): string {
+    let context = this.taskContextMap(task);
+    if (!context) {
+      return '';
+    }
+    let value = context['contact_name'];
+    if (value === undefined || value === null) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    return ArkJSON.stringify(value);
+  }
+
+  private taskContactNameDraftForTask(task: WorkflowTask): string {
+    let draft = this.cardContextDrafts[task.id];
+    if (draft !== undefined) {
+      return draft;
+    }
+    return this.taskContactNameOriginalText(task);
+  }
+
+  private setTaskContextDraft(taskId: string, value: string): void {
+    let next: Record<string, string> = {};
+    let keys = Object.keys(this.cardContextDrafts);
+    for (let i = 0; i < keys.length; i++) {
+      next[keys[i]] = this.cardContextDrafts[keys[i]];
+    }
+    next[taskId] = value;
+    this.cardContextDrafts = next;
+  }
+
+  private removeTaskContextDraft(taskId: string): void {
+    let next: Record<string, string> = {};
+    let keys = Object.keys(this.cardContextDrafts);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== taskId) {
+        next[keys[i]] = this.cardContextDrafts[keys[i]];
+      }
+    }
+    this.cardContextDrafts = next;
+  }
+
+  private taskContextSaveTimerId(taskId: string): number {
+    let timerId = this.cardContextSaveTimerIds[taskId];
+    if (timerId === undefined) {
+      return -1;
+    }
+    return timerId;
+  }
+
+  private setTaskContextSaveTimerId(taskId: string, timerId: number): void {
+    let next: Record<string, number> = {};
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      next[keys[i]] = this.cardContextSaveTimerIds[keys[i]];
+    }
+    next[taskId] = timerId;
+    this.cardContextSaveTimerIds = next;
+  }
+
+  private removeTaskContextSaveTimerId(taskId: string): void {
+    let next: Record<string, number> = {};
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== taskId) {
+        next[keys[i]] = this.cardContextSaveTimerIds[keys[i]];
+      }
+    }
+    this.cardContextSaveTimerIds = next;
+  }
+
+  private clearTaskContextSaveTimer(taskId: string): void {
+    let timerId = this.taskContextSaveTimerId(taskId);
+    if (timerId !== -1) {
+      clearTimeout(timerId);
+    }
+    this.removeTaskContextSaveTimerId(taskId);
+  }
+
+  private clearAllTaskContextSaveTimers(): void {
+    let keys = Object.keys(this.cardContextSaveTimerIds);
+    for (let i = 0; i < keys.length; i++) {
+      let timerId = this.cardContextSaveTimerIds[keys[i]];
+      if (timerId !== undefined && timerId !== -1) {
+        clearTimeout(timerId);
+      }
+    }
+    this.cardContextSaveTimerIds = {};
+  }
+
+  private flushTaskContextDrafts(): boolean {
+    let keys = Object.keys(this.cardContextDrafts);
+    let flushed = keys.length > 0;
+    for (let i = 0; i < keys.length; i++) {
+      let taskId = keys[i];
+      let value = this.cardContextDrafts[taskId];
+      this.clearTaskContextSaveTimer(taskId);
+      this.persistTaskContextDraft(taskId, value);
+    }
+    return flushed;
+  }
+
+  private syncTaskContextDraft(task: WorkflowTask, value: string): void {
+    this.setTaskContextDraft(task.id, value);
+    this.clearTaskContextSaveTimer(task.id);
+    if (this.isTaskExecutionBusy()) {
+      return;
+    }
+    let taskId = task.id;
+    let timerId = setTimeout(() => {
+      this.removeTaskContextSaveTimerId(taskId);
+      this.persistTaskContextDraft(taskId, value);
+    }, CARD_CONTEXT_SAVE_DELAY_MS);
+    this.setTaskContextSaveTimerId(taskId, timerId);
+  }
+
+  private persistTaskContextDraft(taskId: string, value: string): void {
+    if (this.filesDir.length === 0) {
+      return;
+    }
+    try {
+      this.tasks = WorkflowStorage.updateTaskContextValue(this.filesDir, taskId, 'contact_name', value);
+      this.refreshStatsText();
+    } catch (e) {
+      let err = e as Error;
+      this.removeTaskContextDraft(taskId);
+      try {
+        this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      } catch (innerError) {
+      }
+      this.refreshCardContextInputs();
+      showToastSafely('上下文变量保存失败：' + err.message, 2500);
+    }
   }
 
   private openConfigView(): void {
@@ -335,7 +511,12 @@ export struct TaskPage {
   }
 
   private openEditEditor(taskId: string, mode: string = 'graph'): void {
-    this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    }
+    this.refreshCardContextInputs();
     let task = this.findTask(taskId);
     if (!task) {
       showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
@@ -418,6 +599,11 @@ export struct TaskPage {
         }
       }
       this.tasks = WorkflowStorage.upsertTask(this.filesDir, task);
+      if (this.editingTaskId.length > 0) {
+        this.clearTaskContextSaveTimer(this.editingTaskId);
+        this.removeTaskContextDraft(this.editingTaskId);
+        this.refreshCardContextInputs();
+      }
       this.editorOpen = false;
       this.selectedPath = '';
       this.taskScene = this.editorSceneId;
@@ -478,23 +664,7 @@ export struct TaskPage {
       showToastSafely('Workflow 正在执行，请稍后再调整任务开关', 1500);
       return;
     }
-    let next: WorkflowTask = {
-      id: task.id,
-      sceneId: task.sceneId,
-      icon: task.icon,
-      iconColor: task.iconColor,
-      title: task.title,
-      source: task.source,
-      enabled: enabled,
-      configFileName: task.configFileName,
-      workflowJson: task.workflowJson,
-      lastStatus: task.lastStatus,
-      lastRun: task.lastRun,
-      lastMessage: task.lastMessage,
-      isUserModified: task.isUserModified
-    };
-    this.tasks = WorkflowStorage.upsertTask(this.filesDir, next);
-    this.refreshStatsText();
+    this.tasks = WorkflowStorage.updateTaskEnabled(this.filesDir, task.id, enabled);
   }
 
   private async runTask(task: WorkflowTask): Promise<void> {
@@ -502,7 +672,13 @@ export struct TaskPage {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
-    this.reloadTasks();
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    } else {
+      this.refreshCardContextInputs();
+    }
     let currentTask = this.findTask(task.id);
     if (!currentTask) {
       showToastSafely('Workflow 已不存在，请刷新后重试', 1800);
@@ -513,14 +689,13 @@ export struct TaskPage {
       return;
     }
     this.runningTaskId = currentTask.id;
-    WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
-    this.reloadTasks();
+    this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
     try {
       await this.onRunWorkflow(currentTask);
-      this.reloadTasks();
     } finally {
       this.runningTaskId = '';
-      this.reloadTasks();
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      this.refreshStatsText();
     }
   }
 
@@ -529,7 +704,13 @@ export struct TaskPage {
       showToastSafely('已有 workflow 正在执行', 1500);
       return;
     }
-    this.reloadTasks();
+    let flushedContext = this.flushTaskContextDrafts();
+    this.cardContextDrafts = {};
+    if (!flushedContext) {
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+    } else {
+      this.refreshCardContextInputs();
+    }
     let queue = this.enabledTasks();
     if (queue.length === 0) {
       showToastSafely('请先开启至少一个任务', 1500);
@@ -541,18 +722,16 @@ export struct TaskPage {
     let stoppedByCancel = false;
     try {
       for (let i = 0; i < queue.length; i++) {
-        this.reloadTasks();
         let currentTask = this.findTask(queue[i].id);
         if (!currentTask || !currentTask.enabled) {
           continue;
         }
         this.runningTaskId = currentTask.id;
         this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
-        WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
-        this.reloadTasks();
+        this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
           await this.onRunWorkflow(currentTask);
-          this.reloadTasks();
+          this.tasks = WorkflowStorage.loadTasks(this.filesDir);
           if (this.isTaskCancelled(currentTask.id)) {
             stoppedByCancel = true;
             showToastSafely('批量执行已终止', 1500);
@@ -561,12 +740,11 @@ export struct TaskPage {
         } catch (e) {
           let err = e as Error;
           stoppedByError = true;
-          WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
+          this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, 'failed', err.message);
           showToastSafely('任务执行中断：' + err.message, 2500);
           break;
         } finally {
           this.runningTaskId = '';
-          this.reloadTasks();
         }
       }
       if (!stoppedByError && !stoppedByCancel) {
@@ -576,7 +754,8 @@ export struct TaskPage {
       this.batchRunning = false;
       this.runningTaskId = '';
       this.batchRunStatusText = '';
-      this.reloadTasks();
+      this.tasks = WorkflowStorage.loadTasks(this.filesDir);
+      this.refreshStatsText();
     }
   }
 
@@ -3536,6 +3715,45 @@ export struct TaskPage {
     .margin({ top: 18 })
   }
 
+  @Builder TaskContextPanel(task: WorkflowTask) {
+    Column() {
+      Row() {
+        Text('上下文变量')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .layoutWeight(1)
+          .maxLines(1)
+        Text('contact_name')
+          .fontSize(11)
+          .fontColor('#276EF1')
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor('#EAF2FF')
+          .borderRadius(8)
+          .maxLines(1)
+      }
+      .width('100%')
+      TextInput({ placeholder: '请输入联系人名称', text: this.taskContactNameDraftForTask(task) })
+        .width('100%')
+        .height(40)
+        .fontSize(13)
+        .fontColor('#222B3D')
+        .backgroundColor(Color.White)
+        .borderRadius(10)
+        .border({ width: 1, color: '#E3E8F1' })
+        .padding({ left: 10, right: 10 })
+        .margin({ top: 10 })
+        .enabled(!this.isTaskExecutionBusy())
+        .onChange((val: string) => { this.syncTaskContextDraft(task, val); })
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#F8FAFD')
+    .borderRadius(12)
+    .border({ width: 1, color: '#E3E8F1' })
+    .margin({ top: 14 })
+  }
+
   @Builder TaskCard(task: WorkflowTask) {
     Column() {
       Row() {
@@ -3593,6 +3811,9 @@ export struct TaskPage {
           .onChange((value: boolean) => { this.setTaskEnabled(task, value); })
       }
       .width('100%')
+      if (this.taskHasContext(task)) {
+        this.TaskContextPanel(task)
+      }
       Scroll() {
         Row() {
           Button(this.runningTaskId === task.id ? '执行中' : '运行')

@@ -1,5 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import fs from '@ohos.file.fs';
+import { CloudModelClient, CloudModelConfig } from '../main/ets/utils/CloudModelClient';
 import { RawWorkflowResourceReader, WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
 import { WorkflowRunner } from '../main/ets/utils/WorkflowRunner';
 import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
@@ -47,6 +48,9 @@ class FailingRawWorkflowResourceReader implements RawWorkflowResourceReader {
   }
 }
 
+class NoopWorkflowCloudModelClient extends CloudModelClient {
+}
+
 let testRootCounter: number = 0;
 
 function nextTestRoot(name: string): string {
@@ -75,6 +79,15 @@ function prepareTestRoot(path: string): void {
     fs.mkdirSync(path);
   } catch (e) {
   }
+}
+
+function testCloudConfig(): CloudModelConfig {
+  return {
+    plannerBaseUrl: 'http://localhost:8000',
+    deciderBaseUrl: 'http://localhost:8000',
+    apiKey: 'test-key',
+    deciderModel: 'test-model'
+  };
 }
 
 export default function workflowStorageUnitTest() {
@@ -251,6 +264,47 @@ export default function workflowStorageUnitTest() {
         .assertEqual('/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui');
       expect(WorkflowRunner.runDirectoryRoot('/tmp/files', ''))
         .assertEqual('/tmp/files/workflows/runs');
+    });
+
+    it('runTaskThrowsWhenOverrideRunRootIsBlockedByFile', 0, async () => {
+      let filesDir = nextTestRoot('run-root-override-blocked');
+      let blockedRunRoot = filesDir + '/blocked-run-root';
+      try {
+        prepareTestRoot(filesDir);
+        WorkflowStorage.writeText(blockedRunRoot, 'blocked');
+        let runner = new WorkflowRunner(filesDir, new NoopWorkflowCloudModelClient(), () => testCloudConfig(),
+          '127.0.0.1', (_message: string) => {
+          }, blockedRunRoot);
+        let task: WorkflowTask = {
+          id: 'task-1',
+          sceneId: 0,
+          icon: 'Play',
+          iconColor: '#000000',
+          title: 'Minimal workflow task',
+          source: 'minimal-workflow',
+          enabled: true,
+          configFileName: 'minimal-workflow.json',
+          workflowJson: '{"steps":[{"id":"1","type":"tool","tool_name":"noop"}]}',
+          lastStatus: '未运行',
+          lastRun: '尚未执行',
+          lastMessage: '等待执行'
+        };
+
+        let threw = false;
+        let message = '';
+        try {
+          await runner.runTask(task);
+        } catch (e) {
+          let err = e as Error;
+          threw = true;
+          message = err.message || String(e);
+        }
+
+        expect(threw).assertTrue();
+        expect(message.indexOf('Failed to ensure directory: ' + blockedRunRoot) >= 0).assertTrue();
+      } finally {
+        cleanupPath(filesDir);
+      }
     });
 
     it('runSummaryDeleteTargetUsesWholeRunDirectory', 0, () => {

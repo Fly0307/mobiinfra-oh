@@ -3472,7 +3472,7 @@ struct Index {
           let markerMessage = '写入下载完成标记失败: ' + this.errorMessage(markerError);
           this.updateModelDownloadMessage(markerMessage);
           AppLogger.error('ModelDownload', markerMessage);
-          throw markerError;
+          throw new Error(markerMessage);
         }
         this.refreshDownloadedModels();
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');

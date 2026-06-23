@@ -29,6 +29,18 @@ export interface ChatAssistantThinkingParts {
   thinkingContent: string;
 }
 
+export interface ChatStreamThinkingState {
+  enabled: boolean;
+  inThinking: boolean;
+  pendingTag: string;
+}
+
+export interface ChatStreamThinkingDeltaParts {
+  contentDelta: string;
+  thinkingDelta: string;
+  state: ChatStreamThinkingState;
+}
+
 export interface ChatSessionSummary {
   id: string;
   title: string;
@@ -80,16 +92,17 @@ export function createEmptyChatSession(id: string, mode: string, now: number): C
   };
 }
 
+const CHAT_THINK_OPEN_TAG = '<think>';
+const CHAT_THINK_CLOSE_TAG = '</think>';
+
 export function splitAssistantThinkingContent(rawContent: string): ChatAssistantThinkingParts {
-  let closeTag = '</think>';
-  let openTag = '<think>';
   let lookup = rawContent.toLowerCase();
-  let closeIndex = lookup.indexOf(closeTag);
+  let closeIndex = lookup.indexOf(CHAT_THINK_CLOSE_TAG);
   if (closeIndex < 0) {
-    let partialOpenIndex = lookup.indexOf(openTag);
+    let partialOpenIndex = lookup.indexOf(CHAT_THINK_OPEN_TAG);
     if (partialOpenIndex >= 0) {
       let beforeThinking = rawContent.substring(0, partialOpenIndex).trim();
-      let thinkingContent = rawContent.substring(partialOpenIndex + openTag.length).trim();
+      let thinkingContent = rawContent.substring(partialOpenIndex + CHAT_THINK_OPEN_TAG.length).trim();
       return {
         content: beforeThinking,
         thinkingContent: thinkingContent
@@ -101,11 +114,11 @@ export function splitAssistantThinkingContent(rawContent: string): ChatAssistant
     };
   }
 
-  let openIndex = lookup.lastIndexOf(openTag, closeIndex);
-  let thinkingStart = openIndex >= 0 ? openIndex + openTag.length : 0;
+  let openIndex = lookup.lastIndexOf(CHAT_THINK_OPEN_TAG, closeIndex);
+  let thinkingStart = openIndex >= 0 ? openIndex + CHAT_THINK_OPEN_TAG.length : 0;
   let beforeThinking = openIndex >= 0 ? rawContent.substring(0, openIndex).trim() : '';
   let thinkingContent = rawContent.substring(thinkingStart, closeIndex).trim();
-  let afterThinking = rawContent.substring(closeIndex + closeTag.length).trim();
+  let afterThinking = rawContent.substring(closeIndex + CHAT_THINK_CLOSE_TAG.length).trim();
   let visibleContent = afterThinking;
   if (beforeThinking.length > 0) {
     visibleContent = afterThinking.length > 0 ? beforeThinking + '\n\n' + afterThinking : beforeThinking;
@@ -114,6 +127,84 @@ export function splitAssistantThinkingContent(rawContent: string): ChatAssistant
     content: visibleContent,
     thinkingContent: thinkingContent
   };
+}
+
+export function createChatStreamThinkingState(enableThinking: boolean): ChatStreamThinkingState {
+  return {
+    enabled: enableThinking,
+    inThinking: enableThinking,
+    pendingTag: ''
+  };
+}
+
+function isKnownThinkTagPrefix(lowerText: string): boolean {
+  return CHAT_THINK_OPEN_TAG.indexOf(lowerText) === 0 || CHAT_THINK_CLOSE_TAG.indexOf(lowerText) === 0;
+}
+
+export function parseChatStreamThinkingDelta(delta: string,
+  state: ChatStreamThinkingState): ChatStreamThinkingDeltaParts {
+  if (!state.enabled) {
+    return {
+      contentDelta: delta,
+      thinkingDelta: '',
+      state: {
+        enabled: false,
+        inThinking: false,
+        pendingTag: ''
+      }
+    };
+  }
+
+  let text = state.pendingTag + delta;
+  let inThinking = state.inThinking;
+  let pendingTag = '';
+  let contentDelta = '';
+  let thinkingDelta = '';
+  let index = 0;
+  while (index < text.length) {
+    let rest = text.substring(index);
+    let lowerRest = rest.toLowerCase();
+    if (lowerRest.indexOf(CHAT_THINK_CLOSE_TAG) === 0) {
+      inThinking = false;
+      index += CHAT_THINK_CLOSE_TAG.length;
+      continue;
+    }
+    if (lowerRest.indexOf(CHAT_THINK_OPEN_TAG) === 0) {
+      inThinking = true;
+      index += CHAT_THINK_OPEN_TAG.length;
+      continue;
+    }
+    if (rest.charAt(0) === '<' && isKnownThinkTagPrefix(lowerRest)) {
+      pendingTag = rest;
+      break;
+    }
+    if (inThinking) {
+      thinkingDelta += text.charAt(index);
+    } else {
+      contentDelta += text.charAt(index);
+    }
+    index += 1;
+  }
+
+  return {
+    contentDelta: contentDelta,
+    thinkingDelta: thinkingDelta,
+    state: {
+      enabled: state.enabled,
+      inThinking: inThinking,
+      pendingTag: pendingTag
+    }
+  };
+}
+
+export function buildAssistantStreamingRenderContent(content: string, thinkingContent: string): string {
+  if (thinkingContent.length === 0) {
+    return content;
+  }
+  if (content.length === 0) {
+    return CHAT_THINK_OPEN_TAG + thinkingContent;
+  }
+  return CHAT_THINK_OPEN_TAG + thinkingContent + CHAT_THINK_CLOSE_TAG + '\n\n' + content;
 }
 
 function normalizeAssistantMessageContent(role: ChatMessageRole, kind: ChatMessageKind,

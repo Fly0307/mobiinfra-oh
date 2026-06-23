@@ -20,7 +20,10 @@ import {
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
-  createChatMessage
+  buildAssistantStreamingRenderContent,
+  createChatMessage,
+  createChatStreamThinkingState,
+  parseChatStreamThinkingDelta
 } from './chat/ChatSessionTypes';
 import {
   CHAT_CONTEXT_COMPRESSION_NOTICE,
@@ -3146,6 +3149,15 @@ struct Index {
     let enableThinking = this.chatDeepThinkingEnabled;
     let toolTraceLines: string[] = [];
     let streamedContent = '';
+    let streamedVisibleContent = '';
+    let streamedThinkingContent = '';
+    let streamThinkingState = createChatStreamThinkingState(enableThinking);
+    let currentStreamRenderContent = (): string => {
+      if (!enableThinking) {
+        return streamedContent;
+      }
+      return buildAssistantStreamingRenderContent(streamedVisibleContent, streamedThinkingContent);
+    };
     this.resetCloudStreamMessageUpdate();
     try {
       let sessionWithUser = ChatSessionStorage.loadSession(this.filesDir, chatSessionId);
@@ -3191,16 +3203,23 @@ struct Index {
         enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
-          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         },
         onContentDelta: (delta: string) => {
           streamedContent += delta;
-          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, streamedContent, toolTraceLines);
+          if (enableThinking) {
+            let parsed = parseChatStreamThinkingDelta(delta, streamThinkingState);
+            streamThinkingState = parsed.state;
+            streamedThinkingContent += parsed.thinkingDelta;
+            streamedVisibleContent += parsed.contentDelta;
+          }
+          this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
       });
       let response = result.content;
       this.resetCloudStreamMessageUpdate();
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, response, toolTraceLines);
+      let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
       let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
@@ -3209,10 +3228,10 @@ struct Index {
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
-            this.cancelledCloudChatContent(streamedContent), toolTraceLines);
+            this.cancelledCloudChatContent(currentStreamRenderContent()), toolTraceLines);
         } else {
           this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
-            this.cancelledCloudChatContent(streamedContent), new Date().getTime()));
+            this.cancelledCloudChatContent(currentStreamRenderContent()), new Date().getTime()));
         }
         this.appendCloudLog('ReAct 云端聊天已取消。');
       } else {

@@ -11,10 +11,13 @@ import {
   chatMessageStableRenderKey,
   chatMessagesAutoScrollKey,
   chatMessagesStreamFollowKey,
+  buildAssistantStreamingRenderContent,
   chatSessionPreview,
   compactChatPreviewText,
+  createChatStreamThinkingState,
   createChatMessage,
   createEmptyChatSession,
+  parseChatStreamThinkingDelta,
   defaultChatSessionTitle,
   splitAssistantThinkingContent,
   toggleChatMessageThinkingCollapsed,
@@ -233,6 +236,69 @@ export default function chatSessionStorageUnitTest() {
 
       expect(parts.thinkingContent).assertEqual('正在分析第一步');
       expect(parts.content).assertEqual('');
+    });
+
+    it('streamsThinkingContentBeforeClosingTagWhenThinkingEnabled', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let thinking = '';
+      let content = '';
+
+      let first = parseChatStreamThinkingDelta('先分析问题。', state);
+      state = first.state;
+      thinking += first.thinkingDelta;
+      content += first.contentDelta;
+      let rendered = splitAssistantThinkingContent(buildAssistantStreamingRenderContent(content, thinking));
+
+      expect(first.thinkingDelta).assertEqual('先分析问题。');
+      expect(first.contentDelta).assertEqual('');
+      expect(rendered.thinkingContent).assertEqual('先分析问题。');
+      expect(rendered.content).assertEqual('');
+    });
+
+    it('streamsVisibleContentAfterSplitClosingThinkTag', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let thinking = '';
+      let content = '';
+
+      let first = parseChatStreamThinkingDelta('先分析</thi', state);
+      state = first.state;
+      thinking += first.thinkingDelta;
+      content += first.contentDelta;
+      let second = parseChatStreamThinkingDelta('nk>\n最终回答。', state);
+      state = second.state;
+      thinking += second.thinkingDelta;
+      content += second.contentDelta;
+
+      expect(first.thinkingDelta).assertEqual('先分析');
+      expect(first.contentDelta).assertEqual('');
+      expect(second.thinkingDelta).assertEqual('');
+      expect(second.contentDelta).assertEqual('\n最终回答。');
+      expect(state.inThinking).assertFalse();
+      expect(state.pendingTag).assertEqual('');
+      let rendered = splitAssistantThinkingContent(buildAssistantStreamingRenderContent(content, thinking));
+      expect(rendered.thinkingContent).assertEqual('先分析');
+      expect(rendered.content).assertEqual('最终回答。');
+    });
+
+    it('doesNotTreatContentAsThinkingWhenThinkingDisabled', 0, () => {
+      let state = createChatStreamThinkingState(false);
+
+      let parsed = parseChatStreamThinkingDelta('先分析</think>最终回答。', state);
+
+      expect(parsed.thinkingDelta).assertEqual('');
+      expect(parsed.contentDelta).assertEqual('先分析</think>最终回答。');
+      expect(parsed.state.inThinking).assertFalse();
+    });
+
+    it('dropsSplitOpeningThinkTagDuringThinkingStream', 0, () => {
+      let state = createChatStreamThinkingState(true);
+      let first = parseChatStreamThinkingDelta('<thi', state);
+      let second = parseChatStreamThinkingDelta('nk>先分析', first.state);
+
+      expect(first.thinkingDelta).assertEqual('');
+      expect(first.contentDelta).assertEqual('');
+      expect(second.thinkingDelta).assertEqual('先分析');
+      expect(second.contentDelta).assertEqual('');
     });
 
     it('createsAssistantMessageWithCollapsedThinkingModule', 0, () => {

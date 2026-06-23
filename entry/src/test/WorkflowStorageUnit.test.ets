@@ -1,5 +1,8 @@
 import { describe, it, expect } from '@ohos/hypium';
+import fs from '@ohos.file.fs';
 import { RawWorkflowResourceReader, WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
+import { CloudModelClient, CloudModelConfig } from '../main/ets/utils/CloudModelClient';
+import { WorkflowRunner } from '../main/ets/utils/WorkflowRunner';
 import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
@@ -42,6 +45,47 @@ class FailingRawWorkflowResourceReader implements RawWorkflowResourceReader {
   getRawFileContentSync(path: string): Uint8Array {
     this.requestedPaths.push(path);
     throw new Error('missing raw workflow resource: ' + path);
+  }
+}
+
+class NoopCloudModelClient extends CloudModelClient {
+  async chatPlanner(_prompt: string, _config: CloudModelConfig): Promise<string> {
+    throw new Error('chatPlanner should not be called in this test');
+  }
+
+  async chatQwenDecider(_task: string, _historyItems: string[], _imageBase64: string,
+    _config: CloudModelConfig): Promise<string> {
+    throw new Error('chatQwenDecider should not be called in this test');
+  }
+}
+
+let testRootCounter: number = 0;
+
+function nextTestRoot(name: string): string {
+  testRootCounter += 1;
+  return '/tmp/workflow-storage-unit-' + name + '-' + String(new Date().getTime()) + '-' + String(testRootCounter);
+}
+
+function cleanupPath(path: string): void {
+  try {
+    let children = fs.listFileSync(path);
+    for (let i = 0; i < children.length; i++) {
+      cleanupPath(path + '/' + children[i]);
+    }
+    fs.rmdirSync(path);
+  } catch (e) {
+    try {
+      fs.unlinkSync(path);
+    } catch (err) {
+    }
+  }
+}
+
+function prepareTestRoot(path: string): void {
+  cleanupPath(path);
+  try {
+    fs.mkdirSync(path);
+  } catch (e) {
   }
 }
 
@@ -88,6 +132,19 @@ export default function workflowStorageUnitTest() {
         .assertEqual('/tmp/files/chat-sessions/tool-runs/unknown/mobile-gui');
     });
 
+    it('ensureChatSessionMobileGuiToolRunRootCreatesAndReturnsRoot', 0, () => {
+      let filesDir = nextTestRoot('ensure-chat-session-root');
+      prepareTestRoot(filesDir);
+
+      let root = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session/abc');
+
+      expect(root).assertEqual(filesDir + '/chat-sessions/tool-runs/session_abc/mobile-gui');
+      expect(fs.accessSync(root)).assertTrue();
+      expect(fs.accessSync(filesDir + '/chat-sessions/tool-runs/session_abc')).assertTrue();
+
+      cleanupPath(filesDir);
+    });
+
     it('workflowRunRelativePathPreservesChatSessionRelativePaths', 0, () => {
       let filesDir = '/tmp/files';
       let absolutePath = '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json';
@@ -96,6 +153,43 @@ export default function workflowStorageUnitTest() {
       expect(WorkflowStorage.workflowRunRelativePath(filesDir,
         'chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json'))
         .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json');
+    });
+
+    it('workflowRunnerUsesRunRootOverrideForRunDir', 0, async () => {
+      let filesDir = nextTestRoot('runner-override');
+      prepareTestRoot(filesDir);
+      let overrideRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(filesDir, 'session-abc');
+      let client = new NoopCloudModelClient();
+      let runner = new WorkflowRunner(filesDir, client, (): CloudModelConfig => {
+        return {
+          plannerBaseUrl: 'http://127.0.0.1:1',
+          deciderBaseUrl: 'http://127.0.0.1:1',
+          apiKey: 'test-key',
+          deciderModel: 'test-model'
+        };
+      }, 'http://127.0.0.1:1', (): void => {
+      }, overrideRoot);
+      let task: WorkflowTask = {
+        id: 'runner_override_task',
+        sceneId: 0,
+        icon: 'Tool',
+        iconColor: '#000000',
+        title: 'runner override test',
+        source: 'chat-session',
+        enabled: true,
+        configFileName: 'runner_override_task.json',
+        workflowJson: '{"steps":[{"id":"1","type":"if","condition":false,"then_steps":[],"else_steps":[]}]}',
+        lastStatus: '未运行',
+        lastRun: '尚未执行',
+        lastMessage: 'test'
+      };
+
+      let result = await runner.runTask(task);
+
+      expect(result.runDir.indexOf(overrideRoot)).assertEqual(0);
+      expect(fs.accessSync(result.runDir)).assertTrue();
+
+      cleanupPath(filesDir);
     });
 
     it('runSummaryDeleteTargetUsesWholeRunDirectory', 0, () => {

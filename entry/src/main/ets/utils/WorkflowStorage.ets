@@ -200,10 +200,11 @@ export class WorkflowStorage {
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
   }
 
-  static ensureChatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): void {
+  static ensureChatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
     WorkflowStorage.ensureDirectoryTree(filesDir);
     WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId));
     WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId));
+    return WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId);
   }
 
   static readText(path: string): string {

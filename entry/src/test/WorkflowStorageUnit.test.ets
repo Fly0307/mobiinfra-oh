@@ -79,6 +79,25 @@ export default function workflowStorageUnitTest() {
       expect(relative.endsWith('/steps/3')).assertFalse();
     });
 
+    it('chatSessionMobileGuiToolRunRootSanitizesSessionId', 0, () => {
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', 'session-abc'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui');
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', 'sess/ion id'))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/sess_ion_id/mobile-gui');
+      expect(WorkflowStorage.chatSessionMobileGuiToolRunRoot('/tmp/files', ''))
+        .assertEqual('/tmp/files/chat-sessions/tool-runs/unknown/mobile-gui');
+    });
+
+    it('workflowRunRelativePathPreservesChatSessionRelativePaths', 0, () => {
+      let filesDir = '/tmp/files';
+      let absolutePath = '/tmp/files/chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json';
+      expect(WorkflowStorage.workflowRunRelativePath(filesDir, absolutePath))
+        .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json');
+      expect(WorkflowStorage.workflowRunRelativePath(filesDir,
+        'chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json'))
+        .assertEqual('chat-sessions/tool-runs/session-abc/mobile-gui/run-1/run_summary.json');
+    });
+
     it('runSummaryDeleteTargetUsesWholeRunDirectory', 0, () => {
       let filesDir = '/data/app/el2/100/base/com.example.mnnllmchat/haps/entry/files';
       let file: WorkflowManagedFile = {

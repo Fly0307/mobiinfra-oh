@@ -20,6 +20,9 @@ import {
 const WORKFLOW_DIR = 'workflows';
 const CONFIG_DIR = 'configs';
 const RUN_DIR = 'runs';
+const CHAT_SESSION_DIR = 'chat-sessions';
+const TOOL_RUNS_DIR = 'tool-runs';
+const MOBILE_GUI_DIR = 'mobile-gui';
 const DAILY_LOG_DIR = 'daily-log';
 const TASK_INDEX_FILE = 'task-index.json';
 const DELETED_DEFAULT_TASKS_FILE = 'deleted-default-tasks.json';
@@ -152,6 +155,15 @@ export class WorkflowStorage {
     return WorkflowStorage.rootDir(filesDir) + '/' + RUN_DIR;
   }
 
+  static chatSessionToolRunsDir(filesDir: string, sessionId: string): string {
+    return filesDir.replace(/\\/g, '/').replace(/\/+$/g, '') + '/' + CHAT_SESSION_DIR + '/' + TOOL_RUNS_DIR + '/' +
+      WorkflowStorage.sanitizePathSegment(sessionId);
+  }
+
+  static chatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
+    return WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId) + '/' + MOBILE_GUI_DIR;
+  }
+
   static dailyLogDir(filesDir: string): string {
     return WorkflowStorage.rootDir(filesDir) + '/' + DAILY_LOG_DIR;
   }
@@ -186,6 +198,12 @@ export class WorkflowStorage {
     WorkflowStorage.ensureDirectory(WorkflowStorage.configDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.runsDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
+  }
+
+  static ensureChatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): void {
+    WorkflowStorage.ensureDirectoryTree(filesDir);
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId));
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId));
   }
 
   static readText(path: string): string {
@@ -319,9 +337,11 @@ export class WorkflowStorage {
     if (normalized.startsWith('workflows/')) {
       return normalized;
     }
-    let workflowRoot = root + '/' + WORKFLOW_DIR + '/';
-    if (normalized.startsWith(workflowRoot)) {
-      return WORKFLOW_DIR + '/' + normalized.substring(workflowRoot.length);
+    if (normalized.startsWith('chat-sessions/')) {
+      return normalized;
+    }
+    if (normalized.startsWith(root + '/')) {
+      return normalized.substring(root.length + 1);
     }
     let marker = '/' + WORKFLOW_DIR + '/';
     let markerIndex = normalized.indexOf(marker);
@@ -368,6 +388,37 @@ export class WorkflowStorage {
       return WorkflowStorage.readImageAsBase64(WorkflowStorage.workflowAbsolutePath(filesDir, value));
     }
     return value;
+  }
+
+  private static sanitizePathSegment(value: string): string {
+    let text = String(value || '');
+    if (text.length === 0) {
+      return 'unknown';
+    }
+    return text.replace(/[^A-Za-z0-9._-]/g, '_');
+  }
+
+  static ensureDirectoryTree(path: string): void {
+    let normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
+    if (normalized.length === 0) {
+      return;
+    }
+    let parts = normalized.split('/');
+    let current = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) {
+        if (i === 0) {
+          current = '/';
+        }
+        continue;
+      }
+      if (current === '' || current === '/') {
+        current += parts[i];
+      } else {
+        current += '/' + parts[i];
+      }
+      WorkflowStorage.ensureDirectory(current);
+    }
   }
 
   private static workflowAbsolutePath(filesDir: string, path: string): string {

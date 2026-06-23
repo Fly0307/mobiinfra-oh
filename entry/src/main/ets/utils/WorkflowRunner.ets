@@ -202,14 +202,16 @@ export class WorkflowRunner {
   private latestDailyLogPath: string = '';
   private pendingSummaryJobs: PendingSummaryJob[] = [];
   private latestWorkflowScreenshot: WorkflowScreenshotCache | null = null;
+  private runRootOverride: string = '';
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
-    hdcServerIp: string, logHandler: (message: string) => void) {
+    hdcServerIp: string, logHandler: (message: string) => void, runRootOverride: string = '') {
     this.filesDir = filesDir;
     this.cloudClient = cloudClient;
     this.cloudConfigProvider = cloudConfigProvider;
     this.hdcBridge = new HdcWorkflowBridge(hdcServerIp, logHandler);
     this.logHandler = logHandler;
+    this.runRootOverride = runRootOverride;
   }
 
   private workflowJsonForRun(task: WorkflowTask): string {
@@ -347,9 +349,11 @@ export class WorkflowRunner {
 
   private createRunDir(task: WorkflowTask): string {
     WorkflowStorage.ensureWorkspace(this.filesDir);
+    let runRoot = this.runRootOverride.length > 0 ? this.runRootOverride : WorkflowStorage.runsDir(this.filesDir);
+    WorkflowStorage.ensureDirectoryTree(runRoot);
     let stamp = this.formatTimestamp(this.runStartedAt);
     let safeName = this.sanitizeFileName(task.source || task.id);
-    let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
+    let dir = runRoot + '/' + stamp + '-' + safeName;
     WorkflowStorage.ensureDirectory(dir);
     return dir;
   }

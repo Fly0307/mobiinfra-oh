@@ -508,6 +508,37 @@ export default function chatSessionStorageUnitTest() {
       cleanupPath(root);
     });
 
+    it('expandsThinkingModuleWhenStreamingThinkingStarts', 0, () => {
+      let root = nextTestRoot('stream-thinking-expanded');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let assistant = createChatMessage('assistant-1', 'assistant', 'chat', '', 1001);
+      let saved = ChatSessionStorage.appendMessage(root, session.id, assistant);
+      expect(saved !== null).assertTrue();
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: session.id,
+        activeMessages: [assistant],
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: saved
+      };
+
+      let next = ChatSessionController.updateMessageContent(root, state, 'assistant-1',
+        '<think>正在分析问题。', []);
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(next.activeMessages[0].content).assertEqual('');
+      expect(next.activeMessages[0].thinkingContent).assertEqual('正在分析问题。');
+      expect(next.activeMessages[0].thinkingCollapsed).assertFalse();
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        expect(reloaded.messages[0].thinkingCollapsed).assertFalse();
+      }
+
+      cleanupPath(root);
+    });
+
     it('attachesTaskResultImageOnlyToTargetSession', 0, () => {
       let root = nextTestRoot('image');
       prepareTestRoot(root);

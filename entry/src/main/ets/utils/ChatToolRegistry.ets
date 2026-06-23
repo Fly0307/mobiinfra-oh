@@ -3,14 +3,12 @@ import {
   CloudToolCall
 } from './CloudModelClient';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
-import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from './MobileGuiTaskTool';
+import { MobileGuiTaskExecutionCallbacks } from './MobileGuiTaskTypes';
 
-export interface ChatToolExecutionContext {
+export interface ChatToolExecutionContext extends MobileGuiTaskExecutionCallbacks {
   filesDir: string;
   sessionId: string;
   userMessage: string;
-  confirmMobileGuiTask?: (request: MobileGuiTaskRequest) => Promise<boolean>;
-  runMobileGuiTask?: (request: MobileGuiTaskRequest) => Promise<MobileGuiTaskRunResult>;
 }
 
 export interface ChatTool {

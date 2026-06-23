@@ -1,9 +1,13 @@
 import { ChatTool, ChatToolExecutionContext } from './ChatToolRegistry';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
+import {
+  MobileGuiTaskRequest,
+  MobileGuiTaskRunResult
+} from './MobileGuiTaskTypes';
 
 export const MOBILE_GUI_TASK_TOOL_NAME: string = 'run_mobile_gui_task';
 const DEFAULT_MAX_STEPS: number = 20;
-const MAX_MAX_STEPS: number = 50;
+const MAX_STEPS_LIMIT: number = 50;
 
 type MobileGuiTaskJsonValue = Object | string | number | boolean | null;
 interface MobileGuiTaskArguments {
@@ -43,29 +47,11 @@ interface MobileGuiTaskSchemaField {
   description: string;
 }
 
-export interface MobileGuiTaskRequest {
-  task: string;
-  appName: string;
-  packageName: string;
-  maxSteps: number;
-}
-
 export interface MobileGuiTaskArgumentValidation {
   ok: boolean;
   request: MobileGuiTaskRequest;
   errorCode: string;
   error: string;
-}
-
-export interface MobileGuiTaskRunResult {
-  ok: boolean;
-  status: string;
-  errorCode: string;
-  error: string;
-  recoverable: boolean;
-  summary: string;
-  runDir: string;
-  returnedToApp: boolean;
 }
 
 export function createMobileGuiTaskTool(): ChatTool {
@@ -78,34 +64,70 @@ export function createMobileGuiTaskTool(): ChatTool {
       let validation = normalizeMobileGuiTaskArguments(argsText);
       if (!validation.ok) {
         return stringifyMobileGuiTaskToolResponse(
-          mobileGuiTaskToolErrorResponse('failed', 'invalid_arguments', validation.error, false)
+          mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+            false,
+            'failed',
+            'invalid_arguments',
+            validation.error,
+            false
+          ))
         );
       }
 
       if (context.confirmMobileGuiTask === undefined || context.runMobileGuiTask === undefined) {
         return stringifyMobileGuiTaskToolResponse(
-          mobileGuiTaskToolErrorResponse('unavailable', 'unavailable',
-            '当前版本尚未接入手机 GUI 任务执行回调。', true)
+          mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+            false,
+            'unavailable',
+            'unavailable',
+            '当前版本尚未接入手机 GUI 任务执行回调。',
+            true
+          ))
         );
       }
 
-      let confirmed = await context.confirmMobileGuiTask(validation.request);
+      let confirmed = false;
+      try {
+        confirmed = await context.confirmMobileGuiTask(validation.request);
+      } catch (e) {
+        let err = e as Error;
+        return stringifyMobileGuiTaskToolResponse(
+          mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+            false,
+            'failed',
+            'workflow_failed',
+            '确认手机 GUI 任务失败：' + err.message,
+            true
+          ))
+        );
+      }
       if (!confirmed) {
         return stringifyMobileGuiTaskToolResponse(
-          mobileGuiTaskToolResponseFromRunResult({
-            ok: false,
-            status: 'rejected',
-            errorCode: 'user_rejected',
-            error: '用户拒绝执行手机 GUI 任务。',
-            recoverable: true,
-            summary: '',
-            runDir: '',
-            returnedToApp: false
-          })
+          mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+            false,
+            'rejected',
+            'user_rejected',
+            '用户拒绝执行手机 GUI 任务。',
+            true
+          ))
         );
       }
 
-      let runResult = await context.runMobileGuiTask(validation.request);
+      let runResult: MobileGuiTaskRunResult;
+      try {
+        runResult = await context.runMobileGuiTask(validation.request);
+      } catch (e) {
+        let err = e as Error;
+        return stringifyMobileGuiTaskToolResponse(
+          mobileGuiTaskToolResponseFromRunResult(mobileGuiTaskRunResult(
+            false,
+            'failed',
+            'workflow_failed',
+            '手机 GUI 任务执行失败：' + err.message,
+            true
+          ))
+        );
+      }
       return stringifyMobileGuiTaskToolResponse(
         mobileGuiTaskToolResponseFromRunResult(runResult)
       );
@@ -182,18 +204,6 @@ export function stringifyMobileGuiTaskToolResponse(response: MobileGuiTaskToolRe
   return stringifyJsonCompat(response as Object);
 }
 
-function mobileGuiTaskToolErrorResponse(status: string, errorCode: string, error: string, recoverable: boolean):
-  MobileGuiTaskToolResponse {
-  let response: MobileGuiTaskToolResponse = {
-    ok: false,
-    status: status,
-    error_code: errorCode,
-    error: error,
-    recoverable: recoverable
-  };
-  return response;
-}
-
 function assertAllowedFields(args: Object): void {
   let allowed: string[] = ['task', 'app_name', 'package_name', 'max_steps'];
   let keys = Object.keys(args);
@@ -237,8 +247,8 @@ function readMaxSteps(value: number | undefined): number {
   if (normalized <= 0) {
     return DEFAULT_MAX_STEPS;
   }
-  if (normalized > MAX_MAX_STEPS) {
-    return MAX_MAX_STEPS;
+  if (normalized > MAX_STEPS_LIMIT) {
+    return MAX_STEPS_LIMIT;
   }
   return normalized;
 }
@@ -276,4 +286,27 @@ function createToolProperties(): MobileGuiTaskToolProperties {
     max_steps: numberSchema('可选的最大执行步数。非正数回退默认值 20，超过 50 时截断为 50。')
   };
   return properties;
+}
+
+function mobileGuiTaskRunResult(
+  ok: boolean,
+  status: string,
+  errorCode: string,
+  error: string,
+  recoverable: boolean,
+  summary?: string,
+  runDir?: string,
+  returnedToApp?: boolean
+): MobileGuiTaskRunResult {
+  let result: MobileGuiTaskRunResult = {
+    ok: ok,
+    status: status,
+    errorCode: errorCode,
+    error: error,
+    recoverable: recoverable,
+    summary: summary === undefined ? '' : summary,
+    runDir: runDir === undefined ? '' : runDir,
+    returnedToApp: returnedToApp === undefined ? false : returnedToApp
+  };
+  return result;
 }

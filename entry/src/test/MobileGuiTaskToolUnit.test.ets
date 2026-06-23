@@ -2,15 +2,17 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   MOBILE_GUI_TASK_TOOL_NAME,
   createMobileGuiTaskTool,
-  MobileGuiTaskRequest,
   mobileGuiTaskToolParameters,
-  MobileGuiTaskRunResult,
   MobileGuiTaskToolResponse,
   mobileGuiTaskToolResponseFromRunResult,
   normalizeMobileGuiTaskArguments,
   stringifyMobileGuiTaskToolResponse
 } from '../main/ets/utils/MobileGuiTaskTool';
 import { ChatToolExecutionContext } from '../main/ets/utils/ChatToolRegistry';
+import {
+  MobileGuiTaskRequest,
+  MobileGuiTaskRunResult
+} from '../main/ets/utils/MobileGuiTaskTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
 interface TestSchemaObject {
@@ -258,6 +260,44 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.error_code).assertEqual('tool_failed');
       expect(payload.error).assertEqual('执行失败');
       expect(payload.recoverable).assertTrue();
+    });
+
+    it('returnsStructuredFailureWhenConfirmationThrows', 0, async () => {
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          throw new Error('confirm exploded');
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          throw new Error('run should not execute');
+        }
+      }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('failed');
+      expect(payload.error_code).assertEqual('workflow_failed');
+      expect(payload.recoverable).assertTrue();
+      expect(payload.error !== undefined && payload.error!.indexOf('confirm exploded') >= 0).assertTrue();
+    });
+
+    it('returnsStructuredFailureWhenRunnerThrows', 0, async () => {
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          return true;
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          throw new Error('runner exploded');
+        }
+      }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('failed');
+      expect(payload.error_code).assertEqual('workflow_failed');
+      expect(payload.recoverable).assertTrue();
+      expect(payload.error !== undefined && payload.error!.indexOf('runner exploded') >= 0).assertTrue();
     });
   });
 }

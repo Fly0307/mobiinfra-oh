@@ -91,9 +91,17 @@ import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanag
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
-import { ChatReactAgent } from '../utils/ChatReactAgent';
+import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
+import { createMobileGuiTaskTool } from '../utils/MobileGuiTaskTool';
+import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGuiTaskTypes';
+import {
+  buildMobileGuiWorkflowTask,
+  classifyMobileGuiWorkflowFailure,
+  mobileGuiTaskRunResultFromFailure,
+  mobileGuiTaskRunResultFromWorkflowResult
+} from '../utils/MobileGuiTaskWorkflowAdapter';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -1002,6 +1010,85 @@ struct Index {
     });
   }
 
+  private async confirmMobileGuiTask(request: MobileGuiTaskRequest): Promise<boolean> {
+    let detailLines: string[] = ['任务：' + request.task];
+    if (request.appName.trim().length > 0) {
+      detailLines.push('应用名称提示：' + request.appName.trim());
+    }
+    if (request.packageName.trim().length > 0) {
+      detailLines.push('包名提示：' + request.packageName.trim());
+    }
+    detailLines.push('最大步骤：' + String(request.maxSteps));
+    this.appendCloudLog('等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '确认手机 GUI 任务',
+        message: detailLines.join('\n') + '\n\n确认后 App 将通过 HDC bridge 执行该任务。',
+        buttons: [
+          { text: '拒绝', color: '#ff0000' },
+          { text: '执行', color: '#00cc00' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        let approved = data.index === 1;
+        this.appendCloudLog(approved ? '用户已同意手机 GUI 任务。' : '用户已拒绝手机 GUI 任务。');
+        resolve(approved);
+      }).catch(() => {
+        this.appendCloudLog('手机 GUI 任务确认弹窗关闭或失败，按拒绝处理。');
+        resolve(false);
+      });
+    });
+  }
+
+  private isMobileGuiTaskCloudConfigReady(): boolean {
+    return this.isCloudConfigReady() && this.cloudDeciderModel.trim().length > 0;
+  }
+
+  private mobileGuiTaskConfigMissingMessage(): string {
+    return '配置不完整：请先填写 Planner / Decider 的服务地址、API Key 和 Decider 模型。';
+  }
+
+  private async runMobileGuiTaskForChatSession(sessionId: string,
+    request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (!this.isMobileGuiTaskCloudConfigReady()) {
+      this.appendCloudLog(this.mobileGuiTaskConfigMissingMessage());
+      return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
+    }
+    if (!await this.ensureHdcServerReadyForTask(true)) {
+      let message = this.hdcAutoStatus.trim().length > 0 ? this.hdcAutoStatus : 'HDC Server 自动发现或连接失败。';
+      this.appendCloudLog('手机 GUI 任务无法启动：' + message);
+      return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      let message = 'HDC Server 未配置，无法执行手机 GUI 任务。';
+      this.appendCloudLog(message);
+      return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
+    }
+
+    this.currentTab = MainTabIndex.Chat;
+    this.appendCloudLog('手机 GUI 任务开始执行：' + request.task);
+    this.appendCloudLog('HDC Server=' + this.hdcServerIp);
+    let runRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(this.filesDir, sessionId);
+    let task: WorkflowTask = buildMobileGuiWorkflowTask(request);
+    let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
+      this.hdcServerIp, (msg: string) => { this.appendCloudLog(msg); }, runRoot);
+    try {
+      let result: WorkflowRunResult = await runner.runTask(task);
+      let mapped = mobileGuiTaskRunResultFromWorkflowResult(this.filesDir, result);
+      if (mapped.ok) {
+        this.appendCloudLog('手机 GUI 任务执行完成：' + mapped.runDir);
+      } else {
+        this.appendCloudLog('手机 GUI 任务执行失败：' + mapped.errorCode + ' ' + mapped.error);
+      }
+      return mapped;
+    } catch (e) {
+      let err = e as Error;
+      let message = err.message || String(e);
+      let errorCode = classifyMobileGuiWorkflowFailure(message);
+      this.appendCloudLog('手机 GUI 任务执行异常：' + errorCode + ' ' + message);
+      return mobileGuiTaskRunResultFromFailure(errorCode, message, true);
+    }
+  }
+
   private getDataManagerModelConfig(): DataManagerModelConfig {
     return {
       baseUrl: this.cloudPlannerBaseUrl,
@@ -1242,6 +1329,7 @@ struct Index {
         return this.dataManagerFacade.queryIndexedEvents(options);
       }
     ));
+    this.chatToolRegistry.registerTool(createMobileGuiTaskTool());
   }
 
   private reloadDataManagerViewModels(): void {
@@ -3199,10 +3287,16 @@ struct Index {
       assistantMessageCreated = true;
       this.appendCloudLog(`ReAct 云端聊天开始，Think：${enableThinking ? '开启' : '关闭'}，任务：${task}`);
       let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
-      let result = await reactAgent.run(contextMessages, this.getCloudConfig(), {
+      let runOptions: ChatReactAgentRunOptions = {
         filesDir: this.filesDir,
-        sessionId: activeSession.id,
+        sessionId: chatSessionId,
         userMessage: task,
+        confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
+          return await this.confirmMobileGuiTask(request);
+        },
+        runMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          return await this.runMobileGuiTaskForChatSession(chatSessionId, request);
+        },
         enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
@@ -3218,7 +3312,8 @@ struct Index {
           }
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
-      });
+      };
+      let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;
       this.resetCloudStreamMessageUpdate();
       let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;

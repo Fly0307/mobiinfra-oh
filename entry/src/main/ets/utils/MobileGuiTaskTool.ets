@@ -74,16 +74,40 @@ export function createMobileGuiTaskTool(): ChatTool {
     description: '执行需要手机 GUI 操作的高层任务。',
     parameters: mobileGuiTaskToolParameters(),
     strict: false,
-    execute: async (argsText: string, _context: ChatToolExecutionContext): Promise<string> => {
+    execute: async (argsText: string, context: ChatToolExecutionContext): Promise<string> => {
       let validation = normalizeMobileGuiTaskArguments(argsText);
       if (!validation.ok) {
         return stringifyMobileGuiTaskToolResponse(
           mobileGuiTaskToolErrorResponse('failed', 'invalid_arguments', validation.error, false)
         );
       }
+
+      if (context.confirmMobileGuiTask === undefined || context.runMobileGuiTask === undefined) {
+        return stringifyMobileGuiTaskToolResponse(
+          mobileGuiTaskToolErrorResponse('unavailable', 'unavailable',
+            '当前版本尚未接入手机 GUI 任务执行回调。', true)
+        );
+      }
+
+      let confirmed = await context.confirmMobileGuiTask(validation.request);
+      if (!confirmed) {
+        return stringifyMobileGuiTaskToolResponse(
+          mobileGuiTaskToolResponseFromRunResult({
+            ok: false,
+            status: 'rejected',
+            errorCode: 'user_rejected',
+            error: '用户拒绝执行手机 GUI 任务。',
+            recoverable: true,
+            summary: '',
+            runDir: '',
+            returnedToApp: false
+          })
+        );
+      }
+
+      let runResult = await context.runMobileGuiTask(validation.request);
       return stringifyMobileGuiTaskToolResponse(
-        mobileGuiTaskToolErrorResponse('unavailable', 'unavailable',
-          '当前版本尚未接入手机 GUI 任务执行回调。', true)
+        mobileGuiTaskToolResponseFromRunResult(runResult)
       );
     }
   };

@@ -2,6 +2,7 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   MOBILE_GUI_TASK_TOOL_NAME,
   createMobileGuiTaskTool,
+  MobileGuiTaskRequest,
   mobileGuiTaskToolParameters,
   MobileGuiTaskRunResult,
   MobileGuiTaskToolResponse,
@@ -16,7 +17,11 @@ interface TestSchemaObject {
   type?: string;
   additionalProperties?: boolean;
   required?: string[];
-  properties?: Record<string, Object>;
+}
+
+interface MobileGuiTaskCallbackOverrides {
+  confirmMobileGuiTask?: (request: MobileGuiTaskRequest) => Promise<boolean>;
+  runMobileGuiTask?: (request: MobileGuiTaskRequest) => Promise<MobileGuiTaskRunResult>;
 }
 
 interface TestPayload {
@@ -36,6 +41,17 @@ function testContext(): ChatToolExecutionContext {
     sessionId: 'test-session',
     userMessage: '测试手机 GUI 工具'
   };
+}
+
+function testContextWithCallbacks(overrides?: MobileGuiTaskCallbackOverrides): ChatToolExecutionContext {
+  let context: ChatToolExecutionContext = testContext();
+  if (overrides !== undefined && overrides.confirmMobileGuiTask !== undefined) {
+    context.confirmMobileGuiTask = overrides.confirmMobileGuiTask;
+  }
+  if (overrides !== undefined && overrides.runMobileGuiTask !== undefined) {
+    context.runMobileGuiTask = overrides.runMobileGuiTask;
+  }
+  return context;
 }
 
 export default function mobileGuiTaskToolUnitTest() {
@@ -137,7 +153,7 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.recoverable).assertTrue();
     });
 
-    it('returnsUnavailablePayloadForValidExecutionWithoutCallback', 0, async () => {
+    it('returnsUnavailableWhenCallbacksMissing', 0, async () => {
       let tool = createMobileGuiTaskTool();
       let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContext());
       let payload = parseJsonCompat<TestPayload>(output);
@@ -146,6 +162,102 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.error_code).assertEqual('unavailable');
       expect(payload.recoverable).assertTrue();
       expect(payload.status).assertEqual('unavailable');
+    });
+
+    it('returnsRejectedWhenUserDoesNotConfirm', 0, async () => {
+      let confirmCalls = 0;
+      let runCalls = 0;
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContextWithCallbacks({
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          confirmCalls++;
+          return false;
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          runCalls++;
+          return {
+            ok: true,
+            status: 'success',
+            errorCode: '',
+            error: '',
+            recoverable: false,
+            summary: '',
+            runDir: '',
+            returnedToApp: false
+          };
+        }
+      }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(confirmCalls).assertEqual(1);
+      expect(runCalls).assertEqual(0);
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('rejected');
+      expect(payload.error_code).assertEqual('user_rejected');
+      expect(payload.recoverable).assertTrue();
+    });
+
+    it('returnsRunResultWhenConfirmed', 0, async () => {
+      let confirmedTask = '';
+      let runTask = '';
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信","app_name":"微信","package_name":"com.tencent.mm","max_steps":7}',
+        testContextWithCallbacks({
+          confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
+            confirmedTask = request.task;
+            return true;
+          },
+          runMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+            runTask = request.task;
+            return {
+              ok: true,
+              status: 'success',
+              errorCode: '',
+              error: '',
+              recoverable: false,
+              summary: '已完成',
+              runDir: '/tmp/run-3',
+              returnedToApp: true
+            };
+          }
+        }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(confirmedTask).assertEqual('打开微信');
+      expect(runTask).assertEqual('打开微信');
+      expect(payload.ok).assertTrue();
+      expect(payload.status).assertEqual('success');
+      expect(payload.summary).assertEqual('已完成');
+      expect(payload.run_dir).assertEqual('/tmp/run-3');
+      expect(payload.returned_to_app).assertTrue();
+    });
+
+    it('returnsStableFailureFromRunner', 0, async () => {
+      let tool = createMobileGuiTaskTool();
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          return true;
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          return {
+            ok: false,
+            status: 'failed',
+            errorCode: 'tool_failed',
+            error: '执行失败',
+            recoverable: true,
+            summary: '',
+            runDir: '/tmp/run-4',
+            returnedToApp: false
+          };
+        }
+      }));
+      let payload = parseJsonCompat<TestPayload>(output);
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('failed');
+      expect(payload.error_code).assertEqual('tool_failed');
+      expect(payload.error).assertEqual('执行失败');
+      expect(payload.recoverable).assertTrue();
     });
   });
 }

@@ -19,7 +19,10 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <iomanip>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sched.h>
 #include <vector>
 #include <errno.h>
 
@@ -58,6 +61,7 @@ static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
+static std::string g_currentModelConfigPath;
 
 static void appLog(const char* fmt, ...);
 
@@ -268,6 +272,32 @@ static void dumpLlmRequest(const std::string& tag, const std::string& rawInput, 
 static void dumpLlmResponse(const std::string& tag, const std::string& response) {
     appendLargeLogBlock(tag + " MODEL RESPONSE", response);
 }
+
+static std::string profileSummaryPath() {
+    std::lock_guard<std::mutex> g(gLog.mu);
+    if (gLog.filePath.empty()) {
+        return "";
+    }
+    size_t slash = gLog.filePath.find_last_of('/');
+    if (slash == std::string::npos) {
+        return "mnn_profile_summary.log";
+    }
+    return gLog.filePath.substr(0, slash + 1) + "mnn_profile_summary.log";
+}
+
+static void appendProfileSummaryLine(const std::string& line) {
+    std::string path = profileSummaryPath();
+    if (path.empty()) {
+        return;
+    }
+    FILE* fp = fopen(path.c_str(), "a");
+    if (!fp) {
+        return;
+    }
+    fputs(line.c_str(), fp);
+    fputc('\n', fp);
+    fclose(fp);
+}
 } // anonymous namespace
 
 // 去掉 HiLog 隐私格式（%{public}d -> %d），这样同一条格式串也能安全喂给 vsnprintf。
@@ -332,6 +362,19 @@ struct OpProfileStat {
     float flopsM = 0.0f;
     int count = 0;
 };
+
+static std::string formatRuntimeCapabilities() {
+    std::ostringstream out;
+    out << "--- runtime capabilities ---\n";
+    out << "libMNN contains OH_LOG_Print + MNNJNI, so MNN_PRINT/MNN_ERROR logs are expected in system HiLog.\n"
+        << "Search HiLog tag/text: MNNJNI, The device supports, KleidiAI is running.\n"
+        << "App Runtime Logs -> Native captures stdout/stderr and this app's native LOGI/LOGE, but not MNN direct HiLog.\n"
+        << "Expected MNN CPU feature line:\n"
+        << "The device supports: i8sdot:<n>, fp16:<n>, i8mm:<n>, sve2:<n>, sme2:<n>\n"
+        << "Expected KleidiAI line:\n"
+        << "KleidiAI is running! AccelType is <type>\n";
+    return out.str();
+}
 
 static std::string joinPath(const std::string& lhs, const std::string& rhs) {
     if (lhs.empty()) return rhs;
@@ -837,6 +880,8 @@ static std::string formatProfileReport(const std::map<std::string, OpProfileStat
 
     std::ostringstream out;
     out << "=== LLM op profile ===\n";
+    std::string runtimeCapabilities = formatRuntimeCapabilities();
+    out << runtimeCapabilities;
     out << "op kinds: " << rows.size() << "\n";
     out << "op calls: " << totalCalls << " calls\n";
     out << "summed op time: " << totalMs << " ms\n";
@@ -960,6 +1005,7 @@ static void ProfileGenerateExecute(napi_env env, void* data) {
     dumpLlmResponse("ProfileGenerate", responseStr);
     logLlmPerf("ProfileGenerate", g_llm.get(), -1, perfBaseline);
     asyncData->outputStr = formatProfileReport(stats, responseStr, g_llm.get(), topK, perfBaseline);
+    appLog("%{public}s", asyncData->outputStr.c_str());
     asyncData->success = true;
 }
 
@@ -4476,6 +4522,146 @@ static napi_value OpTestAsync(napi_env env, napi_callback_info info) {
     return promise;
 }
 
+// ========== CPU core benchmark: infer big/mid/little cores without sysfs ==========
+static int setCurrentThreadAffinityToCpu(int cpu) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(cpu, &mask);
+#if defined(__OHOS__) || defined(__linux__)
+    return static_cast<int>(syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask));
+#else
+    return sched_setaffinity(0, sizeof(mask), &mask);
+#endif
+}
+
+static double runCpuCoreBenchKernel(int loops) {
+    volatile double acc = 1.000001;
+    volatile uint64_t mix = 0x9e3779b97f4a7c15ULL;
+    auto begin = std::chrono::steady_clock::now();
+    for (int i = 0; i < loops; i++) {
+        acc = acc * 1.0000001192092896 + 0.000000017 * static_cast<double>((i & 255) + 1);
+        acc = std::sin(acc) + std::cos(acc * 0.5) + acc * 0.999999;
+        mix ^= static_cast<uint64_t>(i) + 0x9e3779b97f4a7c15ULL + (mix << 6) + (mix >> 2);
+    }
+    auto end = std::chrono::steady_clock::now();
+    if (acc == 0.123456 || mix == 0) {
+        LOGI("cpu core bench guard acc=%{public}f mix=%{public}llu", acc,
+             static_cast<unsigned long long>(mix));
+    }
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+static std::string runCpuCoreBench() {
+    std::ostringstream log;
+    int cpuCount = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    if (cpuCount <= 0) {
+        cpuCount = 1;
+    }
+    cpuCount = std::min(cpuCount, static_cast<int>(sizeof(cpu_set_t) * 8));
+
+    const int warmLoops = 20000;
+    const int loops = 260000;
+    const int repeats = 3;
+
+    struct CoreBenchResult {
+        int cpu = 0;
+        bool affinityOk = false;
+        int errnoValue = 0;
+        double medianMs = 0.0;
+        double bestMs = 0.0;
+        double score = 0.0;
+    };
+    std::vector<CoreBenchResult> results;
+
+    log << "=== CPU Core Benchmark ===\n";
+    log << "goal: infer big/mid/little cores by binding this benchmark thread to each CPU.\n";
+    log << "online cpu count: " << cpuCount << "\n";
+    log << "loops/core: " << loops << ", repeats: " << repeats << "\n\n";
+
+    for (int cpu = 0; cpu < cpuCount; cpu++) {
+        CoreBenchResult item;
+        item.cpu = cpu;
+        errno = 0;
+        int ret = setCurrentThreadAffinityToCpu(cpu);
+        item.affinityOk = (ret == 0);
+        item.errnoValue = errno;
+        if (!item.affinityOk) {
+            results.push_back(item);
+            continue;
+        }
+        runCpuCoreBenchKernel(warmLoops);
+        std::vector<double> samples;
+        for (int r = 0; r < repeats; r++) {
+            samples.push_back(runCpuCoreBenchKernel(loops));
+        }
+        std::sort(samples.begin(), samples.end());
+        item.bestMs = samples.front();
+        item.medianMs = samples[samples.size() / 2];
+        results.push_back(item);
+    }
+
+    double best = std::numeric_limits<double>::max();
+    for (auto& item : results) {
+        if (item.affinityOk && item.medianMs > 0.0) {
+            best = std::min(best, item.medianMs);
+        }
+    }
+    if (best == std::numeric_limits<double>::max()) {
+        log << "ERROR: set affinity failed for all CPUs. App sandbox may block sched_setaffinity.\n";
+        for (auto& item : results) {
+            log << "cpu" << item.cpu << " affinity=fail errno=" << item.errnoValue << "\n";
+        }
+        return log.str();
+    }
+
+    log << "cpu    median_ms    best_ms    rel_score    inferred\n";
+    log << "----   ---------    -------    ---------    --------\n";
+    for (auto& item : results) {
+        if (!item.affinityOk || item.medianMs <= 0.0) {
+            log << "cpu" << item.cpu << "  affinity failed errno=" << item.errnoValue << "\n";
+            continue;
+        }
+        item.score = best / item.medianMs;
+        std::string group = "little";
+        if (item.score >= 0.88) {
+            group = "big";
+        } else if (item.score >= 0.62) {
+            group = "mid";
+        }
+        log << "cpu" << std::left << std::setw(3) << item.cpu << std::right
+            << "  " << std::fixed << std::setprecision(3) << std::setw(9) << item.medianMs
+            << "    " << std::setw(7) << item.bestMs
+            << "    " << std::setw(9) << item.score
+            << "    " << group << "\n";
+    }
+    log << "\nNotes:\n";
+    log << "- This is empirical. Thermal throttling and foreground load can shift scores.\n";
+    log << "- Re-run 2-3 times; stable clusters are the useful signal.\n";
+    log << "- If all cores have similar scores, the scheduler or sandbox may ignore affinity.\n";
+    return log.str();
+}
+
+static void CpuCoreBenchExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    asyncData->success = true;
+    asyncData->outputStr = runCpuCoreBench();
+}
+
+static napi_value CpuCoreBenchAsync(napi_env env, napi_callback_info info) {
+    AsyncData* asyncData = new AsyncData();
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "CpuCoreBenchAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, CpuCoreBenchExecute, AsyncComplete,
+                           asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
 // ========== N-API 模块注册 ==========
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
@@ -4492,6 +4678,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cpuCoreBench", nullptr, CpuCoreBenchAsync,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"omcTest",      nullptr, OmcTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},

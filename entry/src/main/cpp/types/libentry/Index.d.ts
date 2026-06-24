@@ -18,6 +18,7 @@ export interface LibEntryNative extends AgentLoopNativeApi {
 
   omcTest: (modelDir: string) => Promise<string>;
   opTest: (config: string) => Promise<string>;
+  cpuCoreBench: () => Promise<string>;
 
   setConvMode: (mode: string) => string;
   setConvQuant: (mode: string) => string;
@@ -53,6 +54,7 @@ export const omcTest: (modelDir: string) => Promise<string>;
 // 算子精度测试（CPU vs HiAI delegate）。
 // config: "preset" 使用内置测试集；或 "ic,oc,ih,iw,kh,kw,sh,sw,group" 指定单个卷积形状。
 export const opTest: (config: string) => Promise<string>;
+export const cpuCoreBench: () => Promise<string>;
 
 // HiAI conv-path override for A/B testing: 'auto' | 'matmul' | 'conv'
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_MODE env).

@@ -755,7 +755,6 @@ struct Index {
   }
 
   private handleLocalAgentLog(message: string): void {
-    AppLogger.info('LocalAgent', message);
     this.output = message;
     let sessionId = this.taskSessionId(this.localTaskSessionId);
     let traceLine = this.formatAgentTraceLog(message);
@@ -4386,27 +4385,35 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    if (this.userInput.length === 0 || this.isThinking) {
+    let msg = this.userInput.trim();
+    if (msg.length === 0 || this.isThinking) {
       return;
     }
-    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
-      return;
-    }
-    let msg = this.userInput;
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
-    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    this.ensureActiveChatSession();
+    let assistantMessageId = this.nextChatMessageId('assistant');
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       msg, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
+      this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     try {
+      if (!this.modelLoaded) {
+        let loaded = await this.ensureLocalModelLoaded();
+        if (!loaded) {
+          this.updateActiveChatMessageContent(assistantMessageId, '[错误] 本地模型加载失败');
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
+          return;
+        }
+        this.updateActiveChatMessageContent(assistantMessageId, '思考中...');
+      }
       let reply: string = await mnnllm.chat(msg);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
+      this.updateActiveChatMessageContent(assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
       this.isThinking = false;

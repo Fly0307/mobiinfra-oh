@@ -166,7 +166,6 @@ export class AgentLoopRunner {
     this.log(mode, '>> [Stage 1 - Planner] prompt chars=' + prompt.length + '\n' + prompt);
     let response = mode === 'local' ? await this.runLocalAction(prompt, undefined, undefined, undefined, 'planner') :
       await this.runCloudPlanner(prompt);
-    this.log(mode, '>> [Planner] model response:\n' + response);
     let data = AgentActionParser.extractJsonMap(response, true);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
     if (action === 'error') {
@@ -196,6 +195,8 @@ export class AgentLoopRunner {
     if (appName.length === 0) {
       throw new Error('Planner output missing app_name/package_name');
     }
+    this.log(mode, '>> [Planner] parsed target: app=' + appName + ', package=' +
+      (packageName.length > 0 ? packageName : '(empty)'));
     let target: PlannerTarget = {
       appName: appName,
       packageName: packageName
@@ -279,7 +280,6 @@ export class AgentLoopRunner {
         let response = mode === 'local' ?
           await this.localAgentStep(variable, imageBase64, width, height) :
           await this.cloudAgentStep(imageBase64);
-        this.log(mode, '>> [Agent] response:\n' + response);
         await this.sleep(300);
 
         let parsed = AgentActionParser.parse(response, true);
@@ -288,6 +288,7 @@ export class AgentLoopRunner {
         }
         AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
           ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' + parsed.action);
+        this.log(mode, '>> [Agent] parsed step ' + (i + 1) + ': action=' + parsed.action);
         if (AgentActionParser.isTerminal(parsed.action)) {
           completed = true;
           break;

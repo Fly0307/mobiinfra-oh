@@ -4398,6 +4398,34 @@ struct Index {
       this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    let streamedReply = '';
+    let lastStreamUpdateAt = 0;
+    let streamUpdateTimerId = -1;
+    let flushStreamReply = (): void => {
+      if (streamedReply.length === 0) {
+        return;
+      }
+      lastStreamUpdateAt = new Date().getTime();
+      this.updateActiveChatMessageContent(assistantMessageId, streamedReply);
+    };
+    let scheduleStreamReplyUpdate = (): void => {
+      let now = new Date().getTime();
+      if (now - lastStreamUpdateAt >= 120) {
+        if (streamUpdateTimerId !== -1) {
+          clearTimeout(streamUpdateTimerId);
+          streamUpdateTimerId = -1;
+        }
+        flushStreamReply();
+        return;
+      }
+      if (streamUpdateTimerId !== -1) {
+        return;
+      }
+      streamUpdateTimerId = setTimeout(() => {
+        streamUpdateTimerId = -1;
+        flushStreamReply();
+      }, 120);
+    };
     try {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
@@ -4408,7 +4436,13 @@ struct Index {
         }
         this.updateActiveChatMessageContent(assistantMessageId, '思考中...');
       }
-      let reply: string = await mnnllm.chat(msg);
+      let reply: string = await mnnllm.chat(msg, (token: string) => {
+        streamedReply += token;
+        scheduleStreamReplyUpdate();
+      });
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
       this.updateActiveChatMessageContent(assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
@@ -4416,6 +4450,9 @@ struct Index {
       this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
       this.isThinking = false;
     }
   }

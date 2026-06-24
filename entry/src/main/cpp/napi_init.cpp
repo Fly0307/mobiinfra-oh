@@ -1069,14 +1069,22 @@ static void ChatExecute(napi_env env, void* data) {
     }
     // 多轮对话保存 ChatMessages；Agent 模式使用独立 API，避免污染普通聊天历史。
     g_messages.emplace_back("user", asyncData->inputStr);
-    std::ostringstream oss;
     std::string modelInput = g_llm->apply_chat_template(g_messages);
     dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
     LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
-    g_llm->response(g_messages, &oss);
+    std::string assistant_str;
+    if (asyncData->tsfn) {
+        TsfnStreambuf buf(asyncData->tsfn);
+        std::ostream tokenStream(&buf);
+        g_llm->response(g_messages, &tokenStream);
+        assistant_str = buf.str();
+    } else {
+        std::ostringstream oss;
+        g_llm->response(g_messages, &oss);
+        assistant_str = oss.str();
+    }
     auto context = g_llm->getContext();
-    
-    std::string assistant_str = oss.str();
+
     if (assistant_str.empty() && context) {
         assistant_str = context->generate_str;
     }
@@ -1095,8 +1103,8 @@ static void ChatExecute(napi_env env, void* data) {
 }
 
 static napi_value ChatAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     char userMsg[4096] = {0};
@@ -1105,6 +1113,18 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = userMsg;
+
+    // Optional 2nd arg: onToken callback for local chat streaming.
+    if (argc >= 2) {
+        napi_valuetype argType;
+        napi_typeof(env, args[1], &argType);
+        if (argType == napi_function) {
+            napi_value tsfnName;
+            napi_create_string_utf8(env, "ChatTokenCb", NAPI_AUTO_LENGTH, &tsfnName);
+            napi_create_threadsafe_function(env, args[1], nullptr, tsfnName,
+                0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &asyncData->tsfn);
+        }
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);

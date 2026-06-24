@@ -245,6 +245,40 @@ export class ChatSessionController {
     return ChatSessionController.stateFromSession(filesDir, nextSession);
   }
 
+  static renameSession(filesDir: string, state: ChatSessionViewState, id: string,
+    title: string): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.renameSession(filesDir, id, title);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
+  static toggleSessionPinned(filesDir: string, state: ChatSessionViewState, id: string,
+    now: number = new Date().getTime()): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let current = ChatSessionStorage.loadSession(filesDir, id);
+    if (current === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let session = ChatSessionStorage.setSessionPinned(filesDir, id, current.pinned !== true, now);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
   static toggleTaskTrace(filesDir: string, state: ChatSessionViewState, messageId: string): ChatSessionViewState {
     if (filesDir.length === 0 || state.activeSessionId.length === 0) {
       return state;

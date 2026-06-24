@@ -6,9 +6,11 @@ import {
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
   ChatMessage,
+  ChatSessionSummary,
   buildCloudContextMessages,
   chatMessageRenderKey,
   chatMessageStableRenderKey,
+  chatSessionRenderKey,
   chatMessagesAutoScrollKey,
   chatMessagesStreamFollowKey,
   buildAssistantStreamingRenderContent,
@@ -62,6 +64,15 @@ function prepareTestRoot(path: string): void {
   if (!ChatSessionStorage.pathExists(path)) {
     fs.mkdirSync(path);
   }
+}
+
+function findSummaryById(sessions: ChatSessionSummary[], id: string): ChatSessionSummary | null {
+  for (let i = 0; i < sessions.length; i++) {
+    if (sessions[i].id === id) {
+      return sessions[i];
+    }
+  }
+  return null;
 }
 
 export default function chatSessionStorageUnitTest() {
@@ -402,6 +413,197 @@ export default function chatSessionStorageUnitTest() {
         expect(reloaded.messages.length).assertEqual(2);
         expect(reloaded.messages[0].content).assertEqual('原始用户消息');
         expect(reloaded.messages[1].content).assertEqual('原始助手消息');
+      }
+
+      cleanupPath(root);
+    });
+
+    it('loadsLegacySessionAndIndexWithDefaultMenuMetadata', 0, () => {
+      let root = nextTestRoot('legacy-menu-metadata');
+      prepareTestRoot(root);
+      ChatSessionStorage.ensureWorkspace(root);
+      let legacySessionId = 'legacy-session';
+      let legacyJson = '{"id":"legacy-session","title":"旧会话","mode":"' + CHAT_MODE_CLOUD_AGENT +
+        '","createdAt":1000,"updatedAt":2000,"messages":[]}';
+      ChatSessionStorage.writeText(ChatSessionStorage.sessionPath(root, legacySessionId), legacyJson);
+      let indexJson = '{"sessions":[{"id":"legacy-summary","title":"旧摘要","mode":"' + CHAT_MODE_CLOUD_AGENT +
+        '","fileName":"legacy-summary.json","createdAt":1000,"updatedAt":2000,' +
+        '"messageCount":2,"lastMessagePreview":"旧消息"}]}';
+      ChatSessionStorage.writeText(ChatSessionStorage.indexPath(root), indexJson);
+
+      let loaded = ChatSessionStorage.loadSession(root, legacySessionId);
+      let index = ChatSessionStorage.loadIndex(root);
+
+      expect(loaded !== null).assertTrue();
+      if (loaded !== null) {
+        expect(loaded.customTitle).assertEqual('');
+        expect(loaded.pinned).assertFalse();
+        expect(loaded.pinnedAt).assertEqual(0);
+      }
+      expect(index.length).assertEqual(1);
+      expect(index[0].customTitle).assertEqual('');
+      expect(index[0].pinned).assertFalse();
+      expect(index[0].pinnedAt).assertEqual(0);
+
+      cleanupPath(root);
+    });
+
+    it('usesCustomTitleAndUpdatesSessionRenderKey', 0, () => {
+      let root = nextTestRoot('custom-title-summary');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      session.customTitle = '自定义标题';
+      session.messages = [
+        createChatMessage('m1', 'user', 'chat', '第一条用户消息标题', 1001)
+      ];
+      ChatSessionStorage.saveSession(root, session);
+      let index = ChatSessionStorage.loadIndex(root);
+      let renamedKey = chatSessionRenderKey(index[0]);
+      session.customTitle = '另一个标题';
+      ChatSessionStorage.saveSession(root, session);
+      let nextIndex = ChatSessionStorage.loadIndex(root);
+
+      expect(index.length).assertEqual(1);
+      expect(index[0].title).assertEqual('自定义标题');
+      expect(index[0].customTitle).assertEqual('自定义标题');
+      expect(chatSessionRenderKey(nextIndex[0]) === renamedKey).assertFalse();
+
+      cleanupPath(root);
+    });
+
+    it('fallsBackWhenTrimmedCustomTitleIsEmpty', 0, () => {
+      let root = nextTestRoot('blank-custom-title');
+      prepareTestRoot(root);
+
+      let withMessage = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      withMessage.customTitle = '   ';
+      withMessage.messages = [
+        createChatMessage('m1', 'user', 'chat', '第一条用户消息标题', 1001)
+      ];
+      ChatSessionStorage.saveSession(root, withMessage);
+      let empty = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      empty.customTitle = '\n\t ';
+      ChatSessionStorage.saveSession(root, empty);
+
+      let withMessageSummary = findSummaryById(ChatSessionStorage.loadIndex(root), withMessage.id);
+      let emptySummary = findSummaryById(ChatSessionStorage.loadIndex(root), empty.id);
+
+      expect(withMessageSummary !== null).assertTrue();
+      if (withMessageSummary !== null) {
+        expect(withMessageSummary.title).assertEqual('第一条用户消息标题');
+        expect(withMessageSummary.customTitle).assertEqual('');
+      }
+      expect(emptySummary !== null).assertTrue();
+      if (emptySummary !== null) {
+        expect(emptySummary.title).assertEqual(defaultChatSessionTitle(CHAT_MODE_CLOUD_AGENT));
+        expect(emptySummary.customTitle).assertEqual('');
+      }
+
+      cleanupPath(root);
+    });
+
+    it('renamesSessionWithoutChangingMessagesOrUpdatedAt', 0, () => {
+      let root = nextTestRoot('rename-session');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      session.updatedAt = 3000;
+      session.messages = [
+        createChatMessage('m1', 'user', 'chat', '原始用户消息', 1001),
+        createChatMessage('m2', 'assistant', 'chat', '原始助手消息', 1002)
+      ];
+      ChatSessionStorage.saveSession(root, session);
+
+      let renamed = ChatSessionStorage.renameSession(root, session.id,
+        '  1234567890123456789012345678901234567890EXTRA  ');
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+      let index = ChatSessionStorage.loadIndex(root);
+
+      expect(renamed !== null).assertTrue();
+      expect(reloaded !== null).assertTrue();
+      if (renamed !== null && reloaded !== null) {
+        expect(renamed.customTitle).assertEqual('1234567890123456789012345678901234567890');
+        expect(reloaded.updatedAt).assertEqual(3000);
+        expect(reloaded.messages.length).assertEqual(2);
+      }
+      expect(index[0].title).assertEqual('1234567890123456789012345678901234567890');
+
+      cleanupPath(root);
+    });
+
+    it('sortsPinnedSessionsBeforeNormalSessionsByPinnedAt', 0, () => {
+      let root = nextTestRoot('pinned-sort');
+      prepareTestRoot(root);
+
+      let oldNormal = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      oldNormal.updatedAt = 9000;
+      ChatSessionStorage.saveSession(root, oldNormal);
+      let firstPinned = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      firstPinned.updatedAt = 2000;
+      ChatSessionStorage.saveSession(root, firstPinned);
+      let secondPinned = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 3000);
+      secondPinned.updatedAt = 3000;
+      ChatSessionStorage.saveSession(root, secondPinned);
+
+      ChatSessionStorage.setSessionPinned(root, firstPinned.id, true, 5000);
+      ChatSessionStorage.setSessionPinned(root, secondPinned.id, true, 7000);
+      let index = ChatSessionStorage.loadIndex(root);
+
+      expect(index.length).assertEqual(3);
+      expect(index[0].id).assertEqual(secondPinned.id);
+      expect(index[1].id).assertEqual(firstPinned.id);
+      expect(index[2].id).assertEqual(oldNormal.id);
+
+      cleanupPath(root);
+    });
+
+    it('returnsUnpinnedSessionsToUpdatedAtSorting', 0, () => {
+      let root = nextTestRoot('unpinned-sort');
+      prepareTestRoot(root);
+
+      let newer = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      newer.updatedAt = 9000;
+      ChatSessionStorage.saveSession(root, newer);
+      let pinned = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      pinned.updatedAt = 1000;
+      ChatSessionStorage.saveSession(root, pinned);
+      ChatSessionStorage.setSessionPinned(root, pinned.id, true, 8000);
+      ChatSessionStorage.setSessionPinned(root, pinned.id, false, 9000);
+      let index = ChatSessionStorage.loadIndex(root);
+
+      expect(index[0].id).assertEqual(newer.id);
+      expect(index[1].id).assertEqual(pinned.id);
+      expect(index[1].pinned).assertFalse();
+      expect(index[1].pinnedAt).assertEqual(0);
+
+      cleanupPath(root);
+    });
+
+    it('controllerRenamesAndPinsBackgroundSession', 0, () => {
+      let root = nextTestRoot('controller-session-menu');
+      prepareTestRoot(root);
+
+      let active = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let background = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      let state: ChatSessionViewState = {
+        sessions: ChatSessionStorage.loadIndex(root),
+        activeSessionId: active.id,
+        activeMessages: active.messages,
+        mode: CHAT_MODE_CLOUD_AGENT,
+        activeSession: active
+      };
+
+      let renamed = ChatSessionController.renameSession(root, state, background.id, '后台会话');
+      let pinned = ChatSessionController.toggleSessionPinned(root, renamed, background.id, 5000);
+      let backgroundSummary = findSummaryById(pinned.sessions, background.id);
+
+      expect(pinned.activeSessionId).assertEqual(active.id);
+      expect(backgroundSummary !== null).assertTrue();
+      if (backgroundSummary !== null) {
+        expect(backgroundSummary.customTitle).assertEqual('后台会话');
+        expect(backgroundSummary.pinned).assertTrue();
+        expect(backgroundSummary.pinnedAt).assertEqual(5000);
       }
 
       cleanupPath(root);

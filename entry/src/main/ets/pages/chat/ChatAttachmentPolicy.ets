@@ -1,6 +1,8 @@
 import { CloudContentPart } from '../../utils/CloudModelClient';
 
 export const CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT: string = '请分析这张图片。';
+export const CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA: string = 'camera';
+export const CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM: string = 'album';
 export const CHAT_ATTACHMENT_PREVIEW_HEIGHT_RATIO: number = 0.86;
 export const CHAT_ATTACHMENT_PREVIEW_GAP_RATIO: number = 0.22;
 export const CHAT_ATTACHMENT_PREVIEW_MIN_HEIGHT: number = 44;
@@ -20,6 +22,21 @@ export function chatMessageTextForSend(input: string, imageAttachmentUri: string
     return text;
   }
   return hasChatImageAttachment(imageAttachmentUri) ? CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT : '';
+}
+
+// 图片来源入口固定为拍照和相册，UI 只消费这里的来源列表，避免入口文案和回调顺序分散维护。
+export function chatImageAttachmentSourceOptions(): string[] {
+  return [CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA, CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM];
+}
+
+export function chatImageAttachmentSourceLabel(source: string): string {
+  if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA) {
+    return '拍照';
+  }
+  if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM) {
+    return '相册';
+  }
+  return '';
 }
 
 // 附件预览高度跟随输入框高度按比例计算，避免不同屏幕上固定留白过大或过小。

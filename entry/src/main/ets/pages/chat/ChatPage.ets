@@ -10,9 +10,12 @@ import {
   chatTimeGreeting
 } from './ChatPageTypes';
 import {
+  CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM,
+  CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA,
   chatAttachmentComposerExtraHeight,
   chatAttachmentPreviewHeight,
   chatCanSendMessage,
+  chatImageAttachmentSourceLabel,
   hasChatImageAttachment
 } from './ChatAttachmentPolicy';
 import {
@@ -33,6 +36,7 @@ export struct ChatPage {
   @Link userInput: string;
   @Link chatDeepThinkingEnabled: boolean;
   @State previewImagePath: string = '';
+  @State attachmentSourceMenuVisible: boolean = false;
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
@@ -65,6 +69,7 @@ export struct ChatPage {
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
+  onTakePhotoAttachment: () => Promise<void> = async () => {};
   onPickImageAttachment: () => Promise<void> = async () => {};
   onClearImageAttachment: () => void = () => {};
   onClearCloudDebugImage: () => void = () => {};
@@ -154,6 +159,27 @@ export struct ChatPage {
 
   private closeDebugImagePreview(): void {
     this.previewImagePath = '';
+  }
+
+  private openAttachmentSourceMenu(): void {
+    this.dismissChatInput();
+    this.attachmentSourceMenuVisible = true;
+  }
+
+  private closeAttachmentSourceMenu(): void {
+    this.attachmentSourceMenuVisible = false;
+  }
+
+  // 来源菜单只负责分发用户选择，真正的相机/相册调用仍在页面宿主中完成，避免 UI 组件持有系统能力细节。
+  private async selectImageAttachmentSource(source: string): Promise<void> {
+    this.closeAttachmentSourceMenu();
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA) {
+      await this.onTakePhotoAttachment();
+      return;
+    }
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM) {
+      await this.onPickImageAttachment();
+    }
   }
 
   private activeConversationText(): string {
@@ -483,6 +509,88 @@ export struct ChatPage {
     }
   }
 
+  @Builder AttachmentSourceAction(source: string) {
+    Column() {
+      Text(chatImageAttachmentSourceLabel(source))
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#111827')
+        .maxLines(1)
+      Text(source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA ? '调用相机' : '选择图片')
+        .fontSize(11)
+        .fontColor('#7B8392')
+        .margin({ top: 4 })
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .height(64)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor('#F8FAFD')
+    .borderRadius(18)
+    .border({ width: 1, color: '#E8ECF3' })
+    .onClick(async () => {
+      await this.selectImageAttachmentSource(source);
+    })
+  }
+
+  @Builder AttachmentSourceMenuOverlay() {
+    if (this.attachmentSourceMenuVisible) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column() {
+        }
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#33000000')
+          .onClick(() => {
+            this.closeAttachmentSourceMenu();
+          })
+
+        Column() {
+          Row() {
+            Text('添加附件')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#111827')
+            Blank()
+              .layoutWeight(1)
+            Text('取消')
+              .fontSize(14)
+              .fontColor('#6B7280')
+              .height(32)
+              .padding({ left: 12, right: 12 })
+              .onClick(() => {
+                this.closeAttachmentSourceMenu();
+              })
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          Row() {
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA)
+            Blank()
+              .width(12)
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM)
+          }
+          .width('100%')
+          .margin({ top: 12 })
+        }
+        .width('100%')
+        .padding({
+          left: 20,
+          right: 20,
+          top: 16,
+          bottom: Math.max(22, Math.round(this.bottomOverlayInset() * 0.18))
+        })
+        .backgroundColor(Color.White)
+        .borderRadius(24)
+      }
+      .width('100%')
+      .height('100%')
+      .zIndex(70)
+    }
+  }
+
   @Builder ImagePreviewOverlay() {
     if (this.previewImagePath.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -624,7 +732,7 @@ export struct ChatPage {
             .backgroundColor(Color.White)
             .borderRadius(20)
             .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
-            .onClick(async () => { await this.onPickImageAttachment(); })
+            .onClick(() => { this.openAttachmentSourceMenu(); })
           TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
@@ -653,6 +761,8 @@ export struct ChatPage {
         .margin({ left: 20, right: 20, bottom: 22 })
       }
       .width('100%')
+
+      this.AttachmentSourceMenuOverlay()
 
       if (this.sessionDrawerOpen) {
         Row() {

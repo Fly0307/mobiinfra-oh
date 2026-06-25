@@ -3,8 +3,9 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
@@ -1379,16 +1380,83 @@ struct Index {
     this.setActivePendingChatImageUri('');
   }
 
+  private setPickedChatImageAttachment(uri: string, sourceLabel: string): void {
+    let normalized = uri.trim();
+    if (!hasChatImageAttachment(normalized)) {
+      return;
+    }
+    this.setActivePendingChatImageUri(normalized);
+    showToastSafely('已添加' + sourceLabel + '图片，将随下一条消息发送', 1600);
+  }
+
+  private chatCameraCapturePath(): string {
+    if (this.filesDir.length === 0) {
+      throw new Error('文件目录未初始化');
+    }
+    return this.filesDir + '/chat-camera-' + Date.now().toString() + '.jpg';
+  }
+
+  private prepareChatCameraSaveUri(savePath: string): string {
+    let file = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      return fileUri.getUriFromPath(savePath);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private removeChatCameraCapture(path: string): void {
+    if (path.length === 0) {
+      return;
+    }
+    try {
+      fs.unlinkSync(path);
+    } catch (e) {
+    }
+  }
+
   // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
-  private async pickChatImageAttachment(): Promise<void> {
+  private async takeChatImageAttachment(): Promise<void> {
+    let savePath = '';
+    try {
+      savePath = this.chatCameraCapturePath();
+      let saveUri = this.prepareChatCameraSaveUri(savePath);
+      let pickerProfile: cameraPicker.PickerProfile = {
+        cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
+        saveUri: saveUri
+      };
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('无法获取页面上下文');
+      }
+      let result = await cameraPicker.pick(
+        hostContext,
+        [cameraPicker.PickerMediaType.PHOTO],
+        pickerProfile
+      );
+      if (result.resultCode !== 0 || result.mediaType !== cameraPicker.PickerMediaType.PHOTO) {
+        this.removeChatCameraCapture(savePath);
+        return;
+      }
+      let fallbackUri = pickerProfile.saveUri === undefined ? saveUri : pickerProfile.saveUri;
+      let attachmentUri = result.resultUri.trim().length > 0 ? result.resultUri : fallbackUri;
+      this.setPickedChatImageAttachment(attachmentUri, '拍照');
+    } catch (e) {
+      this.removeChatCameraCapture(savePath);
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'take image attachment failed', err);
+      showToastSafely('拍照失败：' + err.message, 1800);
+    }
+  }
+
+  private async pickChatAlbumImageAttachment(): Promise<void> {
     try {
       let picker = new GalleryPhotoPicker();
       let uris = await picker.selectImageUris(1);
       if (uris.length === 0) {
         return;
       }
-      this.setActivePendingChatImageUri(uris[0]);
-      showToastSafely('已添加图片附件，将随下一条消息发送', 1600);
+      this.setPickedChatImageAttachment(uris[0], '相册');
     } catch (e) {
       let err = e as Error;
       AppLogger.warnCause('Chat.Attachment', 'pick image attachment failed', err);
@@ -4984,7 +5052,8 @@ struct Index {
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
-            onPickImageAttachment: async () => { await this.pickChatImageAttachment(); },
+            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
             onClearImageAttachment: () => { this.clearActivePendingChatImageUri(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },

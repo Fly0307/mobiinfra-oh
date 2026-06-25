@@ -1,10 +1,14 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
   CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT,
+  CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM,
+  CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA,
   chatAttachmentComposerExtraHeight,
   chatAttachmentPreviewHeight,
   chatCanSendMessage,
   chatCloudUserContentWithImage,
+  chatImageAttachmentSourceLabel,
+  chatImageAttachmentSourceOptions,
   chatMessageTextForSend
 } from '../main/ets/pages/chat/ChatAttachmentPolicy';
 import { CloudContentPart, CloudImagePart } from '../main/ets/utils/CloudModelClient';
@@ -36,6 +40,16 @@ export default function chatAttachmentPolicyUnitTest() {
       expect(chatAttachmentPreviewHeight(46)).assertEqual(44);
       expect(chatAttachmentComposerExtraHeight(80, '')).assertEqual(0);
       expect(chatAttachmentComposerExtraHeight(80, 'photo://image/1') > chatAttachmentPreviewHeight(80)).assertTrue();
+    });
+
+    it('keepsAttachmentSourceMenuLimitedToCameraAndAlbum', 0, () => {
+      let sources: string[] = chatImageAttachmentSourceOptions();
+
+      expect(sources.length).assertEqual(2);
+      expect(sources[0]).assertEqual(CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA);
+      expect(sources[1]).assertEqual(CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM);
+      expect(chatImageAttachmentSourceLabel(CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA)).assertEqual('拍照');
+      expect(chatImageAttachmentSourceLabel(CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM)).assertEqual('相册');
     });
   });
 }

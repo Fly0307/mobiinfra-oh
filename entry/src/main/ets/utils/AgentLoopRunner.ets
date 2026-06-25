@@ -24,6 +24,7 @@ const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
+  private modelDirPath: string;
   private localApi: AgentLoopNativeApi;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: CloudConfigProvider;
@@ -37,10 +38,12 @@ export class AgentLoopRunner {
   private cancellationRequested: boolean = false;
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
+  private localActionCallCount: number = 0;
 
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
     filesDir: string,
+    modelDir: string,
     hdcServerIp: string,
     localApi: AgentLoopNativeApi,
     cloudClient: CloudModelClient,
@@ -51,6 +54,7 @@ export class AgentLoopRunner {
     cloudApprovalHandler: ApprovalHandler
   ) {
     this.filesDir = filesDir;
+    this.modelDirPath = modelDir;
     this.localApi = localApi;
     this.cloudClient = cloudClient;
     this.cloudConfigProvider = cloudConfigProvider;
@@ -80,6 +84,7 @@ export class AgentLoopRunner {
   async runLocalTask(task: string): Promise<void> {
     this.mode = 'local';
     this.cancellationRequested = false;
+    this.localActionCallCount = 0;
     AgentExecutionController.beginExecution('本地 Agent 执行中...');
     try {
       await this.syncAgentConfig();
@@ -159,8 +164,8 @@ export class AgentLoopRunner {
     }
 
     this.log(mode, '>> [Stage 1 - Planner] prompt chars=' + prompt.length + '\n' + prompt);
-    let response = mode === 'local' ? await this.runLocalAction(prompt) : await this.runCloudPlanner(prompt);
-    this.log(mode, '>> [Planner] model response:\n' + response);
+    let response = mode === 'local' ? await this.runLocalAction(prompt, undefined, undefined, undefined, 'planner') :
+      await this.runCloudPlanner(prompt);
     let data = AgentActionParser.extractJsonMap(response, true);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
     if (action === 'error') {
@@ -190,6 +195,8 @@ export class AgentLoopRunner {
     if (appName.length === 0) {
       throw new Error('Planner output missing app_name/package_name');
     }
+    this.log(mode, '>> [Planner] parsed target: app=' + appName + ', package=' +
+      (packageName.length > 0 ? packageName : '(empty)'));
     let target: PlannerTarget = {
       appName: appName,
       packageName: packageName
@@ -224,8 +231,11 @@ export class AgentLoopRunner {
 
   private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
     this.checkCancellation();
-    let prefixFile = this.noReasonMode ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
-    let prefixTemplate = AgentPromptTemplates.load(prefixFile);
+    let useNoReasonPrompt = this.resolveAgentNoReasonMode();
+    let prefixFile = useNoReasonPrompt ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
+    this.log(mode, '>> [Agent] prompt mode=' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
+    this.log(mode, '>> [Agent] prefix source=' + AgentPromptTemplates.promptSource(this.modelDirPath, prefixFile));
+    let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] prefix template missing, fallback to full prompt mode.');
       await this.runFullPromptMode(task, mode);
@@ -242,8 +252,9 @@ export class AgentLoopRunner {
 
     let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
-    let variableFile = this.noReasonMode ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
-    let variableTemplate = AgentPromptTemplates.load(variableFile);
+    let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
+    this.log(mode, '>> [Agent] variable source=' + AgentPromptTemplates.promptSource(this.modelDirPath, variableFile));
+    let variableTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, variableFile);
     if (variableTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] variable template missing, fallback to full prompt mode.');
       if (mode === 'local') {
@@ -269,7 +280,6 @@ export class AgentLoopRunner {
         let response = mode === 'local' ?
           await this.localAgentStep(variable, imageBase64, width, height) :
           await this.cloudAgentStep(imageBase64);
-        this.log(mode, '>> [Agent] response:\n' + response);
         await this.sleep(300);
 
         let parsed = AgentActionParser.parse(response, true);
@@ -278,6 +288,7 @@ export class AgentLoopRunner {
         }
         AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
           ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' + parsed.action);
+        this.log(mode, '>> [Agent] parsed step ' + (i + 1) + ': action=' + parsed.action);
         if (AgentActionParser.isTerminal(parsed.action)) {
           completed = true;
           break;
@@ -304,6 +315,24 @@ export class AgentLoopRunner {
     }
   }
 
+  private resolveAgentNoReasonMode(): boolean {
+    let hasReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix.md', 'e2e_v2_agent_variable.md');
+    if (hasReasonPrompts) {
+      return false;
+    }
+    let hasNoReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix_noreason.md',
+      'e2e_v2_agent_variable_noreason.md');
+    if (hasNoReasonPrompts) {
+      return true;
+    }
+    return this.noReasonMode;
+  }
+
+  private hasAgentPromptPair(prefixFile: string, variableFile: string): boolean {
+    return AgentPromptTemplates.hasModelPrompt(this.modelDirPath, prefixFile) &&
+      AgentPromptTemplates.hasModelPrompt(this.modelDirPath, variableFile);
+  }
+
   private async runFullPromptMode(task: string, mode: AgentLoopMode): Promise<void> {
     let template = AgentPromptTemplates.load('e2e_v2.md');
     if (template.trim().length === 0) {
@@ -321,7 +350,7 @@ export class AgentLoopRunner {
         .replace('{history}', historyText).replace('<history>', historyText)
         .replace('{history_str}', historyText);
       let response = mode === 'local' ?
-        await this.runLocalAction(prompt, imageBase64, width, height) :
+        await this.runLocalAction(prompt, imageBase64, width, height, 'full-step-' + (i + 1)) :
         await this.runCloudDeciderPrompt(prompt, imageBase64);
       await this.sleep(300);
       let parsed = AgentActionParser.parse(response, true);
@@ -344,7 +373,8 @@ export class AgentLoopRunner {
     return await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
   }
 
-  private async runLocalAction(prompt: string, imageBase64?: string, width?: number, height?: number): Promise<string> {
+  private async runLocalAction(prompt: string, imageBase64?: string, width?: number, height?: number,
+    stage: string = 'action'): Promise<string> {
     let finalPrompt = prompt;
     if (imageBase64 !== undefined && imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
@@ -354,7 +384,9 @@ export class AgentLoopRunner {
         finalPrompt.replace('<image_placeholder>', imgTag) :
         imgTag + '\n' + finalPrompt;
     }
-    this.log('local', '>> [Action] full prompt:\n' + finalPrompt);
+    this.localActionCallCount += 1;
+    this.log('local', '>> [Action][' + stage + '] infer call #' + this.localActionCallCount +
+      ' full prompt:\n' + finalPrompt);
     AgentExecutionController.updateFloatText('Inferencing...');
     let chat = this.localApi['chat'];
     if (typeof chat !== 'function') {
@@ -363,7 +395,8 @@ export class AgentLoopRunner {
     let response = await chat(finalPrompt) as string;
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
-    this.log('local', '>> [Action] model response:\n' + response);
+    this.log('local', '>> [Action][' + stage + '] infer call #' + this.localActionCallCount +
+      ' model response:\n' + response);
     if (!await this.localApprovalHandler(response)) {
       throw new Error('User rejected');
     }

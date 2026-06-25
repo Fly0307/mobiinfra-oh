@@ -115,6 +115,13 @@ export struct ChatPage {
     return this.messages.length > 0 || this.isBusy();
   }
 
+  private showConversationThinkingRow(): boolean {
+    if (this.isCloudMode()) {
+      return this.cloudThinking;
+    }
+    return this.localThinking && this.messages.length === 0;
+  }
+
   private openDebugImagePreview(path: string): void {
     if (path.length > 0) {
       this.previewImagePath = path;
@@ -297,9 +304,9 @@ export struct ChatPage {
     if (this.messages.length > 0) {
       ChatMessageList({
         messages: this.messages,
-        thinking: this.isBusy(),
-        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
-        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.isBusy()),
+        thinking: this.showConversationThinkingRow(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
+        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         avatarForegroundUri: this.avatarForegroundUri,

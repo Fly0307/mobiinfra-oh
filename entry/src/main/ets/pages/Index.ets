@@ -161,6 +161,21 @@ interface ModelScopeFileTask {
   sha256?: string;
 }
 
+interface ModelDownloadManifestFile {
+  path: string;
+  size: number;
+  sha256?: string;
+  verified: boolean;
+}
+
+interface ModelDownloadManifest {
+  repo: string;
+  completedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  files: ModelDownloadManifestFile[];
+}
+
 interface HdcConnectRequest {
   target: string;
   kill_others: boolean;
@@ -219,6 +234,23 @@ interface CloudChatContextPreparation {
   overBudgetAfterCompression: boolean;
 }
 
+interface DownloadedModelItem {
+  id: string;
+  label: string;
+  path: string;
+  repo: string;
+  sizeText: string;
+  statusText: string;
+  ready: boolean;
+}
+
+const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
+const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
+const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
+const PROFILE_MODEL_CONFIG_PATH_KEY: string = 'profileModelConfigPath';
+const SELECTED_MODEL_ID_KEY: string = 'selectedModelId';
+const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
+
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
@@ -228,6 +260,8 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
+PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -289,6 +323,8 @@ struct Index {
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
+  @State downloadedModels: DownloadedModelItem[] = [];
+  @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -719,7 +755,6 @@ struct Index {
   }
 
   private handleLocalAgentLog(message: string): void {
-    AppLogger.info('LocalAgent', message);
     this.output = message;
     let sessionId = this.taskSessionId(this.localTaskSessionId);
     let traceLine = this.formatAgentTraceLog(message);
@@ -1738,6 +1773,7 @@ struct Index {
     }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
+    this.refreshDownloadedModels();
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
@@ -1893,26 +1929,339 @@ struct Index {
     }
   }
 
+  private legacyModelId(name: string): string {
+    return 'legacy:' + name;
+  }
+
+  private modelScopeModelId(owner: string, repo: string): string {
+    return 'modelscope:' + owner + '/' + repo;
+  }
+
+  private modelScopeRootDir(): string {
+    return this.filesDir + '/' + MODEL_SCOPE_ROOT_DIR_NAME;
+  }
+
+  private encodeModelScopeRepoDir(owner: string, repo: string): string {
+    return owner + '__' + repo;
+  }
+
+  private decodeModelScopeRepoDir(dir: string): string {
+    let sep = dir.indexOf('__');
+    if (sep <= 0 || sep + 2 >= dir.length) {
+      return dir;
+    }
+    return dir.substring(0, sep) + '/' + dir.substring(sep + 2);
+  }
+
+  private modelScopeRepoDir(owner: string, repo: string): string {
+    return this.modelScopeRootDir() + '/' + this.encodeModelScopeRepoDir(owner, repo);
+  }
+
   private getCurrentModelFolderName(): string {
-    return this.selectedModelVariant.length > 0 ? this.selectedModelVariant : 'model';
+    if (this.modelDir.length > 0) {
+      let index = this.modelDir.lastIndexOf('/');
+      return index >= 0 ? this.modelDir.substring(index + 1) : this.modelDir;
+    }
+    return 'model';
   }
 
   private syncModelDir(): void {
-    this.modelDir = `${this.filesDir}/${this.getCurrentModelFolderName()}`;
+    if (this.selectedModelId.startsWith('modelscope:')) {
+      let repo = this.selectedModelId.substring('modelscope:'.length);
+      let parts = repo.split('/');
+      if (parts.length === 2) {
+        this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+        this.syncProfileModelConfigPath();
+        return;
+      }
+    }
+    let legacyName = 'model';
+    if (this.selectedModelId.startsWith('legacy:')) {
+      legacyName = this.selectedModelId.substring('legacy:'.length);
+    } else if (this.selectedModelVariant.length > 0) {
+      legacyName = this.selectedModelVariant;
+    }
+    this.selectedModelVariant = legacyName === 'model' ? '' : legacyName;
+    this.selectedModelId = this.legacyModelId(legacyName);
+    this.modelDir = this.filesDir + '/' + legacyName;
+    this.syncProfileModelConfigPath();
+  }
+
+  private syncProfileModelConfigPath(): void {
+    if (this.modelDir.length === 0) {
+      return;
+    }
+    AppStorage.setOrCreate(PROFILE_MODEL_CONFIG_PATH_KEY, this.modelDir + '/config.json');
   }
 
   private switchModelVariant(variant: string): void {
-    let nextVariant = '';
-    if (variant === 'modelv2' || variant === 'modelv3' || variant === 'modelv4' || variant === 'model_omc') {
-      nextVariant = variant;
+    let legacyName = variant.length > 0 ? variant : 'model';
+    if (LEGACY_MODEL_DIRS.indexOf(legacyName) < 0) {
+      legacyName = 'model';
     }
-    if (this.selectedModelVariant === nextVariant) {
+    this.switchDownloadedModel(this.legacyModelId(legacyName));
+  }
+
+  private switchDownloadedModel(modelId: string): void {
+    if (this.blockModelFileMutationIfBusy('切换模型')) {
       return;
     }
-    this.selectedModelVariant = nextVariant;
-    this.syncModelDir();
+    let target: DownloadedModelItem | null = null;
+    for (let i = 0; i < this.downloadedModels.length; i++) {
+      if (this.downloadedModels[i].id === modelId) {
+        target = this.downloadedModels[i];
+        break;
+      }
+    }
+    if (target === null) {
+      this.output = '模型不存在或尚未扫描到: ' + modelId;
+      return;
+    }
+    if (!target.ready) {
+      this.output = '模型尚未下载完成，暂不可加载: ' + target.label + '\n状态: ' + target.statusText +
+        '\n路径: ' + target.path;
+      return;
+    }
+    if (this.selectedModelId === target.id && this.modelDir === target.path) {
+      return;
+    }
+    this.unloadLocalModelForFileMutation();
+    this.selectedModelId = target.id;
+    this.selectedModelVariant = target.id.startsWith('legacy:') && target.id !== this.legacyModelId('model') ? target.label : '';
+    this.modelDir = target.path;
+    this.syncProfileModelConfigPath();
     this.modelLoaded = false;
-    this.output = `模型路径已切换至: ${this.getCurrentModelFolderName()}`;
+    this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
+  }
+
+  private refreshDownloadedModels(): void {
+    let items: DownloadedModelItem[] = [];
+    for (let i = 0; i < LEGACY_MODEL_DIRS.length; i++) {
+      let name = LEGACY_MODEL_DIRS[i];
+      let path = this.filesDir + '/' + name;
+      if (this.modelDirectoryExists(path)) {
+        items.push(this.buildDownloadedModelItem(this.legacyModelId(name), name === 'model' ? '默认 model' : name, path, 'legacy'));
+      }
+    }
+    try {
+      let root = this.modelScopeRootDir();
+      if (fs.accessSync(root)) {
+        let dirs = fs.listFileSync(root);
+        dirs.sort();
+        for (let dir of dirs) {
+          let path = root + '/' + dir;
+          if (!this.modelDirectoryExists(path)) {
+            continue;
+          }
+          let repo = this.decodeModelScopeRepoDir(dir);
+          let parts = repo.split('/');
+          let id = parts.length === 2 ? this.modelScopeModelId(parts[0], parts[1]) : 'modelscope:' + dir;
+          items.push(this.buildDownloadedModelItem(id, repo, path, repo));
+        }
+      }
+    } catch (e) {
+    }
+    this.downloadedModels = items;
+    let foundSelected = false;
+    for (let item of items) {
+      if (item.id === this.selectedModelId) {
+        foundSelected = true;
+        this.modelDir = item.path;
+        this.syncProfileModelConfigPath();
+        break;
+      }
+    }
+    if (!foundSelected) {
+      this.selectedModelId = this.legacyModelId('model');
+      this.selectedModelVariant = '';
+      this.syncModelDir();
+    }
+  }
+
+  private modelDirectoryExists(path: string): boolean {
+    try {
+      if (!fs.accessSync(path)) {
+        return false;
+      }
+      fs.listFileSync(path);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
+    let statusText = this.modelLoadableStatus(path);
+    let ready = statusText === '下载完成' || statusText === '可加载';
+    return {
+      id: id,
+      label: label,
+      path: path,
+      repo: repo,
+      sizeText: this.formatSize(this.calcPathSize(path)),
+      statusText: statusText,
+      ready: ready
+    };
+  }
+
+  private modelLoadableStatus(path: string): string {
+    let hasComplete = false;
+    try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
+
+    let hasConfig = false;
+    try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
+    let hasWeight = this.hasModelWeightFile(path, 0);
+    if (!hasConfig && !hasWeight) {
+      return '下载未完成';
+    }
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+
+    let manifestStatus = this.modelManifestLoadableStatus(path);
+    if (manifestStatus === '可加载') {
+      return '下载完成';
+    }
+    if (manifestStatus.length > 0) {
+      return manifestStatus;
+    }
+    if (hasComplete) {
+      return '下载完成';
+    }
+    if (hasConfig && hasWeight) {
+      return '可加载';
+    }
+    return '下载未完成';
+  }
+
+  private modelManifestLoadableStatus(path: string): string {
+    let manifestPath = path + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    let hasManifest = false;
+    let hasComplete = false;
+    try { hasManifest = fs.accessSync(manifestPath); } catch (e) { hasManifest = false; }
+    try { hasComplete = fs.accessSync(completePath); } catch (e) { hasComplete = false; }
+    if (!hasManifest) {
+      return '';
+    }
+
+    let manifest = this.readModelDownloadManifest(manifestPath);
+    if (manifest === null || manifest.files.length === 0) {
+      return hasComplete ? '下载记录损坏' : '';
+    }
+
+    let hasConfig = false;
+    let hasWeight = false;
+    for (let file of manifest.files) {
+      let normalizedPath = file.path.replace(/\\/g, '/');
+      if (normalizedPath === 'config.json') {
+        hasConfig = true;
+      }
+      if (this.isModelWeightFile(normalizedPath)) {
+        hasWeight = true;
+      }
+      let target = path + '/' + normalizedPath;
+      let allowLocalConfigChange = normalizedPath === 'config.json';
+      try {
+        let stat = fs.statSync(target);
+        if (!stat.isFile()) {
+          return '下载未完成';
+        }
+        if (!allowLocalConfigChange && file.size >= 0 && stat.size !== file.size) {
+          return '下载未完成';
+        }
+      } catch (e) {
+        return '下载未完成';
+      }
+    }
+
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+    return '可加载';
+  }
+
+  private readModelDownloadManifest(path: string): ModelDownloadManifest | null {
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(path);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      let content = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      let root = ArkJSON.parse(content) as JsonMap;
+      let filesValue = root['files'];
+      if (!Array.isArray(filesValue)) {
+        return null;
+      }
+      let files: ModelDownloadManifestFile[] = [];
+      for (let itemValue of filesValue as Object[]) {
+        let item = itemValue as JsonMap;
+        let filePath = item['path'] === undefined || item['path'] === null ? '' : String(item['path']);
+        let size = item['size'] === undefined || item['size'] === null ? NaN : Number(item['size']);
+        if (filePath.length === 0 || isNaN(size) || size < 0) {
+          return null;
+        }
+        let entry: ModelDownloadManifestFile = {
+          path: filePath,
+          size: size,
+          verified: item['verified'] === true
+        };
+        let sha256 = item['sha256'];
+        if (sha256 !== undefined && sha256 !== null && String(sha256).length > 0) {
+          entry.sha256 = String(sha256);
+        }
+        files.push(entry);
+      }
+      return {
+        repo: root['repo'] === undefined || root['repo'] === null ? '' : String(root['repo']),
+        completedAt: root['completedAt'] === undefined || root['completedAt'] === null ? '' : String(root['completedAt']),
+        fileCount: root['fileCount'] === undefined || root['fileCount'] === null ? files.length : Number(root['fileCount']),
+        totalBytes: root['totalBytes'] === undefined || root['totalBytes'] === null ? 0 : Number(root['totalBytes']),
+        files: files
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      if (file !== null) {
+        try { fs.closeSync(file); } catch (e) {}
+      }
+    }
+  }
+
+  private hasModelWeightFile(path: string, depth: number): boolean {
+    if (depth > 4) {
+      return false;
+    }
+    try {
+      let stat = fs.statSync(path);
+      if (stat.isFile()) {
+        return stat.size > 0 && this.isModelWeightFile(path);
+      }
+      if (!stat.isDirectory()) {
+        return false;
+      }
+      let children = fs.listFileSync(path);
+      for (let name of children) {
+        if (this.hasModelWeightFile(path + '/' + name, depth + 1)) {
+          return true;
+        }
+      }
+    } catch (e) {
+    }
+    return false;
+  }
+
+  private isModelWeightFile(path: string): boolean {
+    let lower = path.toLowerCase();
+    return lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.safetensors') ||
+      lower.endsWith('.weight');
   }
 
   formatSize(bytes: number): string {
@@ -2050,6 +2399,7 @@ struct Index {
       }
       let deletedCount = this.deletePathRecursively(this.modelDir);
       this.modelLoaded = false;
+      this.refreshDownloadedModels();
       this.output = `模型删除成功\n已删除 ${this.getCurrentModelFolderName()} 目录及其内容（共 ${deletedCount} 项）。`;
     } catch (e) {
       this.output = `模型删除失败: ${e}`;
@@ -2072,6 +2422,7 @@ struct Index {
         return;
       }
       fs.unlinkSync(cfgPath);
+      this.refreshDownloadedModels();
       this.modelLoaded = false;
       this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载补齐 config.json。`;
     } catch (e) {
@@ -2528,7 +2879,7 @@ struct Index {
       return;
     }
     this.downloading = true;
-    try { fs.mkdirSync(this.modelDir); } catch {}
+    this.ensureDirectoryRecursive(this.modelDir);
     this.beginModelDownloadProgress('模型下载进度', this.totalBytesAll);
 
     let completedBytes = 0;
@@ -2550,6 +2901,7 @@ struct Index {
       this.updateModelDownloadProgress(completedBytes, this.totalBytesAll,
         failed.length.toString() + ' 个失败，再次点击可继续');
     }
+    this.refreshDownloadedModels();
     this.downloading = false;
   }
 
@@ -2701,6 +3053,54 @@ struct Index {
         try { fs.closeSync(file); } catch (e) {}
       }
     }
+  }
+
+  private removeModelDownloadMarkers(): void {
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) {}
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE); } catch (e) {}
+  }
+
+  private writeTextFile(path: string, content: string): void {
+    let bytes = util.TextEncoder.create('utf-8').encodeInto(content);
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes.buffer);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private writeModelDownloadMarkers(repo: string, files: ModelScopeFileTask[], totalBytes: number): void {
+    let manifestFiles: ModelDownloadManifestFile[] = [];
+    for (let file of files) {
+      let entry: ModelDownloadManifestFile = {
+        path: file.path,
+        size: file.size,
+        verified: true
+      };
+      if (file.sha256 !== undefined && file.sha256.length > 0) {
+        entry.sha256 = file.sha256;
+      }
+      manifestFiles.push(entry);
+    }
+    let manifest: ModelDownloadManifest = {
+      repo: repo,
+      completedAt: new Date().toISOString(),
+      fileCount: manifestFiles.length,
+      totalBytes: totalBytes,
+      files: manifestFiles
+    };
+    let manifestPath = this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    AppLogger.info('ModelDownload', 'write markers start manifest=' + manifestPath +
+      ', complete=' + completePath + ', files=' + manifest.fileCount.toString() +
+      ', total=' + totalBytes.toString());
+    this.writeTextFile(manifestPath, ArkJSON.stringify(manifest, null, 2));
+    this.writeTextFile(completePath,
+      'repo=' + repo + '\ncompletedAt=' + manifest.completedAt + '\nfileCount=' +
+        manifest.fileCount.toString() + '\ntotalBytes=' + totalBytes.toString() + '\n');
+    AppLogger.info('ModelDownload', 'write markers done manifest=' + manifestPath +
+      ', complete=' + completePath);
   }
 
   private ensureDirectoryRecursive(path: string): void {
@@ -3009,8 +3409,13 @@ struct Index {
       AppLogger.warn('ModelDownload', message);
       return;
     }
+    let nextModelId = this.modelScopeModelId(parts[0], parts[1]);
+    this.selectedModelId = nextModelId;
+    this.selectedModelVariant = '';
+    this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+    this.syncProfileModelConfigPath();
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
-    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo);
+    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
     this.modelScopeDownloading = true;
     this.modelScopePauseRequested = false;
@@ -3018,6 +3423,8 @@ struct Index {
     this.modelLoaded = false;
     try {
       this.ensureDirectoryRecursive(this.modelDir);
+      this.removeModelDownloadMarkers();
+      this.refreshDownloadedModels();
       this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
       AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
       let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
@@ -3063,10 +3470,20 @@ struct Index {
       }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
+        try {
+          this.writeModelDownloadMarkers(parts[0] + '/' + parts[1], files, totalBytes);
+        } catch (markerError) {
+          let markerMessage = '写入下载完成标记失败: ' + this.errorMessage(markerError);
+          this.updateModelDownloadMessage(markerMessage);
+          AppLogger.error('ModelDownload', markerMessage);
+          throw new Error(markerMessage);
+        }
+        this.refreshDownloadedModels();
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
           this.formatSize(completedBytes));
       } else {
+        this.refreshDownloadedModels();
         this.updateModelDownloadMessage('ModelScope 下载失败：' + failed.join('，'));
         AppLogger.warn('ModelDownload', 'partial failure repo=' + this.modelScopeMnnRepo + ', failed=' +
           failed.length.toString() + ', downloaded=' + this.formatSize(completedBytes));
@@ -3077,6 +3494,7 @@ struct Index {
       AppLogger.error('ModelDownload', message);
     } finally {
       this.modelScopeActiveHttpReq = null;
+      this.refreshDownloadedModels();
       this.modelScopeDownloading = false;
       this.downloading = false;
     }
@@ -3780,6 +4198,11 @@ struct Index {
     }
 
     let cfg = this.modelDir + '/config.json';
+    let modelStatus = this.modelLoadableStatus(this.modelDir);
+    if (modelStatus !== '下载完成' && modelStatus !== '可加载') {
+      this.reportLocalAgentStartupStatus('模型暂不可加载: ' + modelStatus + '\n路径: ' + this.modelDir, true, true);
+      return false;
+    }
     if (!this.prepareCustomOpp()) {
       let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
       this.reportLocalAgentStartupStatus(reason, true, true);
@@ -3866,6 +4289,7 @@ struct Index {
   private createAgentLoopRunner(): AgentLoopRunner {
     return new AgentLoopRunner(
       this.filesDir,
+      this.modelDir,
       this.hdcServerIp,
       mnnllm,
       this.cloudClient,
@@ -3961,29 +4385,74 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    if (this.userInput.length === 0 || this.isThinking) {
+    let msg = this.userInput.trim();
+    if (msg.length === 0 || this.isThinking) {
       return;
     }
-    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
-      return;
-    }
-    let msg = this.userInput;
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
-    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    this.ensureActiveChatSession();
+    let assistantMessageId = this.nextChatMessageId('assistant');
     this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
       msg, new Date().getTime()));
+    this.appendActiveChatMessage(createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
+      this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    let streamedReply = '';
+    let lastStreamUpdateAt = 0;
+    let streamUpdateTimerId = -1;
+    let flushStreamReply = (): void => {
+      if (streamedReply.length === 0) {
+        return;
+      }
+      lastStreamUpdateAt = new Date().getTime();
+      this.updateActiveChatMessageContent(assistantMessageId, streamedReply);
+    };
+    let scheduleStreamReplyUpdate = (): void => {
+      let now = new Date().getTime();
+      if (now - lastStreamUpdateAt >= 120) {
+        if (streamUpdateTimerId !== -1) {
+          clearTimeout(streamUpdateTimerId);
+          streamUpdateTimerId = -1;
+        }
+        flushStreamReply();
+        return;
+      }
+      if (streamUpdateTimerId !== -1) {
+        return;
+      }
+      streamUpdateTimerId = setTimeout(() => {
+        streamUpdateTimerId = -1;
+        flushStreamReply();
+      }, 120);
+    };
     try {
-      let reply: string = await mnnllm.chat(msg);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
+      if (!this.modelLoaded) {
+        let loaded = await this.ensureLocalModelLoaded();
+        if (!loaded) {
+          this.updateActiveChatMessageContent(assistantMessageId, '[错误] 本地模型加载失败');
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
+          return;
+        }
+        this.updateActiveChatMessageContent(assistantMessageId, '思考中...');
+      }
+      let reply: string = await mnnllm.chat(msg, (token: string) => {
+        streamedReply += token;
+        scheduleStreamReplyUpdate();
+      });
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
+      this.updateActiveChatMessageContent(assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
       this.isThinking = false;
     }
   }
@@ -4297,6 +4766,8 @@ struct Index {
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
             selectedModelVariant: this.selectedModelVariant,
+            downloadedModels: this.downloadedModels,
+            selectedModelId: this.selectedModelId,
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
@@ -4316,6 +4787,8 @@ struct Index {
             onClearScreenshots: () => { this.clearScreenshots(); },
             onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
             onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
+            onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+            onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },

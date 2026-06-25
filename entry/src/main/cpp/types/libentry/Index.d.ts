@@ -1,6 +1,6 @@
 // Agent Loop 所需的 native API 子集，供 AgentLoopRunner 等工具类按接口引用。
 export interface AgentLoopNativeApi {
-  chat(userMessage: string): Promise<string>;
+  chat(userMessage: string, onToken?: (token: string) => void): Promise<string>;
   reset(): string;
   unloadModel(): string;
   agentPrefill(prefix: string): Promise<string>;
@@ -34,7 +34,7 @@ export default native;
 
 export const loadModel: (configPath: string) => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
-export const chat: (userMessage: string) => Promise<string>;
+export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
 export const reset: () => string;
 export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;

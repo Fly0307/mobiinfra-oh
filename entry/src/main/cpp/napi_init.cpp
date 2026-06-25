@@ -478,15 +478,20 @@ static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
 
 // 每个 token chunk 都通过 TSFN 切回 JS 主线程，用于更新浮窗的流式文本。
 static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
-    if (data) {
-        std::string* token = static_cast<std::string*>(data);
-        napi_value argv;
-        napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
-        napi_value undefined;
-        napi_get_undefined(env, &undefined);
-        napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
-        delete token;
+    if (!data) {
+        return;
     }
+    std::string* token = static_cast<std::string*>(data);
+    if (!env || !js_callback) {
+        delete token;
+        return;
+    }
+    napi_value argv;
+    napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
+    delete token;
 }
 
 // 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。
@@ -706,11 +711,19 @@ static void ChatExecute(napi_env env, void* data) {
     }
     // 多轮对话保存 ChatMessages；Agent 模式使用独立 API，避免污染普通聊天历史。
     g_messages.emplace_back("user", asyncData->inputStr);
-    std::ostringstream oss;
-    g_llm->response(g_messages, &oss);
+    std::string assistant_str;
+    if (asyncData->tsfn) {
+        TsfnStreambuf buf(asyncData->tsfn);
+        std::ostream tokenStream(&buf);
+        g_llm->response(g_messages, &tokenStream);
+        assistant_str = buf.str();
+    } else {
+        std::ostringstream oss;
+        g_llm->response(g_messages, &oss);
+        assistant_str = oss.str();
+    }
     auto context = g_llm->getContext();
-    
-    std::string assistant_str = oss.str();
+
     if (assistant_str.empty() && context) {
         assistant_str = context->generate_str;
     }
@@ -727,8 +740,8 @@ static void ChatExecute(napi_env env, void* data) {
 }
 
 static napi_value ChatAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     char userMsg[4096] = {0};
@@ -737,6 +750,18 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = userMsg;
+
+    // Optional 2nd arg: onToken callback for local chat streaming.
+    if (argc >= 2) {
+        napi_valuetype argType;
+        napi_typeof(env, args[1], &argType);
+        if (argType == napi_function) {
+            napi_value tsfnName;
+            napi_create_string_utf8(env, "ChatTokenCb", NAPI_AUTO_LENGTH, &tsfnName);
+            napi_create_threadsafe_function(env, args[1], nullptr, tsfnName,
+                0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &asyncData->tsfn);
+        }
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);

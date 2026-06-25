@@ -115,6 +115,14 @@ export struct ChatPage {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
   }
 
+  private showConversationThinkingRow(): boolean {
+    // 本地流式会先插入 assistant 占位消息，已有消息时不再额外显示底部处理中行。
+    if (this.isCloudMode()) {
+      return this.cloudThinking;
+    }
+    return this.localThinking && this.messages.length === 0;
+  }
+
   private primaryButtonText(): string {
     if (this.isCloudMode() && this.cloudThinking) {
       return '停止';
@@ -320,9 +328,9 @@ export struct ChatPage {
     if (this.messages.length > 0) {
       ChatMessageList({
         messages: this.messages,
-        thinking: this.isBusy(),
-        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
-        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.isBusy()),
+        thinking: this.showConversationThinkingRow(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
+        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         avatarForegroundUri: this.avatarForegroundUri,

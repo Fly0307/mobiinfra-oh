@@ -4203,32 +4203,79 @@ struct Index {
       showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
       return;
     }
-    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
-      return;
-    }
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       return;
     }
+    let chatSessionId = activeSession.id;
     let msg = chatMessageTextForSend(this.userInput, pendingImageUri);
-    let adoptedImageUri = this.adoptedChatImageForSession(activeSession.id, pendingImageUri);
+    let adoptedImageUri = this.adoptedChatImageForSession(chatSessionId, pendingImageUri);
+    let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.localPendingChatImageUri = '';
-    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
-    this.appendChatMessageToExactSession(activeSession.id, createChatMessage(this.nextChatMessageId('user'), 'user',
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
       CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime(), [], adoptedImageUri));
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
+      CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    let streamedReply = '';
+    let lastStreamUpdateAt = 0;
+    let streamUpdateTimerId = -1;
+    // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
+    let flushStreamReply = (): void => {
+      if (streamedReply.length === 0) {
+        return;
+      }
+      lastStreamUpdateAt = new Date().getTime();
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedReply);
+    };
+    let scheduleStreamReplyUpdate = (): void => {
+      let now = new Date().getTime();
+      if (now - lastStreamUpdateAt >= 120) {
+        if (streamUpdateTimerId !== -1) {
+          clearTimeout(streamUpdateTimerId);
+          streamUpdateTimerId = -1;
+        }
+        flushStreamReply();
+        return;
+      }
+      if (streamUpdateTimerId !== -1) {
+        return;
+      }
+      streamUpdateTimerId = setTimeout(() => {
+        streamUpdateTimerId = -1;
+        flushStreamReply();
+      }, 120);
+    };
     try {
-      let reply: string = await mnnllm.chat(msg);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
+      if (!this.modelLoaded) {
+        let loaded = await this.ensureLocalModelLoaded();
+        if (!loaded) {
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
+          return;
+        }
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
+      }
+      let reply: string = await mnnllm.chat(msg, (token: string) => {
+        streamedReply += token;
+        scheduleStreamReplyUpdate();
+      });
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+        streamUpdateTimerId = -1;
+      }
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
       this.isThinking = false;
     }
   }

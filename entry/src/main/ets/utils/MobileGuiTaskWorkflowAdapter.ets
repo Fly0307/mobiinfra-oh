@@ -1,12 +1,26 @@
 import { stringifyJsonCompat } from './JsonCompat';
-import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from './MobileGuiTaskTypes';
+import {
+  MobileGuiTaskBusinessResult,
+  MobileGuiTaskJsonValue,
+  MobileGuiTaskRequest,
+  MobileGuiTaskRunResult
+} from './MobileGuiTaskTypes';
 import { WorkflowStorage } from './WorkflowStorage';
-import { WorkflowDefinition, WorkflowRunResult, WorkflowStep, WorkflowTask } from './WorkflowTypes';
+import { WorkflowDefinition, WorkflowJsonMap, WorkflowJsonValue, WorkflowRunResult, WorkflowStep, WorkflowTask } from './WorkflowTypes';
 
 const MOBILE_GUI_CHAT_TASK_ID: string = 'chat-mobile-gui-task';
 const MOBILE_GUI_CHAT_TASK_SOURCE: string = 'chat_mobile_gui_task';
 const MOBILE_GUI_CHAT_TASK_TITLE: string = '聊天手机 GUI 任务';
 const MOBILE_GUI_CHAT_TASK_CONFIG_FILE_NAME: string = '__chat_mobile_gui_task.json';
+
+export function isMobileGuiTaskCloudConfigReady(plannerBaseUrl: string, deciderBaseUrl: string,
+  apiKey: string): boolean {
+  return plannerBaseUrl.trim().length > 0 && deciderBaseUrl.trim().length > 0 && apiKey.trim().length > 0;
+}
+
+export function mobileGuiTaskCloudConfigMissingMessage(): string {
+  return '配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。';
+}
 
 function compactLine(value: string): string {
   return value.trim().replace(/\s+/g, ' ');
@@ -40,7 +54,8 @@ export function buildMobileGuiWorkflowDefinition(request: MobileGuiTaskRequest):
     task_description: taskDescription,
     package_name: request.packageName.trim().length > 0 ? request.packageName.trim() : undefined,
     max_steps: request.maxSteps,
-    fail_on_max_steps: true
+    fail_on_max_steps: true,
+    extract_result: true
   };
   return {
     metadata: {
@@ -117,15 +132,17 @@ export function mobileGuiTaskRunResultFromWorkflowResult(filesDir: string,
   let relativeRunDir = result.runDir.trim().length > 0 ?
     WorkflowStorage.workflowRunRelativePath(filesDir, result.runDir) : '';
   if (result.status === 'success') {
+    let businessResult = mobileGuiBusinessResultFromWorkflowResult(result);
     return {
       ok: true,
       status: 'completed',
       errorCode: '',
       error: '',
       recoverable: false,
-      summary: result.message,
+      summary: mobileGuiSummaryFromWorkflowResult(result, businessResult),
       runDir: relativeRunDir,
-      returnedToApp: result.returnedToApp
+      returnedToApp: result.returnedToApp,
+      result: businessResult === null ? undefined : businessResult
     };
   }
   if (result.status === 'cancelled') {
@@ -150,4 +167,88 @@ export function mobileGuiTaskRunResultFromWorkflowResult(filesDir: string,
     runDir: relativeRunDir,
     returnedToApp: result.returnedToApp
   };
+}
+
+function mobileGuiSummaryFromWorkflowResult(result: WorkflowRunResult,
+  businessResult: MobileGuiTaskBusinessResult | null): string {
+  if (result.resultSummary !== undefined && result.resultSummary.trim().length > 0) {
+    return result.resultSummary;
+  }
+  if (businessResult !== null && businessResult.summary.trim().length > 0) {
+    return businessResult.summary;
+  }
+  return result.message;
+}
+
+function mobileGuiBusinessResultFromWorkflowResult(result: WorkflowRunResult): MobileGuiTaskBusinessResult | null {
+  if (result.result !== undefined) {
+    return normalizeMobileGuiBusinessResult(result.result);
+  }
+  if (result.resultExtractionError !== undefined && result.resultExtractionError.trim().length > 0) {
+    let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
+    let items: Object[] = [];
+    let summary = result.resultSummary !== undefined && result.resultSummary.trim().length > 0 ?
+      result.resultSummary : result.message;
+    let fallback: MobileGuiTaskBusinessResult = {
+      outcome: 'uncertain',
+      summary: summary,
+      key_values: keyValues,
+      items: items,
+      extraction_error: result.resultExtractionError
+    };
+    return fallback;
+  }
+  return null;
+}
+
+function normalizeMobileGuiBusinessResult(value: WorkflowJsonMap): MobileGuiTaskBusinessResult {
+  let keyValues = normalizeMobileGuiKeyValues(value['key_values']);
+  let items = normalizeMobileGuiItems(value['items']);
+  let result: MobileGuiTaskBusinessResult = {
+    outcome: readWorkflowString(value['outcome'], 'uncertain'),
+    summary: readWorkflowString(value['summary'], ''),
+    key_values: keyValues,
+    items: items
+  };
+  let extractionError = readWorkflowString(value['extraction_error'], '');
+  if (extractionError.length > 0) {
+    result.extraction_error = extractionError;
+  }
+  return result;
+}
+
+function normalizeMobileGuiKeyValues(value: WorkflowJsonValue | undefined): Record<string, MobileGuiTaskJsonValue> {
+  let normalized: Record<string, MobileGuiTaskJsonValue> = {};
+  if (value === undefined || value === null || Array.isArray(value) || typeof value !== 'object') {
+    return normalized;
+  }
+  let source = value as Record<string, MobileGuiTaskJsonValue>;
+  let keys = Object.keys(source);
+  for (let i = 0; i < keys.length; i++) {
+    normalized[keys[i]] = source[keys[i]];
+  }
+  return normalized;
+}
+
+function normalizeMobileGuiItems(value: WorkflowJsonValue | undefined): Object[] {
+  let normalized: Object[] = [];
+  if (value === undefined || value === null || !Array.isArray(value)) {
+    return normalized;
+  }
+  let source = value as Object[];
+  for (let i = 0; i < source.length; i++) {
+    let item = source[i];
+    if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+      normalized.push(item);
+    }
+  }
+  return normalized;
+}
+
+function readWorkflowString(value: WorkflowJsonValue | undefined, fallback: string): string {
+  if (value === undefined || value === null || typeof value !== 'string') {
+    return fallback;
+  }
+  let text = value.trim();
+  return text.length > 0 ? text : fallback;
 }

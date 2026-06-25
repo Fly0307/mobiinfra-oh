@@ -2,8 +2,22 @@ import { describe, it, expect } from '@ohos/hypium';
 import fs from '@ohos.file.fs';
 import { CloudModelClient, CloudModelConfig } from '../main/ets/utils/CloudModelClient';
 import { RawWorkflowResourceReader, WorkflowStorage } from '../main/ets/utils/WorkflowStorage';
-import { WorkflowRunner } from '../main/ets/utils/WorkflowRunner';
-import { WorkflowDefinition, WorkflowManagedFile, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
+import {
+  buildGuiTaskResultExtractionPrompt,
+  fallbackGuiTaskResultExtraction,
+  guiTaskResultExtractionDiagnosticsText,
+  normalizeGuiTaskResultExtractionMap,
+  WorkflowRunner
+} from '../main/ets/utils/WorkflowRunner';
+import {
+  WorkflowDefinition,
+  WorkflowJsonMap,
+  WorkflowManagedFile,
+  WorkflowRunSummary,
+  WorkflowStep,
+  WorkflowStepResult,
+  WorkflowTask
+} from '../main/ets/utils/WorkflowTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 
 function findWeixinChatSummaryQuestion(steps: WorkflowStep[]): string {
@@ -49,6 +63,18 @@ class FailingRawWorkflowResourceReader implements RawWorkflowResourceReader {
 }
 
 class NoopWorkflowCloudModelClient extends CloudModelClient {
+}
+
+interface GuiTaskResultRawTestMap {
+  outcome: string;
+  summary: string;
+  key_values: string;
+  items: Object;
+  evidence: Object;
+}
+
+interface GuiTaskResultItemTestMap {
+  name: string;
 }
 
 let testRootCounter: number = 0;
@@ -257,6 +283,113 @@ export default function workflowStorageUnitTest() {
       } finally {
         cleanupPath(filesDir);
       }
+    });
+
+    it('guiTaskResultExtractionPromptConstrainsScreenshotOnlyJsonAndEmptyUncertainRules', 0, () => {
+      let prompt = buildGuiTaskResultExtractionPrompt('查看是否有待收货订单', '页面显示暂无待收货订单');
+
+      expect(prompt.indexOf('查看是否有待收货订单') >= 0).assertTrue();
+      expect(prompt.indexOf('页面显示暂无待收货订单') >= 0).assertTrue();
+      expect(prompt.indexOf('只基于截图') >= 0).assertTrue();
+      expect(prompt.indexOf('严格输出 JSON 对象') >= 0).assertTrue();
+      expect(prompt.indexOf('"outcome":"found|empty|partial|uncertain"') >= 0).assertTrue();
+      expect(prompt.indexOf("outcome='empty'") >= 0).assertTrue();
+      expect(prompt.indexOf("outcome='uncertain'") >= 0).assertTrue();
+      expect(prompt.indexOf('优先填充 items') >= 0).assertTrue();
+      expect(prompt.indexOf('"完成状态"') >= 0).assertTrue();
+      expect(prompt.indexOf('success / failed / suspended / unknown') >= 0).assertTrue();
+      expect(prompt.indexOf('key_values 不要包含“任务目标”') >= 0).assertTrue();
+      expect(prompt.indexOf('订单号') >= 0).assertTrue();
+      expect(prompt.indexOf('联系人') >= 0).assertTrue();
+      expect(prompt.indexOf('金额') >= 0).assertTrue();
+      expect(prompt.indexOf('地点') >= 0).assertTrue();
+      expect(prompt.indexOf('没有可靠证据的值填 unknown') >= 0).assertTrue();
+      expect(prompt.indexOf('"evidence"') < 0).assertTrue();
+      expect(prompt.indexOf('关键证据') < 0).assertTrue();
+      expect(prompt.indexOf('"rank": 1') >= 0).assertTrue();
+      expect(prompt.indexOf('"title"') >= 0).assertTrue();
+      expect(prompt.indexOf('"order_no"') >= 0).assertTrue();
+      expect(prompt.indexOf('"expected_delivery_date"') >= 0).assertTrue();
+    });
+
+    it('normalizeGuiTaskResultExtractionMapNormalizesOutcomeSummaryAndContainers', 0, () => {
+      let item: GuiTaskResultItemTestMap = { name: '订单A' };
+      let raw: GuiTaskResultRawTestMap = {
+        outcome: 'done',
+        summary: '',
+        key_values: 'bad',
+        items: [item as Object, 'bad', 12] as Object,
+        evidence: ['订单列表为空', 123, false] as Object
+      };
+
+      let normalized = normalizeGuiTaskResultExtractionMap(raw as Object as WorkflowJsonMap, 'final reasoning');
+
+      expect(normalized['outcome']).assertEqual('uncertain');
+      expect(normalized['summary']).assertEqual('final reasoning');
+      expect(Object.keys(normalized['key_values'] as Object).length).assertEqual(0);
+      let items = normalized['items'] as Object[];
+      expect(items.length).assertEqual(1);
+      expect((items[0] as GuiTaskResultItemTestMap).name).assertEqual('订单A');
+      expect(normalized['evidence'] === undefined).assertTrue();
+    });
+
+    it('fallbackGuiTaskResultExtractionKeepsWorkflowSuccessfulWhenExtractionFails', 0, () => {
+      let fallback = fallbackGuiTaskResultExtraction('模型返回空响应', '');
+
+      expect(fallback['outcome']).assertEqual('uncertain');
+      expect(fallback['summary']).assertEqual('GUI 任务已完成，但结果提取失败。');
+      expect(fallback['extraction_error']).assertEqual('模型返回空响应');
+      expect(Object.keys(fallback['key_values'] as Object).length).assertEqual(0);
+      expect((fallback['items'] as Object[]).length).assertEqual(0);
+      expect(fallback['evidence'] === undefined).assertTrue();
+    });
+
+    it('guiTaskResultExtractionDiagnosticsIncludesPreviewAndNormalizedStats', 0, () => {
+      let keyValues: WorkflowJsonMap = {};
+      keyValues['total'] = 2;
+      keyValues['page'] = '微博热搜';
+      let item: GuiTaskResultItemTestMap = { name: '话题A' };
+      let normalized: WorkflowJsonMap = {};
+      normalized['outcome'] = 'found';
+      normalized['summary'] = '提取到热搜';
+      normalized['key_values'] = keyValues;
+      normalized['items'] = [item as Object] as Object;
+
+      let diagnostics = guiTaskResultExtractionDiagnosticsText(normalized, 'raw-response-abcdefghijklmnopqrstuvwxyz');
+
+      expect(diagnostics.indexOf('outcome=found') >= 0).assertTrue();
+      expect(diagnostics.indexOf('items.length=1') >= 0).assertTrue();
+      expect(diagnostics.indexOf('key_values=total,page') >= 0).assertTrue();
+      expect(diagnostics.indexOf('raw_preview=raw-response-abc') >= 0).assertTrue();
+    });
+
+    it('workflowRunSummaryCanPersistSafeGuiTaskExtractionResult', 0, () => {
+      // 覆盖 GUI 任务结果提取的调试产物：run summary 只记录最终截图相对路径，避免持久化大段 base64。
+      let result: WorkflowJsonMap = {};
+      let resultKeyValues: WorkflowJsonMap = {};
+      let resultItems: Object[] = [];
+      let context: WorkflowJsonMap = {};
+      let steps: Record<string, WorkflowStepResult> = {};
+      result['outcome'] = 'empty';
+      result['summary'] = '暂无待收货订单';
+      result['key_values'] = resultKeyValues;
+      result['items'] = resultItems as Object;
+      let summary: WorkflowRunSummary = {
+        workflow_file: '/tmp/workflow.json',
+        run_dir: '/tmp/run',
+        context: context,
+        status: 'success',
+        steps: steps,
+        result_summary: '暂无待收货订单',
+        result: result,
+        result_extraction_error: '',
+        result_screenshot_path: 'chat-sessions/tool-runs/session/mobile-gui/run/result_screenshot.jpg'
+      };
+
+      expect(summary.result_summary).assertEqual('暂无待收货订单');
+      expect(summary.result!['outcome']).assertEqual('empty');
+      expect(summary.result_extraction_error).assertEqual('');
+      expect(summary.result_screenshot_path).assertEqual('chat-sessions/tool-runs/session/mobile-gui/run/result_screenshot.jpg');
     });
 
     it('runDirectoryRootPrefersOverride', 0, () => {

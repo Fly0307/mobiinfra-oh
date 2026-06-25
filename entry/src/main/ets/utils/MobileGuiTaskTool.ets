@@ -1,6 +1,7 @@
 import { ChatTool, ChatToolExecutionContext } from './ChatToolRegistry';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import {
+  MobileGuiTaskBusinessResult,
   MobileGuiTaskRequest,
   MobileGuiTaskRunResult
 } from './MobileGuiTaskTypes';
@@ -29,6 +30,7 @@ export interface MobileGuiTaskToolResponse {
   summary?: string;
   run_dir?: string;
   returned_to_app?: boolean;
+  result?: MobileGuiTaskBusinessResult;
   error_code?: string;
   error?: string;
   recoverable?: boolean;
@@ -227,7 +229,8 @@ export function mobileGuiTaskToolResponseFromRunResult(result: MobileGuiTaskRunR
     status: result.status,
     summary: result.summary.length > 0 ? result.summary : undefined,
     run_dir: result.runDir.length > 0 ? result.runDir : undefined,
-    returned_to_app: result.returnedToApp
+    returned_to_app: result.returnedToApp,
+    result: result.ok ? result.result : undefined
   };
   if (!result.ok) {
     response.error_code = result.errorCode;

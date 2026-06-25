@@ -5,6 +5,16 @@ export interface MobileGuiTaskRequest {
   maxSteps: number;
 }
 
+export type MobileGuiTaskJsonValue = Object | string | number | boolean | null;
+
+export interface MobileGuiTaskBusinessResult {
+  outcome: string;
+  summary: string;
+  key_values: Record<string, MobileGuiTaskJsonValue>;
+  items: Object[];
+  extraction_error?: string;
+}
+
 export interface MobileGuiTaskRunResult {
   ok: boolean;
   status: string;
@@ -14,6 +24,7 @@ export interface MobileGuiTaskRunResult {
   summary: string;
   runDir: string;
   returnedToApp: boolean;
+  result?: MobileGuiTaskBusinessResult;
 }
 
 export type MobileGuiTaskConfirmCallback = (request: MobileGuiTaskRequest) => Promise<boolean>;

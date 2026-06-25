@@ -35,6 +35,7 @@ export interface WorkflowStep {
   type: string;
   name?: string;
   on_error?: string;
+  extract_result?: boolean;
   task_description?: string;
   device?: string;
   use_qwen3?: boolean;
@@ -128,6 +129,10 @@ export interface WorkflowRunSummary {
   context: WorkflowJsonMap;
   status: string;
   steps: Record<string, WorkflowStepResult>;
+  result_summary?: string;
+  result?: WorkflowJsonMap;
+  result_extraction_error?: string;
+  result_screenshot_path?: string;
 }
 
 export interface WorkflowRunOptions {
@@ -141,6 +146,10 @@ export interface WorkflowRunResult {
   runDir: string;
   dailyLogPath: string;
   returnedToApp: boolean;
+  resultSummary?: string;
+  result?: WorkflowJsonMap;
+  resultExtractionError?: string;
+  resultScreenshotPath?: string;
 }
 
 export interface HdcBridgeResponse {

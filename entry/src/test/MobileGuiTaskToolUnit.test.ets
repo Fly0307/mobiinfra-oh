@@ -12,6 +12,8 @@ import {
 } from '../main/ets/utils/MobileGuiTaskTool';
 import { ChatToolExecutionContext } from '../main/ets/utils/ChatToolRegistry';
 import {
+  MobileGuiTaskBusinessResult,
+  MobileGuiTaskJsonValue,
   MobileGuiTaskRequest,
   MobileGuiTaskRunResult
 } from '../main/ets/utils/MobileGuiTaskTypes';
@@ -37,6 +39,7 @@ interface TestPayload {
   error_code?: string;
   error?: string;
   recoverable?: boolean;
+  result?: MobileGuiTaskBusinessResult;
 }
 
 function testContext(): ChatToolExecutionContext {
@@ -135,6 +138,39 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.recoverable === undefined).assertTrue();
     });
 
+    it('keepsToolStatusSeparateFromBusinessOutcomeInWirePayload', 0, () => {
+      let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
+      keyValues['order_count'] = 0;
+      let items: Object[] = [];
+      let businessResult: MobileGuiTaskBusinessResult = {
+        outcome: 'empty',
+        summary: '没有待处理订单',
+        key_values: keyValues,
+        items: items
+      };
+      let result: MobileGuiTaskRunResult = {
+        ok: true,
+        status: 'completed',
+        errorCode: '',
+        error: '',
+        recoverable: false,
+        summary: '没有待处理订单',
+        runDir: '/tmp/run-1',
+        returnedToApp: true,
+        result: businessResult
+      };
+
+      let response: MobileGuiTaskToolResponse = mobileGuiTaskToolResponseFromRunResult(result);
+      let payload = parseJsonCompat<TestPayload>(stringifyMobileGuiTaskToolResponse(response));
+
+      expect(payload.ok).assertTrue();
+      expect(payload.status).assertEqual('completed');
+      expect(payload.result !== undefined).assertTrue();
+      expect(payload.result!.outcome).assertEqual('empty');
+      expect(payload.result!.summary).assertEqual('没有待处理订单');
+      expect(payload.result!.key_values['order_count']).assertEqual(0);
+    });
+
     it('mapsFailedRunResultToSnakeCaseWirePayload', 0, () => {
       let result: MobileGuiTaskRunResult = {
         ok: false,
@@ -155,6 +191,66 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.error_code).assertEqual('tool_failed');
       expect(payload.error).assertEqual('执行失败');
       expect(payload.recoverable).assertTrue();
+    });
+
+    it('omitsBusinessResultFromFailedWirePayload', 0, () => {
+      let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
+      keyValues['stale'] = true;
+      let items: Object[] = [];
+      let businessResult: MobileGuiTaskBusinessResult = {
+        outcome: 'completed',
+        summary: '陈旧业务结果',
+        key_values: keyValues,
+        items: items
+      };
+      let result: MobileGuiTaskRunResult = {
+        ok: false,
+        status: 'failed',
+        errorCode: 'tool_failed',
+        error: '执行失败',
+        recoverable: true,
+        summary: '',
+        runDir: '/tmp/run-2',
+        returnedToApp: false,
+        result: businessResult
+      };
+
+      let response: MobileGuiTaskToolResponse = mobileGuiTaskToolResponseFromRunResult(result);
+      let payload = parseJsonCompat<TestPayload>(stringifyMobileGuiTaskToolResponse(response));
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('failed');
+      expect(payload.result === undefined).assertTrue();
+    });
+
+    it('omitsBusinessResultFromCancelledWirePayload', 0, () => {
+      let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
+      keyValues['stale'] = true;
+      let items: Object[] = [];
+      let businessResult: MobileGuiTaskBusinessResult = {
+        outcome: 'empty',
+        summary: '陈旧取消结果',
+        key_values: keyValues,
+        items: items
+      };
+      let result: MobileGuiTaskRunResult = {
+        ok: false,
+        status: 'cancelled',
+        errorCode: 'user_cancelled',
+        error: '用户取消',
+        recoverable: true,
+        summary: '',
+        runDir: '/tmp/run-cancelled',
+        returnedToApp: true,
+        result: businessResult
+      };
+
+      let response: MobileGuiTaskToolResponse = mobileGuiTaskToolResponseFromRunResult(result);
+      let payload = parseJsonCompat<TestPayload>(stringifyMobileGuiTaskToolResponse(response));
+
+      expect(payload.ok).assertFalse();
+      expect(payload.status).assertEqual('cancelled');
+      expect(payload.result === undefined).assertTrue();
     });
 
     it('returnsUnavailableWhenCallbacksMissing', 0, async () => {

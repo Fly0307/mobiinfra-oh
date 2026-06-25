@@ -3,13 +3,15 @@ import {
   buildMobileGuiWorkflowTask,
   buildMobileGuiWorkflowTaskDescription,
   classifyMobileGuiWorkflowFailure,
+  isMobileGuiTaskCloudConfigReady,
+  mobileGuiTaskCloudConfigMissingMessage,
   mobileGuiTaskRunResultFromFailure,
   mobileGuiTaskRunResultFromWorkflowResult
 } from '../main/ets/utils/MobileGuiTaskWorkflowAdapter';
-import { MobileGuiTaskRequest } from '../main/ets/utils/MobileGuiTaskTypes';
+import { MobileGuiTaskJsonValue, MobileGuiTaskRequest } from '../main/ets/utils/MobileGuiTaskTypes';
 import { parseJsonCompat } from '../main/ets/utils/JsonCompat';
 import { DEFAULT_MAX_GUI_STEPS, resolveGuiTaskMaxSteps, resolveWorkflowJsonForRun } from '../main/ets/utils/WorkflowRunner';
-import { WorkflowRunResult, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
+import { WorkflowJsonMap, WorkflowRunResult, WorkflowStep, WorkflowTask } from '../main/ets/utils/WorkflowTypes';
 
 interface WorkflowJsonObject {
   steps?: WorkflowJsonStep[];
@@ -21,6 +23,7 @@ interface WorkflowJsonStep {
   package_name?: string;
   max_steps?: number;
   fail_on_max_steps?: boolean;
+  extract_result?: boolean;
 }
 
 function mobileGuiRequest(): MobileGuiTaskRequest {
@@ -34,6 +37,13 @@ function mobileGuiRequest(): MobileGuiTaskRequest {
 
 export default function mobileGuiTaskWorkflowAdapterUnitTest() {
   describe('mobileGuiTaskWorkflowAdapterUnitTest', () => {
+    it('treatsDeciderModelAsOptionalForCloudConfig', 0, () => {
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', 'key')).assertTrue();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', '', 'key')).assertFalse();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', '  ')).assertFalse();
+      expect(mobileGuiTaskCloudConfigMissingMessage().indexOf('Decider 模型') < 0).assertTrue();
+    });
+
     it('buildsTaskDescriptionWithAppHints', 0, () => {
       let description = buildMobileGuiWorkflowTaskDescription(mobileGuiRequest());
 
@@ -56,6 +66,8 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect((workflow.steps as WorkflowJsonStep[])[1].type).assertEqual('gui_task');
       expect(((workflow.steps as WorkflowJsonStep[])[0].task_description || '').indexOf('com.tencent.mm') >= 0).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[0].package_name).assertEqual('com.tencent.mm');
+      expect((workflow.steps as WorkflowJsonStep[])[0].extract_result === undefined).assertTrue();
+      expect((workflow.steps as WorkflowJsonStep[])[1].extract_result).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[1].max_steps).assertEqual(18);
       expect((workflow.steps as WorkflowJsonStep[])[1].fail_on_max_steps).assertTrue();
     });
@@ -136,6 +148,57 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(mapped.status).assertEqual('failed');
       expect(mapped.errorCode).assertEqual('timeout');
       expect(mapped.runDir).assertEqual('chat-sessions/tool-runs/session-1/mobile-gui/run-1');
+    });
+
+    it('mapsWorkflowBusinessResultAndSummaryToMobileGuiRunResult', 0, () => {
+      let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
+      keyValues['order_count'] = 0;
+      let items: Object[] = [];
+      let businessResult: WorkflowJsonMap = {};
+      businessResult['outcome'] = 'empty';
+      businessResult['summary'] = '业务摘要';
+      businessResult['key_values'] = keyValues as Object;
+      businessResult['items'] = items as Object;
+      let result: WorkflowRunResult = {
+        status: 'success',
+        message: 'workflow 完成',
+        runDir: '/tmp/files/chat-sessions/tool-runs/session-1/mobile-gui/run-4',
+        dailyLogPath: '',
+        returnedToApp: true,
+        resultSummary: '提取摘要优先',
+        result: businessResult
+      };
+      let mapped = mobileGuiTaskRunResultFromWorkflowResult('/tmp/files', result);
+
+      expect(mapped.ok).assertTrue();
+      expect(mapped.status).assertEqual('completed');
+      expect(mapped.summary).assertEqual('提取摘要优先');
+      expect(mapped.result !== undefined).assertTrue();
+      expect(mapped.result!.outcome).assertEqual('empty');
+      expect(mapped.result!.summary).assertEqual('业务摘要');
+      expect(mapped.result!.key_values['order_count']).assertEqual(0);
+      expect(Object.keys(mapped.result! as Object).indexOf('evidence') < 0).assertTrue();
+    });
+
+    it('fallsBackToUncertainBusinessResultWhenExtractionFails', 0, () => {
+      let result: WorkflowRunResult = {
+        status: 'success',
+        message: 'workflow 已完成',
+        runDir: '/tmp/files/chat-sessions/tool-runs/session-1/mobile-gui/run-5',
+        dailyLogPath: '',
+        returnedToApp: false,
+        resultSummary: '结果待确认',
+        resultExtractionError: 'VLM JSON 解析失败'
+      };
+      let mapped = mobileGuiTaskRunResultFromWorkflowResult('/tmp/files', result);
+
+      expect(mapped.ok).assertTrue();
+      expect(mapped.status).assertEqual('completed');
+      expect(mapped.summary).assertEqual('结果待确认');
+      expect(mapped.result !== undefined).assertTrue();
+      expect(mapped.result!.outcome).assertEqual('uncertain');
+      expect(mapped.result!.summary).assertEqual('结果待确认');
+      expect(mapped.result!.extraction_error).assertEqual('VLM JSON 解析失败');
     });
 
     it('mapsDeciderMaxStepsReachedToFailureInsteadOfCompleted', 0, () => {

@@ -102,6 +102,8 @@ import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGui
 import {
   buildMobileGuiWorkflowTask,
   classifyMobileGuiWorkflowFailure,
+  isMobileGuiTaskCloudConfigReady as isMobileGuiTaskCloudConfigReadyValue,
+  mobileGuiTaskCloudConfigMissingMessage as mobileGuiTaskCloudConfigMissingMessageText,
   mobileGuiTaskRunResultFromFailure,
   mobileGuiTaskRunResultFromWorkflowResult
 } from '../utils/MobileGuiTaskWorkflowAdapter';
@@ -1047,11 +1049,11 @@ struct Index {
   }
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
-    return this.isCloudConfigReady() && this.cloudDeciderModel.trim().length > 0;
+    return isMobileGuiTaskCloudConfigReadyValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl, this.cloudApiKey);
   }
 
   private mobileGuiTaskConfigMissingMessage(): string {
-    return '配置不完整：请先填写 Planner / Decider 的服务地址、API Key 和 Decider 模型。';
+    return mobileGuiTaskCloudConfigMissingMessageText();
   }
 
   private async runMobileGuiTaskForChatSession(sessionId: string,

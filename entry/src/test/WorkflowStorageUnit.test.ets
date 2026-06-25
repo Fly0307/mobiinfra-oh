@@ -7,6 +7,7 @@ import {
   fallbackGuiTaskResultExtraction,
   guiTaskResultExtractionDiagnosticsText,
   normalizeGuiTaskResultExtractionMap,
+  resolveGuiTaskResultExtractionScreenshotCount,
   WorkflowRunner
 } from '../main/ets/utils/WorkflowRunner';
 import {
@@ -306,10 +307,33 @@ export default function workflowStorageUnitTest() {
       expect(prompt.indexOf('没有可靠证据的值填 unknown') >= 0).assertTrue();
       expect(prompt.indexOf('"evidence"') < 0).assertTrue();
       expect(prompt.indexOf('关键证据') < 0).assertTrue();
+      expect(prompt.indexOf('截图按时间顺序排列') >= 0).assertTrue();
+      expect(prompt.indexOf('最后一张截图是最新状态') >= 0).assertTrue();
       expect(prompt.indexOf('"rank": 1') >= 0).assertTrue();
       expect(prompt.indexOf('"title"') >= 0).assertTrue();
       expect(prompt.indexOf('"order_no"') >= 0).assertTrue();
       expect(prompt.indexOf('"expected_delivery_date"') >= 0).assertTrue();
+    });
+
+    it('resolveGuiTaskResultExtractionScreenshotCountDefaultsAndHonorsStepConfig', 0, () => {
+      let defaultStep: WorkflowStep = {
+        id: '1',
+        type: 'gui_task'
+      };
+      let configuredStep: WorkflowStep = {
+        id: '2',
+        type: 'gui_task',
+        extract_result_screenshot_count: 4
+      };
+      let invalidStep: WorkflowStep = {
+        id: '3',
+        type: 'gui_task',
+        extract_result_screenshot_count: 0
+      };
+
+      expect(resolveGuiTaskResultExtractionScreenshotCount(defaultStep)).assertEqual(2);
+      expect(resolveGuiTaskResultExtractionScreenshotCount(configuredStep)).assertEqual(4);
+      expect(resolveGuiTaskResultExtractionScreenshotCount(invalidStep)).assertEqual(2);
     });
 
     it('normalizeGuiTaskResultExtractionMapNormalizesOutcomeSummaryAndContainers', 0, () => {
@@ -383,13 +407,18 @@ export default function workflowStorageUnitTest() {
         result_summary: '暂无待收货订单',
         result: result,
         result_extraction_error: '',
-        result_screenshot_path: 'chat-sessions/tool-runs/session/mobile-gui/run/result_screenshot.jpg'
+        result_screenshot_path: 'chat-sessions/tool-runs/session/mobile-gui/run/result_screenshot.jpg',
+        result_screenshot_paths: [
+          'chat-sessions/tool-runs/session/mobile-gui/run/result_screenshots/result_screenshot_01.jpg',
+          'chat-sessions/tool-runs/session/mobile-gui/run/result_screenshots/result_screenshot_02.jpg'
+        ]
       };
 
       expect(summary.result_summary).assertEqual('暂无待收货订单');
       expect(summary.result!['outcome']).assertEqual('empty');
       expect(summary.result_extraction_error).assertEqual('');
       expect(summary.result_screenshot_path).assertEqual('chat-sessions/tool-runs/session/mobile-gui/run/result_screenshot.jpg');
+      expect(summary.result_screenshot_paths!.length).assertEqual(2);
     });
 
     it('runDirectoryRootPrefersOverride', 0, () => {

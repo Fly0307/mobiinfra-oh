@@ -23,12 +23,21 @@ import {
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
 export const DEFAULT_MAX_GUI_STEPS: number = 20;
+export const DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT: number = 2;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
 
 export function resolveGuiTaskMaxSteps(step: WorkflowStep): number {
   let raw = step.max_steps;
   if (raw === undefined || raw <= 0) {
     return DEFAULT_MAX_GUI_STEPS;
+  }
+  return Math.floor(raw);
+}
+
+export function resolveGuiTaskResultExtractionScreenshotCount(step: WorkflowStep): number {
+  let raw = step.extract_result_screenshot_count;
+  if (raw === undefined || raw <= 0) {
+    return DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT;
   }
   return Math.floor(raw);
 }
@@ -66,6 +75,8 @@ interface GuiDeciderOutput {
   final_decider_reasoning?: string;
   final_decider_parameters?: WorkflowJsonMap;
   result_screenshot_path?: string;
+  result_screenshot_paths?: Object;
+  result_extraction_screenshot_count?: number;
 }
 
 interface GuiActionOutput {
@@ -207,6 +218,7 @@ interface DeciderLoopResult {
   finalParameters: WorkflowJsonMap;
   finalResponse: string;
   finalScreenshot: WorkflowScreenshotCache | null;
+  recentScreenshots: WorkflowScreenshotCache[];
 }
 
 export function buildGuiTaskResultExtractionPrompt(taskDescription: string, finalDeciderReasoning: string): string {
@@ -218,6 +230,7 @@ export function buildGuiTaskResultExtractionPrompt(taskDescription: string, fina
     '\n\n## 输出要求' +
     '\n严格输出 JSON 对象，不要输出 markdown、代码块或额外解释。' +
     '\nJSON 结构必须是：{ "outcome":"found|empty|partial|uncertain", "summary":"", "key_values":{}, "items":[] }。' +
+    '\n输入截图按时间顺序排列，最后一张截图是最新状态；请综合最近截图判断页面是否发生变化和最终结果。' +
     '\nsummary 用中文 1 句话简洁总结任务结果、完成到哪一步和异常情况；总结性判断统一写在 summary，不要额外输出证据字段。' +
     '\nkey_values 必须包含 "完成状态"，值只能是 "success / failed / suspended / unknown" 中最合适的一项。' +
     '\n根据任务实际需要，动态添加 1~5 个最相关的 key，例如：查订单 → "订单号"，查联系人 → "联系人"，查金额 → "金额"，查时间 → "时间"，发邮件 → "邮件主题"，查地点 → "地点"，查待办 → "待办标题"，看数据 → "点赞数" / "播放量"，看页面 → "当前页面"。' +
@@ -383,6 +396,7 @@ export class WorkflowRunner {
   private workflowResult: WorkflowJsonMap | null = null;
   private workflowResultExtractionError: string = '';
   private workflowResultScreenshotPath: string = '';
+  private workflowResultScreenshotPaths: string[] = [];
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
     hdcServerIp: string, logHandler: (message: string) => void, runRootOverride: string = '') {
@@ -420,6 +434,7 @@ export class WorkflowRunner {
     this.workflowResult = null;
     this.workflowResultExtractionError = '';
     this.workflowResultScreenshotPath = '';
+    this.workflowResultScreenshotPaths = [];
     this.clearWorkflowScreenshotCache();
     this.runStartedAt = new Date();
     this.dateContext = new WorkflowDateContext(this.runStartedAt);
@@ -510,6 +525,9 @@ export class WorkflowRunner {
     if (this.workflowResultScreenshotPath.length > 0) {
       result.resultScreenshotPath = this.workflowResultScreenshotPath;
     }
+    if (this.workflowResultScreenshotPaths.length > 0) {
+      result.resultScreenshotPaths = this.workflowResultScreenshotPaths;
+    }
     return result;
   }
 
@@ -533,6 +551,9 @@ export class WorkflowRunner {
       summary.result_extraction_error = this.workflowResultExtractionError;
       if (this.workflowResultScreenshotPath.length > 0) {
         summary.result_screenshot_path = this.workflowResultScreenshotPath;
+      }
+      if (this.workflowResultScreenshotPaths.length > 0) {
+        summary.result_screenshot_paths = this.workflowResultScreenshotPaths;
       }
     }
     WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
@@ -732,7 +753,8 @@ export class WorkflowRunner {
     if (this.currentAppName.length === 0) {
       throw new Error('gui_task after step 1 requires active app context');
     }
-    let deciderResult = await this.runDeciderLoop(step, taskDescription);
+    let resultExtractionScreenshotCount = resolveGuiTaskResultExtractionScreenshotCount(step);
+    let deciderResult = await this.runDeciderLoop(step, taskDescription, resultExtractionScreenshotCount);
     if (deciderResult.stopReason === 'MAX_STEPS_REACHED' && step.fail_on_max_steps === true) {
       throw new Error('Decider max steps reached: ' + String(resolveGuiTaskMaxSteps(step)));
     }
@@ -755,6 +777,10 @@ export class WorkflowRunner {
       await this.extractGuiTaskResult(taskDescription, deciderResult);
       if (this.workflowResultScreenshotPath.length > 0) {
         output.result_screenshot_path = this.workflowResultScreenshotPath;
+      }
+      if (this.workflowResultScreenshotPaths.length > 0) {
+        output.result_screenshot_paths = this.workflowResultScreenshotPaths as Object;
+        output.result_extraction_screenshot_count = this.workflowResultScreenshotPaths.length;
       }
     }
     return output as Object as WorkflowJsonMap;
@@ -872,19 +898,44 @@ export class WorkflowRunner {
     output.source_screenshot = screenshot.source;
   }
 
-  /**
-   * 保存 GUI 任务最终结果提取实际使用的最后一张截图，便于通过 run_summary.json
-   * 定位 VLM 分析输入。这里只写图片文件和相对路径，避免 run summary 再次膨胀。
-   */
-  private saveGuiTaskResultScreenshot(screenshot: WorkflowScreenshotCache): string {
-    let imagePath = this.runDir + '/result_screenshot.jpg';
-    WorkflowStorage.writeBase64Image(imagePath, screenshot.image_b64);
-    let relativePath = WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath);
-    this.log('GUI 任务结果截图已保存：' + relativePath);
-    return relativePath;
+  private appendResultExtractionScreenshotWindow(screenshots: WorkflowScreenshotCache[],
+    screenshot: WorkflowScreenshotCache, limit: number): WorkflowScreenshotCache[] {
+    let boundedLimit = limit > 0 ? limit : DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT;
+    let window: WorkflowScreenshotCache[] = screenshots.slice();
+    window.push(screenshot);
+    while (window.length > boundedLimit) {
+      window.shift();
+    }
+    return window;
   }
 
-  private async runDeciderLoop(step: WorkflowStep, taskDescription: string): Promise<DeciderLoopResult> {
+  /**
+   * 保存 GUI 任务最终结果提取实际使用的截图窗口。`result_screenshot.jpg`
+   * 继续指向最新截图，`result_screenshots/` 保存按时间顺序排列的最近 N 张截图。
+   */
+  private saveGuiTaskResultScreenshots(screenshots: WorkflowScreenshotCache[]): string[] {
+    if (screenshots.length === 0) {
+      return [];
+    }
+    let screenshotDir = this.runDir + '/result_screenshots';
+    WorkflowStorage.ensureDirectoryTree(screenshotDir);
+    let relativePaths: string[] = [];
+    for (let i = 0; i < screenshots.length; i++) {
+      let suffix = String(i + 1).padStart(2, '0');
+      let imagePath = screenshotDir + '/result_screenshot_' + suffix + '.jpg';
+      WorkflowStorage.writeBase64Image(imagePath, screenshots[i].image_b64);
+      relativePaths.push(WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath));
+    }
+    let latestPath = this.runDir + '/result_screenshot.jpg';
+    WorkflowStorage.writeBase64Image(latestPath, screenshots[screenshots.length - 1].image_b64);
+    this.workflowResultScreenshotPath = WorkflowStorage.workflowRunRelativePath(this.filesDir, latestPath);
+    this.log('GUI 任务结果截图窗口已保存：' + String(relativePaths.length) + ' 张，最新=' +
+      this.workflowResultScreenshotPath);
+    return relativePaths;
+  }
+
+  private async runDeciderLoop(step: WorkflowStep, taskDescription: string,
+    resultExtractionScreenshotCount: number): Promise<DeciderLoopResult> {
     let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
     let maxSteps = resolveGuiTaskMaxSteps(step);
@@ -894,7 +945,8 @@ export class WorkflowRunner {
       finalReasoning: '',
       finalParameters: {},
       finalResponse: '',
-      finalScreenshot: null
+      finalScreenshot: null,
+      recentScreenshots: []
     };
     for (let i = 0; i < maxSteps; i++) {
       if (AgentExecutionController.isCancelRequested()) {
@@ -909,6 +961,8 @@ export class WorkflowRunner {
       let imageBase64 = shot.image_b64;
       let width = shot.width;
       let height = shot.height;
+      result.recentScreenshots = this.appendResultExtractionScreenshotWindow(result.recentScreenshots, shot,
+        resultExtractionScreenshotCount);
       this.log('Decider 截图完成：' + width + 'x' + height);
       let response = '';
       try {
@@ -955,14 +1009,20 @@ export class WorkflowRunner {
     if (deciderResult.finalScreenshot === null) {
       return;
     }
-    if (this.workflowResultScreenshotPath.length === 0) {
-      this.workflowResultScreenshotPath = this.saveGuiTaskResultScreenshot(deciderResult.finalScreenshot);
+    let screenshots = deciderResult.recentScreenshots.length > 0 ? deciderResult.recentScreenshots :
+      [deciderResult.finalScreenshot];
+    if (this.workflowResultScreenshotPaths.length === 0) {
+      this.workflowResultScreenshotPaths = this.saveGuiTaskResultScreenshots(screenshots);
+    }
+    let imageBase64List: string[] = [];
+    for (let i = 0; i < screenshots.length; i++) {
+      imageBase64List.push(screenshots[i].image_b64);
     }
     let prompt = buildGuiTaskResultExtractionPrompt(taskDescription, deciderResult.finalReasoning);
     let response = '';
     try {
-      this.log('GUI 任务结果提取开始');
-      response = await this.cloudClient.chatImageQuestion(prompt, deciderResult.finalScreenshot.image_b64,
+      this.log('GUI 任务结果提取开始，截图数：' + String(imageBase64List.length));
+      response = await this.cloudClient.chatImagesQuestion(prompt, imageBase64List,
         this.cloudConfigProvider());
       if (response.trim().length === 0) {
         throw new Error('empty VLM result extraction response');

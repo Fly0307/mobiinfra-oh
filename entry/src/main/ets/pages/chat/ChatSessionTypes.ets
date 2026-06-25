@@ -22,6 +22,7 @@ export interface ChatMessage {
   collapsed: boolean;
   createdAt: number;
   imagePath?: string;
+  imagePaths?: string[];
   streamingActive?: boolean;
   streamingVersion?: number;
 }
@@ -229,9 +230,28 @@ function normalizeAssistantMessageContent(role: ChatMessageRole, kind: ChatMessa
   };
 }
 
+function normalizeChatMessageImagePathInputs(imagePath: string, imagePaths?: string[]): string[] {
+  let normalized: string[] = [];
+  let legacyPath = imagePath.trim();
+  if (legacyPath.length > 0) {
+    normalized.push(legacyPath);
+  }
+  if (imagePaths !== undefined) {
+    for (let i = 0; i < imagePaths.length; i++) {
+      let path = imagePaths[i].trim();
+      if (path.length > 0 && normalized.indexOf(path) < 0) {
+        normalized.push(path);
+      }
+    }
+  }
+  return normalized;
+}
+
 export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatMessageKind, content: string,
-  createdAt: number, trace: string[] = [], imagePath: string = ''): ChatMessage {
+  createdAt: number, trace: string[] = [], imagePath: string = '', imagePaths: string[] = []): ChatMessage {
   let parts = normalizeAssistantMessageContent(role, kind, content);
+  let normalizedImagePaths = normalizeChatMessageImagePathInputs(imagePath, imagePaths);
+  let firstImagePath = normalizedImagePaths.length > 0 ? normalizedImagePaths[0] : '';
   return {
     id: id,
     role: role,
@@ -242,12 +262,19 @@ export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatM
     trace: trace,
     collapsed: kind === CHAT_MESSAGE_KIND_TASK_TRACE,
     createdAt: createdAt,
-    imagePath: imagePath
+    imagePath: firstImagePath,
+    imagePaths: normalizedImagePaths
   };
 }
 
+export function chatMessageImagePaths(message: ChatMessage): string[] {
+  return normalizeChatMessageImagePathInputs(message.imagePath === undefined ? '' : message.imagePath,
+    message.imagePaths);
+}
+
 export function chatMessageImagePath(message: ChatMessage): string {
-  return message.imagePath === undefined ? '' : message.imagePath;
+  let imagePaths = chatMessageImagePaths(message);
+  return imagePaths.length > 0 ? imagePaths[0] : '';
 }
 
 export function chatMessageStreamingActive(message: ChatMessage): boolean {
@@ -375,7 +402,8 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         trace: message.trace.slice(),
         collapsed: !message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       });
     } else {
       next.push(message);
@@ -399,7 +427,8 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
         trace: message.trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       });
     } else {
       next.push(message);
@@ -424,6 +453,15 @@ function chatTraceSignature(trace: string[]): string {
   return parts.join('|');
 }
 
+function chatImagePathsSignature(message: ChatMessage): string {
+  let imagePaths = chatMessageImagePaths(message);
+  let parts: string[] = [String(imagePaths.length)];
+  for (let i = 0; i < imagePaths.length; i++) {
+    parts.push(chatTextSignature(imagePaths[i]));
+  }
+  return parts.join('|');
+}
+
 export function chatMessageRenderKey(message: ChatMessage): string {
   return message.id + ':' + message.kind +
     ':trace=' + chatTraceSignature(message.trace) +
@@ -431,7 +469,7 @@ export function chatMessageRenderKey(message: ChatMessage): string {
     ':content=' + chatTextSignature(message.content) +
     ':thinking=' + chatTextSignature(chatMessageThinkingContent(message)) +
     ':thinkingCollapsed=' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
-    ':image=' + chatTextSignature(chatMessageImagePath(message));
+    ':image=' + chatImagePathsSignature(message);
 }
 
 export function chatMessageStableRenderKey(message: ChatMessage): string {
@@ -451,7 +489,7 @@ function chatMessageStreamFollowRenderKey(message: ChatMessage): string {
     ':thinking=' + chatTextSignature(chatMessageThinkingContent(message)) +
     ':thinkingCollapsed=' + (chatMessageThinkingCollapsed(message) ? '1' : '0') +
     ':trace=' + chatTraceSignature(message.trace) +
-    ':image=' + chatTextSignature(chatMessageImagePath(message));
+    ':image=' + chatImagePathsSignature(message);
 }
 
 export function chatMessagesAutoScrollKey(sessionId: string, messages: ChatMessage[], thinking: boolean): string {

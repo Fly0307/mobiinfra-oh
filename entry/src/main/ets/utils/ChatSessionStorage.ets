@@ -10,6 +10,7 @@ import {
   ChatSessionSummary,
   buildChatSessionSummary,
   chatMessageImagePath,
+  chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
   createEmptyChatSession,
@@ -343,7 +344,8 @@ export class ChatSessionStorage {
         trace: message.trace === undefined ? [] : message.trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       });
     }
     return normalized;

@@ -6,22 +6,51 @@ export const CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM: string = 'album';
 export const CHAT_ATTACHMENT_PREVIEW_HEIGHT_RATIO: number = 0.86;
 export const CHAT_ATTACHMENT_PREVIEW_GAP_RATIO: number = 0.22;
 export const CHAT_ATTACHMENT_PREVIEW_MIN_HEIGHT: number = 44;
+export const CHAT_IMAGE_ATTACHMENT_MAX_COUNT: number = 9;
 
 // 聊天附件策略集中处理输入判定和云端多模态 content 组装，避免 UI 与发送链路各自散落判断。
+export function normalizeChatImageAttachments(uris: string[]): string[] {
+  let normalized: string[] = [];
+  for (let i = 0; i < uris.length && normalized.length < CHAT_IMAGE_ATTACHMENT_MAX_COUNT; i++) {
+    let uri = uris[i].trim();
+    if (uri.length > 0 && normalized.indexOf(uri) < 0) {
+      normalized.push(uri);
+    }
+  }
+  return normalized;
+}
+
 export function hasChatImageAttachment(uri: string): boolean {
   return uri.trim().length > 0;
 }
 
+export function hasChatImageAttachments(uris: string[]): boolean {
+  return normalizeChatImageAttachments(uris).length > 0;
+}
+
 export function chatCanSendMessage(input: string, imageAttachmentUri: string): boolean {
-  return input.trim().length > 0 || hasChatImageAttachment(imageAttachmentUri);
+  return chatCanSendMessageWithImages(input, [imageAttachmentUri]);
+}
+
+export function chatCanSendMessageWithImages(input: string, imageAttachmentUris: string[]): boolean {
+  return input.trim().length > 0 || hasChatImageAttachments(imageAttachmentUris);
+}
+
+// 图片附件当前只进入普通聊天多模态请求；任务下发不消费附件，必须显式拦截以免附件滞留误发。
+export function chatCanSubmitTaskWithImages(imageAttachmentUris: string[]): boolean {
+  return !hasChatImageAttachments(imageAttachmentUris);
 }
 
 export function chatMessageTextForSend(input: string, imageAttachmentUri: string): string {
+  return chatMessageTextForSendWithImages(input, [imageAttachmentUri]);
+}
+
+export function chatMessageTextForSendWithImages(input: string, imageAttachmentUris: string[]): string {
   let text = input.trim();
   if (text.length > 0) {
     return text;
   }
-  return hasChatImageAttachment(imageAttachmentUri) ? CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT : '';
+  return hasChatImageAttachments(imageAttachmentUris) ? CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT : '';
 }
 
 // 图片来源入口固定为拍照和相册，UI 只消费这里的来源列表，避免入口文案和回调顺序分散维护。
@@ -45,7 +74,12 @@ export function chatAttachmentPreviewHeight(textAreaHeight: number): number {
 }
 
 export function chatAttachmentComposerExtraHeight(textAreaHeight: number, imageAttachmentUri: string): number {
-  if (!hasChatImageAttachment(imageAttachmentUri)) {
+  return chatAttachmentComposerExtraHeightWithImages(textAreaHeight, [imageAttachmentUri]);
+}
+
+export function chatAttachmentComposerExtraHeightWithImages(textAreaHeight: number,
+  imageAttachmentUris: string[]): number {
+  if (!hasChatImageAttachments(imageAttachmentUris)) {
     return 0;
   }
   return chatAttachmentPreviewHeight(textAreaHeight) + Math.round(textAreaHeight * CHAT_ATTACHMENT_PREVIEW_GAP_RATIO);
@@ -53,14 +87,20 @@ export function chatAttachmentComposerExtraHeight(textAreaHeight: number, imageA
 
 // OpenAI-compatible 多模态消息要求 text 和 image_url 作为 content part 一起发送。
 export function chatCloudUserContentWithImage(text: string, imageDataUrl: string): string | CloudContentPart[] {
+  return chatCloudUserContentWithImages(text, [imageDataUrl]);
+}
+
+export function chatCloudUserContentWithImages(text: string, imageDataUrls: string[]): string | CloudContentPart[] {
   let normalizedText = text.trim();
-  let normalizedImage = imageDataUrl.trim();
-  if (normalizedImage.length === 0) {
+  let normalizedImages = normalizeChatImageAttachments(imageDataUrls);
+  if (normalizedImages.length === 0) {
     return normalizedText;
   }
   let parts: CloudContentPart[] = [
-    { type: 'text', text: normalizedText.length > 0 ? normalizedText : CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT },
-    { type: 'image_url', image_url: { url: normalizedImage } }
+    { type: 'text', text: normalizedText.length > 0 ? normalizedText : CHAT_IMAGE_ATTACHMENT_ONLY_PROMPT }
   ];
+  for (let i = 0; i < normalizedImages.length; i++) {
+    parts.push({ type: 'image_url', image_url: { url: normalizedImages[i] } });
+  }
   return parts;
 }

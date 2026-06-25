@@ -9,6 +9,7 @@ import {
   ChatSessionSummary,
   buildCloudContextMessages,
   chatMessageRenderKey,
+  chatMessageImagePaths,
   chatMessageStableRenderKey,
   chatSessionRenderKey,
   chatMessagesAutoScrollKey,
@@ -736,6 +737,50 @@ export default function chatSessionStorageUnitTest() {
       expect(reloaded !== null).assertTrue();
       if (reloaded !== null) {
         expect(reloaded.messages[0].thinkingCollapsed).assertFalse();
+      }
+
+      cleanupPath(root);
+    });
+
+    it('createsMessageWithMultipleImageAttachmentsAndKeepsLegacyFirstImagePath', 0, () => {
+      let message = createChatMessage('u1', 'user', 'chat', '看看这些图片', 1000, [],
+        'photo://image/1', ['photo://image/1', 'photo://image/2']);
+      let imagePaths = chatMessageImagePaths(message);
+
+      expect(message.imagePath === undefined ? '' : message.imagePath).assertEqual('photo://image/1');
+      expect(imagePaths.length).assertEqual(2);
+      expect(imagePaths[0]).assertEqual('photo://image/1');
+      expect(imagePaths[1]).assertEqual('photo://image/2');
+    });
+
+    it('readsLegacySingleImagePathAsImagePathList', 0, () => {
+      let message = createChatMessage('u1', 'user', 'chat', '看看这张图片', 1000, [], 'photo://legacy/1');
+      let imagePaths = chatMessageImagePaths(message);
+
+      expect(imagePaths.length).assertEqual(1);
+      expect(imagePaths[0]).assertEqual('photo://legacy/1');
+    });
+
+    it('persistsMultipleImageAttachmentsInSessionMessages', 0, () => {
+      let root = nextTestRoot('multi-image-message');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      session.messages = [
+        createChatMessage('u1', 'user', 'chat', '请分析这些图片', 1001, [],
+          'photo://image/1', ['photo://image/1', 'photo://image/2'])
+      ];
+      ChatSessionStorage.saveSession(root, session);
+
+      let reloaded = ChatSessionStorage.loadSession(root, session.id);
+
+      expect(reloaded !== null).assertTrue();
+      if (reloaded !== null) {
+        let imagePaths = chatMessageImagePaths(reloaded.messages[0]);
+        expect(reloaded.messages[0].imagePath === undefined ? '' : reloaded.messages[0].imagePath)
+          .assertEqual('photo://image/1');
+        expect(imagePaths.length).assertEqual(2);
+        expect(imagePaths[1]).assertEqual('photo://image/2');
       }
 
       cleanupPath(root);

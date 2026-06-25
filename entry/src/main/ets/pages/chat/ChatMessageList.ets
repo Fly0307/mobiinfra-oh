@@ -152,7 +152,7 @@ function chatLightweightPreviewText(kind: ChatMessageKind, detail: ChatMessageDe
   if (preview.length > 0) {
     return preview;
   }
-  if (detail.imagePath.length > 0) {
+  if (detail.imagePaths.length > 0) {
     return '图片消息';
   }
   if (detail.thinkingContent.length > 0) {
@@ -404,17 +404,23 @@ struct ChatMessageImagePreviewView {
   onPreviewDebugImage: (path: string) => void = () => {};
 
   build() {
-    if (this.detail.imagePath.length > 0) {
-      Image(this.detail.imagePath)
-        .width(96)
-        .height(132)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Black)
-        .borderRadius(12)
-        .margin({ top: 12 })
-        .onClick(() => {
-          this.onPreviewDebugImage(this.detail.imagePath);
-        })
+    if (this.detail.imagePaths.length > 0) {
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(this.detail.imagePaths, (path: string, index?: number) => {
+          Image(path)
+            .width(92)
+            .height(118)
+            .objectFit(ImageFit.Contain)
+            .backgroundColor(Color.Black)
+            .borderRadius(12)
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.onPreviewDebugImage(path);
+            })
+        }, (path: string, index?: number) => path + ':' + String(index === undefined ? 0 : index))
+      }
+      .width('100%')
+      .margin({ top: 12 })
     }
   }
 }

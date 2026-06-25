@@ -8,6 +8,7 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   chatMessageImagePath,
+  chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
   splitAssistantThinkingContent,
@@ -132,7 +133,8 @@ export class ChatSessionController {
       trace: trace,
       collapsed: lastMessage.collapsed,
       createdAt: lastMessage.createdAt,
-      imagePath: chatMessageImagePath(lastMessage)
+      imagePath: chatMessageImagePath(lastMessage),
+      imagePaths: chatMessageImagePaths(lastMessage)
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();
@@ -169,7 +171,8 @@ export class ChatSessionController {
       trace: resultMessage.trace.slice(),
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
-      imagePath: sessionImagePath
+      imagePath: sessionImagePath,
+      imagePaths: [sessionImagePath]
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();
@@ -354,7 +357,8 @@ export class ChatSessionController {
         trace: trace === undefined ? message.trace.slice() : trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       };
       changed = true;
       break;

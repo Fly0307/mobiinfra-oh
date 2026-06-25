@@ -12,11 +12,13 @@ import {
 import {
   CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM,
   CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA,
-  chatAttachmentComposerExtraHeight,
+  chatAttachmentComposerExtraHeightWithImages,
   chatAttachmentPreviewHeight,
-  chatCanSendMessage,
+  chatCanSendMessageWithImages,
+  chatCanSubmitTaskWithImages,
   chatImageAttachmentSourceLabel,
-  hasChatImageAttachment
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
 } from './ChatAttachmentPolicy';
 import {
   ChatMessage,
@@ -28,6 +30,7 @@ import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
 import { digitalAvatarContainerHeight } from './DigitalAvatarTypes';
+import { showToastSafely } from '../../utils/PromptSafe';
 
 @Component
 export struct ChatPage {
@@ -51,7 +54,7 @@ export struct ChatPage {
   // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
   @Prop avatarForegroundUri: string = '';
   @Prop avatarMessageForegroundUri: string = '';
-  @Prop pendingImageAttachmentUri: string = '';
+  @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
@@ -93,7 +96,7 @@ export struct ChatPage {
   }
 
   private attachmentComposerExtraHeight(): number {
-    return chatAttachmentComposerExtraHeight(this.composerTextAreaHeight(), this.pendingImageAttachmentUri);
+    return chatAttachmentComposerExtraHeightWithImages(this.composerTextAreaHeight(), this.pendingImageAttachmentList());
   }
 
   private attachmentPreviewHeight(): number {
@@ -148,7 +151,15 @@ export struct ChatPage {
   }
 
   private hasPendingImageAttachment(): boolean {
-    return hasChatImageAttachment(this.pendingImageAttachmentUri);
+    return hasChatImageAttachments(this.pendingImageAttachmentList());
+  }
+
+  private pendingImageAttachmentList(): string[] {
+    return normalizeChatImageAttachments(this.pendingImageAttachmentUris);
+  }
+
+  private pendingImageAttachmentCount(): number {
+    return this.pendingImageAttachmentList().length;
   }
 
   private openDebugImagePreview(path: string): void {
@@ -426,7 +437,7 @@ export struct ChatPage {
       }
       return;
     }
-    if (!chatCanSendMessage(this.activeInput(), this.pendingImageAttachmentUri)) {
+    if (!chatCanSendMessageWithImages(this.activeInput(), this.pendingImageAttachmentList())) {
       return;
     }
     if (!this.isBusy()) {
@@ -440,6 +451,10 @@ export struct ChatPage {
   }
 
   private async runTaskAction(): Promise<void> {
+    if (!chatCanSubmitTaskWithImages(this.pendingImageAttachmentList())) {
+      showToastSafely('图片附件仅支持普通聊天发送，请先发送或清除附件', 1800);
+      return;
+    }
     if (this.activeInput().trim().length > 0 && !this.isBusy()) {
       this.dismissChatInput();
     }
@@ -465,14 +480,26 @@ export struct ChatPage {
   @Builder PendingImageAttachmentPreview() {
     if (this.hasPendingImageAttachment()) {
       Row() {
-        Image(this.pendingImageAttachmentUri)
-          .width(this.attachmentPreviewHeight() * 0.9)
-          .height(this.attachmentPreviewHeight())
-          .objectFit(ImageFit.Cover)
-          .borderRadius(10)
-          .backgroundColor('#F3F4F6')
+        Scroll() {
+          Row() {
+            ForEach(this.pendingImageAttachmentList(), (uri: string, index?: number) => {
+              Image(uri)
+                .width(this.attachmentPreviewHeight() * 0.78)
+                .height(this.attachmentPreviewHeight() * 0.86)
+                .objectFit(ImageFit.Cover)
+                .borderRadius(9)
+                .backgroundColor('#F3F4F6')
+                .margin({ right: 6 })
+            }, (uri: string, index?: number) => uri + ':' + String(index === undefined ? 0 : index))
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .layoutWeight(1)
+        .height(this.attachmentPreviewHeight())
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
         Column() {
-          Text('图片附件')
+          Text('图片附件 x' + String(this.pendingImageAttachmentCount()))
             .fontSize(12)
             .fontWeight(FontWeight.Medium)
             .fontColor('#111827')
@@ -483,7 +510,6 @@ export struct ChatPage {
             .margin({ top: 2 })
             .maxLines(1)
         }
-        .layoutWeight(1)
         .margin({ left: 10 })
         .alignItems(HorizontalAlign.Start)
         Text('×')
@@ -620,7 +646,7 @@ export struct ChatPage {
             .margin({ top: 24 })
             .backgroundColor(Color.Black)
 
-          Text('调试截图')
+          Text('图片预览')
             .fontSize(13)
             .fontColor('#E5E7EB')
             .margin({ top: 12 })

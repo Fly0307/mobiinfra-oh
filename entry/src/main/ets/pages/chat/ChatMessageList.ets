@@ -15,6 +15,7 @@ import { DigitalAvatarView } from './DigitalAvatarView';
 import {
   digitalAvatarContainerWidth,
   DigitalAvatarVisualState,
+  digitalAvatarVisualStateForMessageVoice,
   TEXT_AVATAR_SIZE
 } from './DigitalAvatarTypes';
 import {
@@ -231,7 +232,13 @@ struct ChatMessageAvatarBadge {
   @Prop modeMark: string = '';
   @Prop avatarForegroundUri: string = '';
   @Prop avatarMessageForegroundUri: string = '';
+  @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onToggleTaskTrace: (id: string) => void = () => {};
+
+  private avatarVisualState(): DigitalAvatarVisualState {
+    return digitalAvatarVisualStateForMessageVoice(this.voiceStatus, this.voiceActiveMessageId, this.messageId);
+  }
 
   @Builder AvatarContent() {
     ChatMessageAvatarView({
@@ -241,7 +248,7 @@ struct ChatMessageAvatarBadge {
       modeMark: this.modeMark,
       avatarForegroundUri: this.avatarForegroundUri,
       avatarMessageForegroundUri: this.avatarMessageForegroundUri,
-      visualState: 'idle'
+      visualState: this.avatarVisualState()
     })
   }
 
@@ -271,6 +278,8 @@ struct ChatMessageAvatarHeader {
   @Prop modeMark: string = '';
   @Prop avatarForegroundUri: string = '';
   @Prop avatarMessageForegroundUri: string = '';
+  @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onToggleTaskTrace: (id: string) => void = () => {};
 
   build() {
@@ -285,6 +294,8 @@ struct ChatMessageAvatarHeader {
           modeMark: this.modeMark,
           avatarForegroundUri: this.avatarForegroundUri,
           avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          voiceActiveMessageId: this.voiceActiveMessageId,
+          voiceStatus: this.voiceStatus,
           onToggleTaskTrace: this.onToggleTaskTrace
         })
       } else {
@@ -295,6 +306,8 @@ struct ChatMessageAvatarHeader {
           modeMark: this.modeMark,
           avatarForegroundUri: this.avatarForegroundUri,
           avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+          voiceActiveMessageId: this.voiceActiveMessageId,
+          voiceStatus: this.voiceStatus,
           onToggleTaskTrace: this.onToggleTaskTrace
         })
         Blank()
@@ -812,6 +825,8 @@ struct ChatMessageContentBlock {
         modeMark: this.modeMark,
         avatarForegroundUri: this.avatarForegroundUri,
         avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        voiceStatus: this.voiceStatus,
         onToggleTaskTrace: this.onToggleTaskTrace
       })
       ChatMessageBubbleBody({

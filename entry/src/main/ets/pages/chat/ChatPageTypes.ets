@@ -57,8 +57,9 @@ export function chatVoiceStatusIsCapturing(voiceStatus: string): boolean {
   return voiceStatus === 'listening';
 }
 
+// 播放态已由头像动效和气泡按钮表达，输入栏上方只保留录音、转写、合成等过程提示。
 export function chatVoiceStatusBarVisible(voiceStatus: string, _transcript: string = ''): boolean {
-  return voiceStatus !== 'idle';
+  return voiceStatus !== 'idle' && voiceStatus !== 'speaking';
 }
 
 // ASR 结果已经实时写入可编辑输入框，状态栏只承担状态提示，不再重复展示转写文本。

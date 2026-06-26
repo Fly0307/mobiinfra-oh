@@ -35,7 +35,7 @@ import {
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
-import { digitalAvatarContainerHeight } from './DigitalAvatarTypes';
+import { digitalAvatarContainerHeight, digitalAvatarVisualStateForVoiceStatus } from './DigitalAvatarTypes';
 import { VoiceInteractionStatus, voiceStatusLabel } from './VoiceInteractionTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
 
@@ -363,7 +363,7 @@ export struct ChatPage {
         avatarForegroundUri: this.avatarForegroundUri,
         fallbackText: 'H',
         fallbackColor: '#5968FF',
-        visualState: 'idle',
+        visualState: digitalAvatarVisualStateForVoiceStatus(this.voiceStatus),
         avatarSize: 'hero',
         debugSource: 'welcome-hero mode=' + this.chatMode
       })

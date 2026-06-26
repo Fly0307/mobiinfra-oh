@@ -23,6 +23,8 @@ import {
   DIGITAL_AVATAR_MESSAGE_WIDTH,
   HERO_TEXT_AVATAR_SIZE,
   TEXT_AVATAR_SIZE,
+  digitalAvatarVisualStateForMessageVoice,
+  digitalAvatarVisualStateForVoiceStatus,
   useDigitalAvatarForMessage
 } from '../main/ets/pages/chat/DigitalAvatarTypes';
 
@@ -57,6 +59,27 @@ export default function digitalAvatarTypesUnitTest() {
 
       expect(model.useDigitalAvatar).assertTrue();
       expect(model.visualState).assertEqual('speaking');
+    });
+
+    it('mapsVoiceStatusToAvatarVisualState', 0, () => {
+      expect(digitalAvatarVisualStateForVoiceStatus('idle')).assertEqual('idle');
+      expect(digitalAvatarVisualStateForVoiceStatus('listening')).assertEqual('listening');
+      expect(digitalAvatarVisualStateForVoiceStatus('transcribing')).assertEqual('listening');
+      expect(digitalAvatarVisualStateForVoiceStatus('thinking')).assertEqual('thinking');
+      expect(digitalAvatarVisualStateForVoiceStatus('synthesizing')).assertEqual('thinking');
+      expect(digitalAvatarVisualStateForVoiceStatus('speaking')).assertEqual('speaking');
+      expect(digitalAvatarVisualStateForVoiceStatus('paused')).assertEqual('interrupted');
+      expect(digitalAvatarVisualStateForVoiceStatus('error')).assertEqual('interrupted');
+    });
+
+    it('onlyAnimatesActiveMessageAvatarForVoiceOutput', 0, () => {
+      expect(digitalAvatarVisualStateForMessageVoice('speaking', 'assistant-1', 'assistant-1')).assertEqual('speaking');
+      expect(digitalAvatarVisualStateForMessageVoice('synthesizing', 'assistant-1', 'assistant-1'))
+        .assertEqual('thinking');
+      expect(digitalAvatarVisualStateForMessageVoice('paused', 'assistant-1', 'assistant-1'))
+        .assertEqual('interrupted');
+      expect(digitalAvatarVisualStateForMessageVoice('speaking', 'assistant-1', 'assistant-2')).assertEqual('idle');
+      expect(digitalAvatarVisualStateForMessageVoice('speaking', '', 'assistant-1')).assertEqual('idle');
     });
 
     it('userMessageKeepsTextAvatar', 0, () => {

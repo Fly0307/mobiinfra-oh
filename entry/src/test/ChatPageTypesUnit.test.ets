@@ -71,6 +71,7 @@ export default function chatPageTypesUnitTest() {
       expect(chatVoiceStatusBarVisible('idle')).assertFalse();
       expect(chatVoiceStatusBarVisible('idle', '已经写入输入框')).assertFalse();
       expect(chatVoiceStatusBarVisible('transcribing', '已经写入输入框')).assertTrue();
+      expect(chatVoiceStatusBarVisible('speaking')).assertFalse();
       expect(chatVoiceStatusDetailText('transcribing', '已经写入输入框')).assertEqual('');
     });
 

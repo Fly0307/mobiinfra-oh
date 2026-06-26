@@ -148,6 +148,56 @@ export struct DigitalAvatarView {
     return this.avatarSize === 'hero' ? -12 : -2;
   }
 
+  private waveBarWidth(): number {
+    return this.avatarSize === 'hero' ? 5 : 3;
+  }
+
+  private waveBarGap(): number {
+    return this.avatarSize === 'hero' ? 5 : 3;
+  }
+
+  private waveBarRadius(): number {
+    return this.avatarSize === 'hero' ? 3 : 2;
+  }
+
+  private waveTranslateX(): number {
+    return this.avatarSize === 'hero' ? 55 : 19;
+  }
+
+  private waveTranslateY(): number {
+    return this.avatarSize === 'hero' ? -10 : -2;
+  }
+
+  private waveBarMaxHeight(): number {
+    return this.avatarSize === 'hero' ? 28 : 15;
+  }
+
+  private waveBarScaleY(index: number): number {
+    let small: number = this.avatarSize === 'hero' ? 12 : 7;
+    let large: number = this.waveBarMaxHeight();
+    let targetHeight: number = 0;
+    if (this.visualState === 'interrupted') {
+      targetHeight = small;
+    } else if (this.visualState === 'speaking') {
+      if (index === 1) {
+        targetHeight = this.thinkingPulse ? large : small;
+      } else {
+        targetHeight = this.thinkingPulse ? small : large;
+      }
+    }
+    return targetHeight > 0 ? targetHeight / large : 0.01;
+  }
+
+  private waveOpacity(): number {
+    if (this.visualState === 'speaking') {
+      return this.thinkingPulse ? 1 : 0.72;
+    }
+    if (this.visualState === 'interrupted') {
+      return 0.5;
+    }
+    return 0;
+  }
+
   private tapLiftY(): number {
     return this.avatarSize === 'hero' ? -16 : -10;
   }
@@ -194,6 +244,9 @@ export struct DigitalAvatarView {
   }
 
   private ringScale(): number {
+    if (this.visualState === 'interrupted') {
+      return 1.04;
+    }
     if (!this.isAnimatedVoiceState()) {
       return 0.92;
     }
@@ -204,6 +257,9 @@ export struct DigitalAvatarView {
   }
 
   private ringOpacity(): number {
+    if (this.visualState === 'interrupted') {
+      return 0.42;
+    }
     if (!this.isAnimatedVoiceState()) {
       return 0.22;
     }
@@ -219,6 +275,14 @@ export struct DigitalAvatarView {
   private shadowScale(): number {
     let pulseScale: number = this.isAnimatedVoiceState() && this.thinkingPulse ? 0.92 : 1;
     return this.tapShadowScale * pulseScale;
+  }
+
+  private fallbackRingSize(): number {
+    return this.fallbackSize();
+  }
+
+  private fallbackRingRadius(): number {
+    return this.fallbackSize() / 2;
   }
 
   // 思考态仅通过脉冲状态驱动 transform/opacity，避免频繁触发布局计算。
@@ -260,7 +324,7 @@ export struct DigitalAvatarView {
   }
 
   private syncThinkingTimer(): void {
-    if (this.isAnimatedVoiceState() && this.hasForegroundImage()) {
+    if (this.isAnimatedVoiceState() && (this.hasForegroundImage() || this.fallbackText.length > 0)) {
       this.startThinkingTimer();
       return;
     }
@@ -318,18 +382,32 @@ export struct DigitalAvatarView {
   }
 
   @Builder FallbackAvatar() {
-    Text(this.fallbackText)
-      .fontSize(this.fallbackFontSize())
-      .fontWeight(FontWeight.Bold)
-      .fontColor(Color.White)
-      .width(this.fallbackSize())
-      .height(this.fallbackSize())
-      .textAlign(TextAlign.Center)
-      .backgroundColor(this.fallbackColor)
-      .borderRadius(this.fallbackRadius())
-      .translate({ x: 0, y: this.tapTranslateY })
-      .scale({ x: this.tapScale, y: this.tapScale })
-      .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
+    // 无前景图时也保留固定尺寸的语音反馈层，避免图片失败后状态不可见。
+    Stack({ alignContent: Alignment.Center }) {
+      Row()
+        .width(this.fallbackRingSize())
+        .height(this.fallbackRingSize())
+        .backgroundColor('#335968FF')
+        .borderRadius(this.fallbackRingRadius())
+        .opacity(this.ringOpacity())
+        .scale({ x: this.ringScale(), y: this.ringScale() })
+        .animation({ duration: 760, curve: Curve.EaseInOut });
+
+      Text(this.fallbackText)
+        .fontSize(this.fallbackFontSize())
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(this.fallbackSize())
+        .height(this.fallbackSize())
+        .textAlign(TextAlign.Center)
+        .backgroundColor(this.fallbackColor)
+        .borderRadius(this.fallbackRadius())
+        .translate({ x: 0, y: this.tapTranslateY })
+        .scale({ x: this.foregroundScale(), y: this.foregroundScale() })
+        .animation({ duration: this.tapForegroundAnimationDuration(), curve: Curve.EaseOut });
+    }
+    .width(this.fallbackSize())
+    .height(this.fallbackSize());
   }
 
   @Builder ForegroundAvatar() {
@@ -383,6 +461,32 @@ export struct DigitalAvatarView {
         .borderRadius(this.highlightRadius())
         .translate({ x: this.highlightTranslateX(), y: this.highlightTranslateY() })
         .opacity(0.32);
+
+      Row({ space: this.waveBarGap() }) {
+        Row()
+          .width(this.waveBarWidth())
+          .height(this.waveBarMaxHeight())
+          .backgroundColor('#5968FF')
+          .borderRadius(this.waveBarRadius())
+          .scale({ x: 1, y: this.waveBarScaleY(0) })
+        Row()
+          .width(this.waveBarWidth())
+          .height(this.waveBarMaxHeight())
+          .backgroundColor('#5968FF')
+          .borderRadius(this.waveBarRadius())
+          .scale({ x: 1, y: this.waveBarScaleY(1) })
+        Row()
+          .width(this.waveBarWidth())
+          .height(this.waveBarMaxHeight())
+          .backgroundColor('#5968FF')
+          .borderRadius(this.waveBarRadius())
+          .scale({ x: 1, y: this.waveBarScaleY(2) })
+      }
+      .height(this.waveBarMaxHeight())
+      .alignItems(VerticalAlign.Center)
+      .translate({ x: this.waveTranslateX(), y: this.waveTranslateY() })
+      .opacity(this.waveOpacity())
+      .animation({ duration: 360, curve: Curve.EaseInOut });
     }
     .width(this.frameWidth())
     .height(this.frameHeight());

@@ -3,14 +3,23 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
+  chatCanSendMessageWithImages,
+  chatCloudUserContentWithImages,
+  chatMessageTextForSendWithImages,
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
+} from './chat/ChatAttachmentPolicy';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -21,10 +30,18 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   buildAssistantStreamingRenderContent,
+  chatMessageImagePaths,
   createChatMessage,
   createChatStreamThinkingState,
-  parseChatStreamThinkingDelta
+  parseChatStreamThinkingDelta,
+  splitAssistantThinkingContent
 } from './chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_DISPLAY_TICK_MS,
+  ChatStreamDisplayPacer,
+  ChatStreamDisplaySnapshot,
+  createEmptyChatStreamDisplaySnapshot
+} from './chat/ChatStreamDisplayPacer';
 import {
   CHAT_CONTEXT_COMPRESSION_NOTICE,
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -94,6 +111,7 @@ import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
+import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -311,6 +329,7 @@ struct Index {
   @State output: string = '请先检查服务器连接';
   @State chatHistory: string = '';
   @State userInput: string = '';
+  @State localPendingChatImageUris: string[] = [];
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -377,6 +396,7 @@ struct Index {
   @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
+  @State cloudPendingChatImageUris: string[] = [];
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
@@ -425,6 +445,11 @@ struct Index {
   private cloudStreamPendingMessageId: string = '';
   private cloudStreamPendingContent: string = '';
   private cloudStreamPendingTrace: string[] = [];
+  @State cloudStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private cloudStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private cloudStreamDisplayTimerId: number = -1;
+  private cloudStreamDisplayGeneration: number = 0;
+  private cloudStreamDisplayVersion: number = 0;
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -438,6 +463,40 @@ struct Index {
       mode: this.chatMode,
       activeSession: null
     };
+  }
+
+  private chatMessagesForDisplay(): ChatMessage[] {
+    let snapshot = this.cloudStreamDisplaySnapshot;
+    if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
+      return this.activeChatMessages;
+    }
+    let messages: ChatMessage[] = [];
+    let matched = false;
+    let parts = splitAssistantThinkingContent(snapshot.visibleContent);
+    for (let i = 0; i < this.activeChatMessages.length; i++) {
+      let message = this.activeChatMessages[i];
+      if (message.id !== snapshot.messageId) {
+        messages.push(message);
+        continue;
+      }
+      matched = true;
+      messages.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: parts.content,
+        thinkingContent: parts.thinkingContent,
+        thinkingCollapsed: message.thinkingCollapsed,
+        trace: snapshot.visibleTrace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: message.imagePath,
+        imagePaths: chatMessageImagePaths(message),
+        streamingActive: snapshot.active,
+        streamingVersion: this.cloudStreamDisplayVersion
+      });
+    }
+    return matched ? messages : this.activeChatMessages;
   }
 
   private applyChatSessionViewState(state: ChatSessionViewState): void {
@@ -525,13 +584,28 @@ struct Index {
     }
   }
 
-  private resetCloudStreamMessageUpdate(): void {
+  private clearCloudStreamDisplayTimer(): void {
+    if (this.cloudStreamDisplayTimerId !== -1) {
+      clearTimeout(this.cloudStreamDisplayTimerId);
+      this.cloudStreamDisplayTimerId = -1;
+    }
+  }
+
+  private clearCloudStreamPendingPersistence(): void {
     this.clearCloudStreamFlushTimer();
-    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
     this.cloudStreamPendingSessionId = '';
     this.cloudStreamPendingMessageId = '';
     this.cloudStreamPendingContent = '';
     this.cloudStreamPendingTrace = [];
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamPendingPersistence();
+    this.clearCloudStreamDisplayTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamDisplayGeneration += 1;
+    this.cloudStreamDisplayPacer.reset();
+    this.publishCloudStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
   }
 
   private flushCloudStreamMessageUpdate(): void {
@@ -548,8 +622,43 @@ struct Index {
     this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
   }
 
+  private publishCloudStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.cloudStreamDisplayVersion += 1;
+    this.cloudStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleCloudStreamDisplayFrame(): void {
+    if (this.cloudStreamDisplayTimerId !== -1 || !this.cloudStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.cloudStreamDisplayGeneration;
+    this.cloudStreamDisplayTimerId = setTimeout(() => {
+      this.cloudStreamDisplayTimerId = -1;
+      if (generation !== this.cloudStreamDisplayGeneration) {
+        return;
+      }
+      this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.advanceFrame());
+      this.scheduleCloudStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private updateCloudStreamDisplayTarget(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.setTarget(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+  }
+
+  private finishCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string, trace: string[]): void {
+    this.clearCloudStreamPendingPersistence();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.beginFinish(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
   private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
     trace: string[]): void {
+    this.updateCloudStreamDisplayTarget(sessionId, messageId, content, trace);
     this.cloudStreamPendingSessionId = sessionId;
     this.cloudStreamPendingMessageId = messageId;
     this.cloudStreamPendingContent = content;
@@ -931,6 +1040,62 @@ struct Index {
     showToastSafely('会话已删除', 1500);
   }
 
+  private normalizeChatSessionRenameTitle(title: string): string {
+    let normalizedTitle = title.trim();
+    return normalizedTitle.length > 40 ? normalizedTitle.substring(0, 40) : normalizedTitle;
+  }
+
+  private async renameChatSession(sessionId: string, title: string): Promise<boolean> {
+    if (this.blockChatSessionMutationIfBusy('重命名会话')) {
+      return false;
+    }
+    let normalizedTitle = this.normalizeChatSessionRenameTitle(title);
+    if (normalizedTitle.length === 0) {
+      showToastSafely('名称不能为空', 1400);
+      return false;
+    }
+    let state = ChatSessionController.renameSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      normalizedTitle);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    let saved = false;
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId && state.sessions[i].customTitle === normalizedTitle) {
+        saved = true;
+        break;
+      }
+    }
+    if (!saved) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    showToastSafely('会话已重命名', 1500);
+    return true;
+  }
+
+  private async toggleChatSessionPinned(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('置顶会话')) {
+      return;
+    }
+    let wasPinned = false;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        wasPinned = this.chatSessions[i].pinned === true;
+        break;
+      }
+    }
+    let state = ChatSessionController.toggleSessionPinned(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('会话置顶状态更新失败', 1500);
+      return;
+    }
+    showToastSafely(wasPinned ? '已取消置顶' : '已置顶', 1500);
+  }
+
   private toggleActiveTaskTrace(messageId: string): void {
     let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
     this.applyChatSessionViewState(state);
@@ -1201,6 +1366,178 @@ struct Index {
       return normalized.substring('file://'.length);
     }
     return normalized;
+  }
+
+  private activePendingChatImageUris(): string[] {
+    let source = this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? this.localPendingChatImageUris :
+      this.cloudPendingChatImageUris;
+    return normalizeChatImageAttachments(source);
+  }
+
+  private setActivePendingChatImageUris(uris: string[]): void {
+    let normalized = normalizeChatImageAttachments(uris);
+    if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
+      this.localPendingChatImageUris = normalized;
+      return;
+    }
+    this.cloudPendingChatImageUris = normalized;
+  }
+
+  private clearActivePendingChatImageUris(): void {
+    this.setActivePendingChatImageUris([]);
+  }
+
+  private remainingChatImageAttachmentCount(): number {
+    return CHAT_IMAGE_ATTACHMENT_MAX_COUNT - this.activePendingChatImageUris().length;
+  }
+
+  private appendPickedChatImageAttachments(uris: string[], sourceLabel: string): void {
+    let picked = normalizeChatImageAttachments(uris);
+    if (picked.length === 0) {
+      return;
+    }
+    let current = this.activePendingChatImageUris();
+    let combined = normalizeChatImageAttachments(current.concat(picked));
+    let addedCount = combined.length - current.length;
+    if (addedCount <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    this.setActivePendingChatImageUris(combined);
+    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张' : '';
+    showToastSafely('已添加' + String(addedCount) + '张' + sourceLabel + '图片，将随下一条消息发送' + limitHint, 1800);
+  }
+
+  private setPickedChatImageAttachment(uri: string, sourceLabel: string): void {
+    this.appendPickedChatImageAttachments([uri], sourceLabel);
+  }
+
+  private chatCameraCapturePath(): string {
+    if (this.filesDir.length === 0) {
+      throw new Error('文件目录未初始化');
+    }
+    return this.filesDir + '/chat-camera-' + Date.now().toString() + '.jpg';
+  }
+
+  private prepareChatCameraSaveUri(savePath: string): string {
+    let file = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      return fileUri.getUriFromPath(savePath);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private removeChatCameraCapture(path: string): void {
+    if (path.length === 0) {
+      return;
+    }
+    try {
+      fs.unlinkSync(path);
+    } catch (e) {
+    }
+  }
+
+  // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
+  private async takeChatImageAttachment(): Promise<void> {
+    if (this.remainingChatImageAttachmentCount() <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    let savePath = '';
+    try {
+      savePath = this.chatCameraCapturePath();
+      let saveUri = this.prepareChatCameraSaveUri(savePath);
+      let pickerProfile: cameraPicker.PickerProfile = {
+        cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
+        saveUri: saveUri
+      };
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('无法获取页面上下文');
+      }
+      let result = await cameraPicker.pick(
+        hostContext,
+        [cameraPicker.PickerMediaType.PHOTO],
+        pickerProfile
+      );
+      if (result.resultCode !== 0 || result.mediaType !== cameraPicker.PickerMediaType.PHOTO) {
+        this.removeChatCameraCapture(savePath);
+        return;
+      }
+      let fallbackUri = pickerProfile.saveUri === undefined ? saveUri : pickerProfile.saveUri;
+      let attachmentUri = result.resultUri.trim().length > 0 ? result.resultUri : fallbackUri;
+      this.setPickedChatImageAttachment(attachmentUri, '拍照');
+    } catch (e) {
+      this.removeChatCameraCapture(savePath);
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'take image attachment failed', err);
+      showToastSafely('拍照失败：' + err.message, 1800);
+    }
+  }
+
+  private async pickChatAlbumImageAttachment(): Promise<void> {
+    try {
+      let remainingCount = this.remainingChatImageAttachmentCount();
+      if (remainingCount <= 0) {
+        showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+        return;
+      }
+      let picker = new GalleryPhotoPicker();
+      let uris = await picker.selectImageUris(remainingCount);
+      if (uris.length === 0) {
+        return;
+      }
+      this.appendPickedChatImageAttachments(uris, '相册');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'pick image attachment failed', err);
+      showToastSafely('选择图片失败：' + err.message, 1800);
+    }
+  }
+
+  private adoptedChatImagesForSession(sessionId: string, imageUris: string[]): string[] {
+    let normalized = normalizeChatImageAttachments(imageUris);
+    let adopted: string[] = [];
+    for (let i = 0; i < normalized.length; i++) {
+      adopted.push(ChatSessionStorage.adoptImageForSession(this.filesDir, sessionId, normalized[i]));
+    }
+    return adopted;
+  }
+
+  // 当前请求的图片只注入最后一条用户消息，历史图片仍按纯文本摘要/上下文处理，避免上下文膨胀。
+  private async attachCurrentImagesToCloudContext(messages: CloudChatMessage[],
+    currentUserMessage: ChatMessage): Promise<CloudChatMessage[]> {
+    let imagePaths = chatMessageImagePaths(currentUserMessage);
+    if (!hasChatImageAttachments(imagePaths)) {
+      return messages;
+    }
+    let imageDataUrls: string[] = [];
+    for (let i = 0; i < imagePaths.length; i++) {
+      imageDataUrls.push(await this.imageUriToJpegDataUrl(imagePaths[i]));
+    }
+    let targetIndex = messages.length - 1;
+    if (targetIndex < 0) {
+      return messages;
+    }
+    if (messages[targetIndex].role !== 'user') {
+      targetIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      return messages;
+    }
+    let next = messages.slice();
+    next[targetIndex] = {
+      role: 'user',
+      content: chatCloudUserContentWithImages(currentUserMessage.content, imageDataUrls)
+    };
+    return next;
   }
 
   private async saveHomeAvatarReferencePhoto(sourceImage: string): Promise<string> {
@@ -3548,22 +3885,25 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
+    let pendingImageUris = this.cloudPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.cloudUserInput, pendingImageUris) || this.cloudThinking) {
       return;
     }
-    let task = this.cloudUserInput.trim();
-    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
-    this.cloudThinking = true;
-    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
-      this.cloudThinking = false;
       return;
     }
-    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
-      new Date().getTime());
+    let task = chatMessageTextForSendWithImages(this.cloudUserInput, pendingImageUris);
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudPendingChatImageUris = [];
+    this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let chatSessionId = activeSession.id;
+    let adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, pendingImageUris);
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris);
     this.appendChatMessageToExactSession(chatSessionId, userMessage);
     let assistantMessageId = this.nextChatMessageId('assistant');
     let assistantMessageCreated = false;
@@ -3586,7 +3926,7 @@ struct Index {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
       let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = contextPreparation.messages;
+      let contextMessages = await this.attachCurrentImagesToCloudContext(contextPreparation.messages, userMessage);
       if (contextPreparation.summaryUpdated) {
         this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
           contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
@@ -3638,24 +3978,24 @@ struct Index {
         }
       });
       let response = result.content;
-      this.resetCloudStreamMessageUpdate();
-      let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
+      let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
+      this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
       let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
-      this.resetCloudStreamMessageUpdate();
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+          this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId,
             this.cancelledCloudChatContent(currentStreamRenderContent()), toolTraceLines);
         } else {
+          this.resetCloudStreamMessageUpdate();
           this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
             this.cancelledCloudChatContent(currentStreamRenderContent()), new Date().getTime()));
         }
         this.appendCloudLog('ReAct 云端聊天已取消。');
       } else {
+        this.resetCloudStreamMessageUpdate();
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + err.message,
             toolTraceLines);
@@ -3666,7 +4006,7 @@ struct Index {
         this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
       }
     } finally {
-      this.resetCloudStreamMessageUpdate();
+      this.clearCloudStreamPendingPersistence();
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
     }
@@ -4385,28 +4725,39 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    let msg = this.userInput.trim();
-    if (msg.length === 0 || this.isThinking) {
+    let pendingImageUris = this.localPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
       return;
     }
-    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
-    this.ensureActiveChatSession();
+    if (hasChatImageAttachments(pendingImageUris)) {
+      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
+      return;
+    }
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      return;
+    }
+    let chatSessionId = activeSession.id;
+    let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
     let assistantMessageId = this.nextChatMessageId('assistant');
-    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
-      msg, new Date().getTime()));
-    this.appendActiveChatMessage(createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
-      this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.localPendingChatImageUris = [];
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
+      CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     let streamedReply = '';
     let lastStreamUpdateAt = 0;
     let streamUpdateTimerId = -1;
+    // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
     let flushStreamReply = (): void => {
       if (streamedReply.length === 0) {
         return;
       }
       lastStreamUpdateAt = new Date().getTime();
-      this.updateActiveChatMessageContent(assistantMessageId, streamedReply);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedReply);
     };
     let scheduleStreamReplyUpdate = (): void => {
       let now = new Date().getTime();
@@ -4430,11 +4781,11 @@ struct Index {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
         if (!loaded) {
-          this.updateActiveChatMessageContent(assistantMessageId, '[错误] 本地模型加载失败');
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
           return;
         }
-        this.updateActiveChatMessageContent(assistantMessageId, '思考中...');
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
       let reply: string = await mnnllm.chat(msg, (token: string) => {
         streamedReply += token;
@@ -4442,12 +4793,13 @@ struct Index {
       });
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
+        streamUpdateTimerId = -1;
       }
-      this.updateActiveChatMessageContent(assistantMessageId, reply);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + message);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
       if (streamUpdateTimerId !== -1) {
@@ -4714,9 +5066,10 @@ struct Index {
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
-            messages: this.activeChatMessages,
+            messages: this.chatMessagesForDisplay(),
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+            pendingImageAttachmentUris: this.activePendingChatImageUris(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
@@ -4725,6 +5078,10 @@ struct Index {
             onCreateSession: (mode: string) => { this.createChatSession(mode); },
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.renameChatSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
@@ -4732,6 +5089,9 @@ struct Index {
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
+            onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }

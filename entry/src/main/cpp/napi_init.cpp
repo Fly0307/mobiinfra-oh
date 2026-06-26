@@ -620,15 +620,20 @@ static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
 
 // 每个 token chunk 都通过 TSFN 切回 JS 主线程，用于更新浮窗的流式文本。
 static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
-    if (data) {
-        std::string* token = static_cast<std::string*>(data);
-        napi_value argv;
-        napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
-        napi_value undefined;
-        napi_get_undefined(env, &undefined);
-        napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
-        delete token;
+    if (!data) {
+        return;
     }
+    std::string* token = static_cast<std::string*>(data);
+    if (!env || !js_callback) {
+        delete token;
+        return;
+    }
+    napi_value argv;
+    napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
+    delete token;
 }
 
 // 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。

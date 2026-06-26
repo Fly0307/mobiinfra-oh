@@ -8,6 +8,7 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   chatMessageImagePath,
+  chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
   splitAssistantThinkingContent,
@@ -132,7 +133,8 @@ export class ChatSessionController {
       trace: trace,
       collapsed: lastMessage.collapsed,
       createdAt: lastMessage.createdAt,
-      imagePath: chatMessageImagePath(lastMessage)
+      imagePath: chatMessageImagePath(lastMessage),
+      imagePaths: chatMessageImagePaths(lastMessage)
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();
@@ -169,7 +171,8 @@ export class ChatSessionController {
       trace: resultMessage.trace.slice(),
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
-      imagePath: sessionImagePath
+      imagePath: sessionImagePath,
+      imagePaths: [sessionImagePath]
     };
     session.messages = messages;
     session.updatedAt = new Date().getTime();
@@ -243,6 +246,40 @@ export class ChatSessionController {
       return ChatSessionController.stateFromSession(filesDir, session);
     }
     return ChatSessionController.stateFromSession(filesDir, nextSession);
+  }
+
+  static renameSession(filesDir: string, state: ChatSessionViewState, id: string,
+    title: string): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.renameSession(filesDir, id, title);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
+  static toggleSessionPinned(filesDir: string, state: ChatSessionViewState, id: string,
+    now: number = new Date().getTime()): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let current = ChatSessionStorage.loadSession(filesDir, id);
+    if (current === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let session = ChatSessionStorage.setSessionPinned(filesDir, id, current.pinned !== true, now);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
   }
 
   static toggleTaskTrace(filesDir: string, state: ChatSessionViewState, messageId: string): ChatSessionViewState {
@@ -320,7 +357,8 @@ export class ChatSessionController {
         trace: trace === undefined ? message.trace.slice() : trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       };
       changed = true;
       break;

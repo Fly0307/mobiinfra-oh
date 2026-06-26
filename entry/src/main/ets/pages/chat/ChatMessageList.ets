@@ -19,10 +19,17 @@ import {
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 import { AppLogger } from '../../utils/AppLogger';
+import {
+  ChatBottomOverlayKind,
+  chatBottomOverlayKind,
+  chatBottomSpacerIndex,
+  chatLatestContentIndex,
+  chatMessageListBottomSpacerHeight,
+  chatStreamFollowTargetIndex,
+  THINKING_OVERLAY_GAP
+} from './ChatMessageScrollPolicy';
 
-const STREAM_FOLLOW_STEP: number = 96;
-const STREAM_FOLLOW_DELAY_MS: number = 40;
-const STREAM_FOLLOW_ANIMATION_MS: number = 120;
+const STREAM_FOLLOW_DELAY_MS: number = 150;
 const STRUCTURAL_SCROLL_FRAME_DELAY_MS: number = 16;
 const STRUCTURAL_SCROLL_SETTLE_MS: number = 80;
 const BACK_TO_BOTTOM_BUTTON_GAP: number = 12;
@@ -32,7 +39,6 @@ const MESSAGE_ROW_TOP_MARGIN: number = 14;
 const FIRST_FRAME_FULL_MARKDOWN_COUNT: number = 8;
 const LIGHTWEIGHT_PREVIEW_MAX_LENGTH: number = 90;
 const MESSAGE_LIST_CACHED_COUNT: number = 6;
-const MESSAGE_LIST_BOTTOM_SPACER_HEIGHT: number = 150;
 
 function chatIsUserRole(role: ChatMessageRole): boolean {
   return role === 'user';
@@ -126,6 +132,10 @@ function chatMarkdownVariantFor(role: ChatMessageRole): MarkdownViewVariant {
   return chatIsUserRole(role) ? 'chat_user' : 'chat_assistant';
 }
 
+function chatContentTextColorFor(role: ChatMessageRole): string {
+  return chatIsUserRole(role) ? '#FFFFFF' : '#2F3645';
+}
+
 function chatTraceTitle(detail: ChatMessageDetailUiModel): string {
   let title = markdownTitleText(detail.content);
   if (title.length > 0) {
@@ -142,7 +152,7 @@ function chatLightweightPreviewText(kind: ChatMessageKind, detail: ChatMessageDe
   if (preview.length > 0) {
     return preview;
   }
-  if (detail.imagePath.length > 0) {
+  if (detail.imagePaths.length > 0) {
     return '图片消息';
   }
   if (detail.thinkingContent.length > 0) {
@@ -372,9 +382,18 @@ struct ChatMarkdownContentView {
 
   build() {
     if (chatHasVisibleContent(this.detail)) {
-      MarkdownView({ text: this.detail.content, variant: chatMarkdownVariantFor(this.role) })
-        .width('100%')
-        .margin({ top: 6 })
+      if (this.detail.streamingActive) {
+        Text(this.detail.content)
+          .fontSize(15)
+          .fontColor(chatContentTextColorFor(this.role))
+          .lineHeight(22)
+          .width('100%')
+          .margin({ top: 6 })
+      } else {
+        MarkdownView({ text: this.detail.content, variant: chatMarkdownVariantFor(this.role) })
+          .width('100%')
+          .margin({ top: 6 })
+      }
     }
   }
 }
@@ -385,17 +404,23 @@ struct ChatMessageImagePreviewView {
   onPreviewDebugImage: (path: string) => void = () => {};
 
   build() {
-    if (this.detail.imagePath.length > 0) {
-      Image(this.detail.imagePath)
-        .width(96)
-        .height(132)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Black)
-        .borderRadius(12)
-        .margin({ top: 12 })
-        .onClick(() => {
-          this.onPreviewDebugImage(this.detail.imagePath);
-        })
+    if (this.detail.imagePaths.length > 0) {
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(this.detail.imagePaths, (path: string, index?: number) => {
+          Image(path)
+            .width(92)
+            .height(118)
+            .objectFit(ImageFit.Contain)
+            .backgroundColor(Color.Black)
+            .borderRadius(12)
+            .margin({ right: 8, bottom: 8 })
+            .onClick(() => {
+              this.onPreviewDebugImage(path);
+            })
+        }, (path: string, index?: number) => path + ':' + String(index === undefined ? 0 : index))
+      }
+      .width('100%')
+      .margin({ top: 12 })
     }
   }
 }
@@ -894,7 +919,9 @@ export struct ChatMessageList {
   }
 
   private scheduleStreamFollow(): void {
-    this.clearStreamFollowTimer();
+    if (this.streamFollowTimerId !== -1) {
+      return;
+    }
     this.streamFollowTimerId = setTimeout(() => {
       this.streamFollowTimerId = -1;
       this.followStreamingContent();
@@ -916,10 +943,15 @@ export struct ChatMessageList {
   }
 
   private latestContentIndex(): number {
-    if (this.thinking) {
-      return this.messages.length;
-    }
-    return this.messages.length - 1;
+    return chatLatestContentIndex(this.messages.length);
+  }
+
+  private bottomSpacerIndex(): number {
+    return chatBottomSpacerIndex(this.messages.length);
+  }
+
+  private streamFollowTargetIndex(): number {
+    return chatStreamFollowTargetIndex(this.messages.length);
   }
 
   private scrollToLatestContentIndex(reason: string): void {
@@ -948,20 +980,11 @@ export struct ChatMessageList {
       return;
     }
     try {
-      let offset = this.messageScroller.currentOffset();
-      this.messageScroller.scrollTo({
-        xOffset: offset.xOffset,
-        yOffset: Math.max(0, offset.yOffset + STREAM_FOLLOW_STEP),
-        animation: {
-          duration: STREAM_FOLLOW_ANIMATION_MS,
-          curve: Curve.Smooth,
-          canOverScroll: false
-        },
-        canOverScroll: false
-      });
+      this.messageScroller.scrollToIndex(this.streamFollowTargetIndex(), false, ScrollAlign.END);
       this.logScrollDebug('stream-follow');
     } catch (e) {
       AppLogger.warnCause('Chat.Scroll', 'stream-follow failed', e as Error);
+      this.scrollToBottomEdge('stream-follow-fallback');
     }
   }
 
@@ -973,7 +996,7 @@ export struct ChatMessageList {
 
   private onScrollWillMove(scrollOffset: number, _scrollState: ScrollState, scrollSource: ScrollSource): void {
     this.onScrollContent(scrollOffset);
-    if (this.autoFollowEnabled && this.isUserScrollSource(scrollSource) && scrollOffset > 0) {
+    if (this.autoFollowEnabled && this.isUserScrollSource(scrollSource) && Math.abs(scrollOffset) > 0.5) {
       this.completeSessionFirstFrame('user-scroll');
       this.autoFollowEnabled = false;
       this.backToBottomVisible = true;
@@ -1020,6 +1043,18 @@ export struct ChatMessageList {
 
   private backToBottomButtonBottomOffset(): number {
     return this.bottomOverlayInset + BACK_TO_BOTTOM_BUTTON_GAP;
+  }
+
+  private thinkingOverlayBottomOffset(): number {
+    return this.bottomOverlayInset + THINKING_OVERLAY_GAP;
+  }
+
+  private messageListBottomSpacerHeight(): number {
+    return chatMessageListBottomSpacerHeight(this.bottomOverlayInset, this.thinking);
+  }
+
+  private bottomOverlayKind(): ChatBottomOverlayKind {
+    return chatBottomOverlayKind(this.thinking, this.backToBottomVisible);
   }
 
   private messageAvatarForegroundUri(): string {
@@ -1084,7 +1119,15 @@ export struct ChatMessageList {
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)
-    .margin({ top: 14 })
+  }
+
+  @Builder ThinkingOverlay() {
+    Row() {
+      this.ThinkingRow()
+    }
+    .width('100%')
+    .margin({ bottom: this.thinkingOverlayBottomOffset() })
+    .hitTestBehavior(HitTestMode.None)
   }
 
   build() {
@@ -1111,17 +1154,10 @@ export struct ChatMessageList {
           .selectable(false)
         }, (message: ChatMessageUiModel, _index: number) => this.messageDataSource.keyFor(message))
 
-        if (this.thinking) {
-          ListItem() {
-            this.ThinkingRow()
-          }
-          .selectable(false)
-        }
-
         ListItem() {
           Column() {
             Blank()
-              .height(MESSAGE_LIST_BOTTOM_SPACER_HEIGHT)
+              .height(this.messageListBottomSpacerHeight())
           }
           .width('100%')
         }
@@ -1136,8 +1172,11 @@ export struct ChatMessageList {
       .cachedCount(MESSAGE_LIST_CACHED_COUNT)
       .height('100%')
       .width('100%')
-      if (this.backToBottomVisible) {
+      if (this.bottomOverlayKind() === 'back_to_bottom') {
         this.BackToBottomButton()
+      }
+      if (this.bottomOverlayKind() === 'thinking') {
+        this.ThinkingOverlay()
       }
     }
     .layoutWeight(1)

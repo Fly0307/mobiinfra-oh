@@ -21,6 +21,7 @@ import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 import voiceInteractionUnitTest from './VoiceInteractionUnit.test';
 import mimoVoiceClientUnitTest from './MimoVoiceClientUnit.test';
+import harmonySpeechRecognizerAsrProviderUnitTest from './HarmonySpeechRecognizerAsrProviderUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -46,4 +47,5 @@ export default function testsuite() {
   dateUtilsUnitTest();
   voiceInteractionUnitTest();
   mimoVoiceClientUnitTest();
+  harmonySpeechRecognizerAsrProviderUnitTest();
 }

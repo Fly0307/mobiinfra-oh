@@ -59,6 +59,8 @@ export default function chatPageTypesUnitTest() {
     it('expandsComposerHeightForMultiLineDrafts', 0, () => {
       expect(chatComposerLineCount('短消息')).assertEqual(1);
       expect(chatComposerBarHeight('短消息')).assertEqual(58);
+      expect(chatComposerLineCount('已完成修复审核并且提交')).assertEqual(2);
+      expect(chatComposerBarHeight('已完成修复审核并且提交')).assertEqual(80);
       expect(chatComposerLineCount('第一行\n第二行')).assertEqual(2);
       expect(chatComposerBarHeight('第一行\n第二行')).assertEqual(80);
       expect(chatComposerLineCount('请帮我整理今天截图里的关键信息，并按照时间线、待办事项、需要继续跟进的问题分别输出')).assertEqual(4);

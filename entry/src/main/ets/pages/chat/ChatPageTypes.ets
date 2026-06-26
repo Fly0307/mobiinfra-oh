@@ -4,7 +4,7 @@ export const CLOUD_AGENT_DEFAULT_OUTPUT: string = '请先配置 Planner 和 Deci
 export const CHAT_COMPOSER_MIN_HEIGHT: number = 58;
 export const CHAT_COMPOSER_LINE_HEIGHT: number = 22;
 export const CHAT_COMPOSER_MAX_LINES: number = 4;
-export const CHAT_COMPOSER_CHARS_PER_LINE: number = 12;
+export const CHAT_COMPOSER_CHARS_PER_LINE: number = 10;
 
 export function isSupportedChatMode(mode: string): boolean {
   return mode === CHAT_MODE_CLOUD_AGENT || mode === CHAT_MODE_LOCAL_INFERENCE;

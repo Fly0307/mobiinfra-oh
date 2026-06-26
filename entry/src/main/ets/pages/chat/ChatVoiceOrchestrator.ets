@@ -76,7 +76,7 @@ export class ChatVoiceOrchestrator {
 
   async toggleVoiceInput(): Promise<void> {
     let status = this.voiceController.snapshot().status;
-    if (status === 'listening') {
+    if (status === 'listening' || status === 'transcribing') {
       this.asrProvider.finish();
       return;
     }

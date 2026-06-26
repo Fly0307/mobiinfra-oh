@@ -1,5 +1,6 @@
 import { inputMethod } from '@kit.IMEKit';
 import {
+  CHAT_COMPOSER_MAX_LINES,
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
   chatComposerBarHeight,
@@ -833,6 +834,7 @@ export struct ChatPage {
           TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
+            .maxLines(CHAT_COMPOSER_MAX_LINES)
             .fontSize(15)
             .lineHeight(20)
             .fontColor('#4B5563')

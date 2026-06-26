@@ -36,6 +36,7 @@ class FakeHarmonyAgent:
         self.manage_overlay = None
         self.brought_back = False
         self.device_control_operations = []
+        self.launch_requests = []
 
     def run_driver_call(self, operation_name, operation):
         return operation(self.d)
@@ -67,6 +68,10 @@ class FakeHarmonyAgent:
 
     def press_harmony_key(self, name, fallback_code):
         self.enter_pressed = (name, fallback_code)
+
+    def launch_app(self, app_name, reset_first=True):
+        self.launch_requests.append((app_name, reset_first))
+        return True
 
 
 class FakeWechatCollectService:
@@ -130,6 +135,36 @@ class HdcServerWorkflowInputTest(unittest.TestCase):
         self.assertIn(("input_text", "小赵"), fake_agent.d.events)
         self.assertEqual(("ENTER", 2054), fake_agent.enter_pressed)
         self.assertEqual([], hdc_commands)
+
+
+class AppStartIdentityValidationTest(unittest.TestCase):
+    def test_extract_foreground_package_name_prefers_bundle_name_fields(self):
+        output = """
+        mission name #[#com.example.other:EntryAbility]
+        state #FOREGROUND
+        bundleName: com.example.target
+        """
+
+        self.assertEqual("com.example.target", hdc_server.extract_foreground_package_name(output))
+
+    def test_app_start_returns_identity_mismatch_when_foreground_package_differs(self):
+        fake_agent = FakeHarmonyAgent()
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "is_hdc_connected", lambda force=False: True), \
+                patch.object(hdc_server, "detect_current_foreground_package_name",
+                             lambda: "com.example.other"):
+            result = hdc_server.handle_workflow_action("app_start", {
+                "app_name": "示例应用",
+                "package_name": "com.example.target",
+                "reset_first": True,
+            })
+
+        self.assertEqual("error", result["status"])
+        self.assertIn("app_identity_mismatch", result["message"])
+        self.assertEqual("com.example.target", result["package_name"])
+        self.assertEqual("com.example.other", result["current_package_name"])
+        self.assertEqual([("示例应用", True)], fake_agent.launch_requests)
 
 
 class WechatWorkflowBridgeTest(unittest.TestCase):

@@ -3,8 +3,9 @@ import {
   CloudToolCall
 } from './CloudModelClient';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
+import { MobileGuiTaskExecutionCallbacks } from './MobileGuiTaskTypes';
 
-export interface ChatToolExecutionContext {
+export interface ChatToolExecutionContext extends MobileGuiTaskExecutionCallbacks {
   filesDir: string;
   sessionId: string;
   userMessage: string;

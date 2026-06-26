@@ -19,6 +19,8 @@ import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
+import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
+import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -42,4 +44,6 @@ export default function testsuite() {
   chatAttachmentPolicyUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
+  mobileGuiTaskToolUnitTest();
+  mobileGuiTaskWorkflowAdapterUnitTest();
 }

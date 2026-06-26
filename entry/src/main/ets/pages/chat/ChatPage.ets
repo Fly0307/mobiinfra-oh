@@ -91,6 +91,7 @@ export struct ChatPage {
   onToggleVoiceInput: () => Promise<void> = async () => {};
   onStopVoiceInput: () => Promise<void> = async () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
 
   private isCloudMode(): boolean {
     return this.chatMode !== CHAT_MODE_LOCAL_INFERENCE;
@@ -434,7 +435,9 @@ export struct ChatPage {
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
         onPlayVoiceMessage: async (id: string, text: string) => { await this.onPlayVoiceMessage(id, text); },
+        onReplayVoiceMessage: async (id: string, text: string) => { await this.onReplayVoiceMessage(id, text); },
         voiceActiveMessageId: this.voiceActiveMessageId,
+        voiceStatus: this.voiceStatus,
         onScrollContent: (_yOffset: number) => {}
       })
     } else {

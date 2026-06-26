@@ -37,6 +37,9 @@ export interface EndpointDefaultConfig {
   voiceTtsBaseUrl: string;
   voiceTtsModel: string;
   voiceTtsVoice: string;
+  voiceTtsStylePrompt: string;
+  voiceTtsRolePreset: string;
+  voiceTtsStreamingEnabled: boolean;
 }
 
 export interface LegacyEndpointConfig {
@@ -64,9 +67,12 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   avatarImageResponseFormat: 'url',
   avatarImageOutputFormat: 'jpeg',
   avatarImageWatermark: true,
-  voiceTtsBaseUrl: 'https://api.xiaomimimo.com',
+  voiceTtsBaseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
   voiceTtsModel: 'mimo-v2.5-tts',
-  voiceTtsVoice: 'mimo_default'
+  voiceTtsVoice: '冰糖',
+  voiceTtsStylePrompt: '用温和清晰的中文语气朗读，适合整理回顾信息。',
+  voiceTtsRolePreset: 'data_home',
+  voiceTtsStreamingEnabled: true
 };
 
 export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {

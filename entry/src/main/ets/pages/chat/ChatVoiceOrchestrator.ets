@@ -11,10 +11,13 @@ import {
   createTtsVoiceRuntimeMetadata,
   createVoiceErrorMetadata
 } from './VoiceInteractionTypes';
+import { ChatMessage, chatMessageVoiceMetadata } from './ChatSessionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
 import { HarmonyAudioPlayback } from '../../utils/voice/HarmonyAudioPlayback';
+import { HarmonyPcmStreamPlayback } from '../../utils/voice/HarmonyPcmStreamPlayback';
 import { HarmonySpeechRecognizerAsrProvider } from '../../utils/voice/HarmonySpeechRecognizerAsrProvider';
-import { MimoVoiceClient } from '../../utils/voice/MimoVoiceClient';
+import { MimoTtsStreamRequestControl, MimoVoiceClient } from '../../utils/voice/MimoVoiceClient';
+import { buildPcm16WavBytes, concatPcmChunks } from '../../utils/voice/PcmWav';
 import { showToastSafely } from '../../utils/PromptSafe';
 
 export interface ChatVoiceTtsConfig {
@@ -22,6 +25,8 @@ export interface ChatVoiceTtsConfig {
   apiKey: string;
   model: string;
   voice: string;
+  stylePrompt: string;
+  streamingEnabled: boolean;
 }
 
 export interface ChatVoiceInputDraftTarget {
@@ -63,6 +68,7 @@ export class ChatVoiceOrchestrator {
   private asrProvider: HarmonySpeechRecognizerAsrProvider = new HarmonySpeechRecognizerAsrProvider();
   private voiceTtsClient: MimoVoiceClient = new MimoVoiceClient();
   private voiceAudioPlayback: HarmonyAudioPlayback = new HarmonyAudioPlayback();
+  private voicePcmStreamPlayback: HarmonyPcmStreamPlayback = new HarmonyPcmStreamPlayback();
   private handledVoiceTurnId: string = '';
   private voiceDraftTargetId: string = '';
   private voiceDraftBaseInput: string = '';
@@ -70,6 +76,7 @@ export class ChatVoiceOrchestrator {
   private voicePlaybackSessionId: string = '';
   private voicePlaybackAudioUri: string = '';
   private voicePlaybackVoice: string = '';
+  private voiceTtsStreamCancel: () => void = () => {};
   private voiceInputStartGeneration: number = 0;
   private voiceInputStoppedGeneration: number = 0;
   private voiceInputStopFallbackTimerId: number = -1;
@@ -99,7 +106,7 @@ export class ChatVoiceOrchestrator {
       await this.stopVoiceInput();
       return;
     }
-    if (status === 'speaking' || status === 'synthesizing') {
+    if (status === 'speaking' || status === 'synthesizing' || status === 'paused') {
       await this.stopVoicePlayback();
       return;
     }
@@ -125,14 +132,22 @@ export class ChatVoiceOrchestrator {
 
   async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
     let sessionId = this.host.activeSessionId();
-    await this.playAssistantMessageVoiceInSession(sessionId, messageId, text);
+    await this.playAssistantMessageVoiceInSession(sessionId, messageId, text, false);
+  }
+
+  async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    let sessionId = this.host.activeSessionId();
+    await this.playAssistantMessageVoiceInSession(sessionId, messageId, text, true);
   }
 
   shutdown(): void {
     this.clearVoiceInputStopFallbackTimer();
     this.asrProvider.shutdown();
     this.voicePlaybackGeneration++;
+    this.voiceTtsStreamCancel();
+    this.voiceTtsStreamCancel = () => {};
     this.voiceAudioPlayback.stop().catch(() => {});
+    this.voicePcmStreamPlayback.stop().catch(() => {});
     this.voiceController.reset();
     this.voiceDraftTargetId = '';
     this.voiceDraftBaseInput = '';
@@ -353,16 +368,80 @@ export class ChatVoiceOrchestrator {
     return ChatSessionStorage.sessionAssetPath(this.host.filesDir(), sessionId, messageId + '-tts.wav');
   }
 
-  private saveVoiceTtsAudio(sessionId: string, messageId: string, audioBase64: string): string {
+  private voiceTtsSessionExists(sessionId: string): boolean {
+    return ChatSessionStorage.sessionExists(this.host.filesDir(), sessionId);
+  }
+
+  private prepareVoiceTtsAssetWritePath(sessionId: string, messageId: string): string {
+    if (!this.voiceTtsSessionExists(sessionId)) {
+      return '';
+    }
     ChatSessionStorage.ensureSessionAssetsDir(this.host.filesDir(), sessionId);
+    if (!this.voiceTtsSessionExists(sessionId)) {
+      ChatSessionStorage.deleteSessionAssetsDir(this.host.filesDir(), sessionId);
+      return '';
+    }
+    return this.voiceTtsAssetPath(sessionId, messageId);
+  }
+
+  private completeVoiceTtsAssetWrite(sessionId: string, path: string): boolean {
+    if (this.voiceTtsSessionExists(sessionId)) {
+      return true;
+    }
+    // TTS 可能在会话删除后才完成；此时必须移除刚创建的缓存，避免留下孤立 assets 目录。
+    try {
+      if (ChatSessionStorage.pathExists(path)) {
+        fs.unlinkSync(path);
+      }
+    } catch (e) {
+    }
+    ChatSessionStorage.deleteSessionAssetsDir(this.host.filesDir(), sessionId);
+    return false;
+  }
+
+  private finishVoicePlaybackForDeletedSession(generation: number): void {
+    if (!this.voicePlaybackGenerationActive(generation)) {
+      return;
+    }
+    this.clearVoicePlaybackContext();
+    this.voiceController.finishSpeaking();
+    this.emitSnapshot();
+  }
+
+  private saveVoiceTtsAudio(sessionId: string, messageId: string, audioBase64: string): string {
+    let path = this.prepareVoiceTtsAssetWritePath(sessionId, messageId);
+    if (path.length === 0) {
+      return '';
+    }
     let helper = new util.Base64Helper();
     let bytes = helper.decodeSync(audioBase64);
-    let path = this.voiceTtsAssetPath(sessionId, messageId);
     let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, bytes.buffer);
     } finally {
       fs.closeSync(file);
+    }
+    if (!this.completeVoiceTtsAssetWrite(sessionId, path)) {
+      return '';
+    }
+    return 'file://' + path;
+  }
+
+  private saveVoiceTtsPcmAudio(sessionId: string, messageId: string, chunks: Uint8Array[]): string {
+    let path = this.prepareVoiceTtsAssetWritePath(sessionId, messageId);
+    if (path.length === 0) {
+      return '';
+    }
+    let pcm = concatPcmChunks(chunks);
+    let wavBytes = buildPcm16WavBytes(pcm, { sampleRate: 24000, channels: 1 });
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, wavBytes.buffer);
+    } finally {
+      fs.closeSync(file);
+    }
+    if (!this.completeVoiceTtsAssetWrite(sessionId, path)) {
+      return '';
     }
     return 'file://' + path;
   }
@@ -380,20 +459,56 @@ export class ChatVoiceOrchestrator {
     this.voicePlaybackSessionId = '';
     this.voicePlaybackAudioUri = '';
     this.voicePlaybackVoice = '';
+    this.voiceTtsStreamCancel = () => {};
   }
 
-  private async playAssistantMessageVoiceInSession(sessionId: string, messageId: string, text: string): Promise<void> {
+  private messageVoiceMetadata(messageId: string): ChatVoiceMetadata {
+    let messages: ChatMessage[] = this.host.currentChatSessionViewState().activeMessages;
+    for (let index = 0; index < messages.length; index++) {
+      if (messages[index].id === messageId) {
+        return chatMessageVoiceMetadata(messages[index]);
+      }
+    }
+    return {
+      input: 'none',
+      provider: '',
+      status: 'none',
+      transcript: '',
+      confidence: 0,
+      audioUri: '',
+      voice: '',
+      error: '',
+      createdAt: 0
+    };
+  }
+
+  private async playAssistantMessageVoiceInSession(sessionId: string, messageId: string, text: string,
+    replay: boolean): Promise<void> {
     if (sessionId.length === 0 || messageId.length === 0 || text.trim().length === 0) {
       return;
     }
-    if (!this.ttsConfigReady()) {
-      showToastSafely('请先在设置中配置语音合成服务和 API Key', 1800);
+    let snapshot = this.voiceController.snapshot();
+    if (snapshot.activeMessageId === messageId && !replay) {
+      if (snapshot.status === 'speaking') {
+        await this.pauseVoicePlayback(sessionId, messageId);
+        return;
+      }
+      if (snapshot.status === 'paused') {
+        await this.resumeVoicePlayback(sessionId, messageId);
+        return;
+      }
+      if (snapshot.status === 'synthesizing') {
+        await this.stopVoicePlayback();
+        return;
+      }
+    }
+    let cachedVoice = this.messageVoiceMetadata(messageId);
+    if (replay && cachedVoice.audioUri.length === 0) {
+      showToastSafely(snapshot.activeMessageId === messageId ? '语音仍在生成缓存，稍后再重播' : '暂无可重播语音', 1400);
       return;
     }
-    let snapshot = this.voiceController.snapshot();
-    if ((snapshot.status === 'speaking' || snapshot.status === 'synthesizing') &&
-      snapshot.activeMessageId === messageId) {
-      await this.stopVoicePlayback();
+    if (cachedVoice.audioUri.length === 0 && !this.ttsConfigReady()) {
+      showToastSafely('请先在设置中配置语音合成服务和 API Key', 1800);
       return;
     }
     await this.stopVoicePlayback();
@@ -402,6 +517,44 @@ export class ChatVoiceOrchestrator {
     this.voicePlaybackSessionId = sessionId;
     this.voicePlaybackVoice = config.voice;
     this.voicePlaybackAudioUri = '';
+    if (cachedVoice.audioUri.length > 0) {
+      await this.playCachedVoiceAudio(sessionId, messageId, cachedVoice.audioUri,
+        cachedVoice.voice.length > 0 ? cachedVoice.voice : config.voice, generation);
+      return;
+    }
+    if (config.streamingEnabled) {
+      await this.playStreamingVoiceAudio(sessionId, messageId, text, generation);
+      return;
+    }
+    await this.playNonStreamingVoiceAudio(sessionId, messageId, text, generation);
+  }
+
+  private async playCachedVoiceAudio(sessionId: string, messageId: string, audioUri: string, voice: string,
+    generation: number): Promise<void> {
+    this.voicePlaybackAudioUri = audioUri;
+    this.voicePlaybackVoice = voice;
+    await this.voiceAudioPlayback.playFile(audioUri, {
+      onStarted: () => {
+        if (!this.voicePlaybackGenerationActive(generation)) {
+          return;
+        }
+        this.voiceController.beginSpeaking(messageId);
+        this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+          createTtsVoiceRuntimeMetadata('mimo', voice, audioUri, 'playing', new Date().getTime()));
+        this.emitSnapshot();
+      },
+      onCompleted: () => {
+        this.handleVoicePlaybackCompleted(sessionId, messageId, voice, audioUri, generation);
+      },
+      onError: (message: string) => {
+        this.handleVoicePlaybackError(sessionId, messageId, message, generation);
+      }
+    });
+  }
+
+  private async playNonStreamingVoiceAudio(sessionId: string, messageId: string, text: string,
+    generation: number): Promise<void> {
+    let config = this.host.ttsConfig();
     this.voiceController.beginSynthesizing(messageId);
     this.emitSnapshot();
     this.updateMessageVoiceMetadataForSession(sessionId, messageId,
@@ -411,12 +564,17 @@ export class ChatVoiceOrchestrator {
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         model: config.model,
-        voice: config.voice
+        voice: config.voice,
+        stylePrompt: config.stylePrompt
       });
       if (!this.voicePlaybackGenerationActive(generation)) {
         return;
       }
       let audioUri = this.saveVoiceTtsAudio(sessionId, messageId, result.audioBase64);
+      if (audioUri.length === 0) {
+        this.finishVoicePlaybackForDeletedSession(generation);
+        return;
+      }
       this.voicePlaybackAudioUri = audioUri;
       this.voicePlaybackVoice = result.voice;
       if (!this.voicePlaybackGenerationActive(generation)) {
@@ -435,23 +593,10 @@ export class ChatVoiceOrchestrator {
           this.emitSnapshot();
         },
         onCompleted: () => {
-          if (!this.voicePlaybackGenerationActive(generation)) {
-            return;
-          }
-          this.updateMessageVoiceMetadataForSession(sessionId, messageId,
-            createTtsVoiceMetadata('mimo', result.voice, audioUri, new Date().getTime()));
-          this.clearVoicePlaybackContext();
-          this.voiceController.finishSpeaking();
-          this.emitSnapshot();
+          this.handleVoicePlaybackCompleted(sessionId, messageId, result.voice, audioUri, generation);
         },
         onError: (message: string) => {
-          if (!this.voicePlaybackGenerationActive(generation)) {
-            return;
-          }
-          this.updateMessageVoiceMetadataForSession(sessionId, messageId,
-            createVoiceErrorMetadata('tts', 'mimo', message, new Date().getTime()));
-          this.clearVoicePlaybackContext();
-          this.failVoiceInteraction(message);
+          this.handleVoicePlaybackError(sessionId, messageId, message, generation);
         }
       });
     } catch (e) {
@@ -466,19 +611,159 @@ export class ChatVoiceOrchestrator {
     }
   }
 
+  private async playStreamingVoiceAudio(sessionId: string, messageId: string, text: string,
+    generation: number): Promise<void> {
+    let config = this.host.ttsConfig();
+    let pcmChunks: Uint8Array[] = [];
+    let firstChunkReceived = false;
+    let audioUri = '';
+    let completedBeforeCacheReady = false;
+    this.voiceController.beginSynthesizing(messageId);
+    this.emitSnapshot();
+    this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+      createTtsVoiceMetadata('mimo', config.voice, '', new Date().getTime()));
+    try {
+      await this.voicePcmStreamPlayback.start({
+        onCompleted: () => {
+          if (audioUri.length === 0) {
+            completedBeforeCacheReady = true;
+            return;
+          }
+          this.handleVoicePlaybackCompleted(sessionId, messageId, config.voice, audioUri, generation);
+        },
+        onError: (message: string) => {
+          this.handleVoicePlaybackError(sessionId, messageId, message, generation);
+        }
+      });
+      await this.voiceTtsClient.synthesizeSpeechStream(text.trim(), {
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        voice: config.voice,
+        stylePrompt: config.stylePrompt
+      }, {
+        onRequest: (control: MimoTtsStreamRequestControl) => {
+          this.voiceTtsStreamCancel = control.cancel;
+        },
+        onPcmChunk: (chunk: Uint8Array) => {
+          if (!this.voicePlaybackGenerationActive(generation)) {
+            return;
+          }
+          pcmChunks.push(chunk);
+          this.voicePcmStreamPlayback.appendChunk(chunk);
+          if (!firstChunkReceived) {
+            firstChunkReceived = true;
+            this.voiceController.beginSpeaking(messageId);
+            this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+              createTtsVoiceRuntimeMetadata('mimo', config.voice, '', 'playing', new Date().getTime()));
+            this.emitSnapshot();
+          }
+        },
+        onDone: () => {
+          this.voicePcmStreamPlayback.markEnded();
+        }
+      });
+      this.voiceTtsStreamCancel = () => {};
+      if (!this.voicePlaybackGenerationActive(generation)) {
+        return;
+      }
+      this.voicePcmStreamPlayback.markEnded();
+      if (!firstChunkReceived || pcmChunks.length === 0) {
+        await this.voicePcmStreamPlayback.stop();
+        await this.playNonStreamingVoiceAudio(sessionId, messageId, text, generation);
+        return;
+      }
+      audioUri = this.saveVoiceTtsPcmAudio(sessionId, messageId, pcmChunks);
+      if (audioUri.length === 0) {
+        await this.voicePcmStreamPlayback.stop();
+        this.finishVoicePlaybackForDeletedSession(generation);
+        return;
+      }
+      this.voicePlaybackAudioUri = audioUri;
+      this.voicePlaybackVoice = config.voice;
+      if (completedBeforeCacheReady) {
+        this.handleVoicePlaybackCompleted(sessionId, messageId, config.voice, audioUri, generation);
+        return;
+      }
+      this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+        createTtsVoiceRuntimeMetadata('mimo', config.voice, audioUri, 'playing', new Date().getTime()));
+    } catch (e) {
+      if (!this.voicePlaybackGenerationActive(generation)) {
+        return;
+      }
+      let err = e as Error;
+      await this.voicePcmStreamPlayback.stop();
+      if (!firstChunkReceived) {
+        await this.playNonStreamingVoiceAudio(sessionId, messageId, text, generation);
+        return;
+      }
+      this.handleVoicePlaybackError(sessionId, messageId, '语音流式播放失败：' + err.message, generation);
+    }
+  }
+
+  private async pauseVoicePlayback(sessionId: string, messageId: string): Promise<void> {
+    let voice = this.voicePlaybackVoice.length > 0 ? this.voicePlaybackVoice : this.host.ttsConfig().voice;
+    let audioUri = this.voicePlaybackAudioUri;
+    await this.voiceAudioPlayback.pause();
+    await this.voicePcmStreamPlayback.pause();
+    this.voiceController.pauseSpeaking(messageId);
+    this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+      createTtsVoiceRuntimeMetadata('mimo', voice, audioUri, 'paused', new Date().getTime()));
+    this.emitSnapshot();
+  }
+
+  private async resumeVoicePlayback(sessionId: string, messageId: string): Promise<void> {
+    let voice = this.voicePlaybackVoice.length > 0 ? this.voicePlaybackVoice : this.host.ttsConfig().voice;
+    let audioUri = this.voicePlaybackAudioUri;
+    await this.voiceAudioPlayback.resume();
+    await this.voicePcmStreamPlayback.resume();
+    this.voiceController.beginSpeaking(messageId);
+    this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+      createTtsVoiceRuntimeMetadata('mimo', voice, audioUri, 'playing', new Date().getTime()));
+    this.emitSnapshot();
+  }
+
+  private handleVoicePlaybackCompleted(sessionId: string, messageId: string, voice: string, audioUri: string,
+    generation: number): void {
+    if (!this.voicePlaybackGenerationActive(generation)) {
+      return;
+    }
+    let finalAudioUri = audioUri.length > 0 ? audioUri : this.voicePlaybackAudioUri;
+    this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+      createTtsVoiceMetadata('mimo', voice, finalAudioUri, new Date().getTime()));
+    this.clearVoicePlaybackContext();
+    this.voiceController.finishSpeaking();
+    this.emitSnapshot();
+  }
+
+  private handleVoicePlaybackError(sessionId: string, messageId: string, message: string, generation: number): void {
+    if (!this.voicePlaybackGenerationActive(generation)) {
+      return;
+    }
+    this.updateMessageVoiceMetadataForSession(sessionId, messageId,
+      createVoiceErrorMetadata('tts', 'mimo', message, new Date().getTime()));
+    this.clearVoicePlaybackContext();
+    this.failVoiceInteraction(message);
+  }
+
   private async stopVoicePlayback(): Promise<void> {
     let snapshot = this.voiceController.snapshot();
-    let voiceOutputActive = snapshot.status === 'speaking' || snapshot.status === 'synthesizing';
+    let voiceOutputActive = snapshot.status === 'speaking' || snapshot.status === 'synthesizing' ||
+      snapshot.status === 'paused';
     let sessionId = this.voicePlaybackSessionId;
     let audioUri = this.voicePlaybackAudioUri;
     let voice = this.voicePlaybackVoice;
     this.voicePlaybackGeneration++;
+    let cancelStream = this.voiceTtsStreamCancel;
+    this.voiceTtsStreamCancel = () => {};
+    cancelStream();
     await this.voiceAudioPlayback.stop();
+    await this.voicePcmStreamPlayback.stop();
     if (voiceOutputActive && sessionId.length > 0 && snapshot.activeMessageId.length > 0) {
       if (audioUri.length > 0) {
         this.updateMessageVoiceMetadataForSession(sessionId, snapshot.activeMessageId,
           createTtsVoiceMetadata('mimo', voice, audioUri, new Date().getTime()));
-      } else if (snapshot.status === 'synthesizing') {
+      } else if (snapshot.status === 'synthesizing' || snapshot.status === 'speaking' || snapshot.status === 'paused') {
         this.updateMessageVoiceMetadataForSession(sessionId, snapshot.activeMessageId, undefined);
       }
     }

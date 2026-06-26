@@ -13,6 +13,8 @@ import {
   createTtsVoiceMetadata,
   createTtsVoiceRuntimeMetadata,
   normalizeChatVoiceMetadata,
+  voiceReplayAvailable,
+  voiceReplayGlobalBlockNeeded,
   voiceStatusLabel
 } from '../main/ets/pages/chat/VoiceInteractionTypes';
 import { ChatMessageUiModel } from '../main/ets/pages/chat/ChatMessageUiModel';
@@ -55,6 +57,14 @@ export default function voiceInteractionUnitTest() {
       expect(controller.snapshot().status).assertEqual('speaking');
       expect(controller.snapshot().activeMessageId).assertEqual('assistant-1');
 
+      controller.pauseSpeaking('assistant-1');
+      expect(controller.snapshot().status).assertEqual('paused');
+      expect(controller.snapshot().activeMessageId).assertEqual('assistant-1');
+
+      controller.beginSpeaking('assistant-1');
+      expect(controller.snapshot().status).assertEqual('speaking');
+      expect(controller.snapshot().activeMessageId).assertEqual('assistant-1');
+
       controller.finishSpeaking();
       expect(controller.snapshot().status).assertEqual('idle');
       expect(controller.isBusy()).assertFalse();
@@ -79,7 +89,30 @@ export default function voiceInteractionUnitTest() {
       expect(voiceStatusLabel('thinking')).assertEqual('正在思考...');
       expect(voiceStatusLabel('synthesizing')).assertEqual('正在合成语音...');
       expect(voiceStatusLabel('speaking')).assertEqual('正在朗读...');
+      expect(voiceStatusLabel('paused')).assertEqual('已暂停朗读');
       expect(voiceStatusLabel('error')).assertEqual('语音出错');
+    });
+
+    it('disablesReplayGloballyWhileSynthesizingVoice', 0, () => {
+      expect(voiceReplayAvailable('file://assistant-tts.wav', 'idle', false)).assertTrue();
+      expect(voiceReplayAvailable('file://assistant-tts.wav', 'speaking', false)).assertTrue();
+      expect(voiceReplayAvailable('file://assistant-tts.wav', 'synthesizing', false)).assertFalse();
+      expect(voiceReplayAvailable('file://assistant-tts.wav', 'idle', true)).assertFalse();
+      expect(voiceReplayAvailable('file://assistant-tts.wav', 'speaking', false, true)).assertFalse();
+      expect(voiceReplayAvailable('', 'idle', false)).assertFalse();
+    });
+
+    it('blocksReplayWhileActiveStreamingVoiceCacheIsPending', 0, () => {
+      expect(voiceReplayGlobalBlockNeeded('synthesizing', 'assistant-1', true, 'synthesizing', '')).assertTrue();
+      expect(voiceReplayGlobalBlockNeeded('speaking', 'assistant-1', true, 'playing', '')).assertTrue();
+      expect(voiceReplayGlobalBlockNeeded('paused', 'assistant-1', true, 'paused', '')).assertTrue();
+      expect(voiceReplayGlobalBlockNeeded('speaking', 'assistant-1', true, 'playing',
+        'file://assistant-1-tts.wav')).assertFalse();
+
+      // 活跃语音来自其他会话时，当前列表看不到消息元数据；保守禁用重播，避免打断流式请求。
+      expect(voiceReplayGlobalBlockNeeded('speaking', 'assistant-1', false, 'none', '')).assertTrue();
+      expect(voiceReplayGlobalBlockNeeded('paused', 'assistant-1', false, 'none', '')).assertTrue();
+      expect(voiceReplayGlobalBlockNeeded('idle', '', false, 'none', '')).assertFalse();
     });
 
     it('appendsVoiceTranscriptToEditableDraft', 0, () => {
@@ -156,6 +189,13 @@ export default function voiceInteractionUnitTest() {
       model.apply(assistant);
 
       expect(model.detail.voice.status).assertEqual('playing');
+
+      let paused = createTtsVoiceRuntimeMetadata('mimo', 'mimo_default', 'file://assistant.wav', 'paused', 103);
+      assistant = createChatMessage('voice-assistant-1', 'assistant', CHAT_MESSAGE_KIND_CHAT,
+        '我来帮你看看。', 103, [], '', [], paused);
+      model.apply(assistant);
+
+      expect(model.detail.voice.status).assertEqual('paused');
     });
   });
 }

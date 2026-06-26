@@ -1,8 +1,9 @@
 export type VoiceInteractionStatus =
-  'idle' | 'listening' | 'transcribing' | 'thinking' | 'synthesizing' | 'speaking' | 'error';
+  'idle' | 'listening' | 'transcribing' | 'thinking' | 'synthesizing' | 'speaking' | 'paused' | 'error';
 export type ChatVoiceInputKind = 'none' | 'asr' | 'tts';
-export type ChatVoiceMetadataStatus = 'none' | 'transcribed' | 'synthesizing' | 'ready' | 'playing' | 'error';
-export type TtsVoiceRuntimeStatus = 'synthesizing' | 'ready' | 'playing';
+export type ChatVoiceMetadataStatus = 'none' | 'transcribed' | 'synthesizing' | 'ready' | 'playing' | 'paused' |
+  'error';
+export type TtsVoiceRuntimeStatus = 'synthesizing' | 'ready' | 'playing' | 'paused';
 
 export interface VoiceSessionSnapshot {
   status: VoiceInteractionStatus;
@@ -73,7 +74,7 @@ function normalizeVoiceInputKind(value: string): ChatVoiceInputKind {
 
 function normalizeVoiceMetadataStatus(value: string): ChatVoiceMetadataStatus {
   if (value === 'transcribed' || value === 'synthesizing' || value === 'ready' || value === 'playing' ||
-    value === 'error') {
+    value === 'paused' || value === 'error') {
     return value;
   }
   return 'none';
@@ -184,10 +185,41 @@ export function voiceStatusLabel(status: VoiceInteractionStatus): string {
   if (status === 'speaking') {
     return '正在朗读...';
   }
+  if (status === 'paused') {
+    return '已暂停朗读';
+  }
   if (status === 'error') {
     return '语音出错';
   }
   return '';
+}
+
+export function voiceReplayAvailable(audioUri: string, globalStatus: VoiceInteractionStatus,
+  currentMessageSynthesizing: boolean, globalReplayBlocked: boolean = false): boolean {
+  if (audioUri.trim().length === 0) {
+    return false;
+  }
+  // 流式 TTS 生成期间不能触发任何气泡重播，否则会取消当前请求并截断后续 PCM 缓存。
+  if (globalStatus === 'synthesizing' || globalReplayBlocked) {
+    return false;
+  }
+  return !currentMessageSynthesizing;
+}
+
+export function voiceReplayGlobalBlockNeeded(globalStatus: VoiceInteractionStatus, activeMessageId: string,
+  activeMessageVisible: boolean, activeVoiceStatus: ChatVoiceMetadataStatus, activeAudioUri: string): boolean {
+  if (globalStatus === 'synthesizing') {
+    return true;
+  }
+  if (activeMessageId.length === 0) {
+    return false;
+  }
+  if (!activeMessageVisible) {
+    return globalStatus === 'speaking' || globalStatus === 'paused';
+  }
+  // 流式 TTS 首批 PCM 到达后会进入 speaking，但缓存 audioUri 还没落盘前仍不能重播。
+  return (activeVoiceStatus === 'synthesizing' || activeVoiceStatus === 'playing' || activeVoiceStatus === 'paused') &&
+    activeAudioUri.length === 0;
 }
 
 export class VoiceSessionController {
@@ -268,6 +300,14 @@ export class VoiceSessionController {
 
   beginSpeaking(messageId: string): VoiceSessionSnapshot {
     this.state.status = 'speaking';
+    this.state.activeMessageId = messageId;
+    this.state.error = '';
+    return this.snapshot();
+  }
+
+  pauseSpeaking(messageId: string): VoiceSessionSnapshot {
+    // 暂停只影响 TTS 播放态，保留 activeMessageId 让气泡能继续定位当前可恢复的消息。
+    this.state.status = 'paused';
     this.state.activeMessageId = messageId;
     this.state.error = '';
     return this.snapshot();

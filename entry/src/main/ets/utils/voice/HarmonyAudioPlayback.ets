@@ -81,6 +81,30 @@ export class HarmonyAudioPlayback {
     player.url = 'fd://' + String(file.fd);
   }
 
+  async pause(): Promise<void> {
+    let player = this.avPlayer;
+    if (player === null) {
+      return;
+    }
+    try {
+      await player.pause();
+    } catch (e) {
+      AppLogger.warnCause('Voice.Audio', 'pause player failed', e as Error);
+    }
+  }
+
+  async resume(): Promise<void> {
+    let player = this.avPlayer;
+    if (player === null) {
+      return;
+    }
+    try {
+      await player.play();
+    } catch (e) {
+      AppLogger.warnCause('Voice.Audio', 'resume player failed', e as Error);
+    }
+  }
+
   async stop(): Promise<void> {
     let player = this.avPlayer;
     this.avPlayer = null;

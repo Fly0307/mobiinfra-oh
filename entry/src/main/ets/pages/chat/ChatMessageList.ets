@@ -6,6 +6,7 @@ import {
   ChatMessage,
   ChatMessageKind,
   ChatMessageRole,
+  chatMessageVoiceMetadata,
   compactChatPreviewText
 } from './ChatSessionTypes';
 import { ChatMessageDataSource } from './ChatMessageDataSource';
@@ -16,6 +17,11 @@ import {
   DigitalAvatarVisualState,
   TEXT_AVATAR_SIZE
 } from './DigitalAvatarTypes';
+import {
+  VoiceInteractionStatus,
+  voiceReplayAvailable,
+  voiceReplayGlobalBlockNeeded
+} from './VoiceInteractionTypes';
 import { MarkdownView, MarkdownViewVariant } from '../../components/MarkdownView';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 import { AppLogger } from '../../utils/AppLogger';
@@ -326,7 +332,10 @@ struct ChatVoicePlaybackView {
   @Prop role: ChatMessageRole = 'assistant';
   @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
   @Prop activeMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voiceReplayGloballyBlocked: boolean = false;
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
 
   private visible(): boolean {
     return this.role === 'assistant' && this.kind === CHAT_MESSAGE_KIND_CHAT &&
@@ -334,11 +343,21 @@ struct ChatVoicePlaybackView {
   }
 
   private playing(): boolean {
+    return this.activeMessageId.length > 0 && this.activeMessageId === this.messageId &&
+      this.detail.voice.status === 'playing';
+  }
+
+  private active(): boolean {
     return this.activeMessageId.length > 0 && this.activeMessageId === this.messageId;
   }
 
   private synthesizing(): boolean {
-    return this.detail.voice.status === 'synthesizing';
+    return this.active() && this.detail.voice.status === 'synthesizing';
+  }
+
+  private replayAvailable(): boolean {
+    return voiceReplayAvailable(this.detail.voice.audioUri, this.voiceStatus, this.synthesizing(),
+      this.voiceReplayGloballyBlocked);
   }
 
   private buttonBackgroundColor(): string {
@@ -356,7 +375,7 @@ struct ChatVoicePlaybackView {
       Row() {
         Button() {
           if (this.playing()) {
-            Image($r('app.media.voice_speaker_light'))
+            Image($r('app.media.voice_pause_light'))
               .width(18)
               .height(18)
           } else {
@@ -372,6 +391,24 @@ struct ChatVoicePlaybackView {
           .opacity(this.synthesizing() ? 0.72 : 1)
           .onClick(async () => {
             await this.onPlayVoiceMessage(this.messageId, this.detail.content);
+          })
+        Button() {
+          Image($r('app.media.voice_replay_blue'))
+            .width(18)
+            .height(18)
+        }
+          .width(30)
+          .height(30)
+          .backgroundColor('#EEF2FF')
+          .borderRadius(15)
+          .opacity(this.replayAvailable() ? 1 : 0.48)
+          .enabled(this.replayAvailable())
+          .margin({ left: 8 })
+          .onClick(async () => {
+            if (!this.replayAvailable()) {
+              return;
+            }
+            await this.onReplayVoiceMessage(this.messageId, this.detail.content);
           })
       }
       .width('100%')
@@ -497,7 +534,10 @@ struct ChatBubbleView {
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
   @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voiceReplayGloballyBlocked: boolean = false;
 
   build() {
     Column() {
@@ -530,7 +570,10 @@ struct ChatBubbleView {
         role: this.role,
         kind: this.kind,
         activeMessageId: this.voiceActiveMessageId,
-        onPlayVoiceMessage: this.onPlayVoiceMessage
+        voiceStatus: this.voiceStatus,
+        voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked,
+        onPlayVoiceMessage: this.onPlayVoiceMessage,
+        onReplayVoiceMessage: this.onReplayVoiceMessage
       })
       ChatMessageImagePreviewView({ detail: this.message.detail, onPreviewDebugImage: this.onPreviewDebugImage })
     }
@@ -695,7 +738,10 @@ struct ChatMessageBubbleBody {
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
   @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voiceReplayGloballyBlocked: boolean = false;
 
   build() {
     if (!this.shouldRenderFull) {
@@ -727,7 +773,10 @@ struct ChatMessageBubbleBody {
         onToggleThinking: this.onToggleThinking,
         onPreviewDebugImage: this.onPreviewDebugImage,
         onPlayVoiceMessage: this.onPlayVoiceMessage,
-        voiceActiveMessageId: this.voiceActiveMessageId
+        onReplayVoiceMessage: this.onReplayVoiceMessage,
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        voiceStatus: this.voiceStatus,
+        voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked
       })
     }
   }
@@ -749,7 +798,10 @@ struct ChatMessageContentBlock {
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
   @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voiceReplayGloballyBlocked: boolean = false;
 
   build() {
     Column() {
@@ -774,7 +826,10 @@ struct ChatMessageContentBlock {
         onToggleThinking: this.onToggleThinking,
         onPreviewDebugImage: this.onPreviewDebugImage,
         onPlayVoiceMessage: this.onPlayVoiceMessage,
-        voiceActiveMessageId: this.voiceActiveMessageId
+        onReplayVoiceMessage: this.onReplayVoiceMessage,
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        voiceStatus: this.voiceStatus,
+        voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked
       })
     }
     .width(MESSAGE_BUBBLE_WIDTH)
@@ -797,7 +852,10 @@ struct ChatMessageRow {
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
   @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voiceReplayGloballyBlocked: boolean = false;
 
   build() {
     Row() {
@@ -819,7 +877,10 @@ struct ChatMessageRow {
           onToggleThinking: this.onToggleThinking,
           onPreviewDebugImage: this.onPreviewDebugImage,
           onPlayVoiceMessage: this.onPlayVoiceMessage,
-          voiceActiveMessageId: this.voiceActiveMessageId
+          onReplayVoiceMessage: this.onReplayVoiceMessage,
+          voiceActiveMessageId: this.voiceActiveMessageId,
+          voiceStatus: this.voiceStatus,
+          voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked
         })
       } else {
         ChatMessageContentBlock({
@@ -837,7 +898,10 @@ struct ChatMessageRow {
           onToggleThinking: this.onToggleThinking,
           onPreviewDebugImage: this.onPreviewDebugImage,
           onPlayVoiceMessage: this.onPlayVoiceMessage,
-          voiceActiveMessageId: this.voiceActiveMessageId
+          onReplayVoiceMessage: this.onReplayVoiceMessage,
+          voiceActiveMessageId: this.voiceActiveMessageId,
+          voiceStatus: this.voiceStatus,
+          voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked
         })
         Blank()
           .layoutWeight(1)
@@ -867,7 +931,9 @@ export struct ChatMessageList {
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
   @Prop voiceActiveMessageId: string = '';
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onScrollContent: (yOffset: number) => void = () => {};
   private messageScroller: Scroller = new Scroller();
   private lastAutoScrollKey: string = '';
@@ -876,6 +942,18 @@ export struct ChatMessageList {
   private structuralSettleTimerId: number = -1;
   private streamFollowTimerId: number = -1;
   private messageDataSource: ChatMessageDataSource = new ChatMessageDataSource();
+
+  private voiceReplayGloballyBlocked(): boolean {
+    for (let i = 0; i < this.messages.length; i++) {
+      let message = this.messages[i];
+      if (message.id === this.voiceActiveMessageId) {
+        let voice = chatMessageVoiceMetadata(message);
+        return voiceReplayGlobalBlockNeeded(this.voiceStatus, this.voiceActiveMessageId, true, voice.status,
+          voice.audioUri);
+      }
+    }
+    return voiceReplayGlobalBlockNeeded(this.voiceStatus, this.voiceActiveMessageId, false, 'none', '');
+  }
 
   aboutToAppear(): void {
     this.syncMessageDataSource();
@@ -1237,7 +1315,10 @@ export struct ChatMessageList {
               onToggleThinking: this.onToggleThinking,
               onPreviewDebugImage: this.onPreviewDebugImage,
               onPlayVoiceMessage: this.onPlayVoiceMessage,
-              voiceActiveMessageId: this.voiceActiveMessageId
+              onReplayVoiceMessage: this.onReplayVoiceMessage,
+              voiceActiveMessageId: this.voiceActiveMessageId,
+              voiceStatus: this.voiceStatus,
+              voiceReplayGloballyBlocked: this.voiceReplayGloballyBlocked()
             })
           }
           .selectable(false)

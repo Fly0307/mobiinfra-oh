@@ -117,6 +117,7 @@ import { ChatReactAgent } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
 import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
+import { normalizeVoiceTtsPreset } from '../utils/voice/VoiceTtsPresets';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -295,6 +296,9 @@ PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTt
 PersistentStorage.persistProp('voiceTtsApiKey', '');
 PersistentStorage.persistProp('voiceTtsModel', DEFAULT_ENDPOINT_CONFIG.voiceTtsModel);
 PersistentStorage.persistProp('voiceTtsVoice', DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice);
+PersistentStorage.persistProp('voiceTtsStylePrompt', DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt);
+PersistentStorage.persistProp('voiceTtsRolePreset', DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset);
+PersistentStorage.persistProp('voiceTtsStreamingEnabled', DEFAULT_ENDPOINT_CONFIG.voiceTtsStreamingEnabled);
 PersistentStorage.persistProp('chatContextCompressionThresholdPercent',
   String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT));
 PersistentStorage.persistProp('chatContextRecentRounds', String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT));
@@ -375,6 +379,10 @@ struct Index {
   @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = '';
   @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
   @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
+  @StorageLink('voiceTtsStylePrompt') voiceTtsStylePrompt: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt;
+  @StorageLink('voiceTtsRolePreset') voiceTtsRolePreset: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset;
+  @StorageLink('voiceTtsStreamingEnabled') voiceTtsStreamingEnabled: boolean =
+    DEFAULT_ENDPOINT_CONFIG.voiceTtsStreamingEnabled;
   @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string = String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
@@ -741,7 +749,9 @@ struct Index {
       baseUrl: this.voiceTtsBaseUrl,
       apiKey: this.voiceTtsApiKey,
       model: this.voiceTtsModel,
-      voice: this.voiceTtsVoice
+      voice: normalizeVoiceTtsPreset(this.voiceTtsVoice),
+      stylePrompt: this.voiceTtsStylePrompt,
+      streamingEnabled: this.voiceTtsStreamingEnabled
     };
   }
 
@@ -750,7 +760,9 @@ struct Index {
     this.voiceStatus = snapshot.status;
     this.voicePartialTranscript = snapshot.partialTranscript.length > 0 ? snapshot.partialTranscript :
       snapshot.finalTranscript;
-    this.voiceActiveMessageId = snapshot.status === 'speaking' ? snapshot.activeMessageId : '';
+    this.voiceActiveMessageId =
+      (snapshot.status === 'speaking' || snapshot.status === 'paused' || snapshot.status === 'synthesizing') ?
+        snapshot.activeMessageId : '';
   }
 
   private voiceOrchestrator(): ChatVoiceOrchestrator {
@@ -801,6 +813,10 @@ struct Index {
 
   private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
     await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
+  }
+
+  private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    await this.voiceOrchestrator().replayAssistantMessageVoice(messageId, text);
   }
 
   private compactTraceText(text: string, maxLength: number = 180): string {
@@ -5193,6 +5209,9 @@ struct Index {
             onStopVoiceInput: async () => { await this.stopVoiceInput(); },
             onPlayVoiceMessage: async (messageId: string, text: string) => {
               await this.playAssistantMessageVoice(messageId, text);
+            },
+            onReplayVoiceMessage: async (messageId: string, text: string) => {
+              await this.replayAssistantMessageVoice(messageId, text);
             }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))

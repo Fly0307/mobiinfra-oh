@@ -756,9 +756,20 @@ export class GalleryAnalyzer {
   }
 
   private parseModelJson(raw: string, id: string): GalleryModelParseResult {
-    let text = this.cleanModelJsonText(raw);
-    let parsed = this.tryParseModelJson(text);
+    let rawText = raw.trim();
+    let parsed = this.tryParseModelJson(rawText);
     if (parsed) {
+      return {
+        json: parsed,
+        text: rawText
+      };
+    }
+    let text = this.cleanModelJsonText(raw);
+    parsed = this.tryParseModelJson(text);
+    if (parsed) {
+      this.logInfo('model json normalized id=' + id +
+        ' rawChars=' + rawText.length.toString() +
+        ' normalizedChars=' + text.length.toString());
       return {
         json: parsed,
         text: text

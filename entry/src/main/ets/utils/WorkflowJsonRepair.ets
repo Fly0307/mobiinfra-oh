@@ -12,13 +12,16 @@ export class WorkflowJsonRepair {
     }
     text = text.replace(/^```(?:json)?\s*/i, '');
     text = text.replace(/\s*```$/, '');
+    text = WorkflowJsonRepair.repairMissingLeadingObjectBrace(text.trim());
     text = WorkflowJsonRepair.extractFirstJsonObjectText(text);
+    text = WorkflowJsonRepair.repairMissingLeadingObjectBrace(text.trim());
     return WorkflowJsonRepair.repairLeadingBrokenObjectQuote(text.trim());
   }
 
   static repairCandidates(text: string): string[] {
     let candidates: string[] = [];
     let unwrapped = WorkflowJsonRepair.unwrapDuplicateOuterBraces(text);
+    let leadingObjectBrace = WorkflowJsonRepair.repairMissingLeadingObjectBrace(text);
     let literalCase = WorkflowJsonRepair.repairJsonLiteralCasing(text);
     let unwrappedLiteralCase = WorkflowJsonRepair.repairJsonLiteralCasing(unwrapped);
     let numericArrayComma = WorkflowJsonRepair.repairNumberArrayCommas(text);
@@ -30,6 +33,8 @@ export class WorkflowJsonRepair {
     let quotedArrayItems = WorkflowJsonRepair.quoteBareJsonArrayItems(text);
     let closed = WorkflowJsonRepair.closeTruncatedJson(text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, leadingObjectBrace, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(leadingObjectBrace), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, literalCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrappedLiteralCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
@@ -450,6 +455,28 @@ export class WorkflowJsonRepair {
 
   private static isAsciiLetter(ch: string): boolean {
     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+  }
+
+  private static repairMissingLeadingObjectBrace(text: string): string {
+    let trimmed = text.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return trimmed;
+    }
+    if (WorkflowJsonRepair.startsWithKnownTopLevelKeyMissingOpenQuote(trimmed)) {
+      return WorkflowJsonRepair.closeTruncatedJson('{"' + trimmed);
+    }
+    if (!WorkflowJsonRepair.startsWithKnownTopLevelKey(trimmed)) {
+      return trimmed;
+    }
+    return WorkflowJsonRepair.closeTruncatedJson('{' + trimmed);
+  }
+
+  private static startsWithKnownTopLevelKey(text: string): boolean {
+    return /^"(action|parameters|reasoning|reason|app|app_name|package_name|target_app|bundle|bundle_name|task_description|template_name|title|category|summary|details|tags|importance)"\s*:/.test(text);
+  }
+
+  private static startsWithKnownTopLevelKeyMissingOpenQuote(text: string): boolean {
+    return /^(action|parameters|reasoning|reason|app|app_name|package_name|target_app|bundle|bundle_name|task_description|template_name|title|category|summary|details|tags|importance)"\s*:/.test(text);
   }
 
   private static repairLeadingBrokenObjectQuote(text: string): string {

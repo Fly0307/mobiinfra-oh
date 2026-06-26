@@ -18,7 +18,11 @@
 #include <dirent.h>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <iomanip>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sched.h>
 #include <vector>
 #include <errno.h>
 
@@ -57,6 +61,73 @@ static std::unique_ptr<Llm> g_llm = nullptr;
 static std::mutex g_mutex;
 static ChatMessages g_messages;
 static std::string g_runtimeSandboxDir;
+static std::string g_currentModelConfigPath;
+
+static void appLog(const char* fmt, ...);
+
+struct LlmPerfBaseline {
+    int64_t visionUs = 0;
+    int64_t audioUs = 0;
+    float pixelsMp = 0.0f;
+};
+
+static LlmPerfBaseline captureLlmPerfBaseline(Llm* llm) {
+    LlmPerfBaseline baseline;
+    if (llm == nullptr || llm->getContext() == nullptr) {
+        return baseline;
+    }
+    auto context = llm->getContext();
+    baseline.visionUs = context->vision_us;
+    baseline.audioUs = context->audio_us;
+    baseline.pixelsMp = context->pixels_mp;
+    return baseline;
+}
+
+static void logLlmPerf(const char* label, Llm* llm, int step = -1, LlmPerfBaseline baseline = {}) {
+    if (!llm) {
+        return;
+    }
+    auto context = llm->getContext();
+    if (!context) {
+        return;
+    }
+    int64_t vision_us = context->vision_us - baseline.visionUs;
+    int64_t audio_us = context->audio_us - baseline.audioUs;
+    float pixels_mp = context->pixels_mp - baseline.pixelsMp;
+    if (vision_us < 0) vision_us = context->vision_us;
+    if (audio_us < 0) audio_us = context->audio_us;
+    if (pixels_mp < 0) pixels_mp = context->pixels_mp;
+    float vision_s = vision_us / 1e6f;
+    float audio_s = audio_us / 1e6f;
+    float prefill_s = context->prefill_us / 1e6f;
+    float decode_s = context->decode_us / 1e6f;
+    float total_prefill_s = vision_s + audio_s + prefill_s;
+    float vision_mp_s = vision_s > 0 ? pixels_mp / vision_s : 0;
+    float prefill_tps = prefill_s > 0 ? context->prompt_len / prefill_s : 0;
+    float total_prefill_tps = total_prefill_s > 0 ? context->prompt_len / total_prefill_s : 0;
+    float decode_tps = decode_s > 0 ? context->gen_seq_len / decode_s : 0;
+    std::ostringstream out;
+    out << label;
+    if (step >= 0) {
+        out << " " << step;
+    }
+    out << " perf\n"
+        << "  prefill tokens: " << context->prompt_len << " tokens\n"
+        << "  decode tokens: " << context->gen_seq_len << " tokens\n"
+        << "  vision time: " << vision_s << " s\n"
+        << "  image pixels: " << pixels_mp << " MP\n"
+        << "  image throughput: " << vision_mp_s << " MP/s\n"
+        << "  llm prefill time: " << prefill_s << " s\n"
+        << "  llm prefill speed: " << prefill_tps << " tokens/s\n"
+        << "  total prefill time: " << total_prefill_s << " s\n"
+        << "  total prefill speed: " << total_prefill_tps << " tokens/s\n"
+        << "  decode time: " << decode_s << " s\n"
+        << "  decode speed: " << decode_tps << " tokens/s\n"
+        << "  kv cache: " << llm->getCurrentHistory() << " tokens";
+    std::string report = out.str();
+    LOGI("%{public}s", report.c_str());
+    appLog("%{public}s", report.c_str());
+}
 
 // ==================== Runtime log capture ====================
 namespace {
@@ -178,6 +249,55 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
     napi_create_string_utf8(env, "ok", 2, &ret);
     return ret;
 }
+
+static void appendLargeLogBlock(const std::string& title, const std::string& text) {
+    gLog.append("===== " + title + " BEGIN chars=" + std::to_string(text.size()) + " =====");
+    size_t offset = 0;
+    const size_t chunkSize = 3500;
+    while (offset < text.size()) {
+        gLog.append(text.substr(offset, std::min(chunkSize, text.size() - offset)));
+        offset += chunkSize;
+    }
+    if (text.empty()) {
+        gLog.append("");
+    }
+    gLog.append("===== " + title + " END =====");
+}
+
+static void dumpLlmRequest(const std::string& tag, const std::string& rawInput, const std::string& modelInput) {
+    appendLargeLogBlock(tag + " RAW INPUT", rawInput);
+    appendLargeLogBlock(tag + " MODEL INPUT", modelInput);
+}
+
+static void dumpLlmResponse(const std::string& tag, const std::string& response) {
+    appendLargeLogBlock(tag + " MODEL RESPONSE", response);
+}
+
+static std::string profileSummaryPath() {
+    std::lock_guard<std::mutex> g(gLog.mu);
+    if (gLog.filePath.empty()) {
+        return "";
+    }
+    size_t slash = gLog.filePath.find_last_of('/');
+    if (slash == std::string::npos) {
+        return "mnn_profile_summary.log";
+    }
+    return gLog.filePath.substr(0, slash + 1) + "mnn_profile_summary.log";
+}
+
+static void appendProfileSummaryLine(const std::string& line) {
+    std::string path = profileSummaryPath();
+    if (path.empty()) {
+        return;
+    }
+    FILE* fp = fopen(path.c_str(), "a");
+    if (!fp) {
+        return;
+    }
+    fputs(line.c_str(), fp);
+    fputc('\n', fp);
+    fclose(fp);
+}
 } // anonymous namespace
 
 // 去掉 HiLog 隐私格式（%{public}d -> %d），这样同一条格式串也能安全喂给 vsnprintf。
@@ -233,6 +353,28 @@ struct AsyncData {
     bool success;
     napi_threadsafe_function tsfn = nullptr;  // for token streaming
 };
+
+struct OpProfileStat {
+    std::string type;
+    std::string name;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+    float flopsM = 0.0f;
+    int count = 0;
+};
+
+static std::string formatRuntimeCapabilities() {
+    std::ostringstream out;
+    out << "--- runtime capabilities ---\n";
+    out << "libMNN contains OH_LOG_Print + MNNJNI, so MNN_PRINT/MNN_ERROR logs are expected in system HiLog.\n"
+        << "Search HiLog tag/text: MNNJNI, The device supports, KleidiAI is running.\n"
+        << "App Runtime Logs -> Native captures stdout/stderr and this app's native LOGI/LOGE, but not MNN direct HiLog.\n"
+        << "Expected MNN CPU feature line:\n"
+        << "The device supports: i8sdot:<n>, fp16:<n>, i8mm:<n>, sve2:<n>, sme2:<n>\n"
+        << "Expected KleidiAI line:\n"
+        << "KleidiAI is running! AccelType is <type>\n";
+    return out.str();
+}
 
 static std::string joinPath(const std::string& lhs, const std::string& rhs) {
     if (lhs.empty()) return rhs;
@@ -478,15 +620,20 @@ static napi_value PrepareCustomOpp(napi_env env, napi_callback_info info) {
 
 // 每个 token chunk 都通过 TSFN 切回 JS 主线程，用于更新浮窗的流式文本。
 static void TokenTsfnCallback(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
-    if (data) {
-        std::string* token = static_cast<std::string*>(data);
-        napi_value argv;
-        napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
-        napi_value undefined;
-        napi_get_undefined(env, &undefined);
-        napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
-        delete token;
+    if (!data) {
+        return;
     }
+    std::string* token = static_cast<std::string*>(data);
+    if (!env || !js_callback) {
+        delete token;
+        return;
+    }
+    napi_value argv;
+    napi_create_string_utf8(env, token->c_str(), token->size(), &argv);
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_call_function(env, undefined, js_callback, 1, &argv, nullptr);
+    delete token;
 }
 
 // 自定义 streambuf：MNN 生成时一边累积完整输出，一边把 token chunk 推给 ArkTS 回调。
@@ -640,18 +787,49 @@ static void GenerateExecute(napi_env env, void* data) {
     }
 
     std::ostringstream oss;
+    dumpLlmRequest("Generate", asyncData->inputStr, g_llm->apply_chat_template(asyncData->inputStr));
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     g_llm->response(asyncData->inputStr, &oss);
     asyncData->outputStr = oss.str();
+    dumpLlmResponse("Generate", asyncData->outputStr);
 
     auto context = g_llm->getContext();
     if(context) {
-        float prefill_s = context->prefill_us / 1e6;
-        float decode_s = context->decode_us / 1e6;
-        char perf[512];
+        logLlmPerf("Generate", g_llm.get(), -1, perfBaseline);
+        int64_t vision_us = context->vision_us - perfBaseline.visionUs;
+        int64_t audio_us = context->audio_us - perfBaseline.audioUs;
+        float pixels_mp = context->pixels_mp - perfBaseline.pixelsMp;
+        if (vision_us < 0) vision_us = context->vision_us;
+        if (audio_us < 0) audio_us = context->audio_us;
+        if (pixels_mp < 0) pixels_mp = context->pixels_mp;
+        float vision_s = vision_us / 1e6f;
+        float audio_s = audio_us / 1e6f;
+        float prefill_s = context->prefill_us / 1e6f;
+        float decode_s = context->decode_us / 1e6f;
+        float total_prefill_s = vision_s + audio_s + prefill_s;
+        float vision_mp_s = vision_s > 0 ? pixels_mp / vision_s : 0;
+        char perf[768];
         snprintf(perf, sizeof(perf),
-            "\n\n--- perf ---\nprompt tokens: %d\ndecode tokens: %d\nprefill: %.2f tok/s\ndecode:%.2f tok/s",
-            context->prompt_len, context->gen_seq_len,
+            "\n\n--- perf ---\n"
+            "prefill tokens: %d tokens (includes image tokens for VLM)\n"
+            "image tokens: not exposed by LlmContext\n"
+            "decode tokens: %d tokens\n"
+            "vision time: %.3f s\n"
+            "vit time: not separated\n"
+            "image pixels: %.3f MP\n"
+            "image throughput: %.2f MP/s\n"
+            "llm prefill time: %.3f s\n"
+            "llm prefill speed: %.2f tokens/s\n"
+            "total prefill time: %.3f s\n"
+            "total prefill speed: %.2f tokens/s\n"
+            "decode time: %.3f s\n"
+            "decode speed: %.2f tokens/s",
+            context->prompt_len, context->gen_seq_len, vision_s, pixels_mp, vision_mp_s,
+            prefill_s,
             prefill_s > 0 ? context->prompt_len / prefill_s : 0,
+            total_prefill_s,
+            total_prefill_s > 0 ? context->prompt_len / total_prefill_s : 0,
+            decode_s,
             decode_s > 0 ? context->gen_seq_len / decode_s : 0);
         asyncData->outputStr += perf;
     }
@@ -676,6 +854,196 @@ static napi_value GenerateAsync(napi_env env, napi_callback_info info) {
     napi_value resourceName;
     napi_create_string_utf8(env, "GenerateAsync", NAPI_AUTO_LENGTH, &resourceName);
     napi_create_async_work(env, nullptr, resourceName, GenerateExecute, AsyncComplete, asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
+static std::string formatProfileReport(const std::map<std::string, OpProfileStat>& stats,
+                                       const std::string& response,
+                                       Llm* llm,
+                                       int topK,
+                                       LlmPerfBaseline baseline = {}) {
+    std::vector<OpProfileStat> rows;
+    rows.reserve(stats.size());
+    double totalMs = 0.0;
+    int totalCalls = 0;
+    for (const auto& kv : stats) {
+        rows.push_back(kv.second);
+        totalMs += kv.second.totalMs;
+        totalCalls += kv.second.count;
+    }
+    std::sort(rows.begin(), rows.end(), [](const OpProfileStat& a, const OpProfileStat& b) {
+        return a.totalMs > b.totalMs;
+    });
+    if (topK <= 0) {
+        topK = 30;
+    }
+    if (topK > (int)rows.size()) {
+        topK = (int)rows.size();
+    }
+
+    std::ostringstream out;
+    out << "=== LLM op profile ===\n";
+    std::string runtimeCapabilities = formatRuntimeCapabilities();
+    out << runtimeCapabilities;
+    out << "op kinds: " << rows.size() << "\n";
+    out << "op calls: " << totalCalls << " calls\n";
+    out << "summed op time: " << totalMs << " ms\n";
+    if (rows.size() <= 1) {
+        out << "op granularity: callback only exposed fused MNN graph/operator level; lower-level kernels may be hidden\n";
+    }
+    if (llm != nullptr && llm->getContext()) {
+        auto context = llm->getContext();
+        int64_t visionUs = context->vision_us - baseline.visionUs;
+        int64_t audioUs = context->audio_us - baseline.audioUs;
+        float pixelsMp = context->pixels_mp - baseline.pixelsMp;
+        if (visionUs < 0) visionUs = context->vision_us;
+        if (audioUs < 0) audioUs = context->audio_us;
+        if (pixelsMp < 0) pixelsMp = context->pixels_mp;
+        float visionS = visionUs / 1e6f;
+        float audioS = audioUs / 1e6f;
+        float prefillS = context->prefill_us / 1e6f;
+        float decodeS = context->decode_us / 1e6f;
+        float totalPrefillS = visionS + audioS + prefillS;
+        out << "\n--- runtime perf ---\n"
+            << "prefill tokens: " << context->prompt_len << " tokens (includes image tokens for VLM)\n"
+            << "image tokens: not exposed by LlmContext\n"
+            << "decode tokens: " << context->gen_seq_len << " tokens\n"
+            << "vision time: " << visionS << " s\n"
+            << "vit time: not separated\n"
+            << "image pixels: " << pixelsMp << " MP\n"
+            << "image throughput: " << (visionS > 0 ? pixelsMp / visionS : 0) << " MP/s\n"
+            << "audio time: " << audioS << " s\n"
+            << "llm prefill time: " << prefillS << " s\n"
+            << "llm prefill speed: " << (prefillS > 0 ? context->prompt_len / prefillS : 0) << " tokens/s\n"
+            << "total prefill time: " << totalPrefillS << " s\n"
+            << "total prefill speed: " << (totalPrefillS > 0 ? context->prompt_len / totalPrefillS : 0) << " tokens/s\n"
+            << "decode time: " << decodeS << " s\n"
+            << "decode speed: " << (decodeS > 0 ? context->gen_seq_len / decodeS : 0) << " tokens/s\n";
+    }
+    out << "response_preview=" << response.substr(0, std::min<size_t>(response.size(), 240)) << "\n\n";
+    out << "rank | total_ms | avg_ms | max_ms | count | flopsM | type | name\n";
+    out << "-----|----------|--------|--------|-------|--------|------|-----\n";
+    for (int i = 0; i < topK; ++i) {
+        const auto& r = rows[i];
+        double avgMs = r.count > 0 ? r.totalMs / r.count : 0.0;
+        out << (i + 1) << " | "
+            << r.totalMs << " | "
+            << avgMs << " | "
+            << r.maxMs << " | "
+            << r.count << " | "
+            << r.flopsM << " | "
+            << r.type << " | "
+            << r.name << "\n";
+    }
+    return out.str();
+}
+
+static void ProfileGenerateExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_llm) {
+        asyncData->success = false;
+        asyncData->outputStr = "error: model not loaded";
+        return;
+    }
+
+    std::string prompt = asyncData->inputStr;
+    int topK = 30;
+    auto sep = prompt.rfind("|top=");
+    if (sep != std::string::npos) {
+        std::string topStr = prompt.substr(sep + 5);
+        int parsedTop = std::atoi(topStr.c_str());
+        if (parsedTop > 0) {
+            topK = parsedTop;
+            prompt = prompt.substr(0, sep);
+        }
+    }
+
+    using Clock = std::chrono::high_resolution_clock;
+    std::map<std::string, Clock::time_point> starts;
+    std::map<std::string, OpProfileStat> stats;
+    g_llm->setDebugCallback(
+        [&](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo* info) {
+            if (info == nullptr) {
+                return true;
+            }
+            std::string key = info->type() + ":" + info->name();
+            starts[key] = Clock::now();
+            return true;
+        },
+        [&](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo* info) {
+            if (info == nullptr) {
+                return true;
+            }
+            std::string key = info->type() + ":" + info->name();
+            auto now = Clock::now();
+            auto it = starts.find(key);
+            if (it == starts.end()) {
+                return true;
+            }
+            double ms = std::chrono::duration<double, std::milli>(now - it->second).count();
+            auto& stat = stats[key];
+            stat.type = info->type();
+            stat.name = info->name();
+            stat.flopsM = info->flops();
+            stat.totalMs += ms;
+            stat.maxMs = std::max(stat.maxMs, ms);
+            stat.count += 1;
+            return true;
+        }
+    );
+
+    std::ostringstream response;
+    dumpLlmRequest("ProfileGenerate", prompt, g_llm->apply_chat_template(prompt));
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    g_llm->response(prompt, &response);
+
+    g_llm->setDebugCallback(
+        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; },
+        [](const std::vector<MNN::Tensor*>&, const MNN::OperatorInfo*) { return true; }
+    );
+
+    std::string responseStr = response.str();
+    dumpLlmResponse("ProfileGenerate", responseStr);
+    logLlmPerf("ProfileGenerate", g_llm.get(), -1, perfBaseline);
+    asyncData->outputStr = formatProfileReport(stats, responseStr, g_llm.get(), topK, perfBaseline);
+    appLog("%{public}s", asyncData->outputStr.c_str());
+    asyncData->success = true;
+}
+
+static napi_value ProfileGenerateAsync(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string prompt = "hello";
+    if (argc >= 1) {
+        size_t strLen = 0;
+        napi_get_value_string_utf8(env, args[0], nullptr, 0, &strLen);
+        if (strLen > 0) {
+            prompt.resize(strLen);
+            napi_get_value_string_utf8(env, args[0], &prompt[0], strLen + 1, &strLen);
+        }
+    }
+    if (argc >= 2) {
+        int32_t topK = 0;
+        if (napi_get_value_int32(env, args[1], &topK) == napi_ok && topK > 0) {
+            prompt += "|top=" + std::to_string(topK);
+        }
+    }
+
+    AsyncData* asyncData = new AsyncData();
+    asyncData->inputStr = std::move(prompt);
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "ProfileGenerateAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, ProfileGenerateExecute, AsyncComplete, asyncData, &asyncData->work);
     napi_queue_async_work(env, asyncData->work);
 
     return promise;
@@ -706,11 +1074,22 @@ static void ChatExecute(napi_env env, void* data) {
     }
     // 多轮对话保存 ChatMessages；Agent 模式使用独立 API，避免污染普通聊天历史。
     g_messages.emplace_back("user", asyncData->inputStr);
-    std::ostringstream oss;
-    g_llm->response(g_messages, &oss);
+    std::string modelInput = g_llm->apply_chat_template(g_messages);
+    dumpLlmRequest("Chat", asyncData->inputStr, modelInput);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
+    std::string assistant_str;
+    if (asyncData->tsfn) {
+        TsfnStreambuf buf(asyncData->tsfn);
+        std::ostream tokenStream(&buf);
+        g_llm->response(g_messages, &tokenStream);
+        assistant_str = buf.str();
+    } else {
+        std::ostringstream oss;
+        g_llm->response(g_messages, &oss);
+        assistant_str = oss.str();
+    }
     auto context = g_llm->getContext();
-    
-    std::string assistant_str = oss.str();
+
     if (assistant_str.empty() && context) {
         assistant_str = context->generate_str;
     }
@@ -722,13 +1101,15 @@ static void ChatExecute(napi_env env, void* data) {
     }
 
     g_messages.emplace_back("assistant", assistant_str);
+    dumpLlmResponse("Chat", assistant_str);
+    logLlmPerf("Chat", g_llm.get(), -1, perfBaseline);
     asyncData->outputStr = assistant_str;
     asyncData->success = true;
 }
 
 static napi_value ChatAsync(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     char userMsg[4096] = {0};
@@ -737,6 +1118,18 @@ static napi_value ChatAsync(napi_env env, napi_callback_info info) {
 
     AsyncData* asyncData = new AsyncData();
     asyncData->inputStr = userMsg;
+
+    // Optional 2nd arg: onToken callback for local chat streaming.
+    if (argc >= 2) {
+        napi_valuetype argType;
+        napi_typeof(env, args[1], &argType);
+        if (argType == napi_function) {
+            napi_value tsfnName;
+            napi_create_string_utf8(env, "ChatTokenCb", NAPI_AUTO_LENGTH, &tsfnName);
+            napi_create_threadsafe_function(env, args[1], nullptr, tsfnName,
+                0, 1, nullptr, nullptr, nullptr, TokenTsfnCallback, &asyncData->tsfn);
+        }
+    }
 
     napi_value promise;
     napi_create_promise(env, &asyncData->deferred, &promise);
@@ -771,12 +1164,15 @@ static void AgentPrefillExecute(napi_env env, void* data) {
     g_llm->set_config("{\"use_template\":false}");
 
     // 只 prefill prefix，不生成新 token；记录 prefix 结束位置供后续 eraseHistory 使用。
+    dumpLlmRequest("AgentPrefill", asyncData->inputStr, asyncData->inputStr);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     g_llm->response(asyncData->inputStr, nullptr, nullptr, 0);
     g_prefix_pos = g_llm->getCurrentHistory();
     g_agent_mode = true;
     g_agent_step = 0;
 
     LOGI("AgentPrefill: prefix cached at %{public}zu tokens", g_prefix_pos);
+    logLlmPerf("AgentPrefill", g_llm.get(), -1, perfBaseline);
     asyncData->success = true;
     asyncData->outputStr = "ok:" + std::to_string(g_prefix_pos);
 }
@@ -830,6 +1226,8 @@ static void AgentStepExecute(napi_env env, void* data) {
 
     // 预填当前 variable（历史 + 截图标签），随后生成动作 JSON；可选流式回调用于浮窗。
     std::string response;
+    dumpLlmRequest("AgentStep", asyncData->inputStr, asyncData->inputStr);
+    LlmPerfBaseline perfBaseline = captureLlmPerfBaseline(g_llm.get());
     if (asyncData->tsfn) {
         TsfnStreambuf buf(asyncData->tsfn);
         std::ostream tokenStream(&buf);
@@ -851,16 +1249,9 @@ static void AgentStepExecute(napi_env env, void* data) {
         asyncData->outputStr = "error: empty agent response";
         return;
     }
+    dumpLlmResponse("AgentStep", response);
 
-    if (context) {
-        float prefill_s = context->prefill_us / 1e6;
-        float decode_s = context->decode_us / 1e6;
-        LOGI("AgentStep %{public}d: prompt=%{public}d decode=%{public}d prefill=%.2f tok/s decode=%.2f tok/s kv=%{public}zu",
-             g_agent_step, context->prompt_len, context->gen_seq_len,
-             prefill_s > 0 ? context->prompt_len / prefill_s : 0,
-             decode_s > 0 ? context->gen_seq_len / decode_s : 0,
-             g_llm->getCurrentHistory());
-    }
+    logLlmPerf("AgentStep", g_llm.get(), g_agent_step, perfBaseline);
 
     asyncData->success = true;
     asyncData->outputStr = response;
@@ -4156,6 +4547,146 @@ static napi_value OpTestAsync(napi_env env, napi_callback_info info) {
     return promise;
 }
 
+// ========== CPU core benchmark: infer big/mid/little cores without sysfs ==========
+static int setCurrentThreadAffinityToCpu(int cpu) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(cpu, &mask);
+#if defined(__OHOS__) || defined(__linux__)
+    return static_cast<int>(syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask));
+#else
+    return sched_setaffinity(0, sizeof(mask), &mask);
+#endif
+}
+
+static double runCpuCoreBenchKernel(int loops) {
+    volatile double acc = 1.000001;
+    volatile uint64_t mix = 0x9e3779b97f4a7c15ULL;
+    auto begin = std::chrono::steady_clock::now();
+    for (int i = 0; i < loops; i++) {
+        acc = acc * 1.0000001192092896 + 0.000000017 * static_cast<double>((i & 255) + 1);
+        acc = std::sin(acc) + std::cos(acc * 0.5) + acc * 0.999999;
+        mix ^= static_cast<uint64_t>(i) + 0x9e3779b97f4a7c15ULL + (mix << 6) + (mix >> 2);
+    }
+    auto end = std::chrono::steady_clock::now();
+    if (acc == 0.123456 || mix == 0) {
+        LOGI("cpu core bench guard acc=%{public}f mix=%{public}llu", acc,
+             static_cast<unsigned long long>(mix));
+    }
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+static std::string runCpuCoreBench() {
+    std::ostringstream log;
+    int cpuCount = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    if (cpuCount <= 0) {
+        cpuCount = 1;
+    }
+    cpuCount = std::min(cpuCount, static_cast<int>(sizeof(cpu_set_t) * 8));
+
+    const int warmLoops = 20000;
+    const int loops = 260000;
+    const int repeats = 3;
+
+    struct CoreBenchResult {
+        int cpu = 0;
+        bool affinityOk = false;
+        int errnoValue = 0;
+        double medianMs = 0.0;
+        double bestMs = 0.0;
+        double score = 0.0;
+    };
+    std::vector<CoreBenchResult> results;
+
+    log << "=== CPU Core Benchmark ===\n";
+    log << "goal: infer big/mid/little cores by binding this benchmark thread to each CPU.\n";
+    log << "online cpu count: " << cpuCount << "\n";
+    log << "loops/core: " << loops << ", repeats: " << repeats << "\n\n";
+
+    for (int cpu = 0; cpu < cpuCount; cpu++) {
+        CoreBenchResult item;
+        item.cpu = cpu;
+        errno = 0;
+        int ret = setCurrentThreadAffinityToCpu(cpu);
+        item.affinityOk = (ret == 0);
+        item.errnoValue = errno;
+        if (!item.affinityOk) {
+            results.push_back(item);
+            continue;
+        }
+        runCpuCoreBenchKernel(warmLoops);
+        std::vector<double> samples;
+        for (int r = 0; r < repeats; r++) {
+            samples.push_back(runCpuCoreBenchKernel(loops));
+        }
+        std::sort(samples.begin(), samples.end());
+        item.bestMs = samples.front();
+        item.medianMs = samples[samples.size() / 2];
+        results.push_back(item);
+    }
+
+    double best = std::numeric_limits<double>::max();
+    for (auto& item : results) {
+        if (item.affinityOk && item.medianMs > 0.0) {
+            best = std::min(best, item.medianMs);
+        }
+    }
+    if (best == std::numeric_limits<double>::max()) {
+        log << "ERROR: set affinity failed for all CPUs. App sandbox may block sched_setaffinity.\n";
+        for (auto& item : results) {
+            log << "cpu" << item.cpu << " affinity=fail errno=" << item.errnoValue << "\n";
+        }
+        return log.str();
+    }
+
+    log << "cpu    median_ms    best_ms    rel_score    inferred\n";
+    log << "----   ---------    -------    ---------    --------\n";
+    for (auto& item : results) {
+        if (!item.affinityOk || item.medianMs <= 0.0) {
+            log << "cpu" << item.cpu << "  affinity failed errno=" << item.errnoValue << "\n";
+            continue;
+        }
+        item.score = best / item.medianMs;
+        std::string group = "little";
+        if (item.score >= 0.88) {
+            group = "big";
+        } else if (item.score >= 0.62) {
+            group = "mid";
+        }
+        log << "cpu" << std::left << std::setw(3) << item.cpu << std::right
+            << "  " << std::fixed << std::setprecision(3) << std::setw(9) << item.medianMs
+            << "    " << std::setw(7) << item.bestMs
+            << "    " << std::setw(9) << item.score
+            << "    " << group << "\n";
+    }
+    log << "\nNotes:\n";
+    log << "- This is empirical. Thermal throttling and foreground load can shift scores.\n";
+    log << "- Re-run 2-3 times; stable clusters are the useful signal.\n";
+    log << "- If all cores have similar scores, the scheduler or sandbox may ignore affinity.\n";
+    return log.str();
+}
+
+static void CpuCoreBenchExecute(napi_env env, void* data) {
+    AsyncData* asyncData = static_cast<AsyncData*>(data);
+    asyncData->success = true;
+    asyncData->outputStr = runCpuCoreBench();
+}
+
+static napi_value CpuCoreBenchAsync(napi_env env, napi_callback_info info) {
+    AsyncData* asyncData = new AsyncData();
+
+    napi_value promise;
+    napi_create_promise(env, &asyncData->deferred, &promise);
+
+    napi_value resourceName;
+    napi_create_string_utf8(env, "CpuCoreBenchAsync", NAPI_AUTO_LENGTH, &resourceName);
+    napi_create_async_work(env, nullptr, resourceName, CpuCoreBenchExecute, AsyncComplete,
+                           asyncData, &asyncData->work);
+    napi_queue_async_work(env, asyncData->work);
+
+    return promise;
+}
+
 // ========== N-API 模块注册 ==========
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
@@ -4164,6 +4695,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"copyModel",    nullptr, CopyModel,         nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadModel",    nullptr, LoadModelAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"generate",     nullptr, GenerateAsync,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"profileGenerate", nullptr, ProfileGenerateAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"chat",         nullptr, ChatAsync,          nullptr, nullptr, nullptr, napi_default, nullptr},
         {"reset",        nullptr, Reset,              nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unloadModel",  nullptr, UnloadModel,        nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -4171,6 +4703,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"agentStep",    nullptr, AgentStepAsync,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"agentReset",   nullptr, AgentResetAsync,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"opTest",       nullptr, OpTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cpuCoreBench", nullptr, CpuCoreBenchAsync,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"omcTest",      nullptr, OmcTestAsync,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvMode",  nullptr, SetConvMode,        nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setConvQuant", nullptr, SetConvQuant,       nullptr, nullptr, nullptr, napi_default, nullptr},

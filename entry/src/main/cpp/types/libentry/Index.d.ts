@@ -1,6 +1,6 @@
 // Agent Loop 所需的 native API 子集，供 AgentLoopRunner 等工具类按接口引用。
 export interface AgentLoopNativeApi {
-  chat(userMessage: string): Promise<string>;
+  chat(userMessage: string, onToken?: (token: string) => void): Promise<string>;
   reset(): string;
   unloadModel(): string;
   agentPrefill(prefix: string): Promise<string>;
@@ -12,11 +12,13 @@ export interface AgentLoopNativeApi {
 export interface LibEntryNative extends AgentLoopNativeApi {
   loadModel: (configPath: string) => Promise<string>;
   generate: (prompt: string) => Promise<string>;
+  profileGenerate: (prompt: string, topK?: number) => Promise<string>;
   copyModel: (src: string, dst: string) => string;
   prepareCustomOpp: (resMgr: Object, sandboxRoot: string) => string;
 
   omcTest: (modelDir: string) => Promise<string>;
   opTest: (config: string) => Promise<string>;
+  cpuCoreBench: () => Promise<string>;
 
   setConvMode: (mode: string) => string;
   setConvQuant: (mode: string) => string;
@@ -34,7 +36,8 @@ export default native;
 
 export const loadModel: (configPath: string) => Promise<string>;
 export const generate: (prompt: string) => Promise<string>;
-export const chat: (userMessage: string) => Promise<string>;
+export const profileGenerate: (prompt: string, topK?: number) => Promise<string>;
+export const chat: (userMessage: string, onToken?: (token: string) => void) => Promise<string>;
 export const reset: () => string;
 export const unloadModel: () => string;
 export const copyModel: (src: string, dst: string) => string;
@@ -51,6 +54,7 @@ export const omcTest: (modelDir: string) => Promise<string>;
 // 算子精度测试（CPU vs HiAI delegate）。
 // config: "preset" 使用内置测试集；或 "ic,oc,ih,iw,kh,kw,sh,sw,group" 指定单个卷积形状。
 export const opTest: (config: string) => Promise<string>;
+export const cpuCoreBench: () => Promise<string>;
 
 // HiAI conv-path override for A/B testing: 'auto' | 'matmul' | 'conv'
 // Must be called before opTest (read during HiAI compileHiAIModel via HIAI_CONV_MODE env).

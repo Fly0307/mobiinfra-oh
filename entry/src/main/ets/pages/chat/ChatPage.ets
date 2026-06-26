@@ -10,6 +10,17 @@ import {
   chatTimeGreeting
 } from './ChatPageTypes';
 import {
+  CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM,
+  CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA,
+  chatAttachmentComposerExtraHeightWithImages,
+  chatAttachmentPreviewHeight,
+  chatCanSendMessageWithImages,
+  chatCanSubmitTaskWithImages,
+  chatImageAttachmentSourceLabel,
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
+} from './ChatAttachmentPolicy';
+import {
   ChatMessage,
   ChatSessionSummary,
   chatMessagesAutoScrollKey,
@@ -19,6 +30,7 @@ import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
 import { digitalAvatarContainerHeight } from './DigitalAvatarTypes';
+import { showToastSafely } from '../../utils/PromptSafe';
 
 @Component
 export struct ChatPage {
@@ -27,6 +39,7 @@ export struct ChatPage {
   @Link userInput: string;
   @Link chatDeepThinkingEnabled: boolean;
   @State previewImagePath: string = '';
+  @State attachmentSourceMenuVisible: boolean = false;
   @Prop cloudOutput: string = '';
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
@@ -41,6 +54,7 @@ export struct ChatPage {
   // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
   @Prop avatarForegroundUri: string = '';
   @Prop avatarMessageForegroundUri: string = '';
+  @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
@@ -49,6 +63,8 @@ export struct ChatPage {
   onCreateSession: (mode: string) => void = () => {};
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
+  onRenameSession: (id: string, title: string) => Promise<boolean> = async () => false;
+  onToggleSessionPinned: (id: string) => Promise<void> = async () => {};
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
@@ -56,6 +72,9 @@ export struct ChatPage {
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
+  onTakePhotoAttachment: () => Promise<void> = async () => {};
+  onPickImageAttachment: () => Promise<void> = async () => {};
+  onClearImageAttachment: () => void = () => {};
   onClearCloudDebugImage: () => void = () => {};
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
@@ -76,8 +95,16 @@ export struct ChatPage {
     return chatComposerTextAreaHeight(this.activeInput());
   }
 
+  private attachmentComposerExtraHeight(): number {
+    return chatAttachmentComposerExtraHeightWithImages(this.composerTextAreaHeight(), this.pendingImageAttachmentList());
+  }
+
+  private attachmentPreviewHeight(): number {
+    return chatAttachmentPreviewHeight(this.composerTextAreaHeight());
+  }
+
   private bottomOverlayInset(): number {
-    return this.composerBarHeight() + 64;
+    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + 64;
   }
 
   private welcomeGreeting(): string {
@@ -94,6 +121,14 @@ export struct ChatPage {
 
   private isBusy(): boolean {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
+  }
+
+  private showConversationThinkingRow(): boolean {
+    // 本地流式会先插入 assistant 占位消息，已有消息时不再额外显示底部处理中行。
+    if (this.isCloudMode()) {
+      return this.cloudThinking;
+    }
+    return this.localThinking && this.messages.length === 0;
   }
 
   private primaryButtonText(): string {
@@ -115,6 +150,18 @@ export struct ChatPage {
     return this.messages.length > 0 || this.isBusy();
   }
 
+  private hasPendingImageAttachment(): boolean {
+    return hasChatImageAttachments(this.pendingImageAttachmentList());
+  }
+
+  private pendingImageAttachmentList(): string[] {
+    return normalizeChatImageAttachments(this.pendingImageAttachmentUris);
+  }
+
+  private pendingImageAttachmentCount(): number {
+    return this.pendingImageAttachmentList().length;
+  }
+
   private openDebugImagePreview(path: string): void {
     if (path.length > 0) {
       this.previewImagePath = path;
@@ -123,6 +170,27 @@ export struct ChatPage {
 
   private closeDebugImagePreview(): void {
     this.previewImagePath = '';
+  }
+
+  private openAttachmentSourceMenu(): void {
+    this.dismissChatInput();
+    this.attachmentSourceMenuVisible = true;
+  }
+
+  private closeAttachmentSourceMenu(): void {
+    this.attachmentSourceMenuVisible = false;
+  }
+
+  // 来源菜单只负责分发用户选择，真正的相机/相册调用仍在页面宿主中完成，避免 UI 组件持有系统能力细节。
+  private async selectImageAttachmentSource(source: string): Promise<void> {
+    this.closeAttachmentSourceMenu();
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA) {
+      await this.onTakePhotoAttachment();
+      return;
+    }
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM) {
+      await this.onPickImageAttachment();
+    }
   }
 
   private activeConversationText(): string {
@@ -283,7 +351,7 @@ export struct ChatPage {
         .margin({ top: 14 })
 
         Blank()
-          .height(124)
+          .height(this.bottomOverlayInset())
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
@@ -297,9 +365,9 @@ export struct ChatPage {
     if (this.messages.length > 0) {
       ChatMessageList({
         messages: this.messages,
-        thinking: this.isBusy(),
-        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.isBusy()),
-        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.isBusy()),
+        thinking: this.showConversationThinkingRow(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
+        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
         avatarForegroundUri: this.avatarForegroundUri,
@@ -353,7 +421,7 @@ export struct ChatPage {
           }
 
           Blank()
-            .height(150)
+            .height(this.bottomOverlayInset())
         }
         .width('100%')
       }
@@ -369,7 +437,10 @@ export struct ChatPage {
       }
       return;
     }
-    if (this.activeInput().trim().length > 0 && !this.isBusy()) {
+    if (!chatCanSendMessageWithImages(this.activeInput(), this.pendingImageAttachmentList())) {
+      return;
+    }
+    if (!this.isBusy()) {
       this.dismissChatInput();
     }
     if (this.isCloudMode()) {
@@ -380,6 +451,10 @@ export struct ChatPage {
   }
 
   private async runTaskAction(): Promise<void> {
+    if (!chatCanSubmitTaskWithImages(this.pendingImageAttachmentList())) {
+      showToastSafely('图片附件仅支持普通聊天发送，请先发送或清除附件', 1800);
+      return;
+    }
     if (this.activeInput().trim().length > 0 && !this.isBusy()) {
       this.dismissChatInput();
     }
@@ -399,6 +474,146 @@ export struct ChatPage {
     try {
       this.getUIContext().getFocusController().clearFocus();
     } catch (e) {
+    }
+  }
+
+  @Builder PendingImageAttachmentPreview() {
+    if (this.hasPendingImageAttachment()) {
+      Row() {
+        Scroll() {
+          Row() {
+            ForEach(this.pendingImageAttachmentList(), (uri: string, index?: number) => {
+              Image(uri)
+                .width(this.attachmentPreviewHeight() * 0.78)
+                .height(this.attachmentPreviewHeight() * 0.86)
+                .objectFit(ImageFit.Cover)
+                .borderRadius(9)
+                .backgroundColor('#F3F4F6')
+                .margin({ right: 6 })
+            }, (uri: string, index?: number) => uri + ':' + String(index === undefined ? 0 : index))
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .layoutWeight(1)
+        .height(this.attachmentPreviewHeight())
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        Column() {
+          Text('图片附件 x' + String(this.pendingImageAttachmentCount()))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#111827')
+            .maxLines(1)
+          Text('将随下一条消息发送')
+            .fontSize(10)
+            .fontColor('#7B8392')
+            .margin({ top: 2 })
+            .maxLines(1)
+        }
+        .margin({ left: 10 })
+        .alignItems(HorizontalAlign.Start)
+        Text('×')
+          .fontSize(18)
+          .fontColor('#6B7280')
+          .width(this.attachmentPreviewHeight() * 0.72)
+          .height(this.attachmentPreviewHeight() * 0.72)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#F3F4F6')
+          .borderRadius(this.attachmentPreviewHeight() * 0.36)
+          .onClick(() => {
+            this.onClearImageAttachment();
+          })
+      }
+      .width('100%')
+      .height(this.attachmentPreviewHeight())
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 8, right: 8 })
+      .margin({ left: 22, right: 22, bottom: Math.round(this.composerTextAreaHeight() * 0.18) })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 10, color: '#12000000', offsetX: 0, offsetY: 3 })
+    }
+  }
+
+  @Builder AttachmentSourceAction(source: string) {
+    Column() {
+      Text(chatImageAttachmentSourceLabel(source))
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#111827')
+        .maxLines(1)
+      Text(source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA ? '调用相机' : '选择图片')
+        .fontSize(11)
+        .fontColor('#7B8392')
+        .margin({ top: 4 })
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .height(64)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor('#F8FAFD')
+    .borderRadius(18)
+    .border({ width: 1, color: '#E8ECF3' })
+    .onClick(async () => {
+      await this.selectImageAttachmentSource(source);
+    })
+  }
+
+  @Builder AttachmentSourceMenuOverlay() {
+    if (this.attachmentSourceMenuVisible) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column() {
+        }
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#33000000')
+          .onClick(() => {
+            this.closeAttachmentSourceMenu();
+          })
+
+        Column() {
+          Row() {
+            Text('添加附件')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#111827')
+            Blank()
+              .layoutWeight(1)
+            Text('取消')
+              .fontSize(14)
+              .fontColor('#6B7280')
+              .height(32)
+              .padding({ left: 12, right: 12 })
+              .onClick(() => {
+                this.closeAttachmentSourceMenu();
+              })
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          Row() {
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA)
+            Blank()
+              .width(12)
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM)
+          }
+          .width('100%')
+          .margin({ top: 12 })
+        }
+        .width('100%')
+        .padding({
+          left: 20,
+          right: 20,
+          top: 16,
+          bottom: Math.max(22, Math.round(this.bottomOverlayInset() * 0.18))
+        })
+        .backgroundColor(Color.White)
+        .borderRadius(24)
+      }
+      .width('100%')
+      .height('100%')
+      .zIndex(70)
     }
   }
 
@@ -431,7 +646,7 @@ export struct ChatPage {
             .margin({ top: 24 })
             .backgroundColor(Color.Black)
 
-          Text('调试截图')
+          Text('图片预览')
             .fontSize(13)
             .fontColor('#E5E7EB')
             .margin({ top: 12 })
@@ -503,6 +718,8 @@ export struct ChatPage {
       .backgroundColor(this.hasConversationContent() ? Color.White : '#F4F8FF')
 
       Column() {
+        this.PendingImageAttachmentPreview()
+
         Row() {
           if (chatDeepThinkingToggleVisible(this.chatMode)) {
             Text(this.chatDeepThinkingEnabled ? '深度思考 开' : '深度思考 关')
@@ -532,18 +749,16 @@ export struct ChatPage {
         .margin({ bottom: 8 })
 
         Row() {
-          if (!this.hasConversationContent()) {
-            Text('+')
-              .fontSize(30)
-              .fontColor('#111827')
-              .width(40)
-              .height(40)
-              .textAlign(TextAlign.Center)
-              .backgroundColor(Color.White)
-              .borderRadius(20)
-              .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
-              .onClick(async () => { await this.runTaskAction(); })
-          }
+          Text('+')
+            .fontSize(30)
+            .fontColor('#111827')
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(Color.White)
+            .borderRadius(20)
+            .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
+            .onClick(() => { this.openAttachmentSourceMenu(); })
           TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
             .height(this.composerTextAreaHeight())
@@ -551,8 +766,8 @@ export struct ChatPage {
             .lineHeight(20)
             .fontColor('#4B5563')
             .backgroundColor('#00FFFFFF')
-            .padding({ left: this.hasConversationContent() ? 12 : 14, right: 12, top: 8, bottom: 8 })
-            .margin({ left: this.hasConversationContent() ? 0 : 8 })
+            .padding({ left: 14, right: 12, top: 8, bottom: 8 })
+            .margin({ left: 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
           Button(this.primaryButtonText())
             .width(68)
@@ -573,6 +788,8 @@ export struct ChatPage {
       }
       .width('100%')
 
+      this.AttachmentSourceMenuOverlay()
+
       if (this.sessionDrawerOpen) {
         Row() {
           ChatSessionDrawer({
@@ -582,7 +799,11 @@ export struct ChatPage {
             onClose: () => { this.onCloseSessionDrawer(); },
             onCreateSession: (mode: string) => { this.onCreateSession(mode); },
             onSelectSession: async (id: string) => { await this.onSelectSession(id); },
-            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); }
+            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.onRenameSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.onToggleSessionPinned(id); }
           })
           Blank()
             .layoutWeight(1)

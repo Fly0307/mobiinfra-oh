@@ -3,7 +3,10 @@ import {
   ChatMessageKind,
   ChatMessageRole,
   chatMessageImagePath,
+  chatMessageImagePaths,
   chatMessageStableRenderKey,
+  chatMessageStreamingActive,
+  chatMessageStreamingVersion,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent
 } from './ChatSessionTypes';
@@ -16,6 +19,9 @@ export class ChatMessageDetailUiModel {
   trace: string[] = [];
   collapsed: boolean = false;
   imagePath: string = '';
+  imagePaths: string[] = [];
+  streamingActive: boolean = false;
+  streamingVersion: number = 0;
 
   apply(message: ChatMessage): void {
     if (this.content !== message.content) {
@@ -39,6 +45,18 @@ export class ChatMessageDetailUiModel {
     if (this.imagePath !== nextImagePath) {
       this.imagePath = nextImagePath;
     }
+    let nextImagePaths = chatMessageImagePaths(message);
+    if (this.shouldReplaceImagePaths(nextImagePaths)) {
+      this.imagePaths = nextImagePaths;
+    }
+    let nextStreamingActive = chatMessageStreamingActive(message);
+    if (this.streamingActive !== nextStreamingActive) {
+      this.streamingActive = nextStreamingActive;
+    }
+    let nextStreamingVersion = chatMessageStreamingVersion(message);
+    if (this.streamingVersion !== nextStreamingVersion) {
+      this.streamingVersion = nextStreamingVersion;
+    }
   }
 
   private shouldReplaceTrace(nextTrace: string[]): boolean {
@@ -47,6 +65,18 @@ export class ChatMessageDetailUiModel {
     }
     for (let i = 0; i < nextTrace.length; i++) {
       if (this.trace[i] !== nextTrace[i]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private shouldReplaceImagePaths(nextImagePaths: string[]): boolean {
+    if (this.imagePaths.length !== nextImagePaths.length) {
+      return true;
+    }
+    for (let i = 0; i < nextImagePaths.length; i++) {
+      if (this.imagePaths[i] !== nextImagePaths[i]) {
         return true;
       }
     }
@@ -101,7 +131,10 @@ export class ChatMessageUiModel {
       trace: this.detail.trace.slice(),
       collapsed: this.detail.collapsed,
       createdAt: this.createdAt,
-      imagePath: this.detail.imagePath
+      imagePath: this.detail.imagePath,
+      imagePaths: this.detail.imagePaths.slice(),
+      streamingActive: this.detail.streamingActive,
+      streamingVersion: this.detail.streamingVersion
     };
   }
 }

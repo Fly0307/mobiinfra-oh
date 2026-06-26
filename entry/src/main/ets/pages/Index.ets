@@ -3,14 +3,23 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
+  chatCanSendMessageWithImages,
+  chatCloudUserContentWithImages,
+  chatMessageTextForSendWithImages,
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
+} from './chat/ChatAttachmentPolicy';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -21,10 +30,18 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   buildAssistantStreamingRenderContent,
+  chatMessageImagePaths,
   createChatMessage,
   createChatStreamThinkingState,
-  parseChatStreamThinkingDelta
+  parseChatStreamThinkingDelta,
+  splitAssistantThinkingContent
 } from './chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_DISPLAY_TICK_MS,
+  ChatStreamDisplayPacer,
+  ChatStreamDisplaySnapshot,
+  createEmptyChatStreamDisplaySnapshot
+} from './chat/ChatStreamDisplayPacer';
 import {
   CHAT_CONTEXT_COMPRESSION_NOTICE,
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -107,6 +124,7 @@ import {
   mobileGuiTaskRunResultFromFailure,
   mobileGuiTaskRunResultFromWorkflowResult
 } from '../utils/MobileGuiTaskWorkflowAdapter';
+import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -174,6 +192,21 @@ interface ModelScopeFileTask {
   sha256?: string;
 }
 
+interface ModelDownloadManifestFile {
+  path: string;
+  size: number;
+  sha256?: string;
+  verified: boolean;
+}
+
+interface ModelDownloadManifest {
+  repo: string;
+  completedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  files: ModelDownloadManifestFile[];
+}
+
 interface HdcConnectRequest {
   target: string;
   kill_others: boolean;
@@ -232,6 +265,23 @@ interface CloudChatContextPreparation {
   overBudgetAfterCompression: boolean;
 }
 
+interface DownloadedModelItem {
+  id: string;
+  label: string;
+  path: string;
+  repo: string;
+  sizeText: string;
+  statusText: string;
+  ready: boolean;
+}
+
+const MODEL_SCOPE_ROOT_DIR_NAME: string = 'modelscope';
+const MODEL_DOWNLOAD_MANIFEST_FILE: string = '.download_manifest.json';
+const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
+const PROFILE_MODEL_CONFIG_PATH_KEY: string = 'profileModelConfigPath';
+const SELECTED_MODEL_ID_KEY: string = 'selectedModelId';
+const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
+
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
 
@@ -241,6 +291,8 @@ const WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT_KEY: string = 'wechatAu
 PersistentStorage.persistProp('wirelessIp', DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget);
 PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl);
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
+PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
+PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -290,6 +342,7 @@ struct Index {
   @State output: string = '请先检查服务器连接';
   @State chatHistory: string = '';
   @State userInput: string = '';
+  @State localPendingChatImageUris: string[] = [];
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -302,6 +355,8 @@ struct Index {
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
   @State selectedModelVariant: string = '';
+  @State downloadedModels: DownloadedModelItem[] = [];
+  @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -354,6 +409,7 @@ struct Index {
   @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
+  @State cloudPendingChatImageUris: string[] = [];
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
@@ -402,6 +458,11 @@ struct Index {
   private cloudStreamPendingMessageId: string = '';
   private cloudStreamPendingContent: string = '';
   private cloudStreamPendingTrace: string[] = [];
+  @State cloudStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private cloudStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private cloudStreamDisplayTimerId: number = -1;
+  private cloudStreamDisplayGeneration: number = 0;
+  private cloudStreamDisplayVersion: number = 0;
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -415,6 +476,40 @@ struct Index {
       mode: this.chatMode,
       activeSession: null
     };
+  }
+
+  private chatMessagesForDisplay(): ChatMessage[] {
+    let snapshot = this.cloudStreamDisplaySnapshot;
+    if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
+      return this.activeChatMessages;
+    }
+    let messages: ChatMessage[] = [];
+    let matched = false;
+    let parts = splitAssistantThinkingContent(snapshot.visibleContent);
+    for (let i = 0; i < this.activeChatMessages.length; i++) {
+      let message = this.activeChatMessages[i];
+      if (message.id !== snapshot.messageId) {
+        messages.push(message);
+        continue;
+      }
+      matched = true;
+      messages.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: parts.content,
+        thinkingContent: parts.thinkingContent,
+        thinkingCollapsed: message.thinkingCollapsed,
+        trace: snapshot.visibleTrace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: message.imagePath,
+        imagePaths: chatMessageImagePaths(message),
+        streamingActive: snapshot.active,
+        streamingVersion: this.cloudStreamDisplayVersion
+      });
+    }
+    return matched ? messages : this.activeChatMessages;
   }
 
   private applyChatSessionViewState(state: ChatSessionViewState): void {
@@ -502,13 +597,28 @@ struct Index {
     }
   }
 
-  private resetCloudStreamMessageUpdate(): void {
+  private clearCloudStreamDisplayTimer(): void {
+    if (this.cloudStreamDisplayTimerId !== -1) {
+      clearTimeout(this.cloudStreamDisplayTimerId);
+      this.cloudStreamDisplayTimerId = -1;
+    }
+  }
+
+  private clearCloudStreamPendingPersistence(): void {
     this.clearCloudStreamFlushTimer();
-    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
     this.cloudStreamPendingSessionId = '';
     this.cloudStreamPendingMessageId = '';
     this.cloudStreamPendingContent = '';
     this.cloudStreamPendingTrace = [];
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamPendingPersistence();
+    this.clearCloudStreamDisplayTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamDisplayGeneration += 1;
+    this.cloudStreamDisplayPacer.reset();
+    this.publishCloudStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
   }
 
   private flushCloudStreamMessageUpdate(): void {
@@ -525,8 +635,43 @@ struct Index {
     this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
   }
 
+  private publishCloudStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.cloudStreamDisplayVersion += 1;
+    this.cloudStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleCloudStreamDisplayFrame(): void {
+    if (this.cloudStreamDisplayTimerId !== -1 || !this.cloudStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.cloudStreamDisplayGeneration;
+    this.cloudStreamDisplayTimerId = setTimeout(() => {
+      this.cloudStreamDisplayTimerId = -1;
+      if (generation !== this.cloudStreamDisplayGeneration) {
+        return;
+      }
+      this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.advanceFrame());
+      this.scheduleCloudStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private updateCloudStreamDisplayTarget(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.setTarget(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+  }
+
+  private finishCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string, trace: string[]): void {
+    this.clearCloudStreamPendingPersistence();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.beginFinish(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
   private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
     trace: string[]): void {
+    this.updateCloudStreamDisplayTarget(sessionId, messageId, content, trace);
     this.cloudStreamPendingSessionId = sessionId;
     this.cloudStreamPendingMessageId = messageId;
     this.cloudStreamPendingContent = content;
@@ -732,7 +877,6 @@ struct Index {
   }
 
   private handleLocalAgentLog(message: string): void {
-    AppLogger.info('LocalAgent', message);
     this.output = message;
     let sessionId = this.taskSessionId(this.localTaskSessionId);
     let traceLine = this.formatAgentTraceLog(message);
@@ -907,6 +1051,62 @@ struct Index {
       await this.restoreLocalChatContext(state.activeSession);
     }
     showToastSafely('会话已删除', 1500);
+  }
+
+  private normalizeChatSessionRenameTitle(title: string): string {
+    let normalizedTitle = title.trim();
+    return normalizedTitle.length > 40 ? normalizedTitle.substring(0, 40) : normalizedTitle;
+  }
+
+  private async renameChatSession(sessionId: string, title: string): Promise<boolean> {
+    if (this.blockChatSessionMutationIfBusy('重命名会话')) {
+      return false;
+    }
+    let normalizedTitle = this.normalizeChatSessionRenameTitle(title);
+    if (normalizedTitle.length === 0) {
+      showToastSafely('名称不能为空', 1400);
+      return false;
+    }
+    let state = ChatSessionController.renameSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      normalizedTitle);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    let saved = false;
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId && state.sessions[i].customTitle === normalizedTitle) {
+        saved = true;
+        break;
+      }
+    }
+    if (!saved) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    showToastSafely('会话已重命名', 1500);
+    return true;
+  }
+
+  private async toggleChatSessionPinned(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('置顶会话')) {
+      return;
+    }
+    let wasPinned = false;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        wasPinned = this.chatSessions[i].pinned === true;
+        break;
+      }
+    }
+    let state = ChatSessionController.toggleSessionPinned(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('会话置顶状态更新失败', 1500);
+      return;
+    }
+    showToastSafely(wasPinned ? '已取消置顶' : '已置顶', 1500);
   }
 
   private toggleActiveTaskTrace(messageId: string): void {
@@ -1262,6 +1462,178 @@ struct Index {
       return normalized.substring('file://'.length);
     }
     return normalized;
+  }
+
+  private activePendingChatImageUris(): string[] {
+    let source = this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? this.localPendingChatImageUris :
+      this.cloudPendingChatImageUris;
+    return normalizeChatImageAttachments(source);
+  }
+
+  private setActivePendingChatImageUris(uris: string[]): void {
+    let normalized = normalizeChatImageAttachments(uris);
+    if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
+      this.localPendingChatImageUris = normalized;
+      return;
+    }
+    this.cloudPendingChatImageUris = normalized;
+  }
+
+  private clearActivePendingChatImageUris(): void {
+    this.setActivePendingChatImageUris([]);
+  }
+
+  private remainingChatImageAttachmentCount(): number {
+    return CHAT_IMAGE_ATTACHMENT_MAX_COUNT - this.activePendingChatImageUris().length;
+  }
+
+  private appendPickedChatImageAttachments(uris: string[], sourceLabel: string): void {
+    let picked = normalizeChatImageAttachments(uris);
+    if (picked.length === 0) {
+      return;
+    }
+    let current = this.activePendingChatImageUris();
+    let combined = normalizeChatImageAttachments(current.concat(picked));
+    let addedCount = combined.length - current.length;
+    if (addedCount <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    this.setActivePendingChatImageUris(combined);
+    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张' : '';
+    showToastSafely('已添加' + String(addedCount) + '张' + sourceLabel + '图片，将随下一条消息发送' + limitHint, 1800);
+  }
+
+  private setPickedChatImageAttachment(uri: string, sourceLabel: string): void {
+    this.appendPickedChatImageAttachments([uri], sourceLabel);
+  }
+
+  private chatCameraCapturePath(): string {
+    if (this.filesDir.length === 0) {
+      throw new Error('文件目录未初始化');
+    }
+    return this.filesDir + '/chat-camera-' + Date.now().toString() + '.jpg';
+  }
+
+  private prepareChatCameraSaveUri(savePath: string): string {
+    let file = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      return fileUri.getUriFromPath(savePath);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private removeChatCameraCapture(path: string): void {
+    if (path.length === 0) {
+      return;
+    }
+    try {
+      fs.unlinkSync(path);
+    } catch (e) {
+    }
+  }
+
+  // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
+  private async takeChatImageAttachment(): Promise<void> {
+    if (this.remainingChatImageAttachmentCount() <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    let savePath = '';
+    try {
+      savePath = this.chatCameraCapturePath();
+      let saveUri = this.prepareChatCameraSaveUri(savePath);
+      let pickerProfile: cameraPicker.PickerProfile = {
+        cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
+        saveUri: saveUri
+      };
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('无法获取页面上下文');
+      }
+      let result = await cameraPicker.pick(
+        hostContext,
+        [cameraPicker.PickerMediaType.PHOTO],
+        pickerProfile
+      );
+      if (result.resultCode !== 0 || result.mediaType !== cameraPicker.PickerMediaType.PHOTO) {
+        this.removeChatCameraCapture(savePath);
+        return;
+      }
+      let fallbackUri = pickerProfile.saveUri === undefined ? saveUri : pickerProfile.saveUri;
+      let attachmentUri = result.resultUri.trim().length > 0 ? result.resultUri : fallbackUri;
+      this.setPickedChatImageAttachment(attachmentUri, '拍照');
+    } catch (e) {
+      this.removeChatCameraCapture(savePath);
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'take image attachment failed', err);
+      showToastSafely('拍照失败：' + err.message, 1800);
+    }
+  }
+
+  private async pickChatAlbumImageAttachment(): Promise<void> {
+    try {
+      let remainingCount = this.remainingChatImageAttachmentCount();
+      if (remainingCount <= 0) {
+        showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+        return;
+      }
+      let picker = new GalleryPhotoPicker();
+      let uris = await picker.selectImageUris(remainingCount);
+      if (uris.length === 0) {
+        return;
+      }
+      this.appendPickedChatImageAttachments(uris, '相册');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'pick image attachment failed', err);
+      showToastSafely('选择图片失败：' + err.message, 1800);
+    }
+  }
+
+  private adoptedChatImagesForSession(sessionId: string, imageUris: string[]): string[] {
+    let normalized = normalizeChatImageAttachments(imageUris);
+    let adopted: string[] = [];
+    for (let i = 0; i < normalized.length; i++) {
+      adopted.push(ChatSessionStorage.adoptImageForSession(this.filesDir, sessionId, normalized[i]));
+    }
+    return adopted;
+  }
+
+  // 当前请求的图片只注入最后一条用户消息，历史图片仍按纯文本摘要/上下文处理，避免上下文膨胀。
+  private async attachCurrentImagesToCloudContext(messages: CloudChatMessage[],
+    currentUserMessage: ChatMessage): Promise<CloudChatMessage[]> {
+    let imagePaths = chatMessageImagePaths(currentUserMessage);
+    if (!hasChatImageAttachments(imagePaths)) {
+      return messages;
+    }
+    let imageDataUrls: string[] = [];
+    for (let i = 0; i < imagePaths.length; i++) {
+      imageDataUrls.push(await this.imageUriToJpegDataUrl(imagePaths[i]));
+    }
+    let targetIndex = messages.length - 1;
+    if (targetIndex < 0) {
+      return messages;
+    }
+    if (messages[targetIndex].role !== 'user') {
+      targetIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      return messages;
+    }
+    let next = messages.slice();
+    next[targetIndex] = {
+      role: 'user',
+      content: chatCloudUserContentWithImages(currentUserMessage.content, imageDataUrls)
+    };
+    return next;
   }
 
   private async saveHomeAvatarReferencePhoto(sourceImage: string): Promise<string> {
@@ -1835,6 +2207,7 @@ struct Index {
     }
     dataManagerInfo('Index aboutToAppear: filesDir=' + this.filesDir);
     this.syncModelDir();
+    this.refreshDownloadedModels();
     try {
       mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
     } catch (e) {
@@ -1990,26 +2363,339 @@ struct Index {
     }
   }
 
+  private legacyModelId(name: string): string {
+    return 'legacy:' + name;
+  }
+
+  private modelScopeModelId(owner: string, repo: string): string {
+    return 'modelscope:' + owner + '/' + repo;
+  }
+
+  private modelScopeRootDir(): string {
+    return this.filesDir + '/' + MODEL_SCOPE_ROOT_DIR_NAME;
+  }
+
+  private encodeModelScopeRepoDir(owner: string, repo: string): string {
+    return owner + '__' + repo;
+  }
+
+  private decodeModelScopeRepoDir(dir: string): string {
+    let sep = dir.indexOf('__');
+    if (sep <= 0 || sep + 2 >= dir.length) {
+      return dir;
+    }
+    return dir.substring(0, sep) + '/' + dir.substring(sep + 2);
+  }
+
+  private modelScopeRepoDir(owner: string, repo: string): string {
+    return this.modelScopeRootDir() + '/' + this.encodeModelScopeRepoDir(owner, repo);
+  }
+
   private getCurrentModelFolderName(): string {
-    return this.selectedModelVariant.length > 0 ? this.selectedModelVariant : 'model';
+    if (this.modelDir.length > 0) {
+      let index = this.modelDir.lastIndexOf('/');
+      return index >= 0 ? this.modelDir.substring(index + 1) : this.modelDir;
+    }
+    return 'model';
   }
 
   private syncModelDir(): void {
-    this.modelDir = `${this.filesDir}/${this.getCurrentModelFolderName()}`;
+    if (this.selectedModelId.startsWith('modelscope:')) {
+      let repo = this.selectedModelId.substring('modelscope:'.length);
+      let parts = repo.split('/');
+      if (parts.length === 2) {
+        this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+        this.syncProfileModelConfigPath();
+        return;
+      }
+    }
+    let legacyName = 'model';
+    if (this.selectedModelId.startsWith('legacy:')) {
+      legacyName = this.selectedModelId.substring('legacy:'.length);
+    } else if (this.selectedModelVariant.length > 0) {
+      legacyName = this.selectedModelVariant;
+    }
+    this.selectedModelVariant = legacyName === 'model' ? '' : legacyName;
+    this.selectedModelId = this.legacyModelId(legacyName);
+    this.modelDir = this.filesDir + '/' + legacyName;
+    this.syncProfileModelConfigPath();
+  }
+
+  private syncProfileModelConfigPath(): void {
+    if (this.modelDir.length === 0) {
+      return;
+    }
+    AppStorage.setOrCreate(PROFILE_MODEL_CONFIG_PATH_KEY, this.modelDir + '/config.json');
   }
 
   private switchModelVariant(variant: string): void {
-    let nextVariant = '';
-    if (variant === 'modelv2' || variant === 'modelv3' || variant === 'modelv4' || variant === 'model_omc') {
-      nextVariant = variant;
+    let legacyName = variant.length > 0 ? variant : 'model';
+    if (LEGACY_MODEL_DIRS.indexOf(legacyName) < 0) {
+      legacyName = 'model';
     }
-    if (this.selectedModelVariant === nextVariant) {
+    this.switchDownloadedModel(this.legacyModelId(legacyName));
+  }
+
+  private switchDownloadedModel(modelId: string): void {
+    if (this.blockModelFileMutationIfBusy('切换模型')) {
       return;
     }
-    this.selectedModelVariant = nextVariant;
-    this.syncModelDir();
+    let target: DownloadedModelItem | null = null;
+    for (let i = 0; i < this.downloadedModels.length; i++) {
+      if (this.downloadedModels[i].id === modelId) {
+        target = this.downloadedModels[i];
+        break;
+      }
+    }
+    if (target === null) {
+      this.output = '模型不存在或尚未扫描到: ' + modelId;
+      return;
+    }
+    if (!target.ready) {
+      this.output = '模型尚未下载完成，暂不可加载: ' + target.label + '\n状态: ' + target.statusText +
+        '\n路径: ' + target.path;
+      return;
+    }
+    if (this.selectedModelId === target.id && this.modelDir === target.path) {
+      return;
+    }
+    this.unloadLocalModelForFileMutation();
+    this.selectedModelId = target.id;
+    this.selectedModelVariant = target.id.startsWith('legacy:') && target.id !== this.legacyModelId('model') ? target.label : '';
+    this.modelDir = target.path;
+    this.syncProfileModelConfigPath();
     this.modelLoaded = false;
-    this.output = `模型路径已切换至: ${this.getCurrentModelFolderName()}`;
+    this.output = '已切换模型: ' + target.label + '\n路径: ' + target.path;
+  }
+
+  private refreshDownloadedModels(): void {
+    let items: DownloadedModelItem[] = [];
+    for (let i = 0; i < LEGACY_MODEL_DIRS.length; i++) {
+      let name = LEGACY_MODEL_DIRS[i];
+      let path = this.filesDir + '/' + name;
+      if (this.modelDirectoryExists(path)) {
+        items.push(this.buildDownloadedModelItem(this.legacyModelId(name), name === 'model' ? '默认 model' : name, path, 'legacy'));
+      }
+    }
+    try {
+      let root = this.modelScopeRootDir();
+      if (fs.accessSync(root)) {
+        let dirs = fs.listFileSync(root);
+        dirs.sort();
+        for (let dir of dirs) {
+          let path = root + '/' + dir;
+          if (!this.modelDirectoryExists(path)) {
+            continue;
+          }
+          let repo = this.decodeModelScopeRepoDir(dir);
+          let parts = repo.split('/');
+          let id = parts.length === 2 ? this.modelScopeModelId(parts[0], parts[1]) : 'modelscope:' + dir;
+          items.push(this.buildDownloadedModelItem(id, repo, path, repo));
+        }
+      }
+    } catch (e) {
+    }
+    this.downloadedModels = items;
+    let foundSelected = false;
+    for (let item of items) {
+      if (item.id === this.selectedModelId) {
+        foundSelected = true;
+        this.modelDir = item.path;
+        this.syncProfileModelConfigPath();
+        break;
+      }
+    }
+    if (!foundSelected) {
+      this.selectedModelId = this.legacyModelId('model');
+      this.selectedModelVariant = '';
+      this.syncModelDir();
+    }
+  }
+
+  private modelDirectoryExists(path: string): boolean {
+    try {
+      if (!fs.accessSync(path)) {
+        return false;
+      }
+      fs.listFileSync(path);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private buildDownloadedModelItem(id: string, label: string, path: string, repo: string): DownloadedModelItem {
+    let statusText = this.modelLoadableStatus(path);
+    let ready = statusText === '下载完成' || statusText === '可加载';
+    return {
+      id: id,
+      label: label,
+      path: path,
+      repo: repo,
+      sizeText: this.formatSize(this.calcPathSize(path)),
+      statusText: statusText,
+      ready: ready
+    };
+  }
+
+  private modelLoadableStatus(path: string): string {
+    let hasComplete = false;
+    try { hasComplete = fs.accessSync(path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) { hasComplete = false; }
+
+    let hasConfig = false;
+    try { hasConfig = fs.accessSync(path + '/config.json'); } catch (e) { hasConfig = false; }
+    let hasWeight = this.hasModelWeightFile(path, 0);
+    if (!hasConfig && !hasWeight) {
+      return '下载未完成';
+    }
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+
+    let manifestStatus = this.modelManifestLoadableStatus(path);
+    if (manifestStatus === '可加载') {
+      return '下载完成';
+    }
+    if (manifestStatus.length > 0) {
+      return manifestStatus;
+    }
+    if (hasComplete) {
+      return '下载完成';
+    }
+    if (hasConfig && hasWeight) {
+      return '可加载';
+    }
+    return '下载未完成';
+  }
+
+  private modelManifestLoadableStatus(path: string): string {
+    let manifestPath = path + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = path + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    let hasManifest = false;
+    let hasComplete = false;
+    try { hasManifest = fs.accessSync(manifestPath); } catch (e) { hasManifest = false; }
+    try { hasComplete = fs.accessSync(completePath); } catch (e) { hasComplete = false; }
+    if (!hasManifest) {
+      return '';
+    }
+
+    let manifest = this.readModelDownloadManifest(manifestPath);
+    if (manifest === null || manifest.files.length === 0) {
+      return hasComplete ? '下载记录损坏' : '';
+    }
+
+    let hasConfig = false;
+    let hasWeight = false;
+    for (let file of manifest.files) {
+      let normalizedPath = file.path.replace(/\\/g, '/');
+      if (normalizedPath === 'config.json') {
+        hasConfig = true;
+      }
+      if (this.isModelWeightFile(normalizedPath)) {
+        hasWeight = true;
+      }
+      let target = path + '/' + normalizedPath;
+      let allowLocalConfigChange = normalizedPath === 'config.json';
+      try {
+        let stat = fs.statSync(target);
+        if (!stat.isFile()) {
+          return '下载未完成';
+        }
+        if (!allowLocalConfigChange && file.size >= 0 && stat.size !== file.size) {
+          return '下载未完成';
+        }
+      } catch (e) {
+        return '下载未完成';
+      }
+    }
+
+    if (!hasConfig) {
+      return '缺少 config.json';
+    }
+    if (!hasWeight) {
+      return '缺少模型权重文件';
+    }
+    return '可加载';
+  }
+
+  private readModelDownloadManifest(path: string): ModelDownloadManifest | null {
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let stat = fs.statSync(path);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buf);
+      let content = util.TextDecoder.create('utf-8').decodeWithStream(new Uint8Array(buf));
+      let root = ArkJSON.parse(content) as JsonMap;
+      let filesValue = root['files'];
+      if (!Array.isArray(filesValue)) {
+        return null;
+      }
+      let files: ModelDownloadManifestFile[] = [];
+      for (let itemValue of filesValue as Object[]) {
+        let item = itemValue as JsonMap;
+        let filePath = item['path'] === undefined || item['path'] === null ? '' : String(item['path']);
+        let size = item['size'] === undefined || item['size'] === null ? NaN : Number(item['size']);
+        if (filePath.length === 0 || isNaN(size) || size < 0) {
+          return null;
+        }
+        let entry: ModelDownloadManifestFile = {
+          path: filePath,
+          size: size,
+          verified: item['verified'] === true
+        };
+        let sha256 = item['sha256'];
+        if (sha256 !== undefined && sha256 !== null && String(sha256).length > 0) {
+          entry.sha256 = String(sha256);
+        }
+        files.push(entry);
+      }
+      return {
+        repo: root['repo'] === undefined || root['repo'] === null ? '' : String(root['repo']),
+        completedAt: root['completedAt'] === undefined || root['completedAt'] === null ? '' : String(root['completedAt']),
+        fileCount: root['fileCount'] === undefined || root['fileCount'] === null ? files.length : Number(root['fileCount']),
+        totalBytes: root['totalBytes'] === undefined || root['totalBytes'] === null ? 0 : Number(root['totalBytes']),
+        files: files
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      if (file !== null) {
+        try { fs.closeSync(file); } catch (e) {}
+      }
+    }
+  }
+
+  private hasModelWeightFile(path: string, depth: number): boolean {
+    if (depth > 4) {
+      return false;
+    }
+    try {
+      let stat = fs.statSync(path);
+      if (stat.isFile()) {
+        return stat.size > 0 && this.isModelWeightFile(path);
+      }
+      if (!stat.isDirectory()) {
+        return false;
+      }
+      let children = fs.listFileSync(path);
+      for (let name of children) {
+        if (this.hasModelWeightFile(path + '/' + name, depth + 1)) {
+          return true;
+        }
+      }
+    } catch (e) {
+    }
+    return false;
+  }
+
+  private isModelWeightFile(path: string): boolean {
+    let lower = path.toLowerCase();
+    return lower.endsWith('.mnn') || lower.endsWith('.om') || lower.endsWith('.safetensors') ||
+      lower.endsWith('.weight');
   }
 
   formatSize(bytes: number): string {
@@ -2147,6 +2833,7 @@ struct Index {
       }
       let deletedCount = this.deletePathRecursively(this.modelDir);
       this.modelLoaded = false;
+      this.refreshDownloadedModels();
       this.output = `模型删除成功\n已删除 ${this.getCurrentModelFolderName()} 目录及其内容（共 ${deletedCount} 项）。`;
     } catch (e) {
       this.output = `模型删除失败: ${e}`;
@@ -2169,6 +2856,7 @@ struct Index {
         return;
       }
       fs.unlinkSync(cfgPath);
+      this.refreshDownloadedModels();
       this.modelLoaded = false;
       this.output = `已删除 ${this.getCurrentModelFolderName()}/config.json。\n其他模型文件保留，可重新下载补齐 config.json。`;
     } catch (e) {
@@ -2625,7 +3313,7 @@ struct Index {
       return;
     }
     this.downloading = true;
-    try { fs.mkdirSync(this.modelDir); } catch {}
+    this.ensureDirectoryRecursive(this.modelDir);
     this.beginModelDownloadProgress('模型下载进度', this.totalBytesAll);
 
     let completedBytes = 0;
@@ -2647,6 +3335,7 @@ struct Index {
       this.updateModelDownloadProgress(completedBytes, this.totalBytesAll,
         failed.length.toString() + ' 个失败，再次点击可继续');
     }
+    this.refreshDownloadedModels();
     this.downloading = false;
   }
 
@@ -2798,6 +3487,54 @@ struct Index {
         try { fs.closeSync(file); } catch (e) {}
       }
     }
+  }
+
+  private removeModelDownloadMarkers(): void {
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE); } catch (e) {}
+    try { fs.unlinkSync(this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE); } catch (e) {}
+  }
+
+  private writeTextFile(path: string, content: string): void {
+    let bytes = util.TextEncoder.create('utf-8').encodeInto(content);
+    let file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, bytes.buffer);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private writeModelDownloadMarkers(repo: string, files: ModelScopeFileTask[], totalBytes: number): void {
+    let manifestFiles: ModelDownloadManifestFile[] = [];
+    for (let file of files) {
+      let entry: ModelDownloadManifestFile = {
+        path: file.path,
+        size: file.size,
+        verified: true
+      };
+      if (file.sha256 !== undefined && file.sha256.length > 0) {
+        entry.sha256 = file.sha256;
+      }
+      manifestFiles.push(entry);
+    }
+    let manifest: ModelDownloadManifest = {
+      repo: repo,
+      completedAt: new Date().toISOString(),
+      fileCount: manifestFiles.length,
+      totalBytes: totalBytes,
+      files: manifestFiles
+    };
+    let manifestPath = this.modelDir + '/' + MODEL_DOWNLOAD_MANIFEST_FILE;
+    let completePath = this.modelDir + '/' + MODEL_DOWNLOAD_COMPLETE_FILE;
+    AppLogger.info('ModelDownload', 'write markers start manifest=' + manifestPath +
+      ', complete=' + completePath + ', files=' + manifest.fileCount.toString() +
+      ', total=' + totalBytes.toString());
+    this.writeTextFile(manifestPath, ArkJSON.stringify(manifest, null, 2));
+    this.writeTextFile(completePath,
+      'repo=' + repo + '\ncompletedAt=' + manifest.completedAt + '\nfileCount=' +
+        manifest.fileCount.toString() + '\ntotalBytes=' + totalBytes.toString() + '\n');
+    AppLogger.info('ModelDownload', 'write markers done manifest=' + manifestPath +
+      ', complete=' + completePath);
   }
 
   private ensureDirectoryRecursive(path: string): void {
@@ -3106,8 +3843,13 @@ struct Index {
       AppLogger.warn('ModelDownload', message);
       return;
     }
+    let nextModelId = this.modelScopeModelId(parts[0], parts[1]);
+    this.selectedModelId = nextModelId;
+    this.selectedModelVariant = '';
+    this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
+    this.syncProfileModelConfigPath();
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
-    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo);
+    AppLogger.info('ModelDownload', 'start ModelScope repo=' + this.modelScopeMnnRepo + ', targetDir=' + this.modelDir);
     this.downloading = true;
     this.modelScopeDownloading = true;
     this.modelScopePauseRequested = false;
@@ -3115,6 +3857,8 @@ struct Index {
     this.modelLoaded = false;
     try {
       this.ensureDirectoryRecursive(this.modelDir);
+      this.removeModelDownloadMarkers();
+      this.refreshDownloadedModels();
       this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
       AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
       let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
@@ -3160,10 +3904,20 @@ struct Index {
       }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
+        try {
+          this.writeModelDownloadMarkers(parts[0] + '/' + parts[1], files, totalBytes);
+        } catch (markerError) {
+          let markerMessage = '写入下载完成标记失败: ' + this.errorMessage(markerError);
+          this.updateModelDownloadMessage(markerMessage);
+          AppLogger.error('ModelDownload', markerMessage);
+          throw new Error(markerMessage);
+        }
+        this.refreshDownloadedModels();
         this.updateModelDownloadProgress(completedBytes, totalBytes, '下载完成');
         AppLogger.info('ModelDownload', 'completed repo=' + this.modelScopeMnnRepo + ', total=' +
           this.formatSize(completedBytes));
       } else {
+        this.refreshDownloadedModels();
         this.updateModelDownloadMessage('ModelScope 下载失败：' + failed.join('，'));
         AppLogger.warn('ModelDownload', 'partial failure repo=' + this.modelScopeMnnRepo + ', failed=' +
           failed.length.toString() + ', downloaded=' + this.formatSize(completedBytes));
@@ -3174,6 +3928,7 @@ struct Index {
       AppLogger.error('ModelDownload', message);
     } finally {
       this.modelScopeActiveHttpReq = null;
+      this.refreshDownloadedModels();
       this.modelScopeDownloading = false;
       this.downloading = false;
     }
@@ -3227,22 +3982,25 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
+    let pendingImageUris = this.cloudPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.cloudUserInput, pendingImageUris) || this.cloudThinking) {
       return;
     }
-    let task = this.cloudUserInput.trim();
-    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
-    this.cloudThinking = true;
-    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
-      this.cloudThinking = false;
       return;
     }
-    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
-      new Date().getTime());
+    let task = chatMessageTextForSendWithImages(this.cloudUserInput, pendingImageUris);
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudPendingChatImageUris = [];
+    this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let chatSessionId = activeSession.id;
+    let adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, pendingImageUris);
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris);
     this.appendChatMessageToExactSession(chatSessionId, userMessage);
     let assistantMessageId = this.nextChatMessageId('assistant');
     let assistantMessageCreated = false;
@@ -3265,7 +4023,7 @@ struct Index {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
       let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = contextPreparation.messages;
+      let contextMessages = await this.attachCurrentImagesToCloudContext(contextPreparation.messages, userMessage);
       if (contextPreparation.summaryUpdated) {
         this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
           contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
@@ -3324,24 +4082,24 @@ struct Index {
       };
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;
-      this.resetCloudStreamMessageUpdate();
-      let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
+      let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
+      this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
       let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
-      this.resetCloudStreamMessageUpdate();
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+          this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId,
             this.cancelledCloudChatContent(currentStreamRenderContent()), toolTraceLines);
         } else {
+          this.resetCloudStreamMessageUpdate();
           this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
             this.cancelledCloudChatContent(currentStreamRenderContent()), new Date().getTime()));
         }
         this.appendCloudLog('ReAct 云端聊天已取消。');
       } else {
+        this.resetCloudStreamMessageUpdate();
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + err.message,
             toolTraceLines);
@@ -3352,7 +4110,7 @@ struct Index {
         this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
       }
     } finally {
-      this.resetCloudStreamMessageUpdate();
+      this.clearCloudStreamPendingPersistence();
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
     }
@@ -3889,6 +4647,11 @@ struct Index {
     }
 
     let cfg = this.modelDir + '/config.json';
+    let modelStatus = this.modelLoadableStatus(this.modelDir);
+    if (modelStatus !== '下载完成' && modelStatus !== '可加载') {
+      this.reportLocalAgentStartupStatus('模型暂不可加载: ' + modelStatus + '\n路径: ' + this.modelDir, true, true);
+      return false;
+    }
     if (!this.prepareCustomOpp()) {
       let reason = this.output.trim().length > 0 ? this.output : '本地模型运行环境准备失败。';
       this.reportLocalAgentStartupStatus(reason, true, true);
@@ -3975,6 +4738,7 @@ struct Index {
   private createAgentLoopRunner(): AgentLoopRunner {
     return new AgentLoopRunner(
       this.filesDir,
+      this.modelDir,
       this.hdcServerIp,
       mnnllm,
       this.cloudClient,
@@ -4070,29 +4834,86 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    if (this.userInput.length === 0 || this.isThinking) {
+    let pendingImageUris = this.localPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
       return;
     }
-    if (!this.modelLoaded && !await this.ensureLocalModelLoaded()) {
+    if (hasChatImageAttachments(pendingImageUris)) {
+      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
       return;
     }
-    let msg = this.userInput;
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      return;
+    }
+    let chatSessionId = activeSession.id;
+    let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
+    let assistantMessageId = this.nextChatMessageId('assistant');
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
-    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
-    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
-      msg, new Date().getTime()));
+    this.localPendingChatImageUris = [];
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
+      CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
+    this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
+    let streamedReply = '';
+    let lastStreamUpdateAt = 0;
+    let streamUpdateTimerId = -1;
+    // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
+    let flushStreamReply = (): void => {
+      if (streamedReply.length === 0) {
+        return;
+      }
+      lastStreamUpdateAt = new Date().getTime();
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedReply);
+    };
+    let scheduleStreamReplyUpdate = (): void => {
+      let now = new Date().getTime();
+      if (now - lastStreamUpdateAt >= 120) {
+        if (streamUpdateTimerId !== -1) {
+          clearTimeout(streamUpdateTimerId);
+          streamUpdateTimerId = -1;
+        }
+        flushStreamReply();
+        return;
+      }
+      if (streamUpdateTimerId !== -1) {
+        return;
+      }
+      streamUpdateTimerId = setTimeout(() => {
+        streamUpdateTimerId = -1;
+        flushStreamReply();
+      }, 120);
+    };
     try {
-      let reply: string = await mnnllm.chat(msg);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, reply, new Date().getTime()));
+      if (!this.modelLoaded) {
+        let loaded = await this.ensureLocalModelLoaded();
+        if (!loaded) {
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
+          this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
+          return;
+        }
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
+      }
+      let reply: string = await mnnllm.chat(msg, (token: string) => {
+        streamedReply += token;
+        scheduleStreamReplyUpdate();
+      });
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+        streamUpdateTimerId = -1;
+      }
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('assistant'), 'assistant',
-        CHAT_MESSAGE_KIND_CHAT, '[错误] ' + message, new Date().getTime()));
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
+      if (streamUpdateTimerId !== -1) {
+        clearTimeout(streamUpdateTimerId);
+      }
       this.isThinking = false;
     }
   }
@@ -4354,9 +5175,10 @@ struct Index {
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
-            messages: this.activeChatMessages,
+            messages: this.chatMessagesForDisplay(),
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+            pendingImageAttachmentUris: this.activePendingChatImageUris(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
@@ -4365,6 +5187,10 @@ struct Index {
             onCreateSession: (mode: string) => { this.createChatSession(mode); },
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.renameChatSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
@@ -4372,6 +5198,9 @@ struct Index {
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
+            onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }
@@ -4406,6 +5235,8 @@ struct Index {
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
             selectedModelVariant: this.selectedModelVariant,
+            downloadedModels: this.downloadedModels,
+            selectedModelId: this.selectedModelId,
             onCheckServer: () => { this.checkServer(); },
             onDownloadAll: () => { this.downloadAll(); },
             onDeleteModelFiles: () => { this.deleteModelFiles(); },
@@ -4425,6 +5256,8 @@ struct Index {
             onClearScreenshots: () => { this.clearScreenshots(); },
             onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
             onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
+            onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+            onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },

@@ -35,6 +35,8 @@ export interface WorkflowStep {
   type: string;
   name?: string;
   on_error?: string;
+  extract_result?: boolean;
+  extract_result_screenshot_count?: number;
   task_description?: string;
   device?: string;
   use_qwen3?: boolean;
@@ -56,6 +58,8 @@ export interface WorkflowStep {
   seconds?: number;
   file_name?: string;
   package_name?: string;
+  max_steps?: number;
+  fail_on_max_steps?: boolean;
   tool_name?: string;
   inputs?: WorkflowToolInputs;
   times?: number | string;
@@ -88,6 +92,7 @@ export interface WorkflowTask {
   lastRun: string;
   lastMessage: string;
   isUserModified?: boolean;
+  useEmbeddedWorkflowJson?: boolean;
 }
 
 export interface WorkflowTaskIndex {
@@ -125,6 +130,11 @@ export interface WorkflowRunSummary {
   context: WorkflowJsonMap;
   status: string;
   steps: Record<string, WorkflowStepResult>;
+  result_summary?: string;
+  result?: WorkflowJsonMap;
+  result_extraction_error?: string;
+  result_screenshot_path?: string;
+  result_screenshot_paths?: string[];
 }
 
 export interface WorkflowRunOptions {
@@ -138,6 +148,11 @@ export interface WorkflowRunResult {
   runDir: string;
   dailyLogPath: string;
   returnedToApp: boolean;
+  resultSummary?: string;
+  result?: WorkflowJsonMap;
+  resultExtractionError?: string;
+  resultScreenshotPath?: string;
+  resultScreenshotPaths?: string[];
 }
 
 export interface HdcBridgeResponse {
@@ -149,6 +164,7 @@ export interface HdcBridgeResponse {
   height?: number;
   action?: string;
   package_name?: string;
+  current_package_name?: string;
   no_reason?: boolean;
   max_steps?: number;
 }

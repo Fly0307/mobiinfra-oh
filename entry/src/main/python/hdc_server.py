@@ -1507,6 +1507,89 @@ def run_hdc_command(cmd, timeout=HDC_ACTION_TIMEOUT):
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'command failed: {cmd}')
     return result.stdout.strip()
 
+
+FOREGROUND_PACKAGE_PATTERNS = (
+    re.compile(r"(?im)\bbundle(?:\s*name|name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bmission\s+name\b[^A-Za-z0-9_#-]*#*\s*([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bmain\s+window\b.*?\bbundle(?:\s*name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bability\b.*?\bbundle(?:\s*name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+)
+
+
+def extract_foreground_package_name(text):
+    raw = str(text or "")
+    for pattern in FOREGROUND_PACKAGE_PATTERNS:
+        match = pattern.search(raw)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def run_hdc_command_capture(cmd, timeout=None):
+    limit = HDC_ACTION_TIMEOUT if timeout is None else timeout
+    try:
+        return subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=limit
+        )
+    except subprocess.TimeoutExpired as ex:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            ex.stdout or "",
+            ex.stderr or f"command timed out after {limit}s: {cmd}"
+        )
+
+
+def detect_current_foreground_package_name():
+    commands = (
+        f"{hdc_prefix()} shell aa dump --mission-list",
+        f"{hdc_prefix()} shell aa dump -l",
+        f"{hdc_prefix()} shell hidumper -s AbilityManagerService",
+    )
+    for command in commands:
+        result = run_hdc_command_capture(command, timeout=min(HDC_ACTION_TIMEOUT, 5))
+        package_name = extract_foreground_package_name((result.stdout or "") + "\n" + (result.stderr or ""))
+        if package_name:
+            return package_name
+    return ""
+
+
+def build_app_start_result(app_name, package_name, reset_first):
+    target = app_name or package_name
+    if not target:
+        raise RuntimeError('app_start requires app_name or package_name')
+    ok = harmony_agent.launch_app(target, reset_first=reset_first)
+    if not ok and package_name and package_name != target:
+        ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
+    if not ok:
+        return {
+            'status': 'error',
+            'message': f'app_start failed: {target}',
+            'package_name': package_name
+        }
+    current_package_name = ''
+    if package_name:
+        current_package_name = detect_current_foreground_package_name()
+        if current_package_name and current_package_name != package_name:
+            return {
+                'status': 'error',
+                'message': f'app_identity_mismatch: expected {package_name}, current {current_package_name}',
+                'package_name': package_name,
+                'current_package_name': current_package_name
+            }
+    result = {
+        'status': 'ok',
+        'message': f'app_start {target}',
+        'package_name': package_name
+    }
+    if current_package_name:
+        result['current_package_name'] = current_package_name
+    return result
+
 def hdc_prefix():
     target = get_active_hdc_target(force=False)
     if target:
@@ -1725,15 +1808,7 @@ def _workflow_gui_action_impl(payload):
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        target = app_name or package_name
-        if not target:
-            raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target, reset_first=reset_first)
-        if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
-        if not ok:
-            raise RuntimeError(f'app_start failed: {target}')
-        return {'status': 'ok', 'message': f'app_start {target}', 'package_name': package_name}
+        return build_app_start_result(app_name, package_name, reset_first)
 
     if action == 'app_stop':
         package_name = str(payload.get('package_name', ''))
@@ -1822,17 +1897,7 @@ def handle_workflow_action(action, payload):
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        target = app_name or package_name
-        if not target:
-            raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target, reset_first=reset_first)
-        if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
-        return {
-            'status': 'ok' if ok else 'error',
-            'message': f'app_start {target}',
-            'package_name': package_name
-        }
+        return build_app_start_result(app_name, package_name, reset_first)
 
     if action == 'execute_decider_action':
         ensure_workflow_agent_ready()

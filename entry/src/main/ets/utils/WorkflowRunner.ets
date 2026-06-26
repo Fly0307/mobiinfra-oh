@@ -22,8 +22,25 @@ import {
 } from './WorkflowTypes';
 
 const VARIABLE_PATTERN: RegExp = /\$\{([^}]+)\}/g;
-const MAX_GUI_STEPS = 20;
+export const DEFAULT_MAX_GUI_STEPS: number = 20;
+export const DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT: number = 2;
 const SUMMARY_JOB_RETRY_LIMIT: number = 1;
+
+export function resolveGuiTaskMaxSteps(step: WorkflowStep): number {
+  let raw = step.max_steps;
+  if (raw === undefined || raw <= 0) {
+    return DEFAULT_MAX_GUI_STEPS;
+  }
+  return Math.floor(raw);
+}
+
+export function resolveGuiTaskResultExtractionScreenshotCount(step: WorkflowStep): number {
+  let raw = step.extract_result_screenshot_count;
+  if (raw === undefined || raw <= 0) {
+    return DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT;
+  }
+  return Math.floor(raw);
+}
 
 interface PlannerResult {
   appName: string;
@@ -54,6 +71,12 @@ interface GuiDeciderOutput {
   package_name: string;
   mode: string;
   stop_reason: string;
+  final_decider_action?: string;
+  final_decider_reasoning?: string;
+  final_decider_parameters?: WorkflowJsonMap;
+  result_screenshot_path?: string;
+  result_screenshot_paths?: Object;
+  result_extraction_screenshot_count?: number;
 }
 
 interface GuiActionOutput {
@@ -177,6 +200,172 @@ interface RawResponseMap {
   raw_response: string;
 }
 
+interface EmptyWorkflowJsonMap {
+}
+
+interface GuiTaskResultExtractionMap {
+  outcome: string;
+  summary: string;
+  key_values: WorkflowJsonMap;
+  items: Object[];
+  extraction_error?: string;
+}
+
+interface DeciderLoopResult {
+  stopReason: string;
+  finalAction: string;
+  finalReasoning: string;
+  finalParameters: WorkflowJsonMap;
+  finalResponse: string;
+  finalScreenshot: WorkflowScreenshotCache | null;
+  recentScreenshots: WorkflowScreenshotCache[];
+}
+
+export function buildGuiTaskResultExtractionPrompt(taskDescription: string, finalDeciderReasoning: string): string {
+  let prompt = '# GUI 任务最终业务结果提取' +
+    '\n你是 GUI 任务最终业务结果提取器。请只基于截图、任务目标和 Final Decider reasoning 提取和任务相关的信息，不要编造截图中没有的信息。' +
+    '\n\n## 任务信息' +
+    '\n- task_description: ' + taskDescription +
+    '\n- status_hint: ' + finalDeciderReasoning +
+    '\n\n## 输出要求' +
+    '\n严格输出 JSON 对象，不要输出 markdown、代码块或额外解释。' +
+    '\nJSON 结构必须是：{ "outcome":"found|empty|partial|uncertain", "summary":"", "key_values":{}, "items":[] }。' +
+    '\n输入截图按时间顺序排列，最后一张截图是最新状态；请综合最近截图判断页面是否发生变化和最终结果。' +
+    '\nsummary 用中文 1 句话简洁总结任务结果、完成到哪一步和异常情况；总结性判断统一写在 summary，不要额外输出证据字段。' +
+    '\nkey_values 必须包含 "完成状态"，值只能是 "success / failed / suspended / unknown" 中最合适的一项。' +
+    '\n根据任务实际需要，动态添加 1~5 个最相关的 key，例如：查订单 → "订单号"，查联系人 → "联系人"，查金额 → "金额"，查时间 → "时间"，发邮件 → "邮件主题"，查地点 → "地点"，查待办 → "待办标题"，看数据 → "点赞数" / "播放量"，看页面 → "当前页面"。' +
+    '\nkey_values 不要包含“任务目标”或对任务目标的复述；只包含任务完成状态、任务结果和用户真正需要查询的关键信息。' +
+    '\n没有可靠证据的值填 unknown，不要编造；无关 key 一律不加。' +
+    '\n如果任务要求列出、排名、榜单、热搜、订单、待收货、物流或列表，必须优先填充 items，不要只在 summary 中概括。' +
+    '\n热搜/榜单类 items 示例：[{ "rank": 1, "title": "话题名称" }]。' +
+    '\n订单/待收货类 items 示例：[{ "item": "商品名称", "order_no": "订单号", "expected_delivery_date": "预计到货日期", "status": "待收货" }]。' +
+    "\n如果截图没有相关业务结果（例如无待收货订单），使用 outcome='empty'，items=[]，并在 key_values 中表达数量/是否有结果。" +
+    "\n如果看不清、截图证据不足或无法确定，使用 outcome='uncertain'。";
+  return prompt;
+}
+
+export function normalizeGuiTaskResultExtractionMap(raw: WorkflowJsonMap,
+  fallbackSummary: string): WorkflowJsonMap {
+  let outcome = normalizeGuiTaskResultOutcome(raw['outcome']);
+  let summary = workflowJsonString(raw['summary']).trim();
+  if (summary.length === 0) {
+    summary = fallbackSummary.trim();
+  }
+  if (summary.length === 0) {
+    summary = 'GUI 任务已完成。';
+  }
+  let keyValues = workflowJsonObjectMap(raw['key_values']);
+  let items = normalizeGuiTaskResultItems(raw['items']);
+  let normalized: GuiTaskResultExtractionMap = {
+    outcome: outcome,
+    summary: summary,
+    key_values: keyValues,
+    items: items
+  };
+  let extractionError = workflowJsonString(raw['extraction_error']).trim();
+  if (extractionError.length > 0) {
+    normalized.extraction_error = extractionError;
+  }
+  return normalized as Object as WorkflowJsonMap;
+}
+
+export function fallbackGuiTaskResultExtraction(error: string, finalDeciderReasoning: string): WorkflowJsonMap {
+  let summary = finalDeciderReasoning.trim();
+  if (summary.length === 0) {
+    summary = 'GUI 任务已完成，但结果提取失败。';
+  }
+  let keyValues: EmptyWorkflowJsonMap = {};
+  let items: Object[] = [];
+  let fallback: GuiTaskResultExtractionMap = {
+    outcome: 'uncertain',
+    summary: summary,
+    key_values: keyValues as Object as WorkflowJsonMap,
+    items: items,
+    extraction_error: error
+  };
+  return fallback as Object as WorkflowJsonMap;
+}
+
+export function guiTaskResultExtractionDiagnosticsText(normalized: WorkflowJsonMap, rawResponse: string): string {
+  let outcome = workflowJsonString(normalized['outcome']).trim();
+  if (outcome.length === 0) {
+    outcome = 'unknown';
+  }
+  let itemCount = 0;
+  let items = normalized['items'];
+  if (Array.isArray(items)) {
+    itemCount = items.length;
+  }
+  let keyValueKeys = Object.keys(workflowJsonObjectMap(normalized['key_values'])).join(',');
+  if (keyValueKeys.length === 0) {
+    keyValueKeys = '(empty)';
+  }
+  return 'outcome=' + outcome +
+    ', items.length=' + String(itemCount) +
+    ', key_values=' + keyValueKeys +
+    ', raw_preview=' + guiTaskResultRawPreview(rawResponse);
+}
+
+function guiTaskResultRawPreview(rawResponse: string): string {
+  let compact = rawResponse.trim().replace(/\s+/g, ' ');
+  let limit = 500;
+  if (compact.length <= limit) {
+    return compact;
+  }
+  return compact.substring(0, limit) + '...';
+}
+
+function normalizeGuiTaskResultOutcome(value: WorkflowJsonValue | undefined): string {
+  let outcome = workflowJsonString(value).trim().toLowerCase();
+  if (outcome === 'found' || outcome === 'empty' || outcome === 'partial' || outcome === 'uncertain') {
+    return outcome;
+  }
+  return 'uncertain';
+}
+
+function workflowJsonString(value: WorkflowJsonValue | undefined): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function workflowJsonObjectMap(value: WorkflowJsonValue | undefined): WorkflowJsonMap {
+  if (value === undefined || value === null || Array.isArray(value) || typeof value !== 'object') {
+    let empty: EmptyWorkflowJsonMap = {};
+    return empty as Object as WorkflowJsonMap;
+  }
+  return value as WorkflowJsonMap;
+}
+
+function normalizeGuiTaskResultItems(value: WorkflowJsonValue | undefined): Object[] {
+  let items: Object[] = [];
+  if (!Array.isArray(value)) {
+    return items;
+  }
+  let rawItems = value as Object[];
+  for (let i = 0; i < rawItems.length; i++) {
+    let item = rawItems[i];
+    if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+      items.push(item);
+    }
+  }
+  return items;
+}
+
+export function resolveWorkflowJsonForRun(filesDir: string, task: WorkflowTask,
+  readLatest: (filesDir: string, task: WorkflowTask) => string = WorkflowStorage.readTaskWorkflowJson,
+  logHandler: (message: string) => void = (_message: string): void => {
+  }): string {
+  if (task.useEmbeddedWorkflowJson === true) {
+    return task.workflowJson;
+  }
+  try {
+    return readLatest(filesDir, task);
+  } catch (e) {
+    let err = e as Error;
+    logHandler('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
+    return task.workflowJson;
+  }
+}
+
 export class WorkflowRunner {
   private static readonly APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
@@ -202,24 +391,30 @@ export class WorkflowRunner {
   private latestDailyLogPath: string = '';
   private pendingSummaryJobs: PendingSummaryJob[] = [];
   private latestWorkflowScreenshot: WorkflowScreenshotCache | null = null;
+  private runRootOverride: string = '';
+  private workflowResultSummary: string = '';
+  private workflowResult: WorkflowJsonMap | null = null;
+  private workflowResultExtractionError: string = '';
+  private workflowResultScreenshotPath: string = '';
+  private workflowResultScreenshotPaths: string[] = [];
 
   constructor(filesDir: string, cloudClient: CloudModelClient, cloudConfigProvider: () => CloudModelConfig,
-    hdcServerIp: string, logHandler: (message: string) => void) {
+    hdcServerIp: string, logHandler: (message: string) => void, runRootOverride: string = '') {
     this.filesDir = filesDir;
     this.cloudClient = cloudClient;
     this.cloudConfigProvider = cloudConfigProvider;
     this.hdcBridge = new HdcWorkflowBridge(hdcServerIp, logHandler);
     this.logHandler = logHandler;
+    this.runRootOverride = runRootOverride;
+  }
+
+  static runDirectoryRoot(filesDir: string, runRootOverride: string): string {
+    return runRootOverride.length > 0 ? runRootOverride : WorkflowStorage.runsDir(filesDir);
   }
 
   private workflowJsonForRun(task: WorkflowTask): string {
-    try {
-      return WorkflowStorage.readTaskWorkflowJson(this.filesDir, task);
-    } catch (e) {
-      let err = e as Error;
-      this.log('读取最新 Workflow 配置失败，使用任务索引中的缓存配置：' + (err.message || String(e)));
-      return task.workflowJson;
-    }
+    return resolveWorkflowJsonForRun(this.filesDir, task, WorkflowStorage.readTaskWorkflowJson,
+      (message: string): void => { this.log(message); });
   }
 
   async runTask(task: WorkflowTask): Promise<WorkflowRunResult> {
@@ -235,6 +430,11 @@ export class WorkflowRunner {
     this.traceId = '';
     this.latestDailyLogPath = '';
     this.pendingSummaryJobs = [];
+    this.workflowResultSummary = '';
+    this.workflowResult = null;
+    this.workflowResultExtractionError = '';
+    this.workflowResultScreenshotPath = '';
+    this.workflowResultScreenshotPaths = [];
     this.clearWorkflowScreenshotCache();
     this.runStartedAt = new Date();
     this.dateContext = new WorkflowDateContext(this.runStartedAt);
@@ -306,13 +506,29 @@ export class WorkflowRunner {
     this.debug('run finished status=' + status + ', returnedToApp=' + String(returnedToApp) +
       ', durationMs=' + this.elapsedMs(this.runStartedAt.getTime()));
     this.log('====== Workflow finished: ' + status + ' ======');
-    return {
+    let result: WorkflowRunResult = {
       status: status,
       message: message,
       runDir: this.runDir,
       dailyLogPath: this.latestDailyLogPath,
       returnedToApp: returnedToApp
     };
+    if (this.workflowResultSummary.length > 0) {
+      result.resultSummary = this.workflowResultSummary;
+    }
+    if (this.workflowResult !== null) {
+      result.result = this.workflowResult;
+    }
+    if (this.workflowResultExtractionError.length > 0) {
+      result.resultExtractionError = this.workflowResultExtractionError;
+    }
+    if (this.workflowResultScreenshotPath.length > 0) {
+      result.resultScreenshotPath = this.workflowResultScreenshotPath;
+    }
+    if (this.workflowResultScreenshotPaths.length > 0) {
+      result.resultScreenshotPaths = this.workflowResultScreenshotPaths;
+    }
+    return result;
   }
 
   private writeRunSummary(status: string): void {
@@ -326,6 +542,20 @@ export class WorkflowRunner {
       status: status,
       steps: this.stepResults
     };
+    if (this.workflowResultSummary.length > 0 || this.workflowResult !== null ||
+      this.workflowResultExtractionError.length > 0 || this.workflowResultScreenshotPath.length > 0) {
+      summary.result_summary = this.workflowResultSummary;
+      if (this.workflowResult !== null) {
+        summary.result = this.workflowResult;
+      }
+      summary.result_extraction_error = this.workflowResultExtractionError;
+      if (this.workflowResultScreenshotPath.length > 0) {
+        summary.result_screenshot_path = this.workflowResultScreenshotPath;
+      }
+      if (this.workflowResultScreenshotPaths.length > 0) {
+        summary.result_screenshot_paths = this.workflowResultScreenshotPaths;
+      }
+    }
     WorkflowStorage.writeText(this.runDir + '/run_summary.json', ArkJSON.stringify(summary, null, 2));
   }
 
@@ -347,10 +577,12 @@ export class WorkflowRunner {
 
   private createRunDir(task: WorkflowTask): string {
     WorkflowStorage.ensureWorkspace(this.filesDir);
+    let runRoot = WorkflowRunner.runDirectoryRoot(this.filesDir, this.runRootOverride);
+    WorkflowStorage.ensureDirectoryTree(runRoot);
     let stamp = this.formatTimestamp(this.runStartedAt);
     let safeName = this.sanitizeFileName(task.source || task.id);
-    let dir = WorkflowStorage.runsDir(this.filesDir) + '/' + stamp + '-' + safeName;
-    WorkflowStorage.ensureDirectory(dir);
+    let dir = runRoot + '/' + stamp + '-' + safeName;
+    WorkflowStorage.ensureDirectoryTree(dir);
     return dir;
   }
 
@@ -521,7 +753,11 @@ export class WorkflowRunner {
     if (this.currentAppName.length === 0) {
       throw new Error('gui_task after step 1 requires active app context');
     }
-    let stopReason = await this.runDeciderLoop(taskDescription);
+    let resultExtractionScreenshotCount = resolveGuiTaskResultExtractionScreenshotCount(step);
+    let deciderResult = await this.runDeciderLoop(step, taskDescription, resultExtractionScreenshotCount);
+    if (deciderResult.stopReason === 'MAX_STEPS_REACHED' && step.fail_on_max_steps === true) {
+      throw new Error('Decider max steps reached: ' + String(resolveGuiTaskMaxSteps(step)));
+    }
     let output: GuiDeciderOutput = {
       step_dir: this.stepDir(actualId),
       task_description: taskDescription,
@@ -529,8 +765,24 @@ export class WorkflowRunner {
       app_name: this.currentAppName,
       package_name: this.currentPackageName,
       mode: 'decider_only',
-      stop_reason: stopReason
+      stop_reason: deciderResult.stopReason
     };
+    if (deciderResult.finalAction.length > 0) {
+      output.final_decider_action = deciderResult.finalAction;
+      output.final_decider_reasoning = deciderResult.finalReasoning;
+      output.final_decider_parameters = deciderResult.finalParameters;
+    }
+    if (step.extract_result === true && deciderResult.stopReason.startsWith('TASK_COMPLETED_') &&
+      deciderResult.finalScreenshot !== null) {
+      await this.extractGuiTaskResult(taskDescription, deciderResult);
+      if (this.workflowResultScreenshotPath.length > 0) {
+        output.result_screenshot_path = this.workflowResultScreenshotPath;
+      }
+      if (this.workflowResultScreenshotPaths.length > 0) {
+        output.result_screenshot_paths = this.workflowResultScreenshotPaths as Object;
+        output.result_extraction_screenshot_count = this.workflowResultScreenshotPaths.length;
+      }
+    }
     return output as Object as WorkflowJsonMap;
   }
 
@@ -550,7 +802,7 @@ export class WorkflowRunner {
       let err = e as Error;
       this.debug('Planner request failed durationMs=' + this.elapsedMs(plannerStartedAt) +
         ', message=' + (err.message || String(e)));
-      throw err;
+      throw new Error('Planner request failed: ' + (err.message || String(e)));
     }
     this.log('Planner response:\n' + response);
     let data = this.extractJsonMap(response, true);
@@ -646,11 +898,57 @@ export class WorkflowRunner {
     output.source_screenshot = screenshot.source;
   }
 
-  private async runDeciderLoop(taskDescription: string): Promise<string> {
+  private appendResultExtractionScreenshotWindow(screenshots: WorkflowScreenshotCache[],
+    screenshot: WorkflowScreenshotCache, limit: number): WorkflowScreenshotCache[] {
+    let boundedLimit = limit > 0 ? limit : DEFAULT_GUI_TASK_RESULT_EXTRACTION_SCREENSHOT_COUNT;
+    let window: WorkflowScreenshotCache[] = screenshots.slice();
+    window.push(screenshot);
+    while (window.length > boundedLimit) {
+      window.shift();
+    }
+    return window;
+  }
+
+  /**
+   * 保存 GUI 任务最终结果提取实际使用的截图窗口。`result_screenshot.jpg`
+   * 继续指向最新截图，`result_screenshots/` 保存按时间顺序排列的最近 N 张截图。
+   */
+  private saveGuiTaskResultScreenshots(screenshots: WorkflowScreenshotCache[]): string[] {
+    if (screenshots.length === 0) {
+      return [];
+    }
+    let screenshotDir = this.runDir + '/result_screenshots';
+    WorkflowStorage.ensureDirectoryTree(screenshotDir);
+    let relativePaths: string[] = [];
+    for (let i = 0; i < screenshots.length; i++) {
+      let suffix = String(i + 1).padStart(2, '0');
+      let imagePath = screenshotDir + '/result_screenshot_' + suffix + '.jpg';
+      WorkflowStorage.writeBase64Image(imagePath, screenshots[i].image_b64);
+      relativePaths.push(WorkflowStorage.workflowRunRelativePath(this.filesDir, imagePath));
+    }
+    let latestPath = this.runDir + '/result_screenshot.jpg';
+    WorkflowStorage.writeBase64Image(latestPath, screenshots[screenshots.length - 1].image_b64);
+    this.workflowResultScreenshotPath = WorkflowStorage.workflowRunRelativePath(this.filesDir, latestPath);
+    this.log('GUI 任务结果截图窗口已保存：' + String(relativePaths.length) + ' 张，最新=' +
+      this.workflowResultScreenshotPath);
+    return relativePaths;
+  }
+
+  private async runDeciderLoop(step: WorkflowStep, taskDescription: string,
+    resultExtractionScreenshotCount: number): Promise<DeciderLoopResult> {
     let deciderTask = this.dateContext.withDatePromptAsTask(taskDescription);
     let history: string[] = [];
-    let stopReason = 'MAX_STEPS_REACHED';
-    for (let i = 0; i < MAX_GUI_STEPS; i++) {
+    let maxSteps = resolveGuiTaskMaxSteps(step);
+    let result: DeciderLoopResult = {
+      stopReason: 'MAX_STEPS_REACHED',
+      finalAction: '',
+      finalReasoning: '',
+      finalParameters: {},
+      finalResponse: '',
+      finalScreenshot: null,
+      recentScreenshots: []
+    };
+    for (let i = 0; i < maxSteps; i++) {
       if (AgentExecutionController.isCancelRequested()) {
         throw new Error('用户取消 workflow');
       }
@@ -658,20 +956,33 @@ export class WorkflowRunner {
       if (AgentExecutionController.isCancelRequested()) {
         throw new Error('用户取消 workflow');
       }
-      AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + MAX_GUI_STEPS + ': 识别屏幕并决策');
+      AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps + ': 识别屏幕并决策');
       let shot = await this.captureWorkflowScreenshot('decider:' + String(i + 1));
       let imageBase64 = shot.image_b64;
       let width = shot.width;
       let height = shot.height;
+      result.recentScreenshots = this.appendResultExtractionScreenshotWindow(result.recentScreenshots, shot,
+        resultExtractionScreenshotCount);
       this.log('Decider 截图完成：' + width + 'x' + height);
-      let response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
+      let response = '';
+      try {
+        response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
+      } catch (e) {
+        let err = e as Error;
+        throw new Error('Decider request failed: ' + (err.message || String(e)));
+      }
       this.log('Decider response:\n' + response);
       let parsedAction = AgentActionParser.parse(response);
       let parsed = parsedAction.data;
       let action = parsedAction.action;
-      AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1));
+      AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1, maxSteps));
       if (action === 'done' || action === 'stop' || action === 'terminate' || action === 'abort') {
-        stopReason = 'TASK_COMPLETED_' + action;
+        result.stopReason = 'TASK_COMPLETED_' + action;
+        result.finalAction = action;
+        result.finalReasoning = this.finalDeciderReasoning(parsed);
+        result.finalParameters = parsedAction.parameters;
+        result.finalResponse = response;
+        result.finalScreenshot = shot;
         break;
       }
       let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
@@ -679,7 +990,62 @@ export class WorkflowRunner {
       await this.hdcBridge.guiAction(hdcPayload);
       history.push(ArkJSON.stringify(parsed));
     }
-    return stopReason;
+    return result;
+  }
+
+  private finalDeciderReasoning(parsed: WorkflowJsonMap): string {
+    let reasoning = this.getMapString(parsed, 'reasoning');
+    if (reasoning.length > 0) {
+      return reasoning;
+    }
+    reasoning = this.getMapString(parsed, 'thought');
+    if (reasoning.length > 0) {
+      return reasoning;
+    }
+    return this.getMapString(parsed, 'reason');
+  }
+
+  private async extractGuiTaskResult(taskDescription: string, deciderResult: DeciderLoopResult): Promise<void> {
+    if (deciderResult.finalScreenshot === null) {
+      return;
+    }
+    let screenshots = deciderResult.recentScreenshots.length > 0 ? deciderResult.recentScreenshots :
+      [deciderResult.finalScreenshot];
+    if (this.workflowResultScreenshotPaths.length === 0) {
+      this.workflowResultScreenshotPaths = this.saveGuiTaskResultScreenshots(screenshots);
+    }
+    let imageBase64List: string[] = [];
+    for (let i = 0; i < screenshots.length; i++) {
+      imageBase64List.push(screenshots[i].image_b64);
+    }
+    let prompt = buildGuiTaskResultExtractionPrompt(taskDescription, deciderResult.finalReasoning);
+    let response = '';
+    try {
+      this.log('GUI 任务结果提取开始，截图数：' + String(imageBase64List.length));
+      response = await this.cloudClient.chatImagesQuestion(prompt, imageBase64List,
+        this.cloudConfigProvider());
+      if (response.trim().length === 0) {
+        throw new Error('empty VLM result extraction response');
+      }
+      let parsed = AgentActionParser.extractJsonMap(response, true);
+      let normalized = normalizeGuiTaskResultExtractionMap(parsed, deciderResult.finalReasoning);
+      this.workflowResult = normalized;
+      this.workflowResultSummary = this.getMapString(normalized, 'summary');
+      this.workflowResultExtractionError = '';
+      this.log('GUI 任务结果提取完成：' + this.workflowResultSummary);
+      this.log('GUI 任务结果提取诊断：' + guiTaskResultExtractionDiagnosticsText(normalized, response));
+    } catch (e) {
+      let err = e as Error;
+      let message = err.message || String(e);
+      this.log('GUI 任务结果提取失败：' + message);
+      if (response.trim().length > 0) {
+        this.log('GUI 任务结果提取失败 raw_preview=' + guiTaskResultRawPreview(response));
+      }
+      let fallback = fallbackGuiTaskResultExtraction(message, deciderResult.finalReasoning);
+      this.workflowResult = fallback;
+      this.workflowResultSummary = this.getMapString(fallback, 'summary');
+      this.workflowResultExtractionError = message;
+    }
   }
 
   private async runGuiAction(step: WorkflowStep, actualId: string): Promise<WorkflowJsonMap> {
@@ -1505,16 +1871,16 @@ export class WorkflowRunner {
     return 'Step ' + actualId + ': ' + step.type;
   }
 
-  private buildDeciderFloatText(parsed: WorkflowJsonMap, index: number): string {
+  private buildDeciderFloatText(parsed: WorkflowJsonMap, index: number, maxSteps: number): string {
     let action = this.getMapString(parsed, 'action');
     if (action.length === 0) {
-      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': 等待动作';
+      return 'Decider ' + index + '/' + maxSteps + ': 等待动作';
     }
     let text = this.getMapString(parsed, 'text');
     if (text.length > 0) {
-      return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action + ' ' + text;
+      return 'Decider ' + index + '/' + maxSteps + ': ' + action + ' ' + text;
     }
-    return 'Decider ' + index + '/' + MAX_GUI_STEPS + ': ' + action;
+    return 'Decider ' + index + '/' + maxSteps + ': ' + action;
   }
 
   private toNumber(value: WorkflowJsonValue | undefined, fallback: number): number {

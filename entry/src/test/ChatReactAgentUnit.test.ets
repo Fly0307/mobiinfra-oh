@@ -6,6 +6,10 @@ import {
   ChatToolRegistry
 } from '../main/ets/utils/ChatToolRegistry';
 import {
+  MobileGuiTaskRequest,
+  MobileGuiTaskRunResult
+} from '../main/ets/utils/MobileGuiTaskTypes';
+import {
   CloudChatCompletionOptions,
   CloudChatCompletionResult,
   CloudChatCompletionStreamCallbacks,
@@ -202,6 +206,37 @@ function fakeLookupTool(output: string): ChatTool {
   };
 }
 
+function fakeMobileGuiTool(recordedRequests: MobileGuiTaskRequest[],
+  callbackInvocations: string[]): ChatTool {
+  return {
+    name: 'run_mobile_gui_task',
+    description: 'Run a mobile GUI task.',
+    parameters: emptyToolParameters(),
+    strict: false,
+    execute: async (_argsText: string, context: ChatToolExecutionContext): Promise<string> => {
+      if (context.confirmMobileGuiTask === undefined || context.runMobileGuiTask === undefined) {
+        return '{"ok":false,"error":"callbacks missing"}';
+      }
+      let request: MobileGuiTaskRequest = {
+        task: '打开微信查看消息',
+        appName: '微信',
+        packageName: 'com.tencent.mm',
+        maxSteps: 12
+      };
+      callbackInvocations.push('confirm');
+      let confirmed = await context.confirmMobileGuiTask(request);
+      if (!confirmed) {
+        return '{"ok":false,"status":"rejected"}';
+      }
+      callbackInvocations.push('run');
+      let result = await context.runMobileGuiTask(request);
+      recordedRequests.push(request);
+      return '{"ok":' + String(result.ok) + ',"status":"' + result.status + '","summary":"' + result.summary +
+        '","run_dir":"' + result.runDir + '"}';
+    }
+  };
+}
+
 export default function chatReactAgentUnitTest() {
   describe('chatReactAgentUnitTest', () => {
     it('returnsFinalAnswerWithoutTools', 0, async () => {
@@ -296,6 +331,89 @@ export default function chatReactAgentUnitTest() {
       expect(client.callMessages[1][2].tool_call_id).assertEqual('call-1');
       expect(traces.length).assertEqual(1);
       expect(traces[0].indexOf('lookup_note') >= 0).assertTrue();
+    });
+
+    it('passesMobileGuiCallbacksIntoToolExecutionContext', 0, async () => {
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-mobile', 'run_mobile_gui_task', '{"task":"打开微信"}')]),
+        completion('手机 GUI 任务已完成。')
+      ]);
+      let registry = new ChatToolRegistry();
+      let recordedRequests: MobileGuiTaskRequest[] = [];
+      let callbackInvocations: string[] = [];
+      registry.registerTool(fakeMobileGuiTool(recordedRequests, callbackInvocations));
+      let confirmRequests: MobileGuiTaskRequest[] = [];
+      let runRequests: MobileGuiTaskRequest[] = [];
+      let agent = new ChatReactAgent(client, registry);
+      let options: ChatReactAgentRunOptions = {
+        confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
+          confirmRequests.push(request);
+          return true;
+        },
+        runMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          runRequests.push(request);
+          return {
+            ok: true,
+            status: 'completed',
+            errorCode: '',
+            error: '',
+            recoverable: false,
+            summary: '已完成手机 GUI 任务',
+            runDir: 'chat-sessions/tool-runs/session-1/mobile-gui/run-1',
+            returnedToApp: true
+          };
+        }
+      };
+
+      let result = await agent.run([userMessage('打开微信查看消息')], testConfig(), options);
+
+      expect(result.content).assertEqual('手机 GUI 任务已完成。');
+      expect(callbackInvocations.length).assertEqual(2);
+      expect(callbackInvocations[0]).assertEqual('confirm');
+      expect(callbackInvocations[1]).assertEqual('run');
+      expect(confirmRequests.length).assertEqual(1);
+      expect(runRequests.length).assertEqual(1);
+      expect(recordedRequests.length).assertEqual(1);
+      expect(confirmRequests[0].task).assertEqual('打开微信查看消息');
+      expect(runRequests[0].packageName).assertEqual('com.tencent.mm');
+    });
+
+    it('feedsMobileGuiToolResultIntoNextModelTurn', 0, async () => {
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-mobile', 'run_mobile_gui_task', '{"task":"打开微信"}')]),
+        completion('模型已收到手机 GUI 工具结果。')
+      ]);
+      let registry = new ChatToolRegistry();
+      registry.registerTool(fakeMobileGuiTool([], []));
+      let agent = new ChatReactAgent(client, registry);
+      let options: ChatReactAgentRunOptions = {
+        sessionId: 'chat-session-1',
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          return true;
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          return {
+            ok: true,
+            status: 'completed',
+            errorCode: '',
+            error: '',
+            recoverable: false,
+            summary: '已生成独立运行目录',
+            runDir: 'chat-sessions/tool-runs/chat-session-1/mobile-gui/run-1',
+            returnedToApp: true
+          };
+        }
+      };
+
+      let result = await agent.run([userMessage('打开微信查看消息')], testConfig(), options);
+
+      expect(result.content).assertEqual('模型已收到手机 GUI 工具结果。');
+      expect(client.callMessages.length).assertEqual(2);
+      expect(client.callMessages[1][2].role).assertEqual('tool');
+      expect(client.callMessages[1][2].tool_call_id).assertEqual('call-mobile');
+      expect((client.callMessages[1][2].content as string).indexOf('chat-sessions/tool-runs/chat-session-1/mobile-gui/run-1') >= 0)
+        .assertTrue();
+      expect((client.callMessages[1][2].content as string).indexOf('"status":"completed"') >= 0).assertTrue();
     });
 
     it('streamsFinalAnswerDeltasWhenCallbackProvided', 0, async () => {

@@ -24,6 +24,8 @@ import mimoVoiceClientUnitTest from './MimoVoiceClientUnit.test';
 import voiceTtsPresetsUnitTest from './VoiceTtsPresetsUnit.test';
 import pcmWavUnitTest from './PcmWavUnit.test';
 import harmonySpeechRecognizerAsrProviderUnitTest from './HarmonySpeechRecognizerAsrProviderUnit.test';
+import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
+import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -52,4 +54,6 @@ export default function testsuite() {
   voiceTtsPresetsUnitTest();
   pcmWavUnitTest();
   harmonySpeechRecognizerAsrProviderUnitTest();
+  mobileGuiTaskToolUnitTest();
+  mobileGuiTaskWorkflowAdapterUnitTest();
 }

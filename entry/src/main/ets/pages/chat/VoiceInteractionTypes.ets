@@ -238,6 +238,21 @@ export class VoiceSessionController {
     return this.snapshot();
   }
 
+  markTranscribing(): VoiceSessionSnapshot {
+    if (this.state.status !== 'listening' && this.state.status !== 'transcribing') {
+      return this.snapshot();
+    }
+    this.state.status = 'transcribing';
+    this.state.error = '';
+    return this.snapshot();
+  }
+
+  completeWithoutTranscript(): VoiceSessionSnapshot {
+    // 空识别不是语音服务异常：回到 idle，避免 UI 继续展示错误状态或状态占位。
+    this.state = createEmptyVoiceSessionSnapshot();
+    return this.snapshot();
+  }
+
   markThinking(): VoiceSessionSnapshot {
     this.state.status = 'thinking';
     this.state.error = '';

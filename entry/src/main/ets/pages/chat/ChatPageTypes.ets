@@ -49,6 +49,23 @@ export function chatComposerPrimaryActionRole(isBusy: boolean, voiceCapturing: b
   return isBusy ? 'busy' : 'send';
 }
 
+export function chatComposerVoiceReleaseShouldStop(voiceStatus: string): boolean {
+  return voiceStatus === 'idle' || voiceStatus === 'listening' || voiceStatus === 'transcribing';
+}
+
+export function chatVoiceStatusIsCapturing(voiceStatus: string): boolean {
+  return voiceStatus === 'listening';
+}
+
+export function chatVoiceStatusBarVisible(voiceStatus: string, _transcript: string = ''): boolean {
+  return voiceStatus !== 'idle';
+}
+
+// ASR 结果已经实时写入可编辑输入框，状态栏只承担状态提示，不再重复展示转写文本。
+export function chatVoiceStatusDetailText(_voiceStatus: string, _transcript: string): string {
+  return '';
+}
+
 export function chatTimeGreeting(hour: number): string {
   if (hour >= 6 && hour < 11) {
     return '早上好';

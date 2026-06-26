@@ -5,10 +5,14 @@ import {
   chatModeActionLabel,
   chatComposerBarHeight,
   chatComposerPrimaryActionRole,
+  chatComposerVoiceReleaseShouldStop,
   chatComposerLineCount,
   chatInputAfterAcceptedSend,
   chatModeLabel,
   chatModePlaceholder,
+  chatVoiceStatusBarVisible,
+  chatVoiceStatusIsCapturing,
+  chatVoiceStatusDetailText,
   chatModeSwitcherVisibleAfterScroll,
   chatTimeGreeting,
   chatDeepThinkingToggleVisible,
@@ -54,6 +58,20 @@ export default function chatPageTypesUnitTest() {
       expect(chatComposerPrimaryActionRole(true, false)).assertEqual('busy');
       expect(chatComposerPrimaryActionRole(true, true)).assertEqual('voice_capture');
       expect(chatComposerPrimaryActionRole(false, true)).assertEqual('voice_capture');
+      expect(chatComposerVoiceReleaseShouldStop('idle')).assertTrue();
+      expect(chatComposerVoiceReleaseShouldStop('listening')).assertTrue();
+      expect(chatComposerVoiceReleaseShouldStop('transcribing')).assertTrue();
+      expect(chatComposerVoiceReleaseShouldStop('speaking')).assertFalse();
+      expect(chatVoiceStatusIsCapturing('listening')).assertTrue();
+      expect(chatVoiceStatusIsCapturing('transcribing')).assertFalse();
+      expect(chatVoiceStatusIsCapturing('idle')).assertFalse();
+    });
+
+    it('keepsVoiceTranscriptOnlyInsideEditableDraft', 0, () => {
+      expect(chatVoiceStatusBarVisible('idle')).assertFalse();
+      expect(chatVoiceStatusBarVisible('idle', '已经写入输入框')).assertFalse();
+      expect(chatVoiceStatusBarVisible('transcribing', '已经写入输入框')).assertTrue();
+      expect(chatVoiceStatusDetailText('transcribing', '已经写入输入框')).assertEqual('');
     });
 
     it('expandsComposerHeightForMultiLineDrafts', 0, () => {

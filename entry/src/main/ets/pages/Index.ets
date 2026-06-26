@@ -795,6 +795,10 @@ struct Index {
     await this.voiceOrchestrator().toggleVoiceInput();
   }
 
+  private async stopVoiceInput(): Promise<void> {
+    await this.voiceOrchestrator().stopVoiceInput();
+  }
+
   private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
     await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
   }
@@ -5186,6 +5190,7 @@ struct Index {
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
             onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
+            onStopVoiceInput: async () => { await this.stopVoiceInput(); },
             onPlayVoiceMessage: async (messageId: string, text: string) => {
               await this.playAssistantMessageVoice(messageId, text);
             }

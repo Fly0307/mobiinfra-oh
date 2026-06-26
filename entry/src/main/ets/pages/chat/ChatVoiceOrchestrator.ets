@@ -42,6 +42,21 @@ export interface ChatVoiceOrchestratorHost {
   onSnapshot: (snapshot: VoiceSessionSnapshot) => void;
 }
 
+export function nextVoiceInputStartGeneration(currentGeneration: number): number {
+  return currentGeneration + 1;
+}
+
+export function voiceInputStopGeneration(latestStartGeneration: number, previousStoppedGeneration: number): number {
+  return Math.max(latestStartGeneration, previousStoppedGeneration);
+}
+
+export function voiceInputStartCanProceed(startGeneration: number, latestStartGeneration: number,
+  stoppedGeneration: number): boolean {
+  return startGeneration === latestStartGeneration && startGeneration > stoppedGeneration;
+}
+
+const VOICE_INPUT_STOP_FALLBACK_MS: number = 1500;
+
 export class ChatVoiceOrchestrator {
   private host: ChatVoiceOrchestratorHost;
   private voiceController: VoiceSessionController = new VoiceSessionController();
@@ -55,6 +70,9 @@ export class ChatVoiceOrchestrator {
   private voicePlaybackSessionId: string = '';
   private voicePlaybackAudioUri: string = '';
   private voicePlaybackVoice: string = '';
+  private voiceInputStartGeneration: number = 0;
+  private voiceInputStoppedGeneration: number = 0;
+  private voiceInputStopFallbackTimerId: number = -1;
 
   constructor(host: ChatVoiceOrchestratorHost) {
     this.host = host;
@@ -69,6 +87,7 @@ export class ChatVoiceOrchestrator {
   }
 
   private failVoiceInteraction(message: string): void {
+    this.clearVoiceInputStopFallbackTimer();
     this.voiceController.fail(message);
     this.emitSnapshot();
     showToastSafely(message, 1800);
@@ -77,7 +96,7 @@ export class ChatVoiceOrchestrator {
   async toggleVoiceInput(): Promise<void> {
     let status = this.voiceController.snapshot().status;
     if (status === 'listening' || status === 'transcribing') {
-      this.asrProvider.finish();
+      await this.stopVoiceInput();
       return;
     }
     if (status === 'speaking' || status === 'synthesizing') {
@@ -91,18 +110,34 @@ export class ChatVoiceOrchestrator {
     await this.startVoiceInput();
   }
 
+  async stopVoiceInput(): Promise<void> {
+    this.voiceInputStoppedGeneration = voiceInputStopGeneration(this.voiceInputStartGeneration,
+      this.voiceInputStoppedGeneration);
+    let snapshot = this.voiceController.snapshot();
+    let status = snapshot.status;
+    if (status === 'listening' || status === 'transcribing') {
+      this.voiceController.markTranscribing();
+      this.emitSnapshot();
+      this.scheduleVoiceInputStopFallback(snapshot.turnId);
+      this.asrProvider.finish();
+    }
+  }
+
   async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
     let sessionId = this.host.activeSessionId();
     await this.playAssistantMessageVoiceInSession(sessionId, messageId, text);
   }
 
   shutdown(): void {
+    this.clearVoiceInputStopFallbackTimer();
     this.asrProvider.shutdown();
     this.voicePlaybackGeneration++;
     this.voiceAudioPlayback.stop().catch(() => {});
     this.voiceController.reset();
     this.voiceDraftTargetId = '';
     this.voiceDraftBaseInput = '';
+    this.voiceInputStoppedGeneration = voiceInputStopGeneration(this.voiceInputStartGeneration,
+      this.voiceInputStoppedGeneration);
     this.clearVoicePlaybackContext();
     this.emitSnapshot();
   }
@@ -127,8 +162,14 @@ export class ChatVoiceOrchestrator {
   }
 
   private async startVoiceInput(): Promise<void> {
+    this.clearVoiceInputStopFallbackTimer();
+    let startGeneration = nextVoiceInputStartGeneration(this.voiceInputStartGeneration);
+    this.voiceInputStartGeneration = startGeneration;
     let granted = await this.ensureMicrophonePermission();
     if (!granted) {
+      return;
+    }
+    if (!this.voiceInputStartActive(startGeneration)) {
       return;
     }
     let turnId = 'voice-' + String(new Date().getTime());
@@ -186,6 +227,11 @@ export class ChatVoiceOrchestrator {
         language: 'zh-CN',
         sessionId: turnId
       });
+      if (!this.voiceInputStartActive(startGeneration)) {
+        if (this.voiceTurnActive(turnId)) {
+          this.asrProvider.finish();
+        }
+      }
     } catch (e) {
       let err = e as Error;
       this.failVoiceInteraction(err.message);
@@ -194,6 +240,44 @@ export class ChatVoiceOrchestrator {
 
   private voiceTurnActive(turnId: string): boolean {
     return this.voiceController.snapshot().turnId === turnId;
+  }
+
+  private voiceInputStartActive(startGeneration: number): boolean {
+    return voiceInputStartCanProceed(startGeneration, this.voiceInputStartGeneration,
+      this.voiceInputStoppedGeneration);
+  }
+
+  private clearVoiceInputStopFallbackTimer(): void {
+    if (this.voiceInputStopFallbackTimerId !== -1) {
+      clearTimeout(this.voiceInputStopFallbackTimerId);
+      this.voiceInputStopFallbackTimerId = -1;
+    }
+  }
+
+  private scheduleVoiceInputStopFallback(turnId: string): void {
+    if (turnId.length === 0) {
+      return;
+    }
+    this.clearVoiceInputStopFallbackTimer();
+    // finish() 依赖系统 ASR 回调；部分设备静默或取消时可能不回调，用短超时防止 UI 长时间停在转写态。
+    this.voiceInputStopFallbackTimerId = setTimeout(() => {
+      this.voiceInputStopFallbackTimerId = -1;
+      let snapshot = this.voiceController.snapshot();
+      if (snapshot.turnId !== turnId) {
+        return;
+      }
+      if (snapshot.status !== 'listening' && snapshot.status !== 'transcribing') {
+        return;
+      }
+      let transcript = snapshot.finalTranscript.trim().length > 0 ? snapshot.finalTranscript : snapshot.partialTranscript;
+      if (transcript.trim().length > 0) {
+        this.handleVoiceTranscriptComplete(transcript).catch((e: Error) => {
+          this.failVoiceInteraction(e.message);
+        });
+        return;
+      }
+      this.finishVoiceInputWithoutTranscript();
+    }, VOICE_INPUT_STOP_FALLBACK_MS);
   }
 
   private shouldHandleVoiceTranscriptComplete(snapshot: VoiceSessionSnapshot): boolean {
@@ -223,9 +307,10 @@ export class ChatVoiceOrchestrator {
     if (!this.shouldHandleVoiceTranscriptComplete(snapshot)) {
       return;
     }
+    this.clearVoiceInputStopFallbackTimer();
     let finalTranscript = transcript.trim().length > 0 ? transcript.trim() : snapshot.finalTranscript.trim();
     if (finalTranscript.length === 0) {
-      this.failVoiceInteraction('没有识别到语音内容');
+      this.finishVoiceInputWithoutTranscript();
       return;
     }
     this.voiceController.completeTranscript(finalTranscript);
@@ -234,8 +319,21 @@ export class ChatVoiceOrchestrator {
     this.voiceController.reset();
     this.voiceDraftTargetId = '';
     this.voiceDraftBaseInput = '';
+    this.voiceInputStoppedGeneration = voiceInputStopGeneration(this.voiceInputStartGeneration,
+      this.voiceInputStoppedGeneration);
     this.emitSnapshot();
     showToastSafely('语音已转写到输入框', 1200);
+  }
+
+  private finishVoiceInputWithoutTranscript(): void {
+    this.clearVoiceInputStopFallbackTimer();
+    this.voiceController.completeWithoutTranscript();
+    this.voiceDraftTargetId = '';
+    this.voiceDraftBaseInput = '';
+    this.voiceInputStoppedGeneration = voiceInputStopGeneration(this.voiceInputStartGeneration,
+      this.voiceInputStoppedGeneration);
+    this.emitSnapshot();
+    showToastSafely('没有识别到语音内容', 1200);
   }
 
   private ttsConfigReady(): boolean {

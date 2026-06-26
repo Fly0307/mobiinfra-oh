@@ -6,9 +6,13 @@ import {
   chatComposerBarHeight,
   chatComposerTextAreaHeight,
   chatComposerPrimaryActionRole,
+  chatComposerVoiceReleaseShouldStop,
   chatDeepThinkingToggleVisible,
   chatModeLabel,
   chatModePlaceholder,
+  chatVoiceStatusBarVisible,
+  chatVoiceStatusIsCapturing,
+  chatVoiceStatusDetailText,
   chatTimeGreeting
 } from './ChatPageTypes';
 import {
@@ -85,6 +89,7 @@ export struct ChatPage {
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
   onToggleVoiceInput: () => Promise<void> = async () => {};
+  onStopVoiceInput: () => Promise<void> = async () => {};
   onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
 
   private isCloudMode(): boolean {
@@ -132,11 +137,11 @@ export struct ChatPage {
   }
 
   private isVoiceCapturing(): boolean {
-    return this.voiceStatus === 'listening' || this.voiceStatus === 'transcribing';
+    return chatVoiceStatusIsCapturing(this.voiceStatus);
   }
 
   private voiceStatusVisible(): boolean {
-    return this.voiceStatus !== 'idle' || this.voicePartialTranscript.trim().length > 0;
+    return chatVoiceStatusBarVisible(this.voiceStatus, this.voicePartialTranscript);
   }
 
   private voiceStatusExtraHeight(): number {
@@ -144,11 +149,7 @@ export struct ChatPage {
   }
 
   private voiceStatusText(): string {
-    let transcript = this.voicePartialTranscript.trim();
-    if (transcript.length > 0) {
-      return transcript;
-    }
-    return voiceStatusLabel(this.voiceStatus);
+    return chatVoiceStatusDetailText(this.voiceStatus, this.voicePartialTranscript);
   }
 
   private showConversationThinkingRow(): boolean {
@@ -179,6 +180,16 @@ export struct ChatPage {
 
   private startPrimaryButtonVoiceInput(): void {
     this.onToggleVoiceInput().catch((e: Error) => {
+      let err = e as Error;
+      showToastSafely(err.message, 1600);
+    });
+  }
+
+  private stopPrimaryButtonVoiceInput(): void {
+    if (!chatComposerVoiceReleaseShouldStop(this.voiceStatus)) {
+      return;
+    }
+    this.onStopVoiceInput().catch((e: Error) => {
       let err = e as Error;
       showToastSafely(err.message, 1600);
     });
@@ -672,13 +683,18 @@ export struct ChatPage {
           .fontSize(11)
           .fontColor('#5968FF')
           .maxLines(1)
-        Text(this.voiceStatusText())
-          .fontSize(12)
-          .fontColor('#4B5563')
-          .layoutWeight(1)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ left: 8 })
+        if (this.voiceStatusText().length > 0) {
+          Text(this.voiceStatusText())
+            .fontSize(12)
+            .fontColor('#4B5563')
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ left: 8 })
+        } else {
+          Blank()
+            .layoutWeight(1)
+        }
       }
       .width('100%')
       .height(26)
@@ -874,8 +890,9 @@ export struct ChatPage {
             .borderRadius(20)
             .gesture(
               GestureGroup(GestureMode.Exclusive,
-                LongPressGesture({ duration: 450 })
-                  .onAction(() => { this.startPrimaryButtonVoiceInput(); }),
+                LongPressGesture({ duration: 450, repeat: false })
+                  .onAction(() => { this.startPrimaryButtonVoiceInput(); })
+                  .onActionEnd(() => { this.stopPrimaryButtonVoiceInput(); }),
                 TapGesture()
                   .onAction(() => {
                     this.runPrimaryAction().catch((e: Error) => {
@@ -884,6 +901,7 @@ export struct ChatPage {
                     });
                   })
               )
+                .onCancel(() => { this.stopPrimaryButtonVoiceInput(); })
             )
         }
         .width('100%')

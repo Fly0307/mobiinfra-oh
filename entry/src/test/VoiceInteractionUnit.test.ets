@@ -16,6 +16,11 @@ import {
   voiceStatusLabel
 } from '../main/ets/pages/chat/VoiceInteractionTypes';
 import { ChatMessageUiModel } from '../main/ets/pages/chat/ChatMessageUiModel';
+import {
+  nextVoiceInputStartGeneration,
+  voiceInputStartCanProceed,
+  voiceInputStopGeneration
+} from '../main/ets/pages/chat/ChatVoiceOrchestrator';
 
 export default function voiceInteractionUnitTest() {
   describe('voiceInteractionUnitTest', () => {
@@ -30,6 +35,10 @@ export default function voiceInteractionUnitTest() {
       expect(controller.snapshot().turnId).assertEqual('turn-1');
       expect(controller.snapshot().partialTranscript).assertEqual('今天');
       expect(controller.isBusy()).assertTrue();
+
+      controller.markTranscribing();
+      expect(controller.snapshot().status).assertEqual('transcribing');
+      expect(controller.snapshot().partialTranscript).assertEqual('今天');
 
       controller.completeTranscript('今天天气怎么样');
       expect(controller.snapshot().status).assertEqual('transcribing');
@@ -51,6 +60,18 @@ export default function voiceInteractionUnitTest() {
       expect(controller.isBusy()).assertFalse();
     });
 
+    it('resetsEmptyVoiceInputWithoutErrorStatus', 0, () => {
+      let controller = new VoiceSessionController();
+
+      controller.beginListening('empty-turn');
+      controller.completeWithoutTranscript();
+
+      expect(controller.snapshot().status).assertEqual('idle');
+      expect(controller.snapshot().error).assertEqual('');
+      expect(voiceStatusLabel(controller.snapshot().status)).assertEqual('');
+      expect(controller.isBusy()).assertFalse();
+    });
+
     it('labelsVoiceStatusesForChatUi', 0, () => {
       expect(voiceStatusLabel('idle')).assertEqual('');
       expect(voiceStatusLabel('listening')).assertEqual('正在聆听...');
@@ -66,6 +87,21 @@ export default function voiceInteractionUnitTest() {
       expect(appendVoiceTranscriptToInput('帮我查一下', '今天的天气')).assertEqual('帮我查一下\n今天的天气');
       expect(appendVoiceTranscriptToInput('帮我查一下\n', '今天的天气')).assertEqual('帮我查一下\n今天的天气');
       expect(appendVoiceTranscriptToInput('保留原文', '  ')).assertEqual('保留原文');
+    });
+
+    it('keepsVoiceInputStopRequestsBoundToStartGeneration', 0, () => {
+      let latestStart: number = nextVoiceInputStartGeneration(0);
+      let stopped: number = voiceInputStopGeneration(latestStart, 0);
+
+      expect(voiceInputStartCanProceed(latestStart, latestStart, stopped)).assertFalse();
+
+      let secondStart: number = nextVoiceInputStartGeneration(latestStart);
+
+      expect(voiceInputStartCanProceed(latestStart, secondStart, stopped)).assertFalse();
+      expect(voiceInputStartCanProceed(secondStart, secondStart, stopped)).assertTrue();
+
+      stopped = voiceInputStopGeneration(secondStart, stopped);
+      expect(voiceInputStartCanProceed(secondStart, secondStart, stopped)).assertFalse();
     });
 
     it('normalizesVoiceMetadata', 0, () => {

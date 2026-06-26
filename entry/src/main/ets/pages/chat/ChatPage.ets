@@ -4,6 +4,7 @@ import {
   CHAT_MODE_LOCAL_INFERENCE,
   chatComposerBarHeight,
   chatComposerTextAreaHeight,
+  chatComposerPrimaryActionRole,
   chatDeepThinkingToggleVisible,
   chatModeLabel,
   chatModePlaceholder,
@@ -30,6 +31,7 @@ import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
 import { DigitalAvatarView } from './DigitalAvatarView';
 import { digitalAvatarContainerHeight } from './DigitalAvatarTypes';
+import { VoiceInteractionStatus, voiceStatusLabel } from './VoiceInteractionTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
 
 @Component
@@ -57,6 +59,9 @@ export struct ChatPage {
   @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voicePartialTranscript: string = '';
+  @Prop voiceActiveMessageId: string = '';
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
   onOpenSessionDrawer: () => void = () => {};
   onCloseSessionDrawer: () => void = () => {};
@@ -78,6 +83,8 @@ export struct ChatPage {
   onClearCloudDebugImage: () => void = () => {};
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
+  onToggleVoiceInput: () => Promise<void> = async () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
 
   private isCloudMode(): boolean {
     return this.chatMode !== CHAT_MODE_LOCAL_INFERENCE;
@@ -104,7 +111,7 @@ export struct ChatPage {
   }
 
   private bottomOverlayInset(): number {
-    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + 64;
+    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + this.voiceStatusExtraHeight() + 64;
   }
 
   private welcomeGreeting(): string {
@@ -123,6 +130,26 @@ export struct ChatPage {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
   }
 
+  private isVoiceCapturing(): boolean {
+    return this.voiceStatus === 'listening' || this.voiceStatus === 'transcribing';
+  }
+
+  private voiceStatusVisible(): boolean {
+    return this.voiceStatus !== 'idle' || this.voicePartialTranscript.trim().length > 0;
+  }
+
+  private voiceStatusExtraHeight(): number {
+    return this.voiceStatusVisible() ? 34 : 0;
+  }
+
+  private voiceStatusText(): string {
+    let transcript = this.voicePartialTranscript.trim();
+    if (transcript.length > 0) {
+      return transcript;
+    }
+    return voiceStatusLabel(this.voiceStatus);
+  }
+
   private showConversationThinkingRow(): boolean {
     // 本地流式会先插入 assistant 占位消息，已有消息时不再额外显示底部处理中行。
     if (this.isCloudMode()) {
@@ -136,6 +163,24 @@ export struct ChatPage {
       return '停止';
     }
     return this.isBusy() ? '...' : '发送';
+  }
+
+  private primaryActionRole(): string {
+    return chatComposerPrimaryActionRole(this.isBusy(), this.isVoiceCapturing());
+  }
+
+  private primaryButtonBackgroundColor(): string {
+    if (this.primaryActionRole() === 'voice_capture') {
+      return '#5968FF';
+    }
+    return this.isBusy() ? '#AEB7C8' : '#111827';
+  }
+
+  private startPrimaryButtonVoiceInput(): void {
+    this.onToggleVoiceInput().catch((e: Error) => {
+      let err = e as Error;
+      showToastSafely(err.message, 1600);
+    });
   }
 
   private toggleDeepThinking(): void {
@@ -376,6 +421,8 @@ export struct ChatPage {
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
         onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
+        onPlayVoiceMessage: async (id: string, text: string) => { await this.onPlayVoiceMessage(id, text); },
+        voiceActiveMessageId: this.voiceActiveMessageId,
         onScrollContent: (_yOffset: number) => {}
       })
     } else {
@@ -617,6 +664,28 @@ export struct ChatPage {
     }
   }
 
+  @Builder VoiceStatusBar() {
+    if (this.voiceStatusVisible()) {
+      Row() {
+        Text(voiceStatusLabel(this.voiceStatus))
+          .fontSize(11)
+          .fontColor('#5968FF')
+          .maxLines(1)
+        Text(this.voiceStatusText())
+          .fontSize(12)
+          .fontColor('#4B5563')
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ left: 8 })
+      }
+      .width('100%')
+      .height(26)
+      .padding({ left: 24, right: 24 })
+      .margin({ bottom: 6 })
+    }
+  }
+
   @Builder ImagePreviewOverlay() {
     if (this.previewImagePath.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -748,6 +817,8 @@ export struct ChatPage {
         .padding({ left: 24, right: 24 })
         .margin({ bottom: 8 })
 
+        this.VoiceStatusBar()
+
         Row() {
           Text('+')
             .fontSize(30)
@@ -769,13 +840,49 @@ export struct ChatPage {
             .padding({ left: 14, right: 12, top: 8, bottom: 8 })
             .margin({ left: 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
-          Button(this.primaryButtonText())
-            .width(68)
+          Button() {
+            Row() {
+              if (this.primaryActionRole() === 'voice_capture') {
+                Image($r('app.media.voice_microphone_light'))
+                  .width(20)
+                  .height(20)
+              } else if (this.primaryActionRole() === 'busy') {
+                Text(this.primaryButtonText())
+                  .fontSize(14)
+                  .fontColor(Color.White)
+                  .fontWeight(FontWeight.Bold)
+              } else {
+                Image($r('app.media.voice_microphone_light'))
+                  .width(15)
+                  .height(15)
+                  .margin({ right: 5 })
+                Text(this.primaryButtonText())
+                  .fontSize(14)
+                  .fontColor(Color.White)
+                  .fontWeight(FontWeight.Bold)
+              }
+            }
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+            .alignItems(VerticalAlign.Center)
+          }
+            .width(82)
             .height(40)
-            .fontSize(14)
-            .backgroundColor(this.isBusy() ? '#AEB7C8' : '#111827')
+            .backgroundColor(this.primaryButtonBackgroundColor())
             .borderRadius(20)
-            .onClick(async () => { await this.runPrimaryAction(); })
+            .gesture(
+              GestureGroup(GestureMode.Exclusive,
+                LongPressGesture({ duration: 450 })
+                  .onAction(() => { this.startPrimaryButtonVoiceInput(); }),
+                TapGesture()
+                  .onAction(() => {
+                    this.runPrimaryAction().catch((e: Error) => {
+                      let err = e as Error;
+                      showToastSafely(err.message, 1600);
+                    });
+                  })
+              )
+            )
         }
         .width('100%')
         .height(this.composerBarHeight())

@@ -164,37 +164,60 @@ export struct DigitalAvatarView {
     if (this.tapScale !== 1 || this.tapTranslateY !== 0) {
       return 120;
     }
-    return this.visualState === 'thinking' ? 620 : 120;
+    return this.isAnimatedVoiceState() ? 620 : 120;
   }
 
   private tapShadowAnimationDuration(): number {
     if (this.tapShadowScale !== 1 || this.tapShadowOpacity !== 0.22) {
       return 120;
     }
-    return this.visualState === 'thinking' ? 620 : 120;
+    return this.isAnimatedVoiceState() ? 620 : 120;
+  }
+
+  private isAnimatedVoiceState(): boolean {
+    return this.visualState === 'thinking' || this.visualState === 'listening' || this.visualState === 'speaking';
   }
 
   private foregroundScale(): number {
-    let pulseScale: number = this.visualState === 'thinking' && this.thinkingPulse ? 1.04 : 1;
+    let pulseScale: number = this.isAnimatedVoiceState() && this.thinkingPulse ? this.voicePulseScale() : 1;
     return this.tapScale * pulseScale;
   }
 
+  private voicePulseScale(): number {
+    if (this.visualState === 'listening') {
+      return 1.03;
+    }
+    if (this.visualState === 'speaking') {
+      return 1.07;
+    }
+    return 1.04;
+  }
+
   private ringScale(): number {
-    if (this.visualState !== 'thinking') {
+    if (!this.isAnimatedVoiceState()) {
       return 0.92;
+    }
+    if (this.visualState === 'speaking') {
+      return this.thinkingPulse ? 1.26 : 0.94;
     }
     return this.thinkingPulse ? 1.18 : 0.92;
   }
 
   private ringOpacity(): number {
-    if (this.visualState !== 'thinking') {
+    if (!this.isAnimatedVoiceState()) {
       return 0.22;
+    }
+    if (this.visualState === 'listening') {
+      return this.thinkingPulse ? 0.48 : 0.2;
+    }
+    if (this.visualState === 'speaking') {
+      return this.thinkingPulse ? 0.66 : 0.24;
     }
     return this.thinkingPulse ? 0.58 : 0.22;
   }
 
   private shadowScale(): number {
-    let pulseScale: number = this.visualState === 'thinking' && this.thinkingPulse ? 0.92 : 1;
+    let pulseScale: number = this.isAnimatedVoiceState() && this.thinkingPulse ? 0.92 : 1;
     return this.tapShadowScale * pulseScale;
   }
 
@@ -237,7 +260,7 @@ export struct DigitalAvatarView {
   }
 
   private syncThinkingTimer(): void {
-    if (this.visualState === 'thinking' && this.hasForegroundImage()) {
+    if (this.isAnimatedVoiceState() && this.hasForegroundImage()) {
       this.startThinkingTimer();
       return;
     }

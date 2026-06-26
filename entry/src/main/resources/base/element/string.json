@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "数据归家"
+    },
+    {
+      "name": "reason_for_microphone",
+      "value": "用于在聊天中进行语音输入和语音转写"
     }
   ]
 }

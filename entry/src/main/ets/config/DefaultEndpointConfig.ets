@@ -34,6 +34,9 @@ export interface EndpointDefaultConfig {
   avatarImageResponseFormat: string;
   avatarImageOutputFormat: string;
   avatarImageWatermark: boolean;
+  voiceTtsBaseUrl: string;
+  voiceTtsModel: string;
+  voiceTtsVoice: string;
 }
 
 export interface LegacyEndpointConfig {
@@ -60,7 +63,10 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   avatarImageSize: '2K',
   avatarImageResponseFormat: 'url',
   avatarImageOutputFormat: 'jpeg',
-  avatarImageWatermark: true
+  avatarImageWatermark: true,
+  voiceTtsBaseUrl: 'https://api.xiaomimimo.com',
+  voiceTtsModel: 'mimo-v2.5-tts',
+  voiceTtsVoice: 'mimo_default'
 };
 
 export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {

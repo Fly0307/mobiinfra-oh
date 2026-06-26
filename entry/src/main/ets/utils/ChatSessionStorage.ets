@@ -13,6 +13,7 @@ import {
   chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
+  chatMessageVoiceMetadataForStorage,
   createEmptyChatSession,
   normalizeChatMode,
   splitAssistantThinkingContent
@@ -334,7 +335,7 @@ export class ChatSessionStorage {
         visibleContent = parts.content;
         thinkingContent = parts.thinkingContent;
       }
-      normalized.push({
+      let normalizedMessage: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -346,7 +347,12 @@ export class ChatSessionStorage {
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
-      });
+      };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        normalizedMessage.voice = voiceMetadata;
+      }
+      normalized.push(normalizedMessage);
     }
     return normalized;
   }

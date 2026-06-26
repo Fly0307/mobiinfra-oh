@@ -6,7 +6,7 @@ import {
   ChatMessage
 } from './ChatSessionTypes';
 
-export type DigitalAvatarVisualState = 'idle' | 'thinking';
+export type DigitalAvatarVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted';
 export type DigitalAvatarSize = 'message' | 'hero';
 
 export interface ChatAvatarRenderModel {

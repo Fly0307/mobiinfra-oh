@@ -320,6 +320,67 @@ struct ChatToolCallSummaryView {
 }
 
 @Component
+struct ChatVoicePlaybackView {
+  @ObjectLink detail: ChatMessageDetailUiModel;
+  @Prop messageId: string = '';
+  @Prop role: ChatMessageRole = 'assistant';
+  @Prop kind: ChatMessageKind = CHAT_MESSAGE_KIND_CHAT;
+  @Prop activeMessageId: string = '';
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+
+  private visible(): boolean {
+    return this.role === 'assistant' && this.kind === CHAT_MESSAGE_KIND_CHAT &&
+      this.detail.content.trim().length > 0 && !this.detail.streamingActive;
+  }
+
+  private playing(): boolean {
+    return this.activeMessageId.length > 0 && this.activeMessageId === this.messageId;
+  }
+
+  private synthesizing(): boolean {
+    return this.detail.voice.status === 'synthesizing';
+  }
+
+  private buttonBackgroundColor(): string {
+    if (this.playing()) {
+      return '#5968FF';
+    }
+    if (this.synthesizing()) {
+      return '#E0E7FF';
+    }
+    return '#EEF2FF';
+  }
+
+  build() {
+    if (this.visible()) {
+      Row() {
+        Button() {
+          if (this.playing()) {
+            Image($r('app.media.voice_speaker_light'))
+              .width(18)
+              .height(18)
+          } else {
+            Image($r('app.media.voice_speaker_blue'))
+              .width(18)
+              .height(18)
+          }
+        }
+          .width(30)
+          .height(30)
+          .backgroundColor(this.buttonBackgroundColor())
+          .borderRadius(15)
+          .opacity(this.synthesizing() ? 0.72 : 1)
+          .onClick(async () => {
+            await this.onPlayVoiceMessage(this.messageId, this.detail.content);
+          })
+      }
+      .width('100%')
+      .margin({ top: 8 })
+    }
+  }
+}
+
+@Component
 struct ChatThinkingModuleView {
   @ObjectLink detail: ChatMessageDetailUiModel;
   @Prop messageId: string = '';
@@ -435,6 +496,8 @@ struct ChatBubbleView {
   @Prop modeLabel: string = '';
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  @Prop voiceActiveMessageId: string = '';
 
   build() {
     Column() {
@@ -461,6 +524,14 @@ struct ChatBubbleView {
         onToggleThinking: this.onToggleThinking
       })
       ChatMarkdownContentView({ detail: this.message.detail, role: this.role })
+      ChatVoicePlaybackView({
+        detail: this.message.detail,
+        messageId: this.messageId,
+        role: this.role,
+        kind: this.kind,
+        activeMessageId: this.voiceActiveMessageId,
+        onPlayVoiceMessage: this.onPlayVoiceMessage
+      })
       ChatMessageImagePreviewView({ detail: this.message.detail, onPreviewDebugImage: this.onPreviewDebugImage })
     }
     .width('100%')
@@ -623,6 +694,8 @@ struct ChatMessageBubbleBody {
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  @Prop voiceActiveMessageId: string = '';
 
   build() {
     if (!this.shouldRenderFull) {
@@ -652,7 +725,9 @@ struct ChatMessageBubbleBody {
         createdAt: this.createdAt,
         modeLabel: this.modeLabel,
         onToggleThinking: this.onToggleThinking,
-        onPreviewDebugImage: this.onPreviewDebugImage
+        onPreviewDebugImage: this.onPreviewDebugImage,
+        onPlayVoiceMessage: this.onPlayVoiceMessage,
+        voiceActiveMessageId: this.voiceActiveMessageId
       })
     }
   }
@@ -673,6 +748,8 @@ struct ChatMessageContentBlock {
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  @Prop voiceActiveMessageId: string = '';
 
   build() {
     Column() {
@@ -695,7 +772,9 @@ struct ChatMessageContentBlock {
         modeLabel: this.modeLabel,
         onToggleTaskTrace: this.onToggleTaskTrace,
         onToggleThinking: this.onToggleThinking,
-        onPreviewDebugImage: this.onPreviewDebugImage
+        onPreviewDebugImage: this.onPreviewDebugImage,
+        onPlayVoiceMessage: this.onPlayVoiceMessage,
+        voiceActiveMessageId: this.voiceActiveMessageId
       })
     }
     .width(MESSAGE_BUBBLE_WIDTH)
@@ -717,6 +796,8 @@ struct ChatMessageRow {
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  @Prop voiceActiveMessageId: string = '';
 
   build() {
     Row() {
@@ -736,7 +817,9 @@ struct ChatMessageRow {
           avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           onToggleTaskTrace: this.onToggleTaskTrace,
           onToggleThinking: this.onToggleThinking,
-          onPreviewDebugImage: this.onPreviewDebugImage
+          onPreviewDebugImage: this.onPreviewDebugImage,
+          onPlayVoiceMessage: this.onPlayVoiceMessage,
+          voiceActiveMessageId: this.voiceActiveMessageId
         })
       } else {
         ChatMessageContentBlock({
@@ -752,7 +835,9 @@ struct ChatMessageRow {
           avatarMessageForegroundUri: this.avatarMessageForegroundUri,
           onToggleTaskTrace: this.onToggleTaskTrace,
           onToggleThinking: this.onToggleThinking,
-          onPreviewDebugImage: this.onPreviewDebugImage
+          onPreviewDebugImage: this.onPreviewDebugImage,
+          onPlayVoiceMessage: this.onPlayVoiceMessage,
+          voiceActiveMessageId: this.voiceActiveMessageId
         })
         Blank()
           .layoutWeight(1)
@@ -781,6 +866,8 @@ export struct ChatMessageList {
   onToggleTaskTrace: (id: string) => void = () => {};
   onToggleThinking: (id: string) => void = () => {};
   onPreviewDebugImage: (path: string) => void = () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  @Prop voiceActiveMessageId: string = '';
   onScrollContent: (yOffset: number) => void = () => {};
   private messageScroller: Scroller = new Scroller();
   private lastAutoScrollKey: string = '';
@@ -1148,7 +1235,9 @@ export struct ChatMessageList {
               avatarMessageForegroundUri: this.avatarMessageForegroundUri,
               onToggleTaskTrace: this.onToggleTaskTrace,
               onToggleThinking: this.onToggleThinking,
-              onPreviewDebugImage: this.onPreviewDebugImage
+              onPreviewDebugImage: this.onPreviewDebugImage,
+              onPlayVoiceMessage: this.onPlayVoiceMessage,
+              voiceActiveMessageId: this.voiceActiveMessageId
             })
           }
           .selectable(false)

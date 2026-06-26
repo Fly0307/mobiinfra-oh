@@ -50,6 +50,15 @@ export default function digitalAvatarTypesUnitTest() {
       expect(model.visualState).assertEqual('thinking');
     });
 
+    it('assistantVoiceStateIsPropagated', 0, () => {
+      let message = createChatMessage('assistant-voice', 'assistant', CHAT_MESSAGE_KIND_CHAT, '正在朗读', 7);
+
+      let model = chatAvatarRenderModel(message, '云', 'speaking');
+
+      expect(model.useDigitalAvatar).assertTrue();
+      expect(model.visualState).assertEqual('speaking');
+    });
+
     it('userMessageKeepsTextAvatar', 0, () => {
       let message = createChatMessage('user-1', 'user', CHAT_MESSAGE_KIND_CHAT, '问题', 3);
 

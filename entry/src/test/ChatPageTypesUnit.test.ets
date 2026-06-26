@@ -4,6 +4,7 @@ import {
   CHAT_MODE_LOCAL_INFERENCE,
   chatModeActionLabel,
   chatComposerBarHeight,
+  chatComposerPrimaryActionRole,
   chatComposerLineCount,
   chatInputAfterAcceptedSend,
   chatModeLabel,
@@ -46,6 +47,13 @@ export default function chatPageTypesUnitTest() {
     it('clearsDraftOnlyAfterAcceptedSend', 0, () => {
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', true)).assertEqual('');
       expect(chatInputAfterAcceptedSend('请问您做什么呢？', false)).assertEqual('请问您做什么呢？');
+    });
+
+    it('usesOnePrimaryComposerButtonForSendAndVoiceCapture', 0, () => {
+      expect(chatComposerPrimaryActionRole(false, false)).assertEqual('send');
+      expect(chatComposerPrimaryActionRole(true, false)).assertEqual('busy');
+      expect(chatComposerPrimaryActionRole(true, true)).assertEqual('voice_capture');
+      expect(chatComposerPrimaryActionRole(false, true)).assertEqual('voice_capture');
     });
 
     it('expandsComposerHeightForMultiLineDrafts', 0, () => {

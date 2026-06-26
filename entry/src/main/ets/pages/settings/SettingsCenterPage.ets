@@ -101,6 +101,10 @@ export struct SettingsCenterPage {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
+  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = '';
+  @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
+  @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
   @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string =
@@ -722,6 +726,14 @@ export struct SettingsCenterPage {
         (value: string) => { this.cloudApiKey = value; })
       this.SettingInput('Decider Model', this.cloudDeciderModel, '留空则不传 model',
         (value: string) => { this.cloudDeciderModel = value; })
+      this.SettingInput('语音合成服务', this.voiceTtsBaseUrl, '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+        (value: string) => { this.voiceTtsBaseUrl = value; })
+      this.SettingInput('语音合成 API Key', this.voiceTtsApiKey, 'MiMO TTS 服务密钥',
+        (value: string) => { this.voiceTtsApiKey = value; })
+      this.SettingInput('语音合成模型', this.voiceTtsModel, DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
+        (value: string) => { this.voiceTtsModel = value; })
+      this.SettingInput('语音合成音色', this.voiceTtsVoice, DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice,
+        (value: string) => { this.voiceTtsVoice = value; })
       this.WechatAutoSummaryInput('上下文压缩阈值(%)', this.chatContextCompressionThresholdPercent, '默认 85，范围 50-95',
         (value: string) => { this.chatContextCompressionThresholdPercent = value; },
         () => {

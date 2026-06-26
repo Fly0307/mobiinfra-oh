@@ -1,5 +1,10 @@
 import { CloudChatMessage } from '../../utils/CloudModelClient';
 import { CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE, chatModeLabel } from './ChatPageTypes';
+import {
+  ChatVoiceMetadata,
+  normalizeChatVoiceMetadata,
+  optionalChatVoiceMetadata
+} from './VoiceInteractionTypes';
 
 export { CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE };
 
@@ -25,6 +30,7 @@ export interface ChatMessage {
   imagePaths?: string[];
   streamingActive?: boolean;
   streamingVersion?: number;
+  voice?: ChatVoiceMetadata;
 }
 
 export interface ChatAssistantThinkingParts {
@@ -248,11 +254,12 @@ function normalizeChatMessageImagePathInputs(imagePath: string, imagePaths?: str
 }
 
 export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatMessageKind, content: string,
-  createdAt: number, trace: string[] = [], imagePath: string = '', imagePaths: string[] = []): ChatMessage {
+  createdAt: number, trace: string[] = [], imagePath: string = '', imagePaths: string[] = [],
+  voice?: ChatVoiceMetadata): ChatMessage {
   let parts = normalizeAssistantMessageContent(role, kind, content);
   let normalizedImagePaths = normalizeChatMessageImagePathInputs(imagePath, imagePaths);
   let firstImagePath = normalizedImagePaths.length > 0 ? normalizedImagePaths[0] : '';
-  return {
+  let message: ChatMessage = {
     id: id,
     role: role,
     kind: kind,
@@ -265,6 +272,11 @@ export function createChatMessage(id: string, role: ChatMessageRole, kind: ChatM
     imagePath: firstImagePath,
     imagePaths: normalizedImagePaths
   };
+  let voiceMetadata = optionalChatVoiceMetadata(voice);
+  if (voiceMetadata !== undefined) {
+    message.voice = voiceMetadata;
+  }
+  return message;
 }
 
 export function chatMessageImagePaths(message: ChatMessage): string[] {
@@ -283,6 +295,14 @@ export function chatMessageStreamingActive(message: ChatMessage): boolean {
 
 export function chatMessageStreamingVersion(message: ChatMessage): number {
   return message.streamingVersion === undefined ? 0 : message.streamingVersion;
+}
+
+export function chatMessageVoiceMetadata(message: ChatMessage): ChatVoiceMetadata {
+  return normalizeChatVoiceMetadata(message.voice);
+}
+
+export function chatMessageVoiceMetadataForStorage(message: ChatMessage): ChatVoiceMetadata | undefined {
+  return optionalChatVoiceMetadata(message.voice);
 }
 
 export function chatMessageThinkingContent(message: ChatMessage): string {
@@ -392,7 +412,7 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
   for (let i = 0; i < messages.length; i++) {
     let message = messages[i];
     if (message.id === messageId && message.kind === CHAT_MESSAGE_KIND_TASK_TRACE) {
-      next.push({
+      let updated: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -404,7 +424,12 @@ export function toggleChatMessageCollapsed(messages: ChatMessage[], messageId: s
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
-      });
+      };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        updated.voice = voiceMetadata;
+      }
+      next.push(updated);
     } else {
       next.push(message);
     }
@@ -417,7 +442,7 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
   for (let i = 0; i < messages.length; i++) {
     let message = messages[i];
     if (message.id === messageId && chatMessageThinkingContent(message).length > 0) {
-      next.push({
+      let updated: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -429,7 +454,12 @@ export function toggleChatMessageThinkingCollapsed(messages: ChatMessage[], mess
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
-      });
+      };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        updated.voice = voiceMetadata;
+      }
+      next.push(updated);
     } else {
       next.push(message);
     }

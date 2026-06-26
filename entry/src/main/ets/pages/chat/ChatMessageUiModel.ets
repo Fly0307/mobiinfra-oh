@@ -8,8 +8,10 @@ import {
   chatMessageStreamingActive,
   chatMessageStreamingVersion,
   chatMessageThinkingCollapsed,
-  chatMessageThinkingContent
+  chatMessageThinkingContent,
+  chatMessageVoiceMetadata
 } from './ChatSessionTypes';
+import { ChatVoiceMetadata, createEmptyChatVoiceMetadata } from './VoiceInteractionTypes';
 
 @Observed
 export class ChatMessageDetailUiModel {
@@ -22,6 +24,7 @@ export class ChatMessageDetailUiModel {
   imagePaths: string[] = [];
   streamingActive: boolean = false;
   streamingVersion: number = 0;
+  voice: ChatVoiceMetadata = createEmptyChatVoiceMetadata();
 
   apply(message: ChatMessage): void {
     if (this.content !== message.content) {
@@ -57,6 +60,10 @@ export class ChatMessageDetailUiModel {
     if (this.streamingVersion !== nextStreamingVersion) {
       this.streamingVersion = nextStreamingVersion;
     }
+    let nextVoice = chatMessageVoiceMetadata(message);
+    if (this.shouldReplaceVoice(nextVoice)) {
+      this.voice = nextVoice;
+    }
   }
 
   private shouldReplaceTrace(nextTrace: string[]): boolean {
@@ -81,6 +88,14 @@ export class ChatMessageDetailUiModel {
       }
     }
     return false;
+  }
+
+  private shouldReplaceVoice(nextVoice: ChatVoiceMetadata): boolean {
+    return this.voice.input !== nextVoice.input || this.voice.provider !== nextVoice.provider ||
+      this.voice.status !== nextVoice.status || this.voice.transcript !== nextVoice.transcript ||
+      this.voice.confidence !== nextVoice.confidence || this.voice.audioUri !== nextVoice.audioUri ||
+      this.voice.voice !== nextVoice.voice || this.voice.error !== nextVoice.error ||
+      this.voice.createdAt !== nextVoice.createdAt;
   }
 }
 
@@ -134,7 +149,8 @@ export class ChatMessageUiModel {
       imagePath: this.detail.imagePath,
       imagePaths: this.detail.imagePaths.slice(),
       streamingActive: this.detail.streamingActive,
-      streamingVersion: this.detail.streamingVersion
+      streamingVersion: this.detail.streamingVersion,
+      voice: this.detail.voice
     };
   }
 }

@@ -39,6 +39,16 @@ export function chatInputAfterAcceptedSend(currentInput: string, accepted: boole
   return accepted ? '' : currentInput;
 }
 
+export type ChatComposerPrimaryActionRole = 'send' | 'busy' | 'voice_capture';
+
+// 输入栏只有一个主操作按钮：短按发送，长按语音；语音采集中优先展示麦克风状态。
+export function chatComposerPrimaryActionRole(isBusy: boolean, voiceCapturing: boolean): ChatComposerPrimaryActionRole {
+  if (voiceCapturing) {
+    return 'voice_capture';
+  }
+  return isBusy ? 'busy' : 'send';
+}
+
 export function chatTimeGreeting(hour: number): string {
   if (hour >= 6 && hour < 11) {
     return '早上好';

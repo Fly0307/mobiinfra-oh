@@ -1,4 +1,4 @@
-import { promptAction, router } from '@kit.ArkUI';
+import { promptAction, router, window } from '@kit.ArkUI';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
@@ -138,6 +138,12 @@ import {
 import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
+import {
+  PROFILE_KNOCK_SHARE_UTD,
+  ProfileKnockShareService,
+  ProfileShareEnvelope,
+  ProfileShareReceivedEvent
+} from '../utils/ProfileKnockShareService';
 import { WechatAutoSummaryClient } from '../utils/wechat/WechatAutoSummaryClient';
 import {
   renderWechatAutoSummaryMarkdown,
@@ -240,6 +246,35 @@ interface HdcConnectAttempt {
   body: string;
   message: string;
   health?: HdcHealthResponse;
+}
+
+interface ProfileShareDomainSnapshot {
+  domain: string;
+  title: string;
+  desc: string;
+  fullDesc: string;
+  claims: string[];
+  eventCount: number;
+}
+
+interface ProfileShareRecommendationSnapshot {
+  domain: string;
+  tag: string;
+  title: string;
+  desc: string;
+  meta: string;
+  completed: boolean;
+}
+
+interface ProfileShareSnapshot {
+  updatedLabel: string;
+  completeness: number;
+  totalEvents: number;
+  empty: boolean;
+  domains: ProfileShareDomainSnapshot[];
+  recommendations: ProfileShareRecommendationSnapshot[];
+  activeChatTitle: string;
+  recentChatMessages: string[];
 }
 
 interface CloudAgentTaskSubmitResult {
@@ -451,6 +486,8 @@ struct Index {
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
+  private profileShareCloudClient: CloudModelClient = new CloudModelClient();
+  private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
   private cloudStreamFlushState: ChatStreamUpdateFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
   private cloudStreamFlushTimerId: number = -1;
@@ -2216,6 +2253,10 @@ struct Index {
     this.prepareCustomOpp();
     this.initDataManager();
     this.initChatSessions();
+    this.initializeProfileKnockShare(ctx).catch((e: Error) => {
+      AppLogger.errorCause('ProfileKnockShare', 'initialize failed', e);
+      this.appendCloudLog('一碰分享初始化失败：' + e.message);
+    });
     this.startHomeRecommendationDateTimer();
     this.agentRouter.configureLocal(
       (prefix: string): Promise<string> => mnnllm.agentPrefill(prefix),
@@ -2284,6 +2325,225 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopHomeRecommendationDateTimer();
+    this.profileKnockShareService.dispose();
+  }
+
+  private async initializeProfileKnockShare(ctx: common.UIAbilityContext): Promise<void> {
+    let mainWindow = await window.getLastWindow(ctx);
+    let windowId = mainWindow.getWindowProperties().id;
+    this.profileKnockShareService.configure({
+      filesDir: this.filesDir,
+      windowId: windowId,
+      buildLocalProfile: (): ProfileShareEnvelope => this.buildProfileShareEnvelope(),
+      onProfileReceived: async (event: ProfileShareReceivedEvent): Promise<void> => {
+        await this.handleProfileShareReceived(event);
+      },
+      onLog: (message: string): void => {
+        this.appendCloudLog('[一碰分享] ' + message);
+      }
+    });
+  }
+
+  private buildProfileShareEnvelope(): ProfileShareEnvelope {
+    let snapshot = this.buildProfileShareSnapshot();
+    return {
+      schemaVersion: 1,
+      typeId: PROFILE_KNOCK_SHARE_UTD,
+      appId: 'com.example.mnnllmchat',
+      appName: 'MobiInfer LLM Chat',
+      generatedAt: new Date().toISOString(),
+      profileText: this.buildProfileShareText(snapshot),
+      profile: snapshot
+    };
+  }
+
+  private buildProfileShareSnapshot(): ProfileShareSnapshot {
+    let domains: ProfileShareDomainSnapshot[] = this.homeProfile.domains.slice(0, 12)
+      .map((item: HomeDomainViewModel): ProfileShareDomainSnapshot => {
+        return {
+          domain: item.domain,
+          title: item.title,
+          desc: item.desc,
+          fullDesc: item.fullDesc,
+          claims: item.claims.slice(0, 6),
+          eventCount: item.eventCount
+        };
+      });
+    let recommendations: ProfileShareRecommendationSnapshot[] = this.homeProfile.recommendations.slice(0, 8)
+      .map((item): ProfileShareRecommendationSnapshot => {
+        return {
+          domain: item.domain,
+          tag: item.tag,
+          title: item.title,
+          desc: item.desc,
+          meta: item.meta,
+          completed: item.completed
+        };
+      });
+    return {
+      updatedLabel: this.homeProfile.updatedLabel,
+      completeness: this.homeProfile.completeness,
+      totalEvents: this.homeProfile.totalEvents,
+      empty: this.homeProfile.empty,
+      domains: domains,
+      recommendations: recommendations,
+      activeChatTitle: this.activeChatTitleForProfileShare(),
+      recentChatMessages: this.recentChatLinesForProfileShare()
+    };
+  }
+
+  private buildProfileShareText(snapshot: ProfileShareSnapshot): string {
+    let lines: string[] = [];
+    lines.push('应用：MobiInfer LLM Chat');
+    lines.push('生成时间：' + new Date().toLocaleString());
+    lines.push('画像更新时间：' + (snapshot.updatedLabel.length > 0 ? snapshot.updatedLabel : '未知'));
+    lines.push('画像完整度：' + String(snapshot.completeness) + '%');
+    lines.push('累计事件数：' + String(snapshot.totalEvents));
+    if (snapshot.empty) {
+      lines.push('画像状态：当前画像为空或尚未完成整理。');
+    }
+    lines.push('');
+    lines.push('画像领域：');
+    if (snapshot.domains.length === 0) {
+      lines.push('- 暂无领域摘要');
+    }
+    for (let i = 0; i < snapshot.domains.length; i++) {
+      let domain = snapshot.domains[i];
+      lines.push('- ' + domain.title + '(' + domain.domain + ')：' +
+        this.limitProfileShareText(domain.fullDesc.length > 0 ? domain.fullDesc : domain.desc, 360) +
+        '；事件数=' + String(domain.eventCount));
+      if (domain.claims.length > 0) {
+        lines.push('  证据要点：' + domain.claims.map((claim: string): string =>
+          this.compactProfileShareText(claim, 90)).join('；'));
+      }
+    }
+    lines.push('');
+    lines.push('近期关注/建议：');
+    if (snapshot.recommendations.length === 0) {
+      lines.push('- 暂无建议');
+    }
+    for (let i = 0; i < snapshot.recommendations.length; i++) {
+      let item = snapshot.recommendations[i];
+      lines.push('- [' + item.tag + '] ' + item.title + '：' +
+        this.limitProfileShareText(item.desc, 260) +
+        (item.meta.length > 0 ? '（' + item.meta + '）' : ''));
+    }
+    if (snapshot.recentChatMessages.length > 0) {
+      lines.push('');
+      lines.push('当前聊天上下文摘要：' + snapshot.activeChatTitle);
+      for (let i = 0; i < snapshot.recentChatMessages.length; i++) {
+        lines.push('- ' + snapshot.recentChatMessages[i]);
+      }
+    }
+    return this.limitProfileShareText(lines.join('\n'), 12000);
+  }
+
+  private activeChatTitleForProfileShare(): string {
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === this.activeChatSessionId) {
+        return this.chatSessions[i].title;
+      }
+    }
+    return '当前聊天';
+  }
+
+  private recentChatLinesForProfileShare(): string[] {
+    let lines: string[] = [];
+    let start = Math.max(0, this.activeChatMessages.length - 8);
+    for (let i = start; i < this.activeChatMessages.length; i++) {
+      let message = this.activeChatMessages[i];
+      if (message.kind !== CHAT_MESSAGE_KIND_CHAT || message.content.trim().length === 0) {
+        continue;
+      }
+      lines.push(message.role + '：' + this.compactProfileShareText(message.content, 180));
+    }
+    return lines;
+  }
+
+  private compactProfileShareText(text: string, maxLength: number): string {
+    let compact = text.trim().replace(/\s+/g, ' ');
+    return this.limitProfileShareText(compact, maxLength);
+  }
+
+  private limitProfileShareText(text: string, maxLength: number): string {
+    let value = text.trim();
+    if (value.length <= maxLength) {
+      return value;
+    }
+    return value.substring(0, Math.max(0, maxLength - 3)) + '...';
+  }
+
+  private async handleProfileShareReceived(event: ProfileShareReceivedEvent): Promise<void> {
+    this.currentTab = MainTabIndex.Chat;
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      this.appendCloudLog('[一碰分享] 会话初始化失败，无法写入同频报告。');
+      return;
+    }
+    let chatSessionId = activeSession.id;
+    let sourceText = event.sourceUri.length > 0 ? '\n文件：' + event.sourceUri : '';
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('profile-share'),
+      'system', CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
+      '收到一碰分享的用户画像，正在准备生成同频报告。' + sourceText, new Date().getTime()));
+
+    let assistantMessageId = this.nextChatMessageId('profile-report');
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
+      CHAT_MESSAGE_KIND_CHAT, '正在根据双方画像生成同频报告...', new Date().getTime()));
+
+    if (!this.isCloudPlannerConfigReady()) {
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+        '已收到对方画像，但 Planner 服务地址或 API Key 尚未配置，暂时无法生成同频报告。');
+      return;
+    }
+
+    try {
+      let localProfile = this.buildProfileShareEnvelope().profileText;
+      let report = await this.runProfileShareAffinityAnalysis(localProfile, event.profileText);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, report);
+      this.appendCloudLog('[一碰分享] 同频报告生成完成。');
+    } catch (e) {
+      let err = e as Error;
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+        '[错误] 同频报告生成失败：' + err.message);
+      this.appendCloudLog('[一碰分享] 同频报告生成失败：' + err.message);
+    }
+  }
+
+  private async runProfileShareAffinityAnalysis(localProfile: string, remoteProfile: string): Promise<string> {
+    let config = this.getCloudConfig();
+    let options: CloudChatCompletionOptions = {
+      baseUrl: config.plannerBaseUrl,
+      apiKey: config.apiKey,
+      messages: this.buildProfileAffinityMessages(localProfile, remoteProfile),
+      temperature: 0.2,
+      maxTokens: 2048,
+      readTimeout: 120000,
+      chatTemplateKwargs: {
+        enable_thinking: false
+      }
+    };
+    return await this.profileShareCloudClient.chatCompletionText(options);
+  }
+
+  private buildProfileAffinityMessages(localProfile: string, remoteProfile: string): CloudChatMessage[] {
+    let systemPrompt = '你是一个谨慎的用户画像同频分析助手。你只能根据输入的两份画像摘要分析相似度，' +
+      '不要编造未出现的事实，不要输出隐私原文，不要给出医疗、金融、法律等高风险判断。' +
+      '请用中文输出 Markdown，包含：同频分(0-100)、核心同频点、关键差异、分数原因、适合一起做的事。';
+    let userPrompt = '本机用户画像摘要：\n' +
+      this.limitProfileShareText(localProfile, 12000) +
+      '\n\n对方用户画像摘要：\n' +
+      this.limitProfileShareText(remoteProfile, 12000) +
+      '\n\n请生成一份面向双方用户都能阅读的同频报告。';
+    return [
+      {
+        role: 'system',
+        content: systemPrompt
+      },
+      {
+        role: 'user',
+        content: userPrompt
+      }
+    ];
   }
 
   private migrateDefaultEndpointValues(): void {
@@ -3948,6 +4208,10 @@ struct Index {
     return this.cloudPlannerBaseUrl.trim().length > 0 &&
       this.cloudDeciderBaseUrl.trim().length > 0 &&
       this.cloudApiKey.trim().length > 0;
+  }
+
+  private isCloudPlannerConfigReady(): boolean {
+    return this.cloudPlannerBaseUrl.trim().length > 0 && this.cloudApiKey.trim().length > 0;
   }
 
   async testCloudPlanner() {

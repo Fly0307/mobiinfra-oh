@@ -69,6 +69,19 @@
             "actions": [
               "ohos.want.action.home"
             ]
+          },
+          {
+            "actions": [
+              "ohos.want.action.sendData",
+              "ohos.want.action.sendMultipleData"
+            ],
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "com.mobiinfra.profile-json",
+                "maxFileSupported": 1
+              }
+            ]
           }
         ]
       }

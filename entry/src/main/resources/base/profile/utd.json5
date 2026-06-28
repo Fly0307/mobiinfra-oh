@@ -1,0 +1,17 @@
+{
+  "UniformDataTypeDeclarations": [
+    {
+      "TypeId": "com.mobiinfra.profile-json",
+      "BelongingToTypes": [
+        "general.file"
+      ],
+      "FilenameExtensions": [
+        ".mobi-profile.json"
+      ],
+      "MIMETypes": [
+        "application/vnd.mobiinfra.profile+json"
+      ],
+      "Description": "MobiInfer profile summary JSON file"
+    }
+  ]
+}

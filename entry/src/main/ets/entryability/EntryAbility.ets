@@ -3,6 +3,7 @@ import { AppLogger } from '../utils/AppLogger';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 
 const FLOAT_PANEL_COLLAPSED_WIDTH_VP = 88;
 const FLOAT_PANEL_HEIGHT_VP = 72;
@@ -74,6 +75,7 @@ export default class EntryAbility extends UIAbility {
       }
     });
     AppLogger.info('Ability', 'Ability onCreate');
+    ProfileShareLaunchBridge.enqueueWant(want);
   }
 
   onDestroy(): void {
@@ -99,6 +101,11 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageDestroy(): void {
     AppLogger.info('Ability', 'Ability onWindowStageDestroy');
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    AppLogger.info('Ability', 'Ability onNewWant');
+    ProfileShareLaunchBridge.enqueueWant(want);
   }
 
   onForeground(): void {

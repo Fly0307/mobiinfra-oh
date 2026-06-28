@@ -74,8 +74,9 @@ export default class EntryAbility extends UIAbility {
         throw error;
       }
     });
-    AppLogger.info('Ability', 'Ability onCreate');
-    ProfileShareLaunchBridge.enqueueWant(want);
+    AppLogger.info('Ability', 'Ability onCreate launchReason=' + String(launchParam.launchReason) +
+      ', want=' + this.wantBrief(want));
+    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
   }
 
   onDestroy(): void {
@@ -104,8 +105,26 @@ export default class EntryAbility extends UIAbility {
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    AppLogger.info('Ability', 'Ability onNewWant');
-    ProfileShareLaunchBridge.enqueueWant(want);
+    AppLogger.info('Ability', 'Ability onNewWant launchReason=' + String(launchParam.launchReason) +
+      ', want=' + this.wantBrief(want));
+    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
+  }
+
+  private isProfileShareRelatedWant(want: Want, launchParam: AbilityConstant.LaunchParam): boolean {
+    return launchParam.launchReason === AbilityConstant.LaunchReason.SHARE ||
+    ProfileShareLaunchBridge.isProfileShareLaunchWant(want) ||
+    ProfileShareLaunchBridge.isProfileFileOpenWant(want);
+  }
+
+  private wantBrief(want: Want): string {
+    let parameterKeys = '';
+    if (want.parameters !== undefined) {
+      parameterKeys = Object.keys(want.parameters).join(',');
+    }
+    return 'action=' + String(want.action) +
+      ', type=' + String(want.type) +
+      ', uri=' + String(want.uri) +
+      ', parameters=' + parameterKeys;
   }
 
   onForeground(): void {

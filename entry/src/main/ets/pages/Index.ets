@@ -2473,18 +2473,49 @@ struct Index {
     return value.substring(0, Math.max(0, maxLength - 3)) + '...';
   }
 
+  private createProfileShareCloudSession(event: ProfileShareReceivedEvent): ChatSessionRecord | null {
+    let state = ChatSessionController.createSession(this.filesDir, this.currentChatSessionViewState(),
+      CHAT_MODE_CLOUD_AGENT);
+    this.applyChatSessionViewState(state);
+    if (state.activeSession === null) {
+      return null;
+    }
+    let title = this.profileShareSessionTitle(event);
+    let renamed = ChatSessionController.renameSession(this.filesDir, this.currentChatSessionViewState(),
+      state.activeSession.id, title);
+    this.applyChatSessionViewState(renamed);
+    if (renamed.activeSession !== null && renamed.activeSession.id === state.activeSession.id) {
+      return renamed.activeSession;
+    }
+    return state.activeSession;
+  }
+
+  private profileShareSessionTitle(event: ProfileShareReceivedEvent): string {
+    let date = new Date();
+    let timeText = String(date.getMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getDate()).padStart(2, '0') + ' ' +
+      String(date.getHours()).padStart(2, '0') + ':' +
+      String(date.getMinutes()).padStart(2, '0');
+    let sourceLabel = event.source.indexOf('dataReceive') >= 0 || event.source.indexOf('Inbox') >= 0 ? '一碰' : '分享';
+    return sourceLabel + '同频报告 ' + timeText;
+  }
+
   private async handleProfileShareReceived(event: ProfileShareReceivedEvent): Promise<void> {
     this.currentTab = MainTabIndex.Chat;
-    let activeSession = this.ensureActiveChatSession();
-    if (activeSession === null) {
-      this.appendCloudLog('[一碰分享] 会话初始化失败，无法写入同频报告。');
+    let profileSession = this.createProfileShareCloudSession(event);
+    if (profileSession === null) {
+      this.appendCloudLog('[一碰分享] 云端 Agent 会话创建失败，无法写入同频报告。');
       return;
     }
-    let chatSessionId = activeSession.id;
+    let chatSessionId = profileSession.id;
     let sourceText = event.sourceUri.length > 0 ? '\n文件：' + event.sourceUri : '';
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('profile-share'),
       'system', CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
-      '收到一碰分享的用户画像，正在准备生成同频报告。' + sourceText, new Date().getTime()));
+      '收到一碰分享的用户画像，已创建新的云端 Agent 会话，正在准备生成同频报告。' + sourceText, new Date().getTime()));
+
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('profile-user'),
+      'user', CHAT_MESSAGE_KIND_CHAT, '请根据本机用户画像和对方刚刚通过碰一碰分享的用户画像，分析两个人的画像相似度和同频点，并生成同频报告。',
+      new Date().getTime()));
 
     let assistantMessageId = this.nextChatMessageId('profile-report');
     this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',

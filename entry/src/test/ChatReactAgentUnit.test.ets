@@ -219,8 +219,6 @@ function fakeMobileGuiTool(recordedRequests: MobileGuiTaskRequest[],
       }
       let request: MobileGuiTaskRequest = {
         task: '打开微信查看消息',
-        appName: '微信',
-        packageName: 'com.tencent.mm',
         maxSteps: 12
       };
       callbackInvocations.push('confirm');
@@ -375,7 +373,7 @@ export default function chatReactAgentUnitTest() {
       expect(runRequests.length).assertEqual(1);
       expect(recordedRequests.length).assertEqual(1);
       expect(confirmRequests[0].task).assertEqual('打开微信查看消息');
-      expect(runRequests[0].packageName).assertEqual('com.tencent.mm');
+      expect(runRequests[0].maxSteps).assertEqual(12);
     });
 
     it('feedsMobileGuiToolResultIntoNextModelTurn', 0, async () => {

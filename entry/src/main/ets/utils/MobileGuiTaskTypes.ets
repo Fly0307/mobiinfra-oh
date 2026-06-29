@@ -1,7 +1,5 @@
 export interface MobileGuiTaskRequest {
   task: string;
-  appName: string;
-  packageName: string;
   maxSteps: number;
 }
 

@@ -1221,12 +1221,6 @@ struct Index {
 
   private async confirmMobileGuiTask(sessionId: string, request: MobileGuiTaskRequest): Promise<boolean> {
     let detailLines: string[] = ['任务：' + request.task];
-    if (request.appName.trim().length > 0) {
-      detailLines.push('应用名称提示：' + request.appName.trim());
-    }
-    if (request.packageName.trim().length > 0) {
-      detailLines.push('包名提示：' + request.packageName.trim());
-    }
     detailLines.push('最大步骤：' + String(request.maxSteps));
     this.appendCloudLogToSession(sessionId, '等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
     return new Promise<boolean>((resolve, reject) => {

@@ -612,6 +612,38 @@ export class CloudModelClient {
     return compacted;
   }
 
+  private static messagesContainImage(messages: CloudChatMessage[]): boolean {
+    for (let i = 0; i < messages.length; i++) {
+      let content = messages[i].content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      for (let j = 0; j < content.length; j++) {
+        if (content[j].type === 'image_url') {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private static messageTextChars(messages: CloudChatMessage[]): number {
+    let total = 0;
+    for (let i = 0; i < messages.length; i++) {
+      let content = messages[i].content;
+      if (typeof content === 'string') {
+        total += content.length;
+      } else if (Array.isArray(content)) {
+        for (let j = 0; j < content.length; j++) {
+          if (content[j].type === 'text') {
+            total += (content[j] as CloudTextPart).text.length;
+          }
+        }
+      }
+    }
+    return total;
+  }
+
   async chatCompletion(options: CloudChatCompletionOptions): Promise<CloudChatCompletionResult> {
     let requestBody = this.buildChatRequestBody(options);
 
@@ -630,14 +662,37 @@ export class CloudModelClient {
 
     let httpReq = http.createHttp();
     this.registerActiveRequest(httpReq);
+    let url = this.normalizeChatUrl(options.baseUrl);
+    let startedAt = new Date().getTime();
+    AppLogger.info('CloudModel', 'chat request start url=' + url +
+      ' model=' + (options.model === undefined ? '' : options.model) +
+      ' messages=' + options.messages.length.toString() +
+      ' text_chars=' + CloudModelClient.messageTextChars(options.messages).toString() +
+      ' has_image=' + CloudModelClient.messagesContainImage(options.messages).toString() +
+      ' max_tokens=' + (options.maxTokens === undefined ? '' : options.maxTokens.toString()) +
+      ' read_timeout=' + (options.readTimeout === undefined ? '' : options.readTimeout.toString()));
     try {
-      let response = await httpReq.request(this.normalizeChatUrl(options.baseUrl), requestOptions);
+      let response = await httpReq.request(url, requestOptions);
+      let elapsedMs = new Date().getTime() - startedAt;
+      let responseText = response.result as string;
+      AppLogger.info('CloudModel', 'chat response status=' + response.responseCode.toString() +
+        ' elapsedMs=' + elapsedMs.toString() +
+        ' bytes=' + responseText.length.toString() +
+        ' preview=' + CloudModelClient.previewTextForLog(responseText, 512));
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
-      return CloudModelClient.parseChatCompletionResponseText(response.result as string);
+      let parsed = CloudModelClient.parseChatCompletionResponseText(responseText);
+      AppLogger.info('CloudModel', 'chat parsed content_chars=' + parsed.content.length.toString() +
+        ' finish_reason=' + parsed.finishReason +
+        ' content_preview=' + CloudModelClient.previewTextForLog(parsed.content, 512));
+      return parsed;
     } catch (e) {
       let err = e as Error;
+      AppLogger.error('CloudModel', 'chat request failed url=' + url +
+        ' model=' + (options.model === undefined ? '' : options.model) +
+        ' elapsedMs=' + (new Date().getTime() - startedAt).toString() +
+        ' error=' + (err.message || String(e)));
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);
@@ -931,9 +986,13 @@ export class CloudModelClient {
       }
     }
     try {
-      return await this.chatCompletionText(options);
+      let content = await this.chatCompletionText(options);
+      return content;
     } catch (e) {
       let err = e as Error;
+      AppLogger.error('CloudModel', 'chatMessages returning action=error baseUrl=' + baseUrl +
+        ' model=' + (model === undefined ? '' : model) +
+        ' error=' + (err.message || String(e)));
       return ArkJSON.stringify({ action: 'error', reason: err.message });
     }
   }
@@ -1184,8 +1243,18 @@ export class CloudModelClient {
         '\n必须严格使用这个结构：{"title":"","category":"其他","summary":"","details":["",""],"tags":[],"importance":0.5}' +
         '\n现在只返回 JSON 对象。'
     };
-    return this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
+    AppLogger.info('CloudModel', 'gallery full-json request baseUrl=' + config.baseUrl +
+      ' model=' + config.model +
+      ' image_base64_chars=' + imageBase64.length.toString() +
+      ' ocr_chars=' + ocrText.length.toString() +
+      ' exif_chars=' + exifText.length.toString() +
+      ' prompt_chars=' + textPart.text.length.toString() +
+      ' ocr_preview=' + CloudModelClient.previewTextForLog(ocrText, 200));
+    let rawText = await this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       config.apiKey, config.model, 4096, 90000, this.galleryChatOptions);
+    AppLogger.info('CloudModel', 'gallery full-json response chars=' + rawText.length.toString() +
+      ' preview=' + CloudModelClient.previewTextForLog(rawText, 512));
+    return rawText;
   }
 
   async analyzeGalleryImageByFields(imageBase64: string, ocrText: string, exifText: string,
@@ -1369,6 +1438,9 @@ export class CloudModelClient {
     };
     let rawText = await this.chatMessages(config.baseUrl, [{ role: 'user', content: [imagePart, textPart] }],
       config.apiKey, config.model, 2048, 90000, this.galleryChatOptions);
+    AppLogger.info('CloudModel', 'gallery field response key=' + key +
+      ' chars=' + rawText.length.toString() +
+      ' preview=' + CloudModelClient.previewTextForLog(rawText, 256));
     return {
       key: key,
       rawText: rawText,

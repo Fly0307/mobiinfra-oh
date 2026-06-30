@@ -1,5 +1,5 @@
-export const DEFAULT_GALLERY_API_BASE_URL: string = 'https://api.modelbest.cn/v1';
-export const DEFAULT_GALLERY_API_KEY: string = 'sk-pQ8L2zF3XmR5kY9wV4jB7hN1tC6vM0xG3aD5sH2bJ9lK4cZ8';
+export const DEFAULT_GALLERY_API_BASE_URL: string = 'https://api.modelbest.co/v1';
+export const DEFAULT_GALLERY_API_KEY: string = 'lis_sk_298cf78155f231c7_DkrDcNLHnK8dJRnfFrJCd4JGDbBLMkHrC3T-wLpvC9zy0BPemsyFuQ';
 export const DEFAULT_GALLERY_MODEL: string = 'MiniCPM-V-4.6-Instruct';
 export const DEFAULT_GALLERY_SKIP_OCR: string = 'false';
 export const DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER: string = 'true';

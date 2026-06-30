@@ -3,14 +3,23 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
+import {
+  CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
+  chatCanSendMessageWithImages,
+  chatCloudUserContentWithImages,
+  chatMessageTextForSendWithImages,
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
+} from './chat/ChatAttachmentPolicy';
 import {
   CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_CONTEXT_NOTICE,
@@ -21,10 +30,18 @@ import {
   ChatSessionRecord,
   ChatSessionSummary,
   buildAssistantStreamingRenderContent,
+  chatMessageImagePaths,
   createChatMessage,
   createChatStreamThinkingState,
-  parseChatStreamThinkingDelta
+  parseChatStreamThinkingDelta,
+  splitAssistantThinkingContent
 } from './chat/ChatSessionTypes';
+import {
+  CHAT_STREAM_DISPLAY_TICK_MS,
+  ChatStreamDisplayPacer,
+  ChatStreamDisplaySnapshot,
+  createEmptyChatStreamDisplaySnapshot
+} from './chat/ChatStreamDisplayPacer';
 import {
   CHAT_CONTEXT_COMPRESSION_NOTICE,
   CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT,
@@ -91,9 +108,23 @@ import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanag
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
-import { ChatReactAgent } from '../utils/ChatReactAgent';
+import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
+import {
+  createMobileGuiTaskConfirmationCancelledError,
+  createMobileGuiTaskTool
+} from '../utils/MobileGuiTaskTool';
+import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGuiTaskTypes';
+import {
+  buildMobileGuiWorkflowTask,
+  classifyMobileGuiWorkflowFailure,
+  isMobileGuiTaskCloudConfigReady as isMobileGuiTaskCloudConfigReadyValue,
+  mobileGuiTaskCloudConfigMissingMessage as mobileGuiTaskCloudConfigMissingMessageText,
+  mobileGuiTaskRunResultFromFailure,
+  mobileGuiTaskRunResultFromWorkflowResult
+} from '../utils/MobileGuiTaskWorkflowAdapter';
+import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -311,6 +342,7 @@ struct Index {
   @State output: string = '请先检查服务器连接';
   @State chatHistory: string = '';
   @State userInput: string = '';
+  @State localPendingChatImageUris: string[] = [];
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
   @State modelLoaded: boolean = false;
@@ -377,6 +409,7 @@ struct Index {
   @State localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
+  @State cloudPendingChatImageUris: string[] = [];
   @State cloudDebugImagePath: string = '';
   private cloudTaskSessionId: string = '';
   private localTaskSessionId: string = '';
@@ -425,6 +458,11 @@ struct Index {
   private cloudStreamPendingMessageId: string = '';
   private cloudStreamPendingContent: string = '';
   private cloudStreamPendingTrace: string[] = [];
+  @State cloudStreamDisplaySnapshot: ChatStreamDisplaySnapshot = createEmptyChatStreamDisplaySnapshot();
+  private cloudStreamDisplayPacer: ChatStreamDisplayPacer = new ChatStreamDisplayPacer();
+  private cloudStreamDisplayTimerId: number = -1;
+  private cloudStreamDisplayGeneration: number = 0;
+  private cloudStreamDisplayVersion: number = 0;
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -438,6 +476,40 @@ struct Index {
       mode: this.chatMode,
       activeSession: null
     };
+  }
+
+  private chatMessagesForDisplay(): ChatMessage[] {
+    let snapshot = this.cloudStreamDisplaySnapshot;
+    if (snapshot.sessionId !== this.activeChatSessionId || snapshot.messageId.length === 0) {
+      return this.activeChatMessages;
+    }
+    let messages: ChatMessage[] = [];
+    let matched = false;
+    let parts = splitAssistantThinkingContent(snapshot.visibleContent);
+    for (let i = 0; i < this.activeChatMessages.length; i++) {
+      let message = this.activeChatMessages[i];
+      if (message.id !== snapshot.messageId) {
+        messages.push(message);
+        continue;
+      }
+      matched = true;
+      messages.push({
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: parts.content,
+        thinkingContent: parts.thinkingContent,
+        thinkingCollapsed: message.thinkingCollapsed,
+        trace: snapshot.visibleTrace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: message.imagePath,
+        imagePaths: chatMessageImagePaths(message),
+        streamingActive: snapshot.active,
+        streamingVersion: this.cloudStreamDisplayVersion
+      });
+    }
+    return matched ? messages : this.activeChatMessages;
   }
 
   private applyChatSessionViewState(state: ChatSessionViewState): void {
@@ -525,13 +597,28 @@ struct Index {
     }
   }
 
-  private resetCloudStreamMessageUpdate(): void {
+  private clearCloudStreamDisplayTimer(): void {
+    if (this.cloudStreamDisplayTimerId !== -1) {
+      clearTimeout(this.cloudStreamDisplayTimerId);
+      this.cloudStreamDisplayTimerId = -1;
+    }
+  }
+
+  private clearCloudStreamPendingPersistence(): void {
     this.clearCloudStreamFlushTimer();
-    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
     this.cloudStreamPendingSessionId = '';
     this.cloudStreamPendingMessageId = '';
     this.cloudStreamPendingContent = '';
     this.cloudStreamPendingTrace = [];
+  }
+
+  private resetCloudStreamMessageUpdate(): void {
+    this.clearCloudStreamPendingPersistence();
+    this.clearCloudStreamDisplayTimer();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
+    this.cloudStreamDisplayGeneration += 1;
+    this.cloudStreamDisplayPacer.reset();
+    this.publishCloudStreamDisplaySnapshot(createEmptyChatStreamDisplaySnapshot());
   }
 
   private flushCloudStreamMessageUpdate(): void {
@@ -548,8 +635,43 @@ struct Index {
     this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
   }
 
+  private publishCloudStreamDisplaySnapshot(snapshot: ChatStreamDisplaySnapshot): void {
+    this.cloudStreamDisplayVersion += 1;
+    this.cloudStreamDisplaySnapshot = snapshot;
+  }
+
+  private scheduleCloudStreamDisplayFrame(): void {
+    if (this.cloudStreamDisplayTimerId !== -1 || !this.cloudStreamDisplayPacer.shouldScheduleFrame()) {
+      return;
+    }
+    let generation = this.cloudStreamDisplayGeneration;
+    this.cloudStreamDisplayTimerId = setTimeout(() => {
+      this.cloudStreamDisplayTimerId = -1;
+      if (generation !== this.cloudStreamDisplayGeneration) {
+        return;
+      }
+      this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.advanceFrame());
+      this.scheduleCloudStreamDisplayFrame();
+    }, CHAT_STREAM_DISPLAY_TICK_MS);
+  }
+
+  private updateCloudStreamDisplayTarget(sessionId: string, messageId: string, content: string,
+    trace: string[]): void {
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.setTarget(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+  }
+
+  private finishCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string, trace: string[]): void {
+    this.clearCloudStreamPendingPersistence();
+    this.cloudStreamFlushState = chatStreamUpdateStateAfterFlush(new Date().getTime(), content.length, false);
+    this.publishCloudStreamDisplaySnapshot(this.cloudStreamDisplayPacer.beginFinish(sessionId, messageId, content, trace));
+    this.scheduleCloudStreamDisplayFrame();
+    this.updateChatMessageContentForSession(sessionId, messageId, content, trace);
+  }
+
   private scheduleCloudStreamMessageUpdate(sessionId: string, messageId: string, content: string,
     trace: string[]): void {
+    this.updateCloudStreamDisplayTarget(sessionId, messageId, content, trace);
     this.cloudStreamPendingSessionId = sessionId;
     this.cloudStreamPendingMessageId = messageId;
     this.cloudStreamPendingContent = content;
@@ -931,6 +1053,62 @@ struct Index {
     showToastSafely('会话已删除', 1500);
   }
 
+  private normalizeChatSessionRenameTitle(title: string): string {
+    let normalizedTitle = title.trim();
+    return normalizedTitle.length > 40 ? normalizedTitle.substring(0, 40) : normalizedTitle;
+  }
+
+  private async renameChatSession(sessionId: string, title: string): Promise<boolean> {
+    if (this.blockChatSessionMutationIfBusy('重命名会话')) {
+      return false;
+    }
+    let normalizedTitle = this.normalizeChatSessionRenameTitle(title);
+    if (normalizedTitle.length === 0) {
+      showToastSafely('名称不能为空', 1400);
+      return false;
+    }
+    let state = ChatSessionController.renameSession(this.filesDir, this.currentChatSessionViewState(), sessionId,
+      normalizedTitle);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    let saved = false;
+    for (let i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === sessionId && state.sessions[i].customTitle === normalizedTitle) {
+        saved = true;
+        break;
+      }
+    }
+    if (!saved) {
+      showToastSafely('重命名会话失败', 1500);
+      return false;
+    }
+    showToastSafely('会话已重命名', 1500);
+    return true;
+  }
+
+  private async toggleChatSessionPinned(sessionId: string): Promise<void> {
+    if (this.blockChatSessionMutationIfBusy('置顶会话')) {
+      return;
+    }
+    let wasPinned = false;
+    for (let i = 0; i < this.chatSessions.length; i++) {
+      if (this.chatSessions[i].id === sessionId) {
+        wasPinned = this.chatSessions[i].pinned === true;
+        break;
+      }
+    }
+    let state = ChatSessionController.toggleSessionPinned(this.filesDir, this.currentChatSessionViewState(), sessionId);
+    this.applyChatSessionViewState(state);
+    if (!this.chatSessionExistsInState(state, sessionId)) {
+      showToastSafely('会话置顶状态更新失败', 1500);
+      return;
+    }
+    showToastSafely(wasPinned ? '已取消置顶' : '已置顶', 1500);
+  }
+
   private toggleActiveTaskTrace(messageId: string): void {
     let state = ChatSessionController.toggleTaskTrace(this.filesDir, this.currentChatSessionViewState(), messageId);
     this.applyChatSessionViewState(state);
@@ -964,7 +1142,7 @@ struct Index {
   }
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
-  private appendCloudLog(message: string): void {
+  private appendCloudLogToSession(sessionId: string, message: string): void {
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
@@ -976,13 +1154,17 @@ struct Index {
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
     let traceLine = this.formatAgentTraceLog(message);
     if (traceLine.length > 0) {
-      this.appendTaskTraceLineForSession(this.cloudTaskSessionId, traceLine);
+      this.appendTaskTraceLineForSession(sessionId, traceLine);
     }
-    if (message.indexOf('Task completed') >= 0) {
-      this.appendChatMessageForSession(this.cloudTaskSessionId,
+    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
+      this.appendChatMessageForSession(sessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
           CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
     }
+  }
+
+  private appendCloudLog(message: string): void {
+    this.appendCloudLogToSession(this.cloudTaskSessionId, message);
   }
 
   private resetCloudLog(message: string): void {
@@ -1035,6 +1217,85 @@ struct Index {
         resolve(false);
       });
     });
+  }
+
+  private async confirmMobileGuiTask(sessionId: string, request: MobileGuiTaskRequest): Promise<boolean> {
+    let detailLines: string[] = ['任务：' + request.task];
+    if (request.appName.trim().length > 0) {
+      detailLines.push('应用名称提示：' + request.appName.trim());
+    }
+    if (request.packageName.trim().length > 0) {
+      detailLines.push('包名提示：' + request.packageName.trim());
+    }
+    detailLines.push('最大步骤：' + String(request.maxSteps));
+    this.appendCloudLogToSession(sessionId, '等待用户确认手机 GUI 任务。该确认不会复用自动同意开关。');
+    return new Promise<boolean>((resolve, reject) => {
+      promptAction.showDialog({
+        title: '确认手机 GUI 任务',
+        message: detailLines.join('\n') + '\n\n确认后 App 将通过 HDC bridge 执行该任务。',
+        buttons: [
+          { text: '拒绝', color: '#ff0000' },
+          { text: '执行', color: '#00cc00' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        let approved = data.index === 1;
+        this.appendCloudLogToSession(sessionId, approved ? '用户已同意手机 GUI 任务。' : '用户已拒绝手机 GUI 任务。');
+        resolve(approved);
+      }).catch(() => {
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务确认弹窗关闭或失败，按取消处理。');
+        reject(createMobileGuiTaskConfirmationCancelledError('用户取消手机 GUI 任务确认。'));
+      });
+    });
+  }
+
+  private isMobileGuiTaskCloudConfigReady(): boolean {
+    return isMobileGuiTaskCloudConfigReadyValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl, this.cloudApiKey);
+  }
+
+  private mobileGuiTaskConfigMissingMessage(): string {
+    return mobileGuiTaskCloudConfigMissingMessageText();
+  }
+
+  private async runMobileGuiTaskForChatSession(sessionId: string,
+    request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (!this.isMobileGuiTaskCloudConfigReady()) {
+      this.appendCloudLogToSession(sessionId, this.mobileGuiTaskConfigMissingMessage());
+      return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
+    }
+    if (!await this.ensureHdcServerReadyForTask(true, sessionId)) {
+      let message = this.hdcAutoStatus.trim().length > 0 ? this.hdcAutoStatus : 'HDC Server 自动发现或连接失败。';
+      this.appendCloudLogToSession(sessionId, '手机 GUI 任务无法启动：' + message);
+      return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
+    }
+    if (this.hdcServerIp.trim().length === 0) {
+      let message = 'HDC Server 未配置，无法执行手机 GUI 任务。';
+      this.appendCloudLogToSession(sessionId, message);
+      return mobileGuiTaskRunResultFromFailure('hdc_unavailable', message, true);
+    }
+
+    this.currentTab = MainTabIndex.Chat;
+    this.appendCloudLogToSession(sessionId, '手机 GUI 任务开始执行：' + request.task);
+    this.appendCloudLogToSession(sessionId, 'HDC Server=' + this.hdcServerIp);
+    let runRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(this.filesDir, sessionId);
+    let task: WorkflowTask = buildMobileGuiWorkflowTask(request);
+    let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(),
+      this.hdcServerIp, (msg: string) => { this.appendCloudLogToSession(sessionId, msg); }, runRoot);
+    try {
+      let result: WorkflowRunResult = await runner.runTask(task);
+      let mapped = mobileGuiTaskRunResultFromWorkflowResult(this.filesDir, result);
+      if (mapped.ok) {
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行完成：' + mapped.runDir);
+      } else {
+        this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行失败：' + mapped.errorCode + ' ' + mapped.error);
+      }
+      return mapped;
+    } catch (e) {
+      let err = e as Error;
+      let message = err.message || String(e);
+      let errorCode = classifyMobileGuiWorkflowFailure(message);
+      this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行异常：' + errorCode + ' ' + message);
+      return mobileGuiTaskRunResultFromFailure(errorCode, message, true);
+    }
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
@@ -1203,6 +1464,178 @@ struct Index {
     return normalized;
   }
 
+  private activePendingChatImageUris(): string[] {
+    let source = this.chatMode === CHAT_MODE_LOCAL_INFERENCE ? this.localPendingChatImageUris :
+      this.cloudPendingChatImageUris;
+    return normalizeChatImageAttachments(source);
+  }
+
+  private setActivePendingChatImageUris(uris: string[]): void {
+    let normalized = normalizeChatImageAttachments(uris);
+    if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
+      this.localPendingChatImageUris = normalized;
+      return;
+    }
+    this.cloudPendingChatImageUris = normalized;
+  }
+
+  private clearActivePendingChatImageUris(): void {
+    this.setActivePendingChatImageUris([]);
+  }
+
+  private remainingChatImageAttachmentCount(): number {
+    return CHAT_IMAGE_ATTACHMENT_MAX_COUNT - this.activePendingChatImageUris().length;
+  }
+
+  private appendPickedChatImageAttachments(uris: string[], sourceLabel: string): void {
+    let picked = normalizeChatImageAttachments(uris);
+    if (picked.length === 0) {
+      return;
+    }
+    let current = this.activePendingChatImageUris();
+    let combined = normalizeChatImageAttachments(current.concat(picked));
+    let addedCount = combined.length - current.length;
+    if (addedCount <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    this.setActivePendingChatImageUris(combined);
+    let limitHint = addedCount < picked.length ? '，已达到最多 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张' : '';
+    showToastSafely('已添加' + String(addedCount) + '张' + sourceLabel + '图片，将随下一条消息发送' + limitHint, 1800);
+  }
+
+  private setPickedChatImageAttachment(uri: string, sourceLabel: string): void {
+    this.appendPickedChatImageAttachments([uri], sourceLabel);
+  }
+
+  private chatCameraCapturePath(): string {
+    if (this.filesDir.length === 0) {
+      throw new Error('文件目录未初始化');
+    }
+    return this.filesDir + '/chat-camera-' + Date.now().toString() + '.jpg';
+  }
+
+  private prepareChatCameraSaveUri(savePath: string): string {
+    let file = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      return fileUri.getUriFromPath(savePath);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  private removeChatCameraCapture(path: string): void {
+    if (path.length === 0) {
+      return;
+    }
+    try {
+      fs.unlinkSync(path);
+    } catch (e) {
+    }
+  }
+
+  // 图片附件只绑定到当前聊天模式的下一条消息，避免切换云端/本地后误发到另一条链路。
+  private async takeChatImageAttachment(): Promise<void> {
+    if (this.remainingChatImageAttachmentCount() <= 0) {
+      showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+      return;
+    }
+    let savePath = '';
+    try {
+      savePath = this.chatCameraCapturePath();
+      let saveUri = this.prepareChatCameraSaveUri(savePath);
+      let pickerProfile: cameraPicker.PickerProfile = {
+        cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
+        saveUri: saveUri
+      };
+      let hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('无法获取页面上下文');
+      }
+      let result = await cameraPicker.pick(
+        hostContext,
+        [cameraPicker.PickerMediaType.PHOTO],
+        pickerProfile
+      );
+      if (result.resultCode !== 0 || result.mediaType !== cameraPicker.PickerMediaType.PHOTO) {
+        this.removeChatCameraCapture(savePath);
+        return;
+      }
+      let fallbackUri = pickerProfile.saveUri === undefined ? saveUri : pickerProfile.saveUri;
+      let attachmentUri = result.resultUri.trim().length > 0 ? result.resultUri : fallbackUri;
+      this.setPickedChatImageAttachment(attachmentUri, '拍照');
+    } catch (e) {
+      this.removeChatCameraCapture(savePath);
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'take image attachment failed', err);
+      showToastSafely('拍照失败：' + err.message, 1800);
+    }
+  }
+
+  private async pickChatAlbumImageAttachment(): Promise<void> {
+    try {
+      let remainingCount = this.remainingChatImageAttachmentCount();
+      if (remainingCount <= 0) {
+        showToastSafely('最多支持 ' + String(CHAT_IMAGE_ATTACHMENT_MAX_COUNT) + ' 张图片附件', 1600);
+        return;
+      }
+      let picker = new GalleryPhotoPicker();
+      let uris = await picker.selectImageUris(remainingCount);
+      if (uris.length === 0) {
+        return;
+      }
+      this.appendPickedChatImageAttachments(uris, '相册');
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.warnCause('Chat.Attachment', 'pick image attachment failed', err);
+      showToastSafely('选择图片失败：' + err.message, 1800);
+    }
+  }
+
+  private adoptedChatImagesForSession(sessionId: string, imageUris: string[]): string[] {
+    let normalized = normalizeChatImageAttachments(imageUris);
+    let adopted: string[] = [];
+    for (let i = 0; i < normalized.length; i++) {
+      adopted.push(ChatSessionStorage.adoptImageForSession(this.filesDir, sessionId, normalized[i]));
+    }
+    return adopted;
+  }
+
+  // 当前请求的图片只注入最后一条用户消息，历史图片仍按纯文本摘要/上下文处理，避免上下文膨胀。
+  private async attachCurrentImagesToCloudContext(messages: CloudChatMessage[],
+    currentUserMessage: ChatMessage): Promise<CloudChatMessage[]> {
+    let imagePaths = chatMessageImagePaths(currentUserMessage);
+    if (!hasChatImageAttachments(imagePaths)) {
+      return messages;
+    }
+    let imageDataUrls: string[] = [];
+    for (let i = 0; i < imagePaths.length; i++) {
+      imageDataUrls.push(await this.imageUriToJpegDataUrl(imagePaths[i]));
+    }
+    let targetIndex = messages.length - 1;
+    if (targetIndex < 0) {
+      return messages;
+    }
+    if (messages[targetIndex].role !== 'user') {
+      targetIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      return messages;
+    }
+    let next = messages.slice();
+    next[targetIndex] = {
+      role: 'user',
+      content: chatCloudUserContentWithImages(currentUserMessage.content, imageDataUrls)
+    };
+    return next;
+  }
+
   private async saveHomeAvatarReferencePhoto(sourceImage: string): Promise<string> {
     if (this.dataManagerFacade === null) {
       dataManagerWarn('saveHomeAvatarReferencePhoto skipped: facade is null');
@@ -1277,6 +1710,7 @@ struct Index {
         return this.dataManagerFacade.queryIndexedEvents(options);
       }
     ));
+    this.chatToolRegistry.registerTool(createMobileGuiTaskTool());
   }
 
   private reloadDataManagerViewModels(): void {
@@ -3548,22 +3982,25 @@ struct Index {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
     }
-    if (this.cloudUserInput.trim().length === 0 || this.cloudThinking) {
+    let pendingImageUris = this.cloudPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.cloudUserInput, pendingImageUris) || this.cloudThinking) {
       return;
     }
-    let task = this.cloudUserInput.trim();
-    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
-    this.cloudThinking = true;
-    this.cloudChatCancelRequested = false;
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       this.appendCloudLog('会话初始化失败，无法调用 Planner。');
-      this.cloudThinking = false;
       return;
     }
-    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
-      new Date().getTime());
+    let task = chatMessageTextForSendWithImages(this.cloudUserInput, pendingImageUris);
+    this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
+    this.cloudPendingChatImageUris = [];
+    this.cloudThinking = true;
+    this.cloudChatCancelRequested = false;
     let chatSessionId = activeSession.id;
+    let adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, pendingImageUris);
+    let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
+    let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
+      new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris);
     this.appendChatMessageToExactSession(chatSessionId, userMessage);
     let assistantMessageId = this.nextChatMessageId('assistant');
     let assistantMessageCreated = false;
@@ -3586,7 +4023,7 @@ struct Index {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
       let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = contextPreparation.messages;
+      let contextMessages = await this.attachCurrentImagesToCloudContext(contextPreparation.messages, userMessage);
       if (contextPreparation.summaryUpdated) {
         this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
           contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
@@ -3617,10 +4054,16 @@ struct Index {
       assistantMessageCreated = true;
       this.appendCloudLog(`ReAct 云端聊天开始，Think：${enableThinking ? '开启' : '关闭'}，任务：${task}`);
       let reactAgent = new ChatReactAgent(this.cloudClient, this.chatToolRegistry);
-      let result = await reactAgent.run(contextMessages, this.getCloudConfig(), {
+      let runOptions: ChatReactAgentRunOptions = {
         filesDir: this.filesDir,
-        sessionId: activeSession.id,
+        sessionId: chatSessionId,
         userMessage: task,
+        confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
+          return await this.confirmMobileGuiTask(chatSessionId, request);
+        },
+        runMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          return await this.runMobileGuiTaskForChatSession(chatSessionId, request);
+        },
         enableThinking: enableThinking,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
@@ -3636,26 +4079,27 @@ struct Index {
           }
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
-      });
+      };
+      let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;
-      this.resetCloudStreamMessageUpdate();
-      let responseForMessage = enableThinking && streamedContent.length > 0 ? currentStreamRenderContent() : response;
-      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
+      let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
+      this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId, responseForMessage, toolTraceLines);
       let finishReasonLog = result.finishReason.length > 0 ? '\nfinish_reason: ' + result.finishReason : '';
       this.appendCloudLog(`ReAct 云端聊天返回：\n${response}${finishReasonLog}`);
     } catch (e) {
       let err = e as Error;
-      this.resetCloudStreamMessageUpdate();
       if (this.cloudChatCancelRequested) {
         if (assistantMessageCreated) {
-          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId,
+          this.finishCloudStreamMessageUpdate(chatSessionId, assistantMessageId,
             this.cancelledCloudChatContent(currentStreamRenderContent()), toolTraceLines);
         } else {
+          this.resetCloudStreamMessageUpdate();
           this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
             this.cancelledCloudChatContent(currentStreamRenderContent()), new Date().getTime()));
         }
         this.appendCloudLog('ReAct 云端聊天已取消。');
       } else {
+        this.resetCloudStreamMessageUpdate();
         if (assistantMessageCreated) {
           this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + err.message,
             toolTraceLines);
@@ -3666,7 +4110,7 @@ struct Index {
         this.appendCloudLog('ReAct 云端聊天失败：' + err.message);
       }
     } finally {
-      this.resetCloudStreamMessageUpdate();
+      this.clearCloudStreamPendingPersistence();
       this.cloudThinking = false;
       this.cloudChatCancelRequested = false;
     }
@@ -4010,23 +4454,26 @@ struct Index {
     this.markHdcDisconnected(true, statusPrefix + ': ' + message);
   }
 
-  private async connectManualHdcTarget(useCloudLog: boolean): Promise<boolean> {
+  private async connectManualHdcTarget(useCloudLog: boolean, cloudLogSessionId: string = ''): Promise<boolean> {
     let serverUrl = this.manualHdcServerUrl();
     let target = this.wirelessIp.trim();
     AppLogger.debug('HDC', 'manual fallback start server=' + (serverUrl.length > 0 ? serverUrl : '(empty)') +
       ', target=' + (target.length > 0 ? target : '(empty)') + ', useCloudLog=' + String(useCloudLog));
     if (serverUrl.length === 0) {
       AppLogger.debug('HDC', 'manual fallback skipped reason=missing-server');
-      this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.', useCloudLog);
+      this.logAgentLoopReady('Manual HDC fallback skipped: PC HDC Server URL is not configured.',
+        useCloudLog, cloudLogSessionId);
       return false;
     }
     if (target.length === 0) {
       AppLogger.debug('HDC', 'manual fallback skipped reason=missing-target server=' + serverUrl);
-      this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.', useCloudLog);
+      this.logAgentLoopReady('Manual HDC fallback skipped: phone wireless HDC target is not configured.',
+        useCloudLog, cloudLogSessionId);
       return false;
     }
 
-    this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target, useCloudLog);
+    this.logAgentLoopReady('Auto HDC failed; trying manual HDC pairing: server=' + serverUrl + ', target=' + target,
+      useCloudLog, cloudLogSessionId);
     this.markHdcDisconnected(true, 'Manual HDC fallback is running...');
     let attempt = await this.requestManualHdcConnect(serverUrl, target);
     AppLogger.debug('HDC', 'manual fallback attempt ok=' + String(attempt.ok) +
@@ -4035,14 +4482,14 @@ struct Index {
       this.applyManualHdcFailure(serverUrl, attempt.message, 'Manual HDC fallback failed');
       AppLogger.debug('HDC', 'manual fallback failed selected=' + this.hdcServerIp +
         ', reason=' + attempt.message);
-      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
       return false;
     }
 
     this.applyManualHdcSuccess(serverUrl, attempt.health, 'Manual HDC fallback succeeded');
     AppLogger.debug('HDC', 'manual fallback success selected=' + this.hdcServerIp +
       ', health=' + this.hdcHealthDebugText(attempt.health));
-    this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+    this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
     return true;
   }
 
@@ -4057,7 +4504,8 @@ struct Index {
     this.markHdcDisconnected(true, 'Manual HDC pairing is being edited.');
   }
 
-  private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false): Promise<boolean> {
+  private async discoverHdcServer(useCloudLog: boolean = false, force: boolean = false,
+    cloudLogSessionId: string = ''): Promise<boolean> {
     if (this.hdcAutoConnecting && !force) {
       AppLogger.debug('HDC', 'discover skipped: already connecting, connected=' + String(this.hdcConnected) +
         ', current=' + this.hdcServerIp);
@@ -4091,7 +4539,7 @@ struct Index {
           let statusPrefix = this.isAutoHdcUrl(candidate) ? 'Auto HDC connected' : 'HDC Server fallback connected';
           this.markHdcConnected(candidate, health, statusPrefix);
           AppLogger.debug('HDC', 'discover success selected=' + this.hdcServerIp);
-          this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+          this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
           return true;
         }
         lastMessage = candidate + ': ' + attempt.message;
@@ -4100,7 +4548,7 @@ struct Index {
       let detail = attemptMessages.length > 0 ? attemptMessages.join('; ') : lastMessage;
       this.markHdcDisconnected(false, 'Auto HDC discovery failed. Use manual pairing if needed. ' + detail);
       AppLogger.debug('HDC', 'discover failed detail=' + detail);
-      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog);
+      this.logAgentLoopReady(this.hdcAutoStatus, useCloudLog, cloudLogSessionId);
       return false;
     } finally {
       AppLogger.debug('HDC', 'discover end connected=' + String(this.hdcConnected) +
@@ -4109,26 +4557,27 @@ struct Index {
     }
   }
 
-  private async ensureHdcServerReadyForTask(useCloudLog: boolean): Promise<boolean> {
+  private async ensureHdcServerReadyForTask(useCloudLog: boolean, cloudLogSessionId: string = ''): Promise<boolean> {
     AppLogger.debug('HDC', 'ensure start useCloudLog=' + String(useCloudLog) + ', current=' + this.hdcServerIp);
-    if (await this.discoverHdcServer(useCloudLog, true)) {
+    if (await this.discoverHdcServer(useCloudLog, true, cloudLogSessionId)) {
       AppLogger.debug('HDC', 'ensure success via=auto selected=' + this.hdcServerIp);
       return true;
     }
 
-    if (await this.connectManualHdcTarget(useCloudLog)) {
+    if (await this.connectManualHdcTarget(useCloudLog, cloudLogSessionId)) {
       AppLogger.debug('HDC', 'ensure success via=manual selected=' + this.hdcServerIp);
       return true;
     }
 
-    this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.', useCloudLog);
+    this.logAgentLoopReady('HDC connection failed: automatic tunnel and manual HDC pairing both failed.',
+      useCloudLog, cloudLogSessionId);
     AppLogger.debug('HDC', 'ensure failed selected=' + this.hdcServerIp);
     return false;
   }
 
-  private logAgentLoopReady(message: string, useCloudLog: boolean): void {
+  private logAgentLoopReady(message: string, useCloudLog: boolean, cloudLogSessionId: string = ''): void {
     if (useCloudLog) {
-      this.appendCloudLog(message);
+      this.appendCloudLogToSession(cloudLogSessionId.length > 0 ? cloudLogSessionId : this.cloudTaskSessionId, message);
       return;
     }
     this.output = message;
@@ -4385,28 +4834,39 @@ struct Index {
   }
 
   private async sendLocalChatMessage(): Promise<void> {
-    let msg = this.userInput.trim();
-    if (msg.length === 0 || this.isThinking) {
+    let pendingImageUris = this.localPendingChatImageUris;
+    if (!chatCanSendMessageWithImages(this.userInput, pendingImageUris) || this.isThinking) {
       return;
     }
-    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
-    this.ensureActiveChatSession();
+    if (hasChatImageAttachments(pendingImageUris)) {
+      showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
+      return;
+    }
+    let activeSession = this.ensureActiveChatSession();
+    if (activeSession === null) {
+      return;
+    }
+    let chatSessionId = activeSession.id;
+    let msg = chatMessageTextForSendWithImages(this.userInput, pendingImageUris);
     let assistantMessageId = this.nextChatMessageId('assistant');
-    this.appendActiveChatMessage(createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT,
-      msg, new Date().getTime()));
-    this.appendActiveChatMessage(createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT,
-      this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
+    this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
+    this.localPendingChatImageUris = [];
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('user'), 'user',
+      CHAT_MESSAGE_KIND_CHAT, msg, new Date().getTime()));
+    this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant',
+      CHAT_MESSAGE_KIND_CHAT, this.modelLoaded ? '思考中...' : '首次加载本地模型中...', new Date().getTime()));
     this.isThinking = true;
     this.chatHistory += `\nUser: ${msg}\nAssistant: 思考中...`;
     let streamedReply = '';
     let lastStreamUpdateAt = 0;
     let streamUpdateTimerId = -1;
+    // 本地 token 回调可能跨会话切换返回，必须固定写回发起请求时的会话和占位消息。
     let flushStreamReply = (): void => {
       if (streamedReply.length === 0) {
         return;
       }
       lastStreamUpdateAt = new Date().getTime();
-      this.updateActiveChatMessageContent(assistantMessageId, streamedReply);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, streamedReply);
     };
     let scheduleStreamReplyUpdate = (): void => {
       let now = new Date().getTime();
@@ -4430,11 +4890,11 @@ struct Index {
       if (!this.modelLoaded) {
         let loaded = await this.ensureLocalModelLoaded();
         if (!loaded) {
-          this.updateActiveChatMessageContent(assistantMessageId, '[错误] 本地模型加载失败');
+          this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] 本地模型加载失败');
           this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', 'Assistant: [错误] 本地模型加载失败\n');
           return;
         }
-        this.updateActiveChatMessageContent(assistantMessageId, '思考中...');
+        this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '思考中...');
       }
       let reply: string = await mnnllm.chat(msg, (token: string) => {
         streamedReply += token;
@@ -4442,12 +4902,13 @@ struct Index {
       });
       if (streamUpdateTimerId !== -1) {
         clearTimeout(streamUpdateTimerId);
+        streamUpdateTimerId = -1;
       }
-      this.updateActiveChatMessageContent(assistantMessageId, reply);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, reply);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: ${reply}\n`);
     } catch (err) {
       let message = err instanceof Error ? (err as Error).message : String(err);
-      this.updateActiveChatMessageContent(assistantMessageId, '[错误] ' + message);
+      this.updateChatMessageContentForSession(chatSessionId, assistantMessageId, '[错误] ' + message);
       this.chatHistory = this.chatHistory.replace('Assistant: 思考中...', `Assistant: [错误] ${message}\n`);
     } finally {
       if (streamUpdateTimerId !== -1) {
@@ -4714,9 +5175,10 @@ struct Index {
             modelLoaded: this.modelLoaded,
             sessions: this.chatSessions,
             activeSessionId: this.activeChatSessionId,
-            messages: this.activeChatMessages,
+            messages: this.chatMessagesForDisplay(),
             avatarForegroundUri: this.homeProfile.avatarForegroundUri,
             avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+            pendingImageAttachmentUris: this.activePendingChatImageUris(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
@@ -4725,6 +5187,10 @@ struct Index {
             onCreateSession: (mode: string) => { this.createChatSession(mode); },
             onSelectSession: async (id: string) => { await this.selectChatSession(id); },
             onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.renameChatSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
             onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
             onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
             onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
@@ -4732,6 +5198,9 @@ struct Index {
             onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
             onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
             onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
+            onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }

@@ -108,6 +108,53 @@ export default function chatMessageDataSourceUnitTest() {
       expect(streamedModel.detail.trace.length).assertEqual(1);
       expect(streamedModel.detail.trace[0]).assertEqual('工具调用完成');
       expect(streamedModel.detail.imagePath).assertEqual('/tmp/snapshot.png');
+      expect(streamedModel.detail.imagePaths.length).assertEqual(1);
+      expect(streamedModel.detail.imagePaths[0]).assertEqual('/tmp/snapshot.png');
+    });
+
+    it('reusesUiModelWhenMultipleImageAttachmentsUpdateWithStableKey', 0, () => {
+      let initial: ChatMessage = createChatMessage('m3', 'user', 'chat', '看看这些图片', 1002, [], '', []);
+      let withImages: ChatMessage = createChatMessage('m3', 'user', 'chat', '看看这些图片', 1002, [],
+        'photo://image/1', ['photo://image/1', 'photo://image/2']);
+      let source: ChatMessageDataSource = new ChatMessageDataSource();
+      let recorder: ChatMessageDataChangeRecorder = new ChatMessageDataChangeRecorder();
+      source.registerDataChangeListener(recorder);
+
+      source.setMessages([initial]);
+      let initialModel = source.getData(0);
+      source.setMessages([withImages]);
+      let withImagesModel = source.getData(0);
+
+      expect(recorder.reloadCount).assertEqual(1);
+      expect(recorder.changedIndexes.length).assertEqual(0);
+      expect(initialModel === withImagesModel).assertTrue();
+      expect(withImagesModel.detail.imagePath).assertEqual('photo://image/1');
+      expect(withImagesModel.detail.imagePaths.length).assertEqual(2);
+      expect(withImagesModel.detail.imagePaths[1]).assertEqual('photo://image/2');
+    });
+
+    it('reusesUiModelWhenStreamingRenderPhaseChangesWithStableKey', 0, () => {
+      let initial: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '正在整理', 1001);
+      initial.streamingActive = true;
+      initial.streamingVersion = 1;
+      let completed: ChatMessage = createChatMessage('m2', 'assistant', 'chat', '正在整理完成', 1001);
+      completed.streamingActive = false;
+      completed.streamingVersion = 2;
+      let source: ChatMessageDataSource = new ChatMessageDataSource();
+      let recorder: ChatMessageDataChangeRecorder = new ChatMessageDataChangeRecorder();
+      source.registerDataChangeListener(recorder);
+
+      source.setMessages([initial]);
+      let initialModel = source.getData(0);
+      source.setMessages([completed]);
+      let completedModel = source.getData(0);
+
+      expect(recorder.reloadCount).assertEqual(1);
+      expect(recorder.changedIndexes.length).assertEqual(0);
+      expect(initialModel === completedModel).assertTrue();
+      expect(completedModel.detail.content).assertEqual('正在整理完成');
+      expect(completedModel.detail.streamingActive).assertFalse();
+      expect(completedModel.detail.streamingVersion).assertEqual(2);
     });
 
     it('reloadsWhenMessageCountOrStableKeyOrderChanges', 0, () => {

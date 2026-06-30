@@ -1228,6 +1228,43 @@ export class CloudModelClient {
       config.apiKey, config.deciderModel, 1024, 60000);
   }
 
+  async chatImagesQuestion(question: string, imageBase64List: string[], config: CloudModelConfig): Promise<string> {
+    // GUI 任务总结需要对照最近多张截图，按时间顺序组织图片并标注最后一张为最新状态。
+    if (imageBase64List.length === 0) {
+      throw new Error('chatImagesQuestion requires at least one image');
+    }
+    if (imageBase64List.length === 1) {
+      return this.chatImageQuestion(question, imageBase64List[0], config);
+    }
+    let content: CloudContentPart[] = [];
+    content.push({
+      type: 'text',
+      text: '以下截图按时间顺序排列，最后一张截图是最新状态。'
+    });
+    for (let i = 0; i < imageBase64List.length; i++) {
+      let label = '截图 ' + String(i + 1) + '/' + String(imageBase64List.length);
+      if (i === imageBase64List.length - 1) {
+        label += '（最新状态）';
+      }
+      content.push({
+        type: 'text',
+        text: label
+      });
+      content.push({
+        type: 'image_url',
+        image_url: {
+          url: 'data:image/jpeg;base64,' + imageBase64List[i]
+        }
+      });
+    }
+    content.push({
+      type: 'text',
+      text: question
+    });
+    return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: content }],
+      config.apiKey, config.deciderModel, 1024, 60000);
+  }
+
   async analyzeGalleryImage(imageBase64: string, ocrText: string, exifText: string, config: GalleryCloudModelConfig): Promise<string> {
     let imageUrl: CloudImageUrl = {
       url: 'data:image/jpeg;base64,' + imageBase64

@@ -1,6 +1,6 @@
-// 云端流式输出的 UI/持久化刷新策略。
-// 模型可能在一次长文生成中连续推送大量小片段，不能每个片段都写会话文件和刷新 @State。
-export const CHAT_STREAM_FLUSH_INTERVAL_MS: number = 250;
+// 云端流式输出的持久化兜底策略。
+// UI 打字节奏由 ChatStreamDisplayPacer 控制；这里只限制会话文件写入频率。
+export const CHAT_STREAM_FLUSH_INTERVAL_MS: number = 1200;
 export const CHAT_STREAM_FLUSH_CHAR_DELTA: number = 8192;
 
 export interface ChatStreamUpdateFlushState {

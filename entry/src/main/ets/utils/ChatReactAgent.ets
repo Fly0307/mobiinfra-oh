@@ -11,6 +11,10 @@ import {
   ChatToolRegistry,
   createDefaultChatToolRegistry
 } from './ChatToolRegistry';
+import {
+  MobileGuiTaskConfirmCallback,
+  MobileGuiTaskRunCallback
+} from './MobileGuiTaskTypes';
 
 export type ChatReactTraceHandler = (line: string) => void;
 export type ChatReactContentDeltaHandler = (delta: string) => void;
@@ -20,6 +24,8 @@ export interface ChatReactAgentRunOptions {
   filesDir?: string;
   sessionId?: string;
   userMessage?: string;
+  confirmMobileGuiTask?: MobileGuiTaskConfirmCallback;
+  runMobileGuiTask?: MobileGuiTaskRunCallback;
   enableThinking?: boolean;
   onTrace?: ChatReactTraceHandler;
   onContentDelta?: ChatReactContentDeltaHandler;
@@ -102,7 +108,9 @@ export class ChatReactAgent {
         let toolContext: ChatToolExecutionContext = {
           filesDir: options.filesDir === undefined ? '' : options.filesDir,
           sessionId: options.sessionId === undefined ? '' : options.sessionId,
-          userMessage: options.userMessage === undefined ? '' : options.userMessage
+          userMessage: options.userMessage === undefined ? '' : options.userMessage,
+          confirmMobileGuiTask: options.confirmMobileGuiTask,
+          runMobileGuiTask: options.runMobileGuiTask
         };
         let toolResult = await this.registry.executeToolCall(toolCall, toolContext);
         toolCallCount += 1;

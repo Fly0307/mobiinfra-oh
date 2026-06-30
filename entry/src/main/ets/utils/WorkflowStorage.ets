@@ -20,6 +20,9 @@ import {
 const WORKFLOW_DIR = 'workflows';
 const CONFIG_DIR = 'configs';
 const RUN_DIR = 'runs';
+const CHAT_SESSION_DIR = 'chat-sessions';
+const TOOL_RUNS_DIR = 'tool-runs';
+const MOBILE_GUI_DIR = 'mobile-gui';
 const DAILY_LOG_DIR = 'daily-log';
 const TASK_INDEX_FILE = 'task-index.json';
 const DELETED_DEFAULT_TASKS_FILE = 'deleted-default-tasks.json';
@@ -152,6 +155,15 @@ export class WorkflowStorage {
     return WorkflowStorage.rootDir(filesDir) + '/' + RUN_DIR;
   }
 
+  static chatSessionToolRunsDir(filesDir: string, sessionId: string): string {
+    return filesDir.replace(/\\/g, '/').replace(/\/+$/g, '') + '/' + CHAT_SESSION_DIR + '/' + TOOL_RUNS_DIR + '/' +
+      WorkflowStorage.sanitizePathSegment(sessionId);
+  }
+
+  static chatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
+    return WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId) + '/' + MOBILE_GUI_DIR;
+  }
+
   static dailyLogDir(filesDir: string): string {
     return WorkflowStorage.rootDir(filesDir) + '/' + DAILY_LOG_DIR;
   }
@@ -186,6 +198,13 @@ export class WorkflowStorage {
     WorkflowStorage.ensureDirectory(WorkflowStorage.configDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.runsDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
+  }
+
+  static ensureChatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
+    WorkflowStorage.ensureDirectoryTree(filesDir);
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId));
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId));
+    return WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId);
   }
 
   static readText(path: string): string {
@@ -319,9 +338,11 @@ export class WorkflowStorage {
     if (normalized.startsWith('workflows/')) {
       return normalized;
     }
-    let workflowRoot = root + '/' + WORKFLOW_DIR + '/';
-    if (normalized.startsWith(workflowRoot)) {
-      return WORKFLOW_DIR + '/' + normalized.substring(workflowRoot.length);
+    if (normalized.startsWith('chat-sessions/')) {
+      return normalized;
+    }
+    if (normalized.startsWith(root + '/')) {
+      return normalized.substring(root.length + 1);
     }
     let marker = '/' + WORKFLOW_DIR + '/';
     let markerIndex = normalized.indexOf(marker);
@@ -346,7 +367,8 @@ export class WorkflowStorage {
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
-    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('runs/') ||
+    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/') ||
       /\.(jpg|jpeg|png|webp|gif)$/i.test(normalized)) {
       return 'path';
     }
@@ -370,20 +392,88 @@ export class WorkflowStorage {
     return value;
   }
 
+  private static sanitizePathSegment(value: string): string {
+    let text = String(value || '');
+    if (text.length === 0) {
+      return 'unknown';
+    }
+    let sanitized = text.replace(/[^A-Za-z0-9_-]/g, '_').replace(/[.]/g, '_');
+    if (sanitized.replace(/_/g, '').length === 0) {
+      return 'unknown';
+    }
+    return sanitized;
+  }
+
+  static ensureDirectoryTree(path: string): void {
+    let normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
+    if (normalized.length === 0) {
+      return;
+    }
+    let parts = normalized.split('/');
+    let current = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) {
+        if (i === 0) {
+          current = '/';
+        }
+        continue;
+      }
+      if (current === '' || current === '/') {
+        current += parts[i];
+      } else {
+        current += '/' + parts[i];
+      }
+      WorkflowStorage.ensureDirectory(current);
+      WorkflowStorage.assertDirectoryExists(current);
+    }
+    WorkflowStorage.assertDirectoryExists(normalized);
+  }
+
+  private static assertDirectoryExists(path: string): void {
+    try {
+      let stat = fs.statSync(path);
+      if (!stat.isDirectory()) {
+        throw new Error('Path is not a directory: ' + path);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Failed to ensure directory: ' + path + ', ' + (err.message || String(e)));
+    }
+  }
+
+  private static assertSafeWorkflowPath(root: string, normalized: string): void {
+    if (normalized.length === 0) {
+      throw new Error('Path is empty');
+    }
+    let segments = normalized.split('/');
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i] === '.' || segments[i] === '..') {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+    if (normalized.startsWith('/')) {
+      if (normalized !== root && !normalized.startsWith(root + '/')) {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+  }
+
   private static workflowAbsolutePath(filesDir: string, path: string): string {
     let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
     let normalized = path.trim().replace(/\\/g, '/');
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
+    WorkflowStorage.assertSafeWorkflowPath(root, normalized);
     if (normalized.startsWith('/')) {
       return normalized;
     }
-    if (normalized.startsWith('workflows/')) {
+    if (normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/')) {
+      if (normalized.startsWith('runs/')) {
+        return WorkflowStorage.rootDir(root) + '/' + normalized;
+      }
       return root + '/' + normalized;
-    }
-    if (normalized.startsWith('runs/')) {
-      return WorkflowStorage.rootDir(root) + '/' + normalized;
     }
     return root + '/' + normalized;
   }

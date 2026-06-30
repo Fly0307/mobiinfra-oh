@@ -10,6 +10,7 @@ import {
   ChatSessionSummary,
   buildChatSessionSummary,
   chatMessageImagePath,
+  chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
   createEmptyChatSession,
@@ -21,6 +22,7 @@ const CHAT_SESSION_DIR: string = 'chat-sessions';
 const CHAT_SESSION_RECORD_DIR: string = 'sessions';
 const CHAT_SESSION_ASSET_DIR: string = 'assets';
 const CHAT_SESSION_INDEX_FILE: string = 'session-index.json';
+const CHAT_SESSION_CUSTOM_TITLE_MAX_LENGTH: number = 40;
 type ListFileEntry = string | Record<string, Object | string | number | boolean | null>;
 
 export class ChatSessionStorage {
@@ -132,7 +134,8 @@ export class ChatSessionStorage {
         return [];
       }
       let parsed = parseJsonCompat<ChatSessionIndex>(ChatSessionStorage.readText(ChatSessionStorage.indexPath(filesDir)));
-      return ChatSessionStorage.sortSessions(parsed.sessions === undefined ? [] : parsed.sessions);
+      return ChatSessionStorage.sortSessions(ChatSessionStorage.normalizeSummaries(parsed.sessions === undefined ? [] :
+        parsed.sessions));
     } catch (e) {
       try {
         let brokenPath = ChatSessionStorage.indexPath(filesDir) + '.broken.' + String(new Date().getTime());
@@ -145,13 +148,27 @@ export class ChatSessionStorage {
 
   static saveIndex(filesDir: string, sessions: ChatSessionSummary[]): void {
     ChatSessionStorage.ensureWorkspace(filesDir);
-    let index: ChatSessionIndex = { sessions: ChatSessionStorage.sortSessions(sessions) };
+    let index: ChatSessionIndex = {
+      sessions: ChatSessionStorage.sortSessions(ChatSessionStorage.normalizeSummaries(sessions))
+    };
     ChatSessionStorage.writeText(ChatSessionStorage.indexPath(filesDir), stringifyJsonCompat(index as Object, 2));
   }
 
   static sortSessions(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
-    let sorted = sessions.slice();
+    let sorted = ChatSessionStorage.normalizeSummaries(sessions);
     sorted.sort((left: ChatSessionSummary, right: ChatSessionSummary) => {
+      let leftPinned = left.pinned === true;
+      let rightPinned = right.pinned === true;
+      if (leftPinned !== rightPinned) {
+        return leftPinned ? -1 : 1;
+      }
+      if (leftPinned && rightPinned) {
+        let leftPinnedAt = ChatSessionStorage.normalizedOptionalNumber(left.pinnedAt);
+        let rightPinnedAt = ChatSessionStorage.normalizedOptionalNumber(right.pinnedAt);
+        if (leftPinnedAt !== rightPinnedAt) {
+          return rightPinnedAt - leftPinnedAt;
+        }
+      }
       if (left.updatedAt !== right.updatedAt) {
         return right.updatedAt - left.updatedAt;
       }
@@ -180,6 +197,9 @@ export class ChatSessionStorage {
       session.contextSummaryUpdatedAt = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt);
       session.contextSummaryUntilMessageId = ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId);
       session.contextSummaryMessageCount = ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount);
+      session.customTitle = ChatSessionStorage.normalizedCustomTitle(session.customTitle);
+      session.pinned = ChatSessionStorage.normalizedOptionalBoolean(session.pinned);
+      session.pinnedAt = session.pinned ? ChatSessionStorage.normalizedOptionalNumber(session.pinnedAt) : 0;
       return session;
     } catch (e) {
       ChatSessionStorage.removeFromIndex(filesDir, sessionId);
@@ -199,7 +219,11 @@ export class ChatSessionStorage {
       contextSummary: ChatSessionStorage.normalizedOptionalString(session.contextSummary),
       contextSummaryUpdatedAt: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryUpdatedAt),
       contextSummaryUntilMessageId: ChatSessionStorage.normalizedOptionalString(session.contextSummaryUntilMessageId),
-      contextSummaryMessageCount: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount)
+      contextSummaryMessageCount: ChatSessionStorage.normalizedOptionalNumber(session.contextSummaryMessageCount),
+      customTitle: ChatSessionStorage.normalizedCustomTitle(session.customTitle),
+      pinned: ChatSessionStorage.normalizedOptionalBoolean(session.pinned),
+      pinnedAt: ChatSessionStorage.normalizedOptionalBoolean(session.pinned) ?
+        ChatSessionStorage.normalizedOptionalNumber(session.pinnedAt) : 0
     };
     ChatSessionStorage.writeText(ChatSessionStorage.sessionPath(filesDir, normalized.id),
       stringifyJsonCompat(normalized as Object, 2));
@@ -214,6 +238,30 @@ export class ChatSessionStorage {
     }
     session.messages = session.messages.concat([message]);
     session.updatedAt = message.createdAt;
+    ChatSessionStorage.saveSession(filesDir, session);
+    return session;
+  }
+
+  static renameSession(filesDir: string, sessionId: string, title: string): ChatSessionRecord | null {
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return null;
+    }
+    // 重命名只更新展示元数据，不触碰消息列表和更新时间，避免改变普通历史排序语义。
+    session.customTitle = ChatSessionStorage.normalizedCustomTitle(title);
+    ChatSessionStorage.saveSession(filesDir, session);
+    return session;
+  }
+
+  static setSessionPinned(filesDir: string, sessionId: string, pinned: boolean,
+    now: number): ChatSessionRecord | null {
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return null;
+    }
+    // 置顶排序由 pinnedAt 驱动；取消置顶后清零，重新回到普通 updatedAt 排序。
+    session.pinned = pinned;
+    session.pinnedAt = pinned ? now : 0;
     ChatSessionStorage.saveSession(filesDir, session);
     return session;
   }
@@ -296,7 +344,8 @@ export class ChatSessionStorage {
         trace: message.trace === undefined ? [] : message.trace.slice(),
         collapsed: message.collapsed,
         createdAt: message.createdAt,
-        imagePath: chatMessageImagePath(message)
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
       });
     }
     return normalized;
@@ -308,6 +357,42 @@ export class ChatSessionStorage {
 
   private static normalizedOptionalNumber(value?: number): number {
     return value === undefined ? 0 : value;
+  }
+
+  private static normalizedOptionalBoolean(value?: boolean): boolean {
+    return value === true;
+  }
+
+  private static normalizedCustomTitle(value?: string): string {
+    let title = ChatSessionStorage.normalizedOptionalString(value).trim();
+    return title.length > CHAT_SESSION_CUSTOM_TITLE_MAX_LENGTH ? title.substring(0,
+      CHAT_SESSION_CUSTOM_TITLE_MAX_LENGTH) : title;
+  }
+
+  private static normalizeSummary(summary: ChatSessionSummary): ChatSessionSummary {
+    let pinned = ChatSessionStorage.normalizedOptionalBoolean(summary.pinned);
+    let customTitle = ChatSessionStorage.normalizedCustomTitle(summary.customTitle);
+    return {
+      id: summary.id,
+      title: customTitle.length > 0 ? customTitle : summary.title,
+      mode: normalizeChatMode(summary.mode),
+      fileName: summary.fileName,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      messageCount: summary.messageCount,
+      lastMessagePreview: summary.lastMessagePreview,
+      customTitle: customTitle,
+      pinned: pinned,
+      pinnedAt: pinned ? ChatSessionStorage.normalizedOptionalNumber(summary.pinnedAt) : 0
+    };
+  }
+
+  private static normalizeSummaries(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
+    let normalized: ChatSessionSummary[] = [];
+    for (let i = 0; i < sessions.length; i++) {
+      normalized.push(ChatSessionStorage.normalizeSummary(sessions[i]));
+    }
+    return normalized;
   }
 
   private static stripFileUri(path: string): string {

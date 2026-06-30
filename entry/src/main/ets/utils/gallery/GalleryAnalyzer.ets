@@ -4,7 +4,6 @@ import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
 import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
-import { GalleryEmbeddingService } from './GalleryEmbeddingService';
 import { GalleryStorage } from './GalleryStorage';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import { GalleryExifUtils } from './GalleryExifUtils';
@@ -14,7 +13,6 @@ import {
   GalleryAnalyzeOptions,
   GalleryAnalyzeOutcome,
   GalleryAnalyzerConfig,
-  GalleryEmbeddingRecord,
   GalleryExifMetadata,
   GalleryLocationCacheRecord,
   GalleryModelJson,
@@ -57,7 +55,6 @@ class GallerySemaphore {
 interface GalleryStageGates {
   ocr: GallerySemaphore;
   model: GallerySemaphore;
-  embedding: GallerySemaphore;
 }
 
 interface GalleryModelParseResult {
@@ -74,7 +71,6 @@ export class GalleryAnalyzer {
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private ocrService: GalleryOcrService = new GalleryOcrService();
-  private embeddingService: GalleryEmbeddingService;
   private reverseGeocoder: GalleryReverseGeocoder = new GalleryReverseGeocoder();
   private locationRequests: Record<string, Promise<GalleryLocationCacheRecord | undefined>> = {};
   private locationFailedKeys: Record<string, boolean> = {};
@@ -82,7 +78,6 @@ export class GalleryAnalyzer {
   constructor(filesDir: string, cloudClient: CloudModelClient) {
     this.filesDir = filesDir;
     this.cloudClient = cloudClient;
-    this.embeddingService = new GalleryEmbeddingService(cloudClient);
   }
 
   async analyzeUris(uris: string[], config: GalleryAnalyzerConfig, onProgress: GalleryProgressHandler,
@@ -120,10 +115,9 @@ export class GalleryAnalyzer {
     let results: GalleryAnalysisResult[] = [];
     let gates: GalleryStageGates = {
       ocr: new GallerySemaphore(config.ocrConcurrency),
-      model: new GallerySemaphore(config.modelConcurrency),
-      embedding: new GallerySemaphore(config.embeddingConcurrency)
+      model: new GallerySemaphore(config.modelConcurrency)
     };
-    let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency, config.embeddingConcurrency);
+    let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency);
     await this.runWithLimit(inputs, limit, async (input: GalleryPhotoInput, index: number): Promise<boolean> => {
       // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
       if (options && options.shouldPause && options.shouldPause()) {
@@ -405,52 +399,12 @@ export class GalleryAnalyzer {
       let details = this.detailListFrom(modelJson.details);
       let tags = this.tagListFrom(modelJson.tags);
       let keywords = this.keywordsFrom(tags, ocrText);
-      let resultText = this.resultText(modelJson, ocrText);
       let embeddingStatus = 'skipped';
       let embeddingDimension = 0;
       let embeddingRef = '';
-      if (resultText.length > 0 && config.embeddingApiKey.trim().length > 0) {
-        await gates.embedding.acquire();
-        try {
-          let embeddingStartedAt = new Date().getTime();
-          this.logInfo('embedding start id=' + id + ' mode=' + config.embeddingMode + ' model=' +
-            (config.embeddingMode === 'huawei_local' ? 'huawei_local_basic' : config.embeddingModel));
-          progress.current = '生成 Embedding ' + id;
-          onProgress(progress);
-          let embeddingResult = await this.embeddingService.embedText(resultText, config, this.filesDir,
-            (level: string, message: string) => {
-              this.logEmbeddingMessage(level, id, message);
-            });
-          let vector = embeddingResult.vector;
-          embeddingDimension = vector.length;
-          embeddingStatus = 'ok';
-          this.logInfo('embedding done id=' + id + ' mode=' + embeddingResult.mode + ' model=' + embeddingResult.model +
-            ' dimension=' + embeddingDimension + ' elapsedMs=' + this.elapsed(embeddingStartedAt));
-          let embedding: GalleryEmbeddingRecord = {
-            id: id,
-            uri: uri,
-            date: date,
-            category: category,
-            text: resultText,
-            vector: vector,
-            model: embeddingResult.model,
-            mode: embeddingResult.mode,
-            createdAt: new Date().getTime()
-          };
-          GalleryStorage.upsertEmbedding(this.filesDir, embedding);
-          embeddingRef = GalleryStorage.embeddingRef(embedding);
-        } catch (e) {
-          embeddingStatus = 'failed: ' + this.errorMessage(e);
-          this.logError('embedding failed id=' + id + ' error=' + this.errorMessage(e));
-        } finally {
-          gates.embedding.release();
-        }
-      } else {
-        this.logInfo('embedding skipped id=' + id + ' emptyText=' + (resultText.length === 0).toString() +
-          ' emptyApiKey=' + (config.embeddingApiKey.trim().length === 0).toString());
-        progress.current = '跳过 Embedding ' + id;
-        onProgress(progress);
-      }
+      this.logInfo('embedding disabled id=' + id);
+      progress.current = '跳过 Embedding ' + id;
+      onProgress(progress);
       progress.embeddingDone += 1;
       onProgress(progress);
 

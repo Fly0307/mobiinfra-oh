@@ -374,15 +374,22 @@ export class GalleryAnalyzer {
           modelJson = this.normalizeMergedModelJson(fieldResult.json);
           let fieldCount = this.modelFieldCount(modelJson);
           this.logInfo('model fields merged id=' + id + ' fields=' + fieldCount.toString());
+          this.logInfo('model fields raw id=' + id + ' preview=' + this.previewForLog(rawModelText, 512));
           if (fieldCount === 0) {
             this.logInfo('model fields empty fallback full-json id=' + id);
             rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, exifText, this.toCloudConfig(config));
+            this.logInfo('model full-json fallback raw id=' + id + ' chars=' + rawModelText.length.toString() +
+              ' preview=' + this.previewForLog(rawModelText, 512));
+            this.throwIfModelErrorResponse(rawModelText);
             let modelParse = this.parseModelJson(rawModelText, id);
             modelJson = modelParse.json;
             rawModelText = modelParse.text;
           }
         } else {
           rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, exifText, this.toCloudConfig(config));
+          this.logInfo('model full-json raw id=' + id + ' chars=' + rawModelText.length.toString() +
+            ' preview=' + this.previewForLog(rawModelText, 512));
+          this.throwIfModelErrorResponse(rawModelText);
           let modelParse = this.parseModelJson(rawModelText, id);
           modelJson = modelParse.json;
           rawModelText = modelParse.text;
@@ -838,6 +845,31 @@ export class GalleryAnalyzer {
     }
   }
 
+  private throwIfModelErrorResponse(raw: string): void {
+    let text = this.cleanModelJsonText(raw);
+    let payload = this.tryParseModelJson(text);
+    if (!payload) {
+      return;
+    }
+    let map = payload as Record<string, Object | string | number | boolean | null>;
+    let action = map['action'];
+    if (typeof action !== 'string' || action.toLowerCase() !== 'error') {
+      return;
+    }
+    let reason = '';
+    let rawReason = map['reason'];
+    if (typeof rawReason === 'string') {
+      reason = rawReason.trim();
+    }
+    if (reason.length === 0) {
+      let rawMessage = map['message'];
+      if (typeof rawMessage === 'string') {
+        reason = rawMessage.trim();
+      }
+    }
+    throw new Error('调用 AI 分析失败' + (reason.length > 0 ? '：' + reason : ''));
+  }
+
   private modelJsonRepairCandidates(text: string): string[] {
     let candidates: string[] = [];
     let trimmed = text.trim();
@@ -1226,6 +1258,14 @@ export class GalleryAnalyzer {
 
   private elapsed(startedAt: number): number {
     return new Date().getTime() - startedAt;
+  }
+
+  private previewForLog(text: string, maxLength: number): string {
+    let normalized = text.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return normalized.substring(0, maxLength) + '...';
   }
 
   private logInfo(message: string): void {

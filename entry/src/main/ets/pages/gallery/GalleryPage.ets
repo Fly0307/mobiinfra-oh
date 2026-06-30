@@ -2826,17 +2826,10 @@ struct GalleryPage {
     if (item.error && item.error.length > 0) {
       return '分析失败';
     }
-    let status = item.embeddingStatus ? item.embeddingStatus : '';
-    if (status === 'ok') {
+    if (item.rawModelText && item.rawModelText.trim().length > 0) {
       return '已入库';
     }
-    if (status === 'skipped' || status.length === 0) {
-      return '未入库';
-    }
-    if (status.indexOf('failed') === 0) {
-      return 'Embedding 失败';
-    }
-    return status;
+    return '未入库';
   }
 
   private previewUri(item: GalleryAnalysisResult): string {

@@ -3,6 +3,7 @@ import { AppLogger } from '../utils/AppLogger';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 
 const FLOAT_PANEL_COLLAPSED_WIDTH_VP = 88;
 const FLOAT_PANEL_HEIGHT_VP = 72;
@@ -73,7 +74,9 @@ export default class EntryAbility extends UIAbility {
         throw error;
       }
     });
-    AppLogger.info('Ability', 'Ability onCreate');
+    AppLogger.info('Ability', 'Ability onCreate launchReason=' + String(launchParam.launchReason) +
+      ', want=' + this.wantBrief(want));
+    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
   }
 
   onDestroy(): void {
@@ -99,6 +102,29 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageDestroy(): void {
     AppLogger.info('Ability', 'Ability onWindowStageDestroy');
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    AppLogger.info('Ability', 'Ability onNewWant launchReason=' + String(launchParam.launchReason) +
+      ', want=' + this.wantBrief(want));
+    ProfileShareLaunchBridge.enqueueWant(want, this.isProfileShareRelatedWant(want, launchParam));
+  }
+
+  private isProfileShareRelatedWant(want: Want, launchParam: AbilityConstant.LaunchParam): boolean {
+    return launchParam.launchReason === AbilityConstant.LaunchReason.SHARE ||
+    ProfileShareLaunchBridge.isProfileShareLaunchWant(want) ||
+    ProfileShareLaunchBridge.isProfileFileOpenWant(want);
+  }
+
+  private wantBrief(want: Want): string {
+    let parameterKeys = '';
+    if (want.parameters !== undefined) {
+      parameterKeys = Object.keys(want.parameters).join(',');
+    }
+    return 'action=' + String(want.action) +
+      ', type=' + String(want.type) +
+      ', uri=' + String(want.uri) +
+      ', parameters=' + parameterKeys;
   }
 
   onForeground(): void {

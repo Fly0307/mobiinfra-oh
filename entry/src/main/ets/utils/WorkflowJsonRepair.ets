@@ -32,12 +32,15 @@ export class WorkflowJsonRepair {
     let singleQuoted = WorkflowJsonRepair.repairSingleQuotedJson(text);
     let quotedArrayItems = WorkflowJsonRepair.quoteBareJsonArrayItems(text);
     let closed = WorkflowJsonRepair.closeTruncatedJson(text);
+    let bareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, leadingObjectBrace, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(leadingObjectBrace), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, literalCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrappedLiteralCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, bareCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(bareCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, cjkPunctuation, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, withoutParentheses, text);
@@ -54,8 +57,10 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonLiteralCasing(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairBareCoordinateArrays(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairBareCoordinateArrays(closed), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(literalCase), text);
@@ -128,6 +133,16 @@ export class WorkflowJsonRepair {
 
   private static repairNumberArrayCommas(text: string): string {
     return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static repairBareCoordinateArrays(text: string): string {
+    let numberPattern = '-?\\d+(?:\\.\\d+)?';
+    let bboxPattern = new RegExp('("bbox"\\s*:\\s*)(' + numberPattern + ')\\s*,\\s*(' + numberPattern +
+      ')\\s*,\\s*(' + numberPattern + ')\\s*,\\s*(' + numberPattern + ')(?=\\s*(?:[,}\\]]|$))', 'g');
+    let pairPattern = new RegExp('("(?:coords|start_coords|end_coords)"\\s*:\\s*)(' + numberPattern +
+      ')\\s*,\\s*(' + numberPattern + ')(?=\\s*(?:[,}\\]]|$))', 'g');
+    return text.replace(bboxPattern, '$1[$2, $3, $4, $5]')
+      .replace(pairPattern, '$1[$2, $3]');
   }
 
   private static normalizeCjkJsonPunctuation(text: string): string {

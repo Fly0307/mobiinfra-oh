@@ -286,6 +286,7 @@ const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
 const PROFILE_MODEL_CONFIG_PATH_KEY: string = 'profileModelConfigPath';
 const SELECTED_MODEL_ID_KEY: string = 'selectedModelId';
 const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
+const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
@@ -461,6 +462,10 @@ struct Index {
   private agentRouter: AgentRouterServer = new AgentRouterServer();
   private pcServerMonitor: PcServerMonitor | null = null;
   private pcServerConnectedPromptShown: boolean = false;
+  private pcServerCloudFallbackPlannerBaseUrl: string = '';
+  private pcServerCloudFallbackDeciderBaseUrl: string = '';
+  private pcServerCloudFallbackApiKey: string = '';
+  private pcServerCloudFallbackSaved: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
@@ -1261,6 +1266,9 @@ struct Index {
   }
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     return isMobileGuiTaskCloudConfigReadyValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl, this.cloudApiKey);
   }
 
@@ -2320,11 +2328,16 @@ struct Index {
   }
 
   private applyPcServerState(state: PcServerState, becameConnected: boolean): void {
+    let wasConnected = this.pcServerConnected;
     this.pcServerConnected = state.state === 'connected';
     this.pcServerStatusText = this.pcServerConnected ? '已连接 PC Server' : state.message;
     AppStorage.setOrCreate('pcServerConnected', this.pcServerConnected);
     AppStorage.setOrCreate('pcServerStatusText', this.pcServerStatusText);
+    if (wasConnected && !this.pcServerConnected && this.isPcServerCloudEndpointEnabled()) {
+      this.disablePcServerCloudEndpoint(false);
+    }
     if (becameConnected) {
+      this.enablePcServerCloudEndpoint(false);
       this.showPcServerConnectedPrompt();
     }
   }
@@ -2342,6 +2355,57 @@ struct Index {
         { text: '知道了', color: '#5968FF' }
       ]
     }).catch(() => {});
+  }
+
+  private isPcServerCloudEndpointEnabled(): boolean {
+    return this.cloudPlannerBaseUrl.trim() === PC_SERVER_LLM_BASE_URL &&
+      this.cloudDeciderBaseUrl.trim() === PC_SERVER_LLM_BASE_URL;
+  }
+
+  private enablePcServerCloudEndpoint(showToast: boolean = true): void {
+    if (!this.pcServerConnected) {
+      showToastSafely('PC Server 未连接', 1500);
+      return;
+    }
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      this.pcServerCloudFallbackPlannerBaseUrl = this.cloudPlannerBaseUrl;
+      this.pcServerCloudFallbackDeciderBaseUrl = this.cloudDeciderBaseUrl;
+      this.pcServerCloudFallbackApiKey = this.cloudApiKey;
+      this.pcServerCloudFallbackSaved = true;
+    }
+    this.cloudPlannerBaseUrl = PC_SERVER_LLM_BASE_URL;
+    this.cloudDeciderBaseUrl = PC_SERVER_LLM_BASE_URL;
+    this.cloudApiKey = '';
+    if (showToast) {
+      showToastSafely('已启用 PC Server 云端接口', 1600);
+    }
+  }
+
+  private disablePcServerCloudEndpoint(showToast: boolean = true): void {
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      return;
+    }
+    this.cloudPlannerBaseUrl = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackPlannerBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+    this.cloudDeciderBaseUrl = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackDeciderBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+    this.cloudApiKey = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackApiKey : DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
+    this.pcServerCloudFallbackPlannerBaseUrl = '';
+    this.pcServerCloudFallbackDeciderBaseUrl = '';
+    this.pcServerCloudFallbackApiKey = '';
+    this.pcServerCloudFallbackSaved = false;
+    if (showToast) {
+      showToastSafely('已恢复原云端接口', 1600);
+    }
+  }
+
+  private togglePcServerCloudEndpoint(): void {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      this.disablePcServerCloudEndpoint();
+      return;
+    }
+    this.enablePcServerCloudEndpoint();
   }
 
   private migrateDefaultEndpointValues(): void {
@@ -4003,9 +4067,70 @@ struct Index {
   }
 
   private isCloudConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     return this.cloudPlannerBaseUrl.trim().length > 0 &&
       this.cloudDeciderBaseUrl.trim().length > 0 &&
       this.cloudApiKey.trim().length > 0;
+  }
+
+  private pcServerLlmHealthUrl(): string {
+    return PC_SERVER_LLM_BASE_URL + '/health';
+  }
+
+  private async ensurePcServerLlmHealthy(): Promise<void> {
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      return;
+    }
+    let httpReq = http.createHttp();
+    let url = this.pcServerLlmHealthUrl();
+    let timeoutId = -1;
+    let timedOut = false;
+    try {
+      this.appendCloudLog('PC Server LLM 健康检查：' + url);
+      let requestPromise = httpReq.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 3000,
+        readTimeout: 5000,
+        expectDataType: http.HttpDataType.STRING
+      });
+      let timeoutPromise = new Promise<http.HttpResponse>((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true;
+          try {
+            httpReq.destroy();
+          } catch (e) {
+          }
+          reject(new Error('PC Server LLM 健康检查超时'));
+        }, 8000);
+      });
+      let response = await Promise.race([requestPromise, timeoutPromise]);
+      if (timeoutId !== -1) {
+        clearTimeout(timeoutId);
+        timeoutId = -1;
+      }
+      let body = String(response.result);
+      let bodyPreview = body.substring(0, body.length > 300 ? 300 : body.length);
+      this.appendCloudLog('PC Server LLM 健康检查返回：HTTP ' + response.responseCode.toString() +
+        (bodyPreview.length > 0 ? '，' + bodyPreview : ''));
+      AppLogger.info('CloudModel', 'pc server llm health status=' + response.responseCode.toString() +
+        ' body=' + bodyPreview);
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new Error('HTTP ' + response.responseCode.toString() + ': ' + body);
+      }
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('PC Server LLM 健康检查失败：' + (err.message || String(e)));
+      throw err;
+    } finally {
+      if (timeoutId !== -1) {
+        clearTimeout(timeoutId);
+      }
+      if (!timedOut) {
+        httpReq.destroy();
+      }
+    }
   }
 
   async testCloudPlanner() {
@@ -4016,6 +4141,7 @@ struct Index {
     this.cloudThinking = true;
     this.appendCloudLog(`测试 Planner：${this.cloudPlannerBaseUrl}`);
     try {
+      await this.ensurePcServerLlmHealthy();
       let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
     } catch (e) {
@@ -4107,6 +4233,8 @@ struct Index {
       if (this.cloudChatCancelRequested) {
         throw new Error('已取消本次回复。');
       }
+      await this.ensurePcServerLlmHealthy();
+      let usePcServerNonStreaming = this.isPcServerCloudEndpointEnabled();
       this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT, '',
         new Date().getTime()));
       assistantMessageCreated = true;
@@ -4127,7 +4255,7 @@ struct Index {
           toolTraceLines.push(line);
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         },
-        onContentDelta: (delta: string) => {
+        onContentDelta: usePcServerNonStreaming ? undefined : (delta: string) => {
           streamedContent += delta;
           if (enableThinking) {
             let parsed = parseChatStreamThinkingDelta(delta, streamThinkingState);
@@ -4138,6 +4266,9 @@ struct Index {
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
       };
+      if (usePcServerNonStreaming) {
+        this.appendCloudLog('PC Server 模式：已切换为非流式请求。');
+      }
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;
       let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
@@ -5239,6 +5370,8 @@ struct Index {
             pendingImageAttachmentUris: this.activePendingChatImageUris(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
+            pcServerConnected: this.pcServerConnected,
+            pcServerCloudEnabled: this.isPcServerCloudEndpointEnabled(),
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
             onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
             onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
@@ -5261,7 +5394,8 @@ struct Index {
             onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
-            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); }
+            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
+            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))
         TabContent() {

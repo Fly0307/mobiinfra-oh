@@ -57,6 +57,8 @@ export struct ChatPage {
   @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
+  @Prop pcServerConnected: boolean = false;
+  @Prop pcServerCloudEnabled: boolean = false;
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
   onOpenSessionDrawer: () => void = () => {};
   onCloseSessionDrawer: () => void = () => {};
@@ -78,6 +80,7 @@ export struct ChatPage {
   onClearCloudDebugImage: () => void = () => {};
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
+  onUsePcServerCloud: () => void = () => {};
 
   private isCloudMode(): boolean {
     return this.chatMode !== CHAT_MODE_LOCAL_INFERENCE;
@@ -129,6 +132,10 @@ export struct ChatPage {
       return this.cloudThinking;
     }
     return this.localThinking && this.messages.length === 0;
+  }
+
+  private showPcServerCloudButton(): boolean {
+    return this.isCloudMode() && this.pcServerConnected;
   }
 
   private primaryButtonText(): string {
@@ -733,6 +740,18 @@ export struct ChatPage {
               .opacity(this.isBusy() ? 0.6 : 1)
               .onClick(() => { this.toggleDeepThinking(); })
           }
+          if (this.showPcServerCloudButton()) {
+            Text('PC Server')
+              .fontSize(12)
+              .fontColor(this.pcServerCloudEnabled ? '#FFFFFF' : '#222222')
+              .height(34)
+              .padding({ left: 13, right: 13 })
+              .backgroundColor(this.pcServerCloudEnabled ? '#167456' : Color.White)
+              .borderRadius(17)
+              .border({ width: 1, color: this.pcServerCloudEnabled ? '#167456' : '#E2E5EA' })
+              .margin({ left: chatDeepThinkingToggleVisible(this.chatMode) ? 10 : 0 })
+              .onClick(() => { this.onUsePcServerCloud(); })
+          }
           Text('下发任务')
             .fontSize(12)
             .fontColor('#222222')
@@ -741,7 +760,7 @@ export struct ChatPage {
             .backgroundColor(Color.White)
             .borderRadius(17)
             .border({ width: 1, color: '#E2E5EA' })
-            .margin({ left: chatDeepThinkingToggleVisible(this.chatMode) ? 10 : 0 })
+            .margin({ left: (chatDeepThinkingToggleVisible(this.chatMode) || this.showPcServerCloudButton()) ? 10 : 0 })
             .onClick(async () => { await this.runTaskAction(); })
         }
         .width('100%')

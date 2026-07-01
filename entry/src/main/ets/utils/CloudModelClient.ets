@@ -717,6 +717,14 @@ export class CloudModelClient {
 
     let httpReq = http.createHttp();
     this.registerActiveRequest(httpReq);
+    let url = this.normalizeChatUrl(options.baseUrl);
+    AppLogger.info('CloudModel', 'chat stream request start url=' + url +
+      ' model=' + (options.model === undefined ? '' : options.model) +
+      ' messages=' + options.messages.length.toString() +
+      ' text_chars=' + CloudModelClient.messageTextChars(options.messages).toString() +
+      ' has_image=' + CloudModelClient.messagesContainImage(options.messages).toString() +
+      ' max_tokens=' + (options.maxTokens === undefined ? '' : options.maxTokens.toString()) +
+      ' read_timeout=' + (options.readTimeout === undefined ? '' : options.readTimeout.toString()));
     return new Promise<CloudChatCompletionResult>((resolve, reject) => {
       let self = this;
       let resolved = false;

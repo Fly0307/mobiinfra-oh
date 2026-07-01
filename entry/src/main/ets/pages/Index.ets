@@ -117,6 +117,11 @@ import {
 } from '../utils/MobileGuiTaskTool';
 import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGuiTaskTypes';
 import {
+  PC_SERVER_DEFAULT_URL,
+  PcServerMonitor,
+  PcServerState
+} from '../utils/PcServerMonitor';
+import {
   buildMobileGuiWorkflowTask,
   classifyMobileGuiWorkflowFailure,
   isMobileGuiTaskCloudConfigReady as isMobileGuiTaskCloudConfigReadyValue,
@@ -321,6 +326,8 @@ PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
+PersistentStorage.persistProp('pcServerUrl', PC_SERVER_DEFAULT_URL);
+PersistentStorage.persistProp('pcServerConnected', false);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
@@ -369,6 +376,7 @@ struct Index {
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
+  @StorageLink('pcServerUrl') pcServerUrl: string = PC_SERVER_DEFAULT_URL;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
@@ -427,6 +435,8 @@ struct Index {
   @State hdcAutoConnecting: boolean = false;
   @State hdcManualPairing: boolean = false;
   @State hdcAutoStatus: string = 'HDC Server will be auto-discovered after startup.';
+  @State pcServerConnected: boolean = false;
+  @State pcServerStatusText: string = 'PC Server 未连接';
   @State dataManagerRefreshing: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
@@ -449,6 +459,8 @@ struct Index {
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
+  private pcServerMonitor: PcServerMonitor | null = null;
+  private pcServerConnectedPromptShown: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
@@ -2271,11 +2283,13 @@ struct Index {
     this.discoverHdcServer(false, false).catch(() => {
       this.hdcAutoConnecting = false;
     });
+    this.startPcServerMonitor();
   }
 
   onPageShow(): void {
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
+    this.startPcServerMonitor();
   }
 
   onPageHide(): void {
@@ -2284,6 +2298,50 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopHomeRecommendationDateTimer();
+    this.stopPcServerMonitor();
+  }
+
+  private startPcServerMonitor(): void {
+    if (this.pcServerMonitor !== null) {
+      return;
+    }
+    this.pcServerMonitor = new PcServerMonitor(this.pcServerUrl, (state: PcServerState, becameConnected: boolean) => {
+      this.applyPcServerState(state, becameConnected);
+    });
+    this.pcServerMonitor.start();
+  }
+
+  private stopPcServerMonitor(): void {
+    if (this.pcServerMonitor === null) {
+      return;
+    }
+    this.pcServerMonitor.stop();
+    this.pcServerMonitor = null;
+  }
+
+  private applyPcServerState(state: PcServerState, becameConnected: boolean): void {
+    this.pcServerConnected = state.state === 'connected';
+    this.pcServerStatusText = this.pcServerConnected ? '已连接 PC Server' : state.message;
+    AppStorage.setOrCreate('pcServerConnected', this.pcServerConnected);
+    AppStorage.setOrCreate('pcServerStatusText', this.pcServerStatusText);
+    if (becameConnected) {
+      this.showPcServerConnectedPrompt();
+    }
+  }
+
+  private showPcServerConnectedPrompt(): void {
+    if (this.pcServerConnectedPromptShown) {
+      return;
+    }
+    this.pcServerConnectedPromptShown = true;
+    showToastSafely('已连接 PC Server', 2200);
+    promptAction.showDialog({
+      title: '已连接 PC Server',
+      message: '手机 App 已连接到 PC Server，事件通道已建立。',
+      buttons: [
+        { text: '知道了', color: '#5968FF' }
+      ]
+    }).catch(() => {});
   }
 
   private migrateDefaultEndpointValues(): void {

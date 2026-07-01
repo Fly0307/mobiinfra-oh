@@ -1144,7 +1144,10 @@ export struct HomePage {
     Stack() {
       Scroll() {
         Column() {
-          AppHeader({ title: '数据归家' })
+          AppHeader({
+            title: '数据归家',
+            pcServerVisible: true
+          })
 
         Column() {
           this.AvatarImage()

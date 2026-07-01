@@ -29,8 +29,6 @@ interface WorkflowJsonStep {
 function mobileGuiRequest(): MobileGuiTaskRequest {
   return {
     task: '打开微信查看今天的消息',
-    appName: '微信',
-    packageName: 'com.tencent.mm',
     maxSteps: 18
   };
 }
@@ -44,13 +42,13 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(mobileGuiTaskCloudConfigMissingMessage().indexOf('Decider 模型') < 0).assertTrue();
     });
 
-    it('buildsTaskDescriptionWithAppHints', 0, () => {
+    it('buildsTaskDescriptionFromRawTaskOnly', 0, () => {
       let description = buildMobileGuiWorkflowTaskDescription(mobileGuiRequest());
 
-      expect(description.indexOf('打开微信查看今天的消息') >= 0).assertTrue();
-      expect(description.indexOf('目标应用名称提示：微信') >= 0).assertTrue();
-      expect(description.indexOf('目标应用包名提示：com.tencent.mm') >= 0).assertTrue();
-      expect(description.indexOf('最大步骤建议：18') >= 0).assertTrue();
+      expect(description).assertEqual('打开微信查看今天的消息');
+      expect(description.indexOf('目标应用名称提示') < 0).assertTrue();
+      expect(description.indexOf('目标应用包名提示') < 0).assertTrue();
+      expect(description.indexOf('最大步骤建议') < 0).assertTrue();
     });
 
     it('buildsTemporaryWorkflowTaskWithoutPersistingIndex', 0, () => {
@@ -64,9 +62,11 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect((workflow.steps as WorkflowJsonStep[]).length).assertEqual(2);
       expect((workflow.steps as WorkflowJsonStep[])[0].type).assertEqual('gui_task');
       expect((workflow.steps as WorkflowJsonStep[])[1].type).assertEqual('gui_task');
-      expect(((workflow.steps as WorkflowJsonStep[])[0].task_description || '').indexOf('com.tencent.mm') >= 0).assertTrue();
-      expect((workflow.steps as WorkflowJsonStep[])[0].package_name).assertEqual('com.tencent.mm');
+      expect((workflow.steps as WorkflowJsonStep[])[0].task_description).assertEqual('打开微信查看今天的消息');
+      expect((workflow.steps as WorkflowJsonStep[])[0].package_name === undefined).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[0].extract_result === undefined).assertTrue();
+      expect((workflow.steps as WorkflowJsonStep[])[1].task_description).assertEqual('打开微信查看今天的消息');
+      expect((workflow.steps as WorkflowJsonStep[])[1].package_name === undefined).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[1].extract_result).assertTrue();
       expect((workflow.steps as WorkflowJsonStep[])[1].max_steps).assertEqual(18);
       expect((workflow.steps as WorkflowJsonStep[])[1].fail_on_max_steps).assertTrue();

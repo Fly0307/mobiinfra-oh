@@ -13,14 +13,10 @@ const MAX_STEPS_LIMIT: number = 50;
 type MobileGuiTaskJsonValue = Object | string | number | boolean | null;
 interface MobileGuiTaskArguments {
   task?: string;
-  app_name?: string;
-  package_name?: string;
   max_steps?: number;
 }
 interface MobileGuiTaskToolProperties {
   task: MobileGuiTaskSchemaField;
-  app_name: MobileGuiTaskSchemaField;
-  package_name: MobileGuiTaskSchemaField;
   max_steps: MobileGuiTaskSchemaField;
 }
 
@@ -205,8 +201,6 @@ export function normalizeMobileGuiTaskArguments(argsText: string): MobileGuiTask
       ok: true,
       request: {
         task: task,
-        appName: readOptionalStringField(args.app_name),
-        packageName: readOptionalStringField(args.package_name),
         maxSteps: readMaxSteps(args.max_steps)
       },
       errorCode: '',
@@ -245,7 +239,7 @@ export function stringifyMobileGuiTaskToolResponse(response: MobileGuiTaskToolRe
 }
 
 function assertAllowedFields(args: Object): void {
-  let allowed: string[] = ['task', 'app_name', 'package_name', 'max_steps'];
+  let allowed: string[] = ['task', 'max_steps'];
   let keys = Object.keys(args);
   for (let i = 0; i < keys.length; i++) {
     let key = keys[i];
@@ -261,16 +255,6 @@ function readRequiredStringField(value: string | undefined, key: string): string
   }
   if (typeof value !== 'string') {
     throw new Error(key + ' must be a string.');
-  }
-  return value.trim();
-}
-
-function readOptionalStringField(value: string | undefined): string {
-  if (value === undefined) {
-    return '';
-  }
-  if (typeof value !== 'string') {
-    throw new Error('Optional string field must be a string.');
   }
   return value.trim();
 }
@@ -296,8 +280,6 @@ function readMaxSteps(value: number | undefined): number {
 function emptyRequest(): MobileGuiTaskRequest {
   return {
     task: '',
-    appName: '',
-    packageName: '',
     maxSteps: DEFAULT_MAX_STEPS
   };
 }
@@ -320,9 +302,7 @@ function numberSchema(description: string): MobileGuiTaskSchemaField {
 
 function createToolProperties(): MobileGuiTaskToolProperties {
   let properties: MobileGuiTaskToolProperties = {
-    task: stringSchema('需要执行的手机 GUI 任务。'),
-    app_name: stringSchema('可选的目标应用名称。'),
-    package_name: stringSchema('可选的目标应用包名。'),
+    task: stringSchema('根据用户需要下发执行的手机 GUI 任务。例如“在xxAPP中进行xxx”,例如“在饿了么APP中帮我下单一杯蜜雪冰城的冰鲜柠檬水。”'),
     max_steps: numberSchema('可选的最大执行步数。非正数回退默认值 20，超过 50 时截断为 50。')
   };
   return properties;

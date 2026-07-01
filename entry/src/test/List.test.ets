@@ -21,6 +21,7 @@ import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
+import agentActionParserUnitTest from './AgentActionParserUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -46,4 +47,5 @@ export default function testsuite() {
   dateUtilsUnitTest();
   mobileGuiTaskToolUnitTest();
   mobileGuiTaskWorkflowAdapterUnitTest();
+  agentActionParserUnitTest();
 }

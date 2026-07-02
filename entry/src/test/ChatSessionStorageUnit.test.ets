@@ -877,6 +877,61 @@ export default function chatSessionStorageUnitTest() {
       cleanupPath(root);
     });
 
+    it('deleteSessionRemovesTtsVoiceCacheFiles', 0, () => {
+      let root = nextTestRoot('delete-tts-assets');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, session.id);
+      let voicePath = ChatSessionStorage.sessionAssetPath(root, session.id, 'assistant-1-tts.wav');
+      ChatSessionStorage.writeText(voicePath, 'fake-wav');
+
+      let deleted = ChatSessionStorage.deleteSession(root, session.id);
+
+      expect(deleted).assertTrue();
+      expect(ChatSessionStorage.pathExists(voicePath)).assertFalse();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, session.id))).assertFalse();
+
+      cleanupPath(root);
+    });
+
+    it('sessionExistsTracksDeletedSessionRecords', 0, () => {
+      let root = nextTestRoot('session-exists-after-delete');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, session.id);
+
+      expect(ChatSessionStorage.sessionExists(root, session.id)).assertTrue();
+
+      ChatSessionStorage.deleteSession(root, session.id);
+
+      // 覆盖异步 TTS 保存前的会话存活判断，避免删除后继续落盘缓存。
+      expect(ChatSessionStorage.sessionExists(root, session.id)).assertFalse();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, session.id))).assertFalse();
+
+      cleanupPath(root);
+    });
+
+    it('deleteSessionAssetsDirRemovesTtsCacheWithoutDeletingSessionRecord', 0, () => {
+      let root = nextTestRoot('delete-session-assets-dir-only');
+      prepareTestRoot(root);
+
+      let session = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, session.id);
+      let voicePath = ChatSessionStorage.sessionAssetPath(root, session.id, 'assistant-1-tts.wav');
+      ChatSessionStorage.writeText(voicePath, 'fake-wav');
+
+      ChatSessionStorage.deleteSessionAssetsDir(root, session.id);
+
+      // 覆盖 TTS 删除竞态的补偿清理：只移除缓存目录，不破坏仍存在的会话记录。
+      expect(ChatSessionStorage.pathExists(voicePath)).assertFalse();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, session.id))).assertFalse();
+      expect(ChatSessionStorage.sessionExists(root, session.id)).assertTrue();
+
+      cleanupPath(root);
+    });
+
     it('deleteSessionKeepsOtherSessionAssetFiles', 0, () => {
       let root = nextTestRoot('delete-assets-isolated');
       prepareTestRoot(root);
@@ -895,6 +950,29 @@ export default function chatSessionStorageUnitTest() {
       expect(deleted).assertTrue();
       expect(ChatSessionStorage.pathExists(firstImagePath)).assertFalse();
       expect(ChatSessionStorage.pathExists(secondImagePath)).assertTrue();
+      expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, second.id))).assertTrue();
+
+      cleanupPath(root);
+    });
+
+    it('deleteSessionKeepsOtherSessionTtsVoiceCacheFiles', 0, () => {
+      let root = nextTestRoot('delete-tts-assets-isolated');
+      prepareTestRoot(root);
+
+      let first = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 1000);
+      let second = ChatSessionStorage.createSession(root, CHAT_MODE_CLOUD_AGENT, 2000);
+      ChatSessionStorage.ensureSessionAssetsDir(root, first.id);
+      ChatSessionStorage.ensureSessionAssetsDir(root, second.id);
+      let firstVoicePath = ChatSessionStorage.sessionAssetPath(root, first.id, 'assistant-1-tts.wav');
+      let secondVoicePath = ChatSessionStorage.sessionAssetPath(root, second.id, 'assistant-2-tts.wav');
+      ChatSessionStorage.writeText(firstVoicePath, 'first-wav');
+      ChatSessionStorage.writeText(secondVoicePath, 'second-wav');
+
+      let deleted = ChatSessionStorage.deleteSession(root, first.id);
+
+      expect(deleted).assertTrue();
+      expect(ChatSessionStorage.pathExists(firstVoicePath)).assertFalse();
+      expect(ChatSessionStorage.pathExists(secondVoicePath)).assertTrue();
       expect(ChatSessionStorage.pathExists(ChatSessionStorage.sessionAssetsDir(root, second.id))).assertTrue();
 
       cleanupPath(root);

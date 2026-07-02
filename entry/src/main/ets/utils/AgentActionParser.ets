@@ -1,4 +1,4 @@
-import { JSON as ArkJSON } from '@kit.ArkTS';
+import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { WorkflowJsonRepair } from './WorkflowJsonRepair';
 import { WorkflowJsonMap, WorkflowJsonValue } from './WorkflowTypes';
 
@@ -80,14 +80,14 @@ export class AgentActionParser {
   static extractJsonMap(raw: string, failOnParseError: boolean = true): WorkflowJsonMap {
     let text = WorkflowJsonRepair.normalizeJsonText(raw);
     try {
-      let parsed = ArkJSON.parse(text) as WorkflowJsonMap;
+      let parsed = parseJsonCompat<WorkflowJsonMap>(text);
       return AgentActionParser.unwrapKnownPayload(parsed, 0);
     } catch (e) {
       let candidates = WorkflowJsonRepair.repairCandidates(text);
       let lastMessage = (e as Error).message || String(e);
       for (let i = 0; i < candidates.length; i++) {
         try {
-          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          let parsed = parseJsonCompat<WorkflowJsonMap>(candidates[i]);
           return AgentActionParser.unwrapKnownPayload(parsed, 0);
         } catch (repairError) {
           lastMessage = (repairError as Error).message || String(repairError);
@@ -295,8 +295,8 @@ export class AgentActionParser {
       text = text.substring(jsonStart, jsonEnd + 1);
     }
     try {
-      let parsed = ArkJSON.parse(text) as Object;
-      return ArkJSON.stringify(parsed);
+      let parsed = parseJsonCompat<Object>(text);
+      return stringifyJsonCompat(parsed);
     } catch (e) {
       return response;
     }
@@ -459,14 +459,14 @@ export class AgentActionParser {
   private static stringToKnownPayload(value: string, depth: number): WorkflowJsonMap | null {
     let text = WorkflowJsonRepair.normalizeJsonText(value);
     try {
-      let parsed = ArkJSON.parse(text) as WorkflowJsonMap;
+      let parsed = parseJsonCompat<WorkflowJsonMap>(text);
       let unwrapped = AgentActionParser.unwrapKnownPayload(parsed, depth + 1);
       return AgentActionParser.isKnownPayload(unwrapped) ? unwrapped : null;
     } catch (e) {
       let candidates = WorkflowJsonRepair.repairCandidates(text);
       for (let i = 0; i < candidates.length; i++) {
         try {
-          let parsed = ArkJSON.parse(candidates[i]) as WorkflowJsonMap;
+          let parsed = parseJsonCompat<WorkflowJsonMap>(candidates[i]);
           let unwrapped = AgentActionParser.unwrapKnownPayload(parsed, depth + 1);
           if (AgentActionParser.isKnownPayload(unwrapped)) {
             return unwrapped;

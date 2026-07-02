@@ -13,6 +13,7 @@ import {
   chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
+  chatMessageVoiceMetadataForStorage,
   createEmptyChatSession,
   normalizeChatMode,
   splitAssistantThinkingContent
@@ -54,6 +55,11 @@ export class ChatSessionStorage {
     return ChatSessionStorage.sessionsDir(filesDir) + '/' + ChatSessionStorage.sessionFileName(sessionId);
   }
 
+  // 只做会话记录存在性判断，不解析 JSON，供异步缓存保存前快速确认会话未被删除。
+  static sessionExists(filesDir: string, sessionId: string): boolean {
+    return ChatSessionStorage.pathExists(ChatSessionStorage.sessionPath(filesDir, sessionId));
+  }
+
   static sessionAssetPath(filesDir: string, sessionId: string, fileName: string): string {
     return ChatSessionStorage.sessionAssetsDir(filesDir, sessionId) + '/' + ChatSessionStorage.safeAssetFileName(fileName);
   }
@@ -88,6 +94,11 @@ export class ChatSessionStorage {
   static ensureSessionAssetsDir(filesDir: string, sessionId: string): void {
     ChatSessionStorage.ensureWorkspace(filesDir);
     ChatSessionStorage.ensureDirectory(ChatSessionStorage.sessionAssetsDir(filesDir, sessionId));
+  }
+
+  // 独立清理指定会话的资源目录，避免异步 TTS 保存竞态留下孤立缓存。
+  static deleteSessionAssetsDir(filesDir: string, sessionId: string): void {
+    ChatSessionStorage.deletePathRecursive(ChatSessionStorage.sessionAssetsDir(filesDir, sessionId));
   }
 
   static readText(path: string): string {
@@ -313,7 +324,7 @@ export class ChatSessionStorage {
         return false;
       }
     }
-    ChatSessionStorage.deletePathRecursive(ChatSessionStorage.sessionAssetsDir(filesDir, sessionId));
+    ChatSessionStorage.deleteSessionAssetsDir(filesDir, sessionId);
     ChatSessionStorage.removeFromIndex(filesDir, sessionId);
     return true;
   }
@@ -334,7 +345,7 @@ export class ChatSessionStorage {
         visibleContent = parts.content;
         thinkingContent = parts.thinkingContent;
       }
-      normalized.push({
+      let normalizedMessage: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -346,7 +357,12 @@ export class ChatSessionStorage {
         createdAt: message.createdAt,
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
-      });
+      };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        normalizedMessage.voice = voiceMetadata;
+      }
+      normalized.push(normalizedMessage);
     }
     return normalized;
   }

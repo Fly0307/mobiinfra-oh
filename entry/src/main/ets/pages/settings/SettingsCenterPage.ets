@@ -28,6 +28,14 @@ import {
 } from '../../utils/gallery/GallerySettingsDefaults';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
+  MIMO_CHINESE_VOICE_PRESETS,
+  VOICE_TTS_ROLE_PRESETS,
+  VoiceTtsRolePreset,
+  VoiceTtsRoleSelection,
+  VoiceTtsVoicePreset,
+  voiceTtsSelectionFromRolePreset
+} from '../../utils/voice/VoiceTtsPresets';
+import {
   DEFAULT_WECHAT_AUTO_SUMMARY_DAYS,
   DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED,
   DEFAULT_WECHAT_AUTO_SUMMARY_HISTORY_SWIPE_RATIO,
@@ -81,6 +89,7 @@ import {
 
 registerGallerySettingsDefaults();
 
+const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
 @Component
 export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
@@ -116,6 +125,14 @@ export struct SettingsCenterPage {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
+  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey;
+  @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
+  @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
+  @StorageLink('voiceTtsStylePrompt') voiceTtsStylePrompt: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt;
+  @StorageLink('voiceTtsRolePreset') voiceTtsRolePreset: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset;
+  @StorageLink('voiceTtsStreamingEnabled') voiceTtsStreamingEnabled: boolean =
+    DEFAULT_ENDPOINT_CONFIG.voiceTtsStreamingEnabled;
   @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string =
@@ -156,6 +173,7 @@ export struct SettingsCenterPage {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   private detailScroller: Scroller = new Scroller();
+  @State private voiceTtsStylePromptEditorRevision: number = 0;
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
   onDeleteModelFiles: () => void = () => {};
@@ -182,15 +200,25 @@ export struct SettingsCenterPage {
 
   aboutToAppear(): void {
     this.restoreMaskedDefaultSecrets();
+    this.upgradeLegacyVoiceTtsBaseUrl();
   }
 
   private restoreMaskedDefaultSecrets(): void {
     this.cloudApiKey = restoreMaskedSensitiveSettingDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
     this.avatarImageApiKey = restoreMaskedSensitiveSettingDefault(this.avatarImageApiKey,
       DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
+    this.voiceTtsApiKey = restoreMaskedSensitiveSettingDefault(this.voiceTtsApiKey,
+      DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey);
     this.galleryApiKey = restoreMaskedSensitiveSettingDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY);
     this.galleryEmbeddingApiKey =
       restoreMaskedSensitiveSettingDefault(this.galleryEmbeddingApiKey, DEFAULT_GALLERY_EMBEDDING_API_KEY);
+  }
+
+  private upgradeLegacyVoiceTtsBaseUrl(): void {
+    // 只迁移旧默认值；用户手动配置的其他 OpenAI-compatible 地址保持不变。
+    if (this.voiceTtsBaseUrl.trim() === LEGACY_MIMO_TTS_BASE_URL) {
+      this.voiceTtsBaseUrl = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
+    }
   }
 
   private hdcInputEditable(): boolean {
@@ -447,6 +475,83 @@ export struct SettingsCenterPage {
       selected: selected,
       onValueChange: onValueChange
     })
+  }
+
+  @Builder VoiceTtsStylePromptTextArea() {
+    TextArea({ placeholder: '留空则不发送 user 风格消息', text: this.voiceTtsStylePrompt })
+      .height(96)
+      .width('100%')
+      .maxLines(5)
+      .fontSize(13)
+      .lineHeight(20)
+      .fontColor(SETTINGS_MUTED_TEXT_COLOR)
+      .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
+      .borderRadius(SETTINGS_CONTROL_RADIUS)
+      .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+      .onChange((val: string) => {
+        this.voiceTtsStylePrompt = val;
+      })
+  }
+
+  @Builder VoiceTtsStylePromptInput() {
+    this.FieldLabel('语音风格提示')
+    if (this.voiceTtsStylePromptEditorRevision % 2 === 0) {
+      this.VoiceTtsStylePromptTextArea()
+    } else {
+      // 角色预设切换会改变外部状态；输入组件自身有编辑态，切换分支可确保文本重建同步。
+      this.VoiceTtsStylePromptTextArea()
+    }
+  }
+
+  @Builder VoiceTtsRolePresetButton(preset: VoiceTtsRolePreset) {
+    Button(preset.label)
+      .height(36)
+      .width('48%')
+      .fontSize(12)
+      .fontColor(this.voiceTtsRolePreset === preset.id ? Color.White : settingsActionColor(SettingsActionKind.Primary))
+      .backgroundColor(this.voiceTtsRolePreset === preset.id ? settingsActionColor(SettingsActionKind.Primary) :
+        '#EEF3FF')
+      .borderRadius(10)
+      .margin({ right: 6, bottom: 8 })
+      .onClick(() => {
+        let selection: VoiceTtsRoleSelection = voiceTtsSelectionFromRolePreset(preset);
+        this.voiceTtsRolePreset = selection.rolePreset;
+        this.voiceTtsVoice = selection.voice;
+        this.voiceTtsStylePrompt = selection.stylePrompt;
+        this.voiceTtsStylePromptEditorRevision++;
+      })
+  }
+
+  @Builder VoiceTtsVoicePresetButton(voice: VoiceTtsVoicePreset) {
+    Button(voice)
+      .height(34)
+      .width('31%')
+      .fontSize(11)
+      .fontColor(this.voiceTtsVoice === voice ? Color.White : settingsActionColor(SettingsActionKind.Primary))
+      .backgroundColor(this.voiceTtsVoice === voice ? settingsActionColor(SettingsActionKind.Primary) : '#EEF3FF')
+      .borderRadius(10)
+      .margin({ right: 6, bottom: 8 })
+      .onClick(() => { this.voiceTtsVoice = voice; })
+  }
+
+  @Builder VoiceTtsPresetSettings() {
+    this.SettingToggle('流式语音合成', '开启后首批 PCM 到达即播放，失败时回退 WAV 合成',
+      this.voiceTtsStreamingEnabled, (value: boolean) => { this.voiceTtsStreamingEnabled = value; })
+    this.FieldLabel('助手朗读角色')
+    Flex({ wrap: FlexWrap.Wrap }) {
+      ForEach(VOICE_TTS_ROLE_PRESETS, (preset: VoiceTtsRolePreset) => {
+        this.VoiceTtsRolePresetButton(preset)
+      }, (preset: VoiceTtsRolePreset) => preset.id)
+    }
+    .width('100%')
+    this.FieldLabel('语音合成音色')
+    Flex({ wrap: FlexWrap.Wrap }) {
+      ForEach(MIMO_CHINESE_VOICE_PRESETS, (voice: VoiceTtsVoicePreset) => {
+        this.VoiceTtsVoicePresetButton(voice)
+      }, (voice: VoiceTtsVoicePreset) => voice)
+    }
+    .width('100%')
+    this.VoiceTtsStylePromptInput()
   }
 
   private isWechatAutoSummaryEnabled(): boolean {
@@ -868,6 +973,11 @@ export struct SettingsCenterPage {
         contentBuilder: () => { this.CloudPlannerDeciderGroup() }
       })
       SettingsGroupCard({
+        title: '语音合成服务',
+        subtitle: '配置助手朗读的 TTS 服务、模型、音色与流式播放',
+        contentBuilder: () => { this.VoiceTtsServiceGroup() }
+      })
+      SettingsGroupCard({
         title: '上下文压缩',
         subtitle: '聊天上下文压缩阈值和保留轮数',
         contentBuilder: () => { this.ContextCompressionGroup() }
@@ -939,6 +1049,28 @@ export struct SettingsCenterPage {
       kind: SettingsActionKind.Success,
       onActionClick: async () => { await this.onTestCloudPlanner(); }
     })
+  }
+
+  @Builder VoiceTtsServiceGroup() {
+    SettingInput({
+      label: '语音合成服务',
+      value: this.voiceTtsBaseUrl,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+      onValueChange: (value: string) => { this.voiceTtsBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      label: '语音合成 API Key',
+      value: this.voiceTtsApiKey,
+      placeholder: 'MiMO TTS 服务密钥，格式 tp-xxxxx',
+      onValueChange: (value: string) => { this.voiceTtsApiKey = value; }
+    })
+    SettingInput({
+      label: '语音合成模型',
+      value: this.voiceTtsModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
+      onValueChange: (value: string) => { this.voiceTtsModel = value; }
+    })
+    this.VoiceTtsPresetSettings()
   }
 
   @Builder ContextCompressionGroup() {

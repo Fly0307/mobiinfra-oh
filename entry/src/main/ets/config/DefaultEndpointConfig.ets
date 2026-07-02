@@ -39,6 +39,13 @@ export interface EndpointDefaultConfig {
   avatarImageResponseFormat: string;
   avatarImageOutputFormat: string;
   avatarImageWatermark: boolean;
+  voiceTtsBaseUrl: string;
+  voiceTtsApiKey: string;
+  voiceTtsModel: string;
+  voiceTtsVoice: string;
+  voiceTtsStylePrompt: string;
+  voiceTtsRolePreset: string;
+  voiceTtsStreamingEnabled: boolean;
 }
 
 export interface LegacyEndpointConfig {
@@ -49,6 +56,7 @@ export interface LegacyEndpointConfig {
   cloudDeciderBaseUrls: string[];
   cloudApiKeys: string[];
   cloudDeciderModels: string[];
+  voiceTtsBaseUrls: string[];
 }
 
 export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
@@ -67,7 +75,14 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   avatarImageSize: '2K',
   avatarImageResponseFormat: 'url',
   avatarImageOutputFormat: 'jpeg',
-  avatarImageWatermark: true
+  avatarImageWatermark: true,
+  voiceTtsBaseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+  voiceTtsApiKey: '',
+  voiceTtsModel: 'mimo-v2.5-tts',
+  voiceTtsVoice: '冰糖',
+  voiceTtsStylePrompt: '用温和清晰的中文语气朗读，适合整理回顾信息。',
+  voiceTtsRolePreset: 'data_home',
+  voiceTtsStreamingEnabled: true
 };
 
 export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
@@ -95,6 +110,9 @@ export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
   cloudDeciderModels: [
     'decider',
     'decider_model'
+  ],
+  voiceTtsBaseUrls: [
+    'https://api.xiaomimimo.com'
   ]
 };
 

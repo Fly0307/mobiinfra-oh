@@ -2,8 +2,12 @@ import {
   FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT,
   FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR,
   FIRST_LAUNCH_ONBOARDING_SLIDE_DATA_HOME,
+  FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE,
   FIRST_LAUNCH_ONBOARDING_SLIDES,
+  FIRST_LAUNCH_USAGE_GUIDE_ITEMS,
+  FirstLaunchOnboardingSlideKind,
   FirstLaunchOnboardingSlide,
+  FirstLaunchUsageGuideItem,
   clampFirstLaunchOnboardingIndex,
   firstLaunchOnboardingButtonText,
   isFirstLaunchOnboardingLastPage
@@ -16,9 +20,9 @@ const ONBOARDING_CARD_BACKGROUND: string = '#FFFFFFFF';
 const ONBOARDING_DOT_INACTIVE: string = '#DCE3F0';
 
 /**
- * 首次安装核心能力预览页。
+ * 首次安装核心能力与使用路径引导页。
  *
- * 组件只负责展示三页产品介绍和完成回调，不读写持久化状态。
+ * 组件只负责展示产品介绍、使用配置清单和完成回调，不读写持久化状态。
  * 完成状态由 Index 统一写入，避免引导页组件和应用 Shell 形成隐式耦合。
  */
 @Component
@@ -78,7 +82,7 @@ export struct FirstLaunchOnboarding {
   }
 
   @Builder
-  private SlidePage(slide: FirstLaunchOnboardingSlide) {
+  private PreviewSlidePage(slide: FirstLaunchOnboardingSlide) {
     Column() {
       this.SlideHero(slide)
 
@@ -106,6 +110,107 @@ export struct FirstLaunchOnboarding {
   }
 
   @Builder
+  private UsageGuideCard(item: FirstLaunchUsageGuideItem) {
+    Row({ space: 14 }) {
+      Row() {
+        Text(item.iconText)
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(item.accentColor)
+      }
+      .width(42)
+      .height(42)
+      .borderRadius(14)
+      .backgroundColor(item.softBackgroundColor)
+      .justifyContent(FlexAlign.Center)
+
+      Column({ space: 5 }) {
+        Text(item.title)
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(ONBOARDING_TEXT_PRIMARY)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text(item.entryLabel)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(item.accentColor)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text(item.configLabel)
+          .fontSize(14)
+          .lineHeight(20)
+          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text(item.description)
+          .fontSize(14)
+          .lineHeight(20)
+          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 15, bottom: 15 })
+    .backgroundColor(ONBOARDING_CARD_BACKGROUND)
+    .borderRadius(22)
+    .alignItems(VerticalAlign.Top)
+  }
+
+  @Builder
+  private UsageGuidePage(slide: FirstLaunchOnboardingSlide) {
+    Scroll() {
+      Column() {
+        Text(slide.title)
+          .fontSize(32)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(ONBOARDING_TEXT_PRIMARY)
+          .textAlign(TextAlign.Center)
+          .width('100%')
+
+        Text(slide.description)
+          .fontSize(17)
+          .lineHeight(25)
+          .fontColor(ONBOARDING_TEXT_SECONDARY)
+          .textAlign(TextAlign.Center)
+          .maxLines(4)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .margin({ top: 12 })
+
+        Column({ space: 12 }) {
+          ForEach(FIRST_LAUNCH_USAGE_GUIDE_ITEMS, (item: FirstLaunchUsageGuideItem) => {
+            this.UsageGuideCard(item)
+          }, (item: FirstLaunchUsageGuideItem) => item.id)
+        }
+        .width('100%')
+        .margin({ top: 22 })
+      }
+      .width('100%')
+      .padding({ left: 24, right: 24, top: 8, bottom: 8 })
+    }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+  }
+
+  @Builder
+  private SlidePage(slide: FirstLaunchOnboardingSlide) {
+    if (slide.kind === FirstLaunchOnboardingSlideKind.UsageGuide ||
+      slide.id === FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE) {
+      this.UsageGuidePage(slide)
+    } else {
+      this.PreviewSlidePage(slide)
+    }
+  }
+
+  @Builder
   private ProgressDot(index: number, slide: FirstLaunchOnboardingSlide) {
     Row()
       .width(this.currentIndex === index ? 24 : 8)
@@ -118,9 +223,9 @@ export struct FirstLaunchOnboarding {
   @Builder
   private ProgressDots() {
     Row() {
-      this.ProgressDot(0, FIRST_LAUNCH_ONBOARDING_SLIDES[0])
-      this.ProgressDot(1, FIRST_LAUNCH_ONBOARDING_SLIDES[1])
-      this.ProgressDot(2, FIRST_LAUNCH_ONBOARDING_SLIDES[2])
+      ForEach(FIRST_LAUNCH_ONBOARDING_SLIDES, (slide: FirstLaunchOnboardingSlide, index: number) => {
+        this.ProgressDot(index, slide)
+      }, (slide: FirstLaunchOnboardingSlide) => slide.id)
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')

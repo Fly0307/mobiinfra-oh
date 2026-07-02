@@ -99,7 +99,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT,
     kind: FirstLaunchOnboardingSlideKind.Preview,
     title: '自动执行',
-    description: '让 Agent 根据你的目标规划步骤、调用工具并执行任务，关键动作保留确认边界。',
+    description: '让 Agent 根据你的目标规划步骤、调用工具并执行任务，更准确，更懂你。',
     mediaResourceName: 'onboarding_agent',
     accentColor: '#18A886',
     softBackgroundColor: '#E9F8F3'

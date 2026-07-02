@@ -17,6 +17,7 @@ import {
 } from '../../utils/gallery/GalleryMonthlyInsights';
 import { GalleryPhotoPicker } from '../../utils/gallery/GalleryPhotoPicker';
 import { GalleryReverseGeocoder } from '../../utils/gallery/GalleryReverseGeocoder';
+import { configuredEndpointSecretOrDefault } from '../../config/DefaultEndpointConfig';
 import {
   DEFAULT_GALLERY_AMAP_WEB_KEY,
   DEFAULT_GALLERY_API_BASE_URL,
@@ -156,9 +157,7 @@ struct GalleryPage {
   }
 
   private ensureDefaultSettings(): void {
-    if (this.galleryApiKey.trim().length === 0) {
-      this.galleryApiKey = DEFAULT_GALLERY_API_KEY;
-    }
+    this.galleryApiKey = configuredEndpointSecretOrDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY);
     if (this.galleryModel.trim().length === 0) {
       this.galleryModel = DEFAULT_GALLERY_MODEL;
     }
@@ -168,18 +167,15 @@ struct GalleryPage {
     if (this.galleryEmbeddingMode.trim().length === 0) {
       this.galleryEmbeddingMode = DEFAULT_GALLERY_EMBEDDING_MODE;
     }
-    if (this.galleryEmbeddingApiKey.trim().length === 0) {
-      this.galleryEmbeddingApiKey = DEFAULT_GALLERY_EMBEDDING_API_KEY;
-    }
+    this.galleryEmbeddingApiKey = configuredEndpointSecretOrDefault(this.galleryEmbeddingApiKey,
+      DEFAULT_GALLERY_EMBEDDING_API_KEY);
     if (this.galleryUseOcrKeywordFilter.trim().length === 0) {
       this.galleryUseOcrKeywordFilter = DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER;
     }
     if (this.galleryParallelFieldRequests.trim().length === 0) {
       this.galleryParallelFieldRequests = DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS;
     }
-    if (this.galleryAmapWebKey.trim().length === 0) {
-      this.galleryAmapWebKey = DEFAULT_GALLERY_AMAP_WEB_KEY;
-    }
+    this.galleryAmapWebKey = configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY);
     this.galleryImageScale = this.normalizeScale(this.galleryImageScale, DEFAULT_GALLERY_IMAGE_SCALE);
   }
 
@@ -695,7 +691,7 @@ struct GalleryPage {
   private galleryCloudModelConfig(): GalleryCloudModelConfig {
     return {
       baseUrl: this.galleryApiBaseUrl.trim().length > 0 ? this.galleryApiBaseUrl.trim() : DEFAULT_GALLERY_API_BASE_URL,
-      apiKey: this.galleryApiKey.trim().length > 0 ? this.galleryApiKey.trim() : DEFAULT_GALLERY_API_KEY,
+      apiKey: configuredEndpointSecretOrDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY),
       model: this.galleryModel.trim().length > 0 ? this.galleryModel.trim() : DEFAULT_GALLERY_MODEL
     };
   }
@@ -1637,7 +1633,7 @@ struct GalleryPage {
           .backgroundColor('#EEF4FF')
           .borderRadius(10)
           .onClick(() => {
-            if (this.galleryAmapWebKey.trim().length === 0) {
+            if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
               this.settingsOpen = true;
               return;
             }
@@ -2224,9 +2220,9 @@ struct GalleryPage {
   private buildAnalyzerConfig(useOcrKeywordFilter: boolean): GalleryAnalyzerConfig {
     return {
       apiBaseUrl: this.galleryApiBaseUrl.trim().length > 0 ? this.galleryApiBaseUrl.trim() : DEFAULT_GALLERY_API_BASE_URL,
-      apiKey: this.galleryApiKey.trim().length > 0 ? this.galleryApiKey.trim() : DEFAULT_GALLERY_API_KEY,
+      apiKey: configuredEndpointSecretOrDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY),
       model: this.galleryModel.trim().length > 0 ? this.galleryModel.trim() : DEFAULT_GALLERY_MODEL,
-      amapWebKey: this.galleryAmapWebKey.trim(),
+      amapWebKey: configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY),
       skipOcr: this.gallerySkipOcr === 'true',
       useOcrKeywordFilter: useOcrKeywordFilter && this.gallerySkipOcr !== 'true' && this.galleryUseOcrKeywordFilter === 'true',
       ocrConcurrency: parseInt(this.galleryOcrConcurrency),
@@ -2235,7 +2231,8 @@ struct GalleryPage {
       parallelFieldRequests: this.galleryParallelFieldRequests === 'true',
       embeddingMode: this.galleryEmbeddingMode === 'remote' ? 'remote' : 'huawei_local',
       embeddingBaseUrl: this.galleryEmbeddingBaseUrl.trim().length > 0 ? this.galleryEmbeddingBaseUrl.trim() : DEFAULT_GALLERY_EMBEDDING_BASE_URL,
-      embeddingApiKey: this.galleryEmbeddingApiKey.trim(),
+      embeddingApiKey: configuredEndpointSecretOrDefault(this.galleryEmbeddingApiKey,
+        DEFAULT_GALLERY_EMBEDDING_API_KEY),
       embeddingModel: this.galleryEmbeddingModel.trim().length > 0 ? this.galleryEmbeddingModel.trim() : DEFAULT_GALLERY_EMBEDDING_MODEL,
       imageScale: parseFloat(this.normalizeScale(this.galleryImageScale, DEFAULT_GALLERY_IMAGE_SCALE))
     };
@@ -2581,7 +2578,7 @@ struct GalleryPage {
   }
 
   private captureStaticMapUrl(item: GalleryAnalysisResult): string {
-    let amapKey = this.galleryAmapWebKey.trim();
+    let amapKey = configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY);
     if (amapKey.length === 0) {
       return '';
     }
@@ -2662,14 +2659,14 @@ struct GalleryPage {
     if (this.locationResolveErrorKey === key && this.locationResolveErrorText.length > 0) {
       return '解析失败：' + this.locationResolveErrorText;
     }
-    if (this.galleryAmapWebKey.trim().length === 0) {
+    if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
       return '配置高德 Web 服务 Key 后，可按需解析具体地理位置。';
     }
     return '尚未解析具体地址，点击右侧按钮后会请求一次并写入本地缓存。';
   }
 
   private captureLocationActionText(item: GalleryAnalysisResult): string {
-    if (this.galleryAmapWebKey.trim().length === 0) {
+    if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
       return '配置';
     }
     let key = this.captureLocationCacheKey(item);
@@ -2702,7 +2699,7 @@ struct GalleryPage {
       this.persistLocationToResult(item, this.locationCacheRecords[key]);
       return;
     }
-    let amapKey = this.galleryAmapWebKey.trim();
+    let amapKey = configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY);
     if (amapKey.length === 0) {
       this.locationResolveRevision += 1;
       return;

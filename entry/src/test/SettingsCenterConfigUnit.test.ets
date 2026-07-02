@@ -2,11 +2,14 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   SettingsActionKind,
   isSettingsSectionSelected,
+  isMaskedSensitiveSettingValue,
   maskSensitiveSettingValue,
   normalizeSettingsSectionId,
   restoreMaskedSensitiveSettingDefault,
   SETTINGS_SECTION_ITEMS,
   SETTINGS_SECTION_NONE,
+  settingsInputShouldUseMultiline,
+  settingsSensitiveInputShouldUseMultiline,
   SettingsSectionId,
   settingsSectionSubtitle,
   settingsSectionTitle
@@ -14,8 +17,15 @@ import {
 import { settingsActionColor } from '../main/ets/pages/settings/SettingsCenterTheme';
 import {
   DEFAULT_ENDPOINT_CONFIG,
+  configuredEndpointSecretOrDefault,
   configuredEndpointValueOrDefault
 } from '../main/ets/config/DefaultEndpointConfig';
+import {
+  CloudModelConfig,
+  cloudDeciderApiKey,
+  cloudPlannerApiKey
+} from '../main/ets/utils/CloudModelClient';
+import { buildCloudOutputLog } from '../main/ets/utils/CloudLogOutput';
 
 export default function settingsCenterConfigUnitTest() {
   describe('settingsCenterConfigUnitTest', () => {
@@ -61,11 +71,27 @@ export default function settingsCenterConfigUnitTest() {
       expect(maskSensitiveSettingValue('sk-1234567890abcdef')).assertEqual('sk-1••••••••cdef');
     });
 
+    it('usesMultilineInputsForLongConfigurationText', 0, () => {
+      expect(settingsInputShouldUseMultiline('https://ark.cn-beijing.volces.com/api/v3/images/generations', ''))
+        .assertTrue();
+      expect(settingsInputShouldUseMultiline('mimo-v2.5-tts', '')).assertFalse();
+      expect(settingsSensitiveInputShouldUseMultiline('sk-1234567890abcdefghijklmnopqrstuvwxyz', ''))
+        .assertTrue();
+      expect(settingsSensitiveInputShouldUseMultiline('', 'MiMO TTS 服务密钥，格式 tp-xxxxx')).assertTrue();
+    });
+
     it('restoresMaskedDefaultSensitiveValues', 0, () => {
       expect(restoreMaskedSensitiveSettingDefault('sk-1••••••••cdef', 'sk-1234567890abcdef'))
         .assertEqual('sk-1234567890abcdef');
       expect(restoreMaskedSensitiveSettingDefault('sk-other••••••••abcd', 'sk-1234567890abcdef'))
-        .assertEqual('sk-other••••••••abcd');
+        .assertEqual('');
+    });
+
+    it('doesNotUseMaskedSensitiveValuesAsEndpointSecrets', 0, () => {
+      expect(isMaskedSensitiveSettingValue('366e••••••••0f68')).assertTrue();
+      expect(configuredEndpointSecretOrDefault('366e••••••••0f68', '')).assertEqual('');
+      expect(configuredEndpointSecretOrDefault('mobiagent-key', 'fallback-key')).assertEqual('mobiagent-key');
+      expect(configuredEndpointSecretOrDefault('   ', 'fallback-key')).assertEqual('fallback-key');
     });
 
     it('resolvesConfiguredEndpointValuesWithDefaultFallback', 0, () => {
@@ -74,12 +100,45 @@ export default function settingsCenterConfigUnitTest() {
       expect(configuredEndpointValueOrDefault(' custom-model ', 'default-model')).assertEqual('custom-model');
     });
 
+    it('resetsCloudOutputForFocusedPlannerTests', 0, () => {
+      expect(buildCloudOutputLog('old log', '[now] 测试 Planner：http://127.0.0.1:9003', true, 60000))
+        .assertEqual('[now] 测试 Planner：http://127.0.0.1:9003');
+      expect(buildCloudOutputLog('old log', '[now] Planner 测试返回：ok', false, 60000))
+        .assertEqual('old log\n[now] Planner 测试返回：ok');
+    });
+
     it('exposesModelAndApiDefaultsForFreshInstall', 0, () => {
       expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl).assertEqual('http://123.60.91.241:9003');
       expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel).assertEqual('');
       expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl).assertEqual('http://166.111.53.96:7003');
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey).assertEqual('mobiagent-key');
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey).assertEqual('mobiagent-key');
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageModel).assertEqual('doubao-seedream-4-5-251128');
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat).assertEqual('url');
+    });
+
+    it('resolvesSeparatePlannerAndDeciderApiKeys', 0, () => {
+      let config: CloudModelConfig = {
+        plannerBaseUrl: 'http://planner',
+        plannerModel: '',
+        plannerApiKey: 'planner-key',
+        deciderBaseUrl: 'http://decider',
+        deciderApiKey: 'decider-key',
+        apiKey: 'legacy-key',
+        deciderModel: ''
+      };
+      expect(cloudPlannerApiKey(config)).assertEqual('planner-key');
+      expect(cloudDeciderApiKey(config)).assertEqual('decider-key');
+
+      let legacyConfig: CloudModelConfig = {
+        plannerBaseUrl: 'http://planner',
+        plannerModel: '',
+        deciderBaseUrl: 'http://decider',
+        apiKey: 'legacy-key',
+        deciderModel: ''
+      };
+      expect(cloudPlannerApiKey(legacyConfig)).assertEqual('legacy-key');
+      expect(cloudDeciderApiKey(legacyConfig)).assertEqual('legacy-key');
     });
   });
 }

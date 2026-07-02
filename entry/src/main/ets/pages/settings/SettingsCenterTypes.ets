@@ -1,3 +1,5 @@
+import { isMaskedSensitiveValue } from '../../utils/SensitiveValueUtils';
+
 export enum SettingsSectionId {
   PersonalPrivacy = 0,
   DataCollection = 1,
@@ -38,6 +40,8 @@ export interface DownloadedModelItem {
 }
 
 export const SETTINGS_SECTION_NONE: number = -1;
+const SETTINGS_INPUT_SINGLE_LINE_LIMIT: number = 34;
+const SETTINGS_SENSITIVE_INPUT_SINGLE_LINE_LIMIT: number = 24;
 
 export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
   {
@@ -108,12 +112,36 @@ export function maskSensitiveSettingValue(value: string): string {
   return value.substring(0, 4) + '••••••••' + value.substring(value.length - 4);
 }
 
+export function isMaskedSensitiveSettingValue(value: string): boolean {
+  return isMaskedSensitiveValue(value);
+}
+
 export function restoreMaskedSensitiveSettingDefault(value: string, defaultValue: string): string {
-  if (defaultValue.length === 0) {
-    return value;
-  }
-  if (value === maskSensitiveSettingValue(defaultValue)) {
-    return defaultValue;
+  if (isMaskedSensitiveSettingValue(value)) {
+    if (defaultValue.length > 0 && value === maskSensitiveSettingValue(defaultValue)) {
+      return defaultValue;
+    }
+    return '';
   }
   return value;
+}
+
+function settingsTextExceedsSingleLine(text: string, singleLineLimit: number): boolean {
+  let normalized = text.trim();
+  if (normalized.indexOf('\n') >= 0) {
+    return true;
+  }
+  return normalized.length > singleLineLimit;
+}
+
+// 设置页普通配置输入根据当前值或占位文案判断是否需要多行展示，避免 URL/模型名被单行截断。
+export function settingsInputShouldUseMultiline(value: string, placeholder: string): boolean {
+  let displayText = value.trim().length > 0 ? value : placeholder;
+  return settingsTextExceedsSingleLine(displayText, SETTINGS_INPUT_SINGLE_LINE_LIMIT);
+}
+
+// 敏感配置右侧有显隐按钮，可用宽度更窄，因此使用更短阈值提前切到多行编辑/显示。
+export function settingsSensitiveInputShouldUseMultiline(value: string, placeholder: string): boolean {
+  let displayText = value.trim().length > 0 ? value : placeholder;
+  return settingsTextExceedsSingleLine(displayText, SETTINGS_SENSITIVE_INPUT_SINGLE_LINE_LIMIT);
 }

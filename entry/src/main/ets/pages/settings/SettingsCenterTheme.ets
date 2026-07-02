@@ -15,6 +15,7 @@ export const SETTINGS_CONTROL_RADIUS: number = 12;
 export const SETTINGS_CARD_PADDING: number = 16;
 export const SETTINGS_PAGE_HORIZONTAL_PADDING: string = '92%';
 export const SETTINGS_FIELD_HEIGHT: number = 42;
+export const SETTINGS_MULTILINE_FIELD_HEIGHT: number = 86;
 export const SETTINGS_BUTTON_HEIGHT: number = 40;
 export const SETTINGS_GROUP_GAP: number = 12;
 export const SETTINGS_ACTION_GAP: number = 10;

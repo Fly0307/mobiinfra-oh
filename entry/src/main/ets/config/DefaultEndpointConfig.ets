@@ -1,3 +1,5 @@
+import { isMaskedSensitiveValue } from '../utils/SensitiveValueUtils';
+
 export interface EndpointDefaultConfig {
   /**
    * 手机无线 HDC 调试目标，格式为 ip:port。
@@ -23,6 +25,17 @@ export interface EndpointDefaultConfig {
    * 云端 decider 服务地址，格式为 http://ip:port。
    */
   cloudDeciderBaseUrl: string;
+  /**
+   * 云端 planner 服务密钥。新安装默认与 decider 一致，用户可分别覆盖。
+   */
+  cloudPlannerApiKey: string;
+  /**
+   * 云端 decider 服务密钥。新安装默认与 planner 一致，用户可分别覆盖。
+   */
+  cloudDeciderApiKey: string;
+  /**
+   * 历史共享密钥字段，保留用于旧版本配置兜底迁移。
+   */
   cloudApiKey: string;
   /**
    * 留空时不向 decider 请求传 model 字段。
@@ -66,6 +79,8 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   cloudPlannerBaseUrl: 'http://123.60.91.241:9003',
   cloudPlannerModel: '',
   cloudDeciderBaseUrl: 'http://166.111.53.96:7003',
+  cloudPlannerApiKey: 'mobiagent-key',
+  cloudDeciderApiKey: 'mobiagent-key',
   cloudApiKey: 'mobiagent-key',
   cloudDeciderModel: '',
   agentRouterPort: 9126,
@@ -119,6 +134,15 @@ export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
 export function configuredEndpointValueOrDefault(configuredValue: string, defaultValue: string): string {
   let value = configuredValue.trim();
   if (value.length > 0) {
+    return value;
+  }
+  return defaultValue;
+}
+
+// API Key 等敏感配置若已经是遮罩展示值，不能再作为真实密钥发给后端。
+export function configuredEndpointSecretOrDefault(configuredValue: string, defaultValue: string): string {
+  let value = configuredValue.trim();
+  if (value.length > 0 && !isMaskedSensitiveValue(value)) {
     return value;
   }
   return defaultValue;

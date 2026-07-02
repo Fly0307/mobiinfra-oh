@@ -1,4 +1,10 @@
-import { maskSensitiveSettingValue, SettingsActionKind } from './SettingsCenterTypes';
+import {
+  isMaskedSensitiveSettingValue,
+  maskSensitiveSettingValue,
+  settingsInputShouldUseMultiline,
+  settingsSensitiveInputShouldUseMultiline,
+  SettingsActionKind
+} from './SettingsCenterTypes';
 import {
   SETTINGS_ACTION_GAP,
   SETTINGS_BUTTON_HEIGHT,
@@ -11,6 +17,7 @@ import {
   SETTINGS_INPUT_BACKGROUND_COLOR,
   SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR,
   SETTINGS_MUTED_TEXT_COLOR,
+  SETTINGS_MULTILINE_FIELD_HEIGHT,
   SETTINGS_PANEL_BACKGROUND_COLOR,
   SETTINGS_PANEL_BORDER_COLOR,
   SETTINGS_SECONDARY_TEXT_COLOR,
@@ -23,6 +30,7 @@ import {
 export struct SettingsGroupCard {
   title: string = '';
   subtitle: string = '';
+  onHeaderClick: () => void = () => {};
   @BuilderParam contentBuilder: () => void = this.EmptyContent;
 
   @Builder EmptyContent() {}
@@ -34,6 +42,7 @@ export struct SettingsGroupCard {
         .fontWeight(FontWeight.Bold)
         .fontColor(SETTINGS_TITLE_COLOR)
         .width('100%')
+        .onClick(() => { this.onHeaderClick(); })
       if (this.subtitle.length > 0) {
         Text(this.subtitle)
           .fontSize(12)
@@ -42,6 +51,7 @@ export struct SettingsGroupCard {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 4 })
+          .onClick(() => { this.onHeaderClick(); })
       }
       Column() {
         this.contentBuilder()
@@ -68,6 +78,7 @@ export struct SettingInput {
   inputEnabled: boolean = true;
   inputType: InputType = InputType.Normal;
   onValueChange: (value: string) => void = (value: string) => {};
+  onInputFocus: () => void = () => {};
   onInputBlur: () => void = () => {};
 
   build() {
@@ -77,18 +88,38 @@ export struct SettingInput {
         .fontColor(SETTINGS_MUTED_TEXT_COLOR)
         .width('100%')
         .margin({ bottom: 6 })
-      TextInput({ placeholder: this.placeholder, text: this.value })
-        .type(this.inputType)
-        .height(SETTINGS_FIELD_HEIGHT)
-        .width('100%')
-        .fontSize(13)
-        .fontColor(this.inputEnabled ? SETTINGS_TITLE_COLOR : SETTINGS_SECONDARY_TEXT_COLOR)
-        .backgroundColor(this.inputEnabled ? SETTINGS_INPUT_BACKGROUND_COLOR : SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR)
-        .borderRadius(SETTINGS_CONTROL_RADIUS)
-        .padding({ left: 12, right: 12 })
-        .enabled(this.inputEnabled)
-        .onChange((value: string) => { this.onValueChange(value); })
-        .onBlur(() => { this.onInputBlur(); })
+      if (settingsInputShouldUseMultiline(this.value, this.placeholder)) {
+        TextArea({ placeholder: this.placeholder, text: this.value })
+          .height(SETTINGS_MULTILINE_FIELD_HEIGHT)
+          .width('100%')
+          .maxLines(4)
+          .fontSize(13)
+          .lineHeight(20)
+          .fontColor(this.inputEnabled ? SETTINGS_TITLE_COLOR : SETTINGS_SECONDARY_TEXT_COLOR)
+          .backgroundColor(this.inputEnabled ? SETTINGS_INPUT_BACKGROUND_COLOR : SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR)
+          .borderRadius(SETTINGS_CONTROL_RADIUS)
+          .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+          .enabled(this.inputEnabled)
+          .onClick(() => { this.onInputFocus(); })
+          .onFocus(() => { this.onInputFocus(); })
+          .onChange((value: string) => { this.onValueChange(value); })
+          .onBlur(() => { this.onInputBlur(); })
+      } else {
+        TextInput({ placeholder: this.placeholder, text: this.value })
+          .type(this.inputType)
+          .height(SETTINGS_FIELD_HEIGHT)
+          .width('100%')
+          .fontSize(13)
+          .fontColor(this.inputEnabled ? SETTINGS_TITLE_COLOR : SETTINGS_SECONDARY_TEXT_COLOR)
+          .backgroundColor(this.inputEnabled ? SETTINGS_INPUT_BACKGROUND_COLOR : SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR)
+          .borderRadius(SETTINGS_CONTROL_RADIUS)
+          .padding({ left: 12, right: 12 })
+          .enabled(this.inputEnabled)
+          .onClick(() => { this.onInputFocus(); })
+          .onFocus(() => { this.onInputFocus(); })
+          .onChange((value: string) => { this.onValueChange(value); })
+          .onBlur(() => { this.onInputBlur(); })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -99,11 +130,158 @@ export struct SettingInput {
 // 敏感输入默认遮罩展示，显示后才允许编辑原始值，避免把遮罩值写回配置。
 @Component
 export struct SensitiveSettingInput {
+  sensitiveId: string = '';
+  @Prop activeSensitiveId: string = '';
   label: string = '';
   value: string = '';
   placeholder: string = '';
   onValueChange: (value: string) => void = (value: string) => {};
-  @State private visible: boolean = false;
+  onActiveSensitiveChange: (value: string) => void = (value: string) => {};
+  @State private localVisible: boolean = false;
+  @State private autoFocusEditor: boolean = false;
+
+  private previewText(): string {
+    let maskedValue = maskSensitiveSettingValue(this.value);
+    if (maskedValue.length > 0) {
+      return maskedValue;
+    }
+    return this.placeholder;
+  }
+
+  private previewTextColor(): string {
+    return this.value.length > 0 ? SETTINGS_SECONDARY_TEXT_COLOR : '#A9B0BE';
+  }
+
+  private effectiveSensitiveId(): string {
+    if (this.sensitiveId.length > 0) {
+      return this.sensitiveId;
+    }
+    return this.label;
+  }
+
+  private isExternallyControlled(): boolean {
+    return this.sensitiveId.length > 0;
+  }
+
+  private isVisible(): boolean {
+    if (this.isExternallyControlled()) {
+      return this.activeSensitiveId === this.effectiveSensitiveId();
+    }
+    return this.localVisible;
+  }
+
+  private editorNodeId(): string {
+    return 'settings-sensitive-editor-' + this.effectiveSensitiveId();
+  }
+
+  private requestEditorFocus(): void {
+    let nodeId = this.editorNodeId();
+    this.autoFocusEditor = true;
+    setTimeout(() => {
+      try {
+        this.getUIContext().getFocusController().requestFocus(nodeId);
+      } catch (e) {
+      }
+      this.autoFocusEditor = false;
+    }, 0);
+  }
+
+  private enterEditMode(): void {
+    if (this.isExternallyControlled()) {
+      this.onActiveSensitiveChange(this.effectiveSensitiveId());
+    } else {
+      this.localVisible = true;
+    }
+    this.requestEditorFocus();
+  }
+
+  private leaveEditMode(): void {
+    if (this.isExternallyControlled()) {
+      this.onActiveSensitiveChange('');
+    } else {
+      this.localVisible = false;
+    }
+    this.autoFocusEditor = false;
+  }
+
+  private editorText(): string {
+    if (isMaskedSensitiveSettingValue(this.value)) {
+      return '';
+    }
+    return this.value;
+  }
+
+  private editorPlaceholder(): string {
+    if (isMaskedSensitiveSettingValue(this.value)) {
+      return '当前密钥已被遮罩，请重新输入';
+    }
+    return this.placeholder;
+  }
+
+  private handleEditorChange(value: string): void {
+    if (isMaskedSensitiveSettingValue(value)) {
+      return;
+    }
+    this.onValueChange(value);
+  }
+
+  @Builder HiddenPreview() {
+    Column() {
+      Text(this.previewText())
+        .fontSize(13)
+        .lineHeight(20)
+        .fontColor(this.previewTextColor())
+        .width('100%')
+        .maxLines(settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ? 3 : 1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .justifyContent(FlexAlign.Center)
+    .height(settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder) ?
+      SETTINGS_MULTILINE_FIELD_HEIGHT : SETTINGS_FIELD_HEIGHT)
+    .layoutWeight(1)
+    .backgroundColor(SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR)
+    .borderRadius(SETTINGS_CONTROL_RADIUS)
+    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    .onClick(() => { this.enterEditMode(); })
+  }
+
+  @Builder VisibleEditor() {
+    if (settingsSensitiveInputShouldUseMultiline(this.value, this.placeholder)) {
+      TextArea({ placeholder: this.editorPlaceholder(), text: this.editorText() })
+        .height(SETTINGS_MULTILINE_FIELD_HEIGHT)
+        .layoutWeight(1)
+        .maxLines(4)
+        .fontSize(13)
+        .lineHeight(20)
+        .fontColor(SETTINGS_TITLE_COLOR)
+        .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+        .id(this.editorNodeId())
+        .focusOnTouch(true)
+        .enabled(true)
+        .defaultFocus(this.autoFocusEditor)
+        .onFocus(() => { this.autoFocusEditor = false; })
+        .onChange((value: string) => { this.handleEditorChange(value); })
+        .onBlur(() => { this.leaveEditMode(); })
+    } else {
+      TextInput({ placeholder: this.editorPlaceholder(), text: this.editorText() })
+        .height(SETTINGS_FIELD_HEIGHT)
+        .layoutWeight(1)
+        .fontSize(13)
+        .fontColor(SETTINGS_TITLE_COLOR)
+        .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .padding({ left: 12, right: 12 })
+        .id(this.editorNodeId())
+        .focusOnTouch(true)
+        .enabled(true)
+        .defaultFocus(this.autoFocusEditor)
+        .onFocus(() => { this.autoFocusEditor = false; })
+        .onChange((value: string) => { this.handleEditorChange(value); })
+        .onBlur(() => { this.leaveEditMode(); })
+    }
+  }
 
   build() {
     Column() {
@@ -113,39 +291,35 @@ export struct SensitiveSettingInput {
         .width('100%')
         .margin({ bottom: 6 })
       Row() {
-        if (this.visible) {
-          TextInput({ placeholder: this.placeholder, text: this.value })
-            .height(SETTINGS_FIELD_HEIGHT)
-            .layoutWeight(1)
-            .fontSize(13)
-            .fontColor(SETTINGS_TITLE_COLOR)
-            .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
-            .borderRadius(SETTINGS_CONTROL_RADIUS)
-            .padding({ left: 12, right: 12 })
-            .enabled(true)
-            .onChange((value: string) => { this.onValueChange(value); })
+        if (this.isVisible()) {
+          this.VisibleEditor()
         } else {
-          TextInput({ placeholder: this.placeholder, text: maskSensitiveSettingValue(this.value) })
-            .height(SETTINGS_FIELD_HEIGHT)
-            .layoutWeight(1)
-            .fontSize(13)
-            .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
-            .backgroundColor(SETTINGS_INPUT_DISABLED_BACKGROUND_COLOR)
-            .borderRadius(SETTINGS_CONTROL_RADIUS)
-            .padding({ left: 12, right: 12 })
-            .enabled(false)
+          this.HiddenPreview()
         }
-        Button(this.visible ? '隐藏' : '显示')
-          .height(SETTINGS_FIELD_HEIGHT)
-          .width(64)
-          .fontSize(12)
-          .fontColor(Color.White)
-          .backgroundColor(settingsActionColor(this.visible ? SettingsActionKind.Secondary : SettingsActionKind.Primary))
-          .borderRadius(SETTINGS_CONTROL_RADIUS)
-          .margin({ left: 8 })
-          .onClick(() => { this.visible = !this.visible; })
+        if (this.isVisible()) {
+          Button('隐藏')
+            .height(SETTINGS_FIELD_HEIGHT)
+            .width(64)
+            .fontSize(12)
+            .fontColor(Color.White)
+            .backgroundColor(settingsActionColor(SettingsActionKind.Secondary))
+            .borderRadius(SETTINGS_CONTROL_RADIUS)
+            .margin({ left: 8 })
+            .onClick(() => { this.leaveEditMode(); })
+        } else {
+          Button('显示')
+            .height(SETTINGS_FIELD_HEIGHT)
+            .width(64)
+            .fontSize(12)
+            .fontColor(Color.White)
+            .backgroundColor(settingsActionColor(SettingsActionKind.Primary))
+            .borderRadius(SETTINGS_CONTROL_RADIUS)
+            .margin({ left: 8 })
+            .onClick(() => { this.enterEditMode(); })
+        }
       }
       .width('100%')
+      .alignItems(VerticalAlign.Top)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -229,8 +403,8 @@ export struct SettingsActionRow {
 // 设置输出面板用于本地/云端日志和配置 JSON 等只读长文本。
 @Component
 export struct SettingsOutputPanel {
-  title: string = '';
-  content: string = '';
+  @Prop title: string = '';
+  @Prop content: string = '';
 
   build() {
     Column() {

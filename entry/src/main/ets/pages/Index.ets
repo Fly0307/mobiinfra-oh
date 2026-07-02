@@ -84,7 +84,9 @@ import {
   CloudChatCompletionOptions,
   CloudChatMessage,
   CloudModelClient,
-  CloudModelConfig
+  CloudModelConfig,
+  cloudDeciderApiKey,
+  cloudPlannerApiKey
 } from '../utils/CloudModelClient';
 import {
   createEmptyCollectionViewModels,
@@ -135,6 +137,7 @@ import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
+import { buildCloudOutputLog } from '../utils/CloudLogOutput';
 import {
   currentLocalDateKey,
   formatLocalDateKey,
@@ -144,6 +147,7 @@ import {
 import {
   DEFAULT_ENDPOINT_CONFIG,
   LEGACY_ENDPOINT_CONFIG,
+  configuredEndpointSecretOrDefault,
   configuredEndpointValueOrDefault
 } from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
@@ -342,7 +346,9 @@ PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUr
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
 PersistentStorage.persistProp('cloudPlannerModel', DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
+PersistentStorage.persistProp('cloudPlannerApiKey', DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
+PersistentStorage.persistProp('cloudDeciderApiKey', DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
 PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl);
@@ -372,7 +378,9 @@ PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
 PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudPlannerModel', '');
+PersistentStorage.persistProp('endpointDefault.cloudPlannerApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudDeciderApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
 PersistentStorage.persistProp('endpointDefault.voiceTtsBaseUrl', '');
@@ -439,7 +447,9 @@ struct Index {
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
   @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
+  @StorageLink('cloudPlannerApiKey') cloudPlannerApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+  @StorageLink('cloudDeciderApiKey') cloudDeciderApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
   @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
@@ -817,7 +827,7 @@ struct Index {
   private voiceTtsConfig(): ChatVoiceTtsConfig {
     return {
       baseUrl: configuredEndpointValueOrDefault(this.voiceTtsBaseUrl, DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl),
-      apiKey: configuredEndpointValueOrDefault(this.voiceTtsApiKey, DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey),
+      apiKey: configuredEndpointSecretOrDefault(this.voiceTtsApiKey, DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey),
       model: configuredEndpointValueOrDefault(this.voiceTtsModel, DEFAULT_ENDPOINT_CONFIG.voiceTtsModel),
       voice: normalizeVoiceTtsPreset(configuredEndpointValueOrDefault(this.voiceTtsVoice,
         DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice)),
@@ -1305,14 +1315,11 @@ struct Index {
   }
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
-  private appendCloudLogToSession(sessionId: string, message: string): void {
+  private appendCloudLogToSession(sessionId: string, message: string, replaceExisting: boolean = false): void {
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
-    let nextLogs = this.cloudOutput.length > 0 ? this.cloudOutput + '\n' + line : line;
-    if (nextLogs.length > 60000) {
-      nextLogs = nextLogs.substring(nextLogs.length - 60000);
-    }
+    let nextLogs = buildCloudOutputLog(this.cloudOutput, line, replaceExisting, 60000);
     this.cloudOutput = nextLogs;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
     let traceLine = this.formatAgentTraceLog(message);
@@ -1326,8 +1333,8 @@ struct Index {
     }
   }
 
-  private appendCloudLog(message: string): void {
-    this.appendCloudLogToSession(this.cloudTaskSessionId, message);
+  private appendCloudLog(message: string, replaceExisting: boolean = false): void {
+    this.appendCloudLogToSession(this.cloudTaskSessionId, message, replaceExisting);
   }
 
   private resetCloudLog(message: string): void {
@@ -1407,7 +1414,8 @@ struct Index {
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
     let config = this.getCloudConfig();
-    return isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl, config.apiKey);
+    return isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl,
+      cloudPlannerApiKey(config), cloudDeciderApiKey(config));
   }
 
   private mobileGuiTaskConfigMissingMessage(): string {
@@ -1459,9 +1467,10 @@ struct Index {
   private getDataManagerModelConfig(): DataManagerModelConfig {
     let plannerBaseUrl = configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
       DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
     return {
       baseUrl: plannerBaseUrl,
-      apiKey: configuredEndpointValueOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey),
+      apiKey: configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey),
       enabled: plannerBaseUrl.trim().length > 0
     };
   }
@@ -1473,7 +1482,7 @@ struct Index {
     return {
       imageBaseUrl: configuredEndpointValueOrDefault(this.avatarImageBaseUrl,
         DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl),
-      apiKey: configuredEndpointValueOrDefault(this.avatarImageApiKey, DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey),
+      apiKey: configuredEndpointSecretOrDefault(this.avatarImageApiKey, DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey),
       textToImageModel: textModel,
       imageToImageModel: imageModel,
       size: configuredEndpointValueOrDefault(this.avatarImageSize, DEFAULT_ENDPOINT_CONFIG.avatarImageSize),
@@ -2015,7 +2024,7 @@ struct Index {
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
-      apiKey: config.apiKey,
+      apiKey: cloudPlannerApiKey(config),
       messages: messages,
       temperature: 0.7,
       maxTokens: 4096,
@@ -2705,7 +2714,7 @@ struct Index {
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
-      apiKey: config.apiKey,
+      apiKey: cloudPlannerApiKey(config),
       messages: this.buildProfileAffinityMessages(localProfile, remoteProfile),
       temperature: 0.2,
       maxTokens: 2048,
@@ -2754,6 +2763,10 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
+    this.cloudPlannerApiKey = this.migrateSplitCloudApiKey(this.cloudPlannerApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, 'endpointDefault.cloudPlannerApiKey');
+    this.cloudDeciderApiKey = this.migrateSplitCloudApiKey(this.cloudDeciderApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey, 'endpointDefault.cloudDeciderApiKey');
     this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
     this.voiceTtsBaseUrl = this.migrateEndpointValue(this.voiceTtsBaseUrl, DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
@@ -2822,6 +2835,20 @@ struct Index {
     let nextValue = shouldUseConfiguredDefault ? configuredDefault : currentValue;
     AppStorage.setOrCreate(snapshotKey, configuredDefault);
     return nextValue;
+  }
+
+  private migrateSplitCloudApiKey(currentValue: string, configuredDefault: string, snapshotKey: string): string {
+    let lastAppliedDefault = AppStorage.get(snapshotKey) as string;
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    let firstSplitDefault = lastAppliedDefault === undefined || lastAppliedDefault.length === 0;
+    let shouldInheritLegacyKey = firstSplitDefault &&
+      legacyApiKey !== DEFAULT_ENDPOINT_CONFIG.cloudApiKey &&
+      (currentValue.trim().length === 0 || currentValue === configuredDefault);
+    if (shouldInheritLegacyKey) {
+      AppStorage.setOrCreate(snapshotKey, configuredDefault);
+      return legacyApiKey;
+    }
+    return this.migrateEndpointValue(currentValue, configuredDefault, LEGACY_ENDPOINT_CONFIG.cloudApiKeys, snapshotKey);
   }
 
   private prepareCustomOpp(): boolean {
@@ -4413,13 +4440,18 @@ struct Index {
   }
 
   private getCloudConfig(): CloudModelConfig {
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
+    let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
     let config: CloudModelConfig = {
       plannerBaseUrl: configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
       plannerModel: configuredEndpointValueOrDefault(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
+      plannerApiKey: plannerApiKey,
       deciderBaseUrl: configuredEndpointValueOrDefault(this.cloudDeciderBaseUrl,
         DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
-      apiKey: configuredEndpointValueOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey),
+      deciderApiKey: deciderApiKey,
+      apiKey: plannerApiKey,
       deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
     };
     return config;
@@ -4429,22 +4461,23 @@ struct Index {
     let config = this.getCloudConfig();
     return config.plannerBaseUrl.trim().length > 0 &&
       config.deciderBaseUrl.trim().length > 0 &&
-      config.apiKey.trim().length > 0;
+      cloudPlannerApiKey(config).trim().length > 0 &&
+      cloudDeciderApiKey(config).trim().length > 0;
   }
 
   private isCloudPlannerConfigReady(): boolean {
     let config = this.getCloudConfig();
-    return config.plannerBaseUrl.trim().length > 0 && config.apiKey.trim().length > 0;
+    return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
   }
 
   async testCloudPlanner() {
-    if (!this.isCloudConfigReady()) {
-      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+    if (!this.isCloudPlannerConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner 服务地址和 API Key。', true);
       return;
     }
     this.cloudThinking = true;
     let config = this.getCloudConfig();
-    this.appendCloudLog(`测试 Planner：${config.plannerBaseUrl}`);
+    this.appendCloudLog(`测试 Planner：${config.plannerBaseUrl}`, true);
     try {
       let response = await this.cloudClient.chatPlanner('请只回复 ok', config);
       this.appendCloudLog(`Planner 测试返回：\n${response}`);

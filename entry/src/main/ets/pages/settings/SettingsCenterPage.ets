@@ -122,7 +122,9 @@ export struct SettingsCenterPage {
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
   @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
+  @StorageLink('cloudPlannerApiKey') cloudPlannerApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+  @StorageLink('cloudDeciderApiKey') cloudDeciderApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
   @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
@@ -172,6 +174,7 @@ export struct SettingsCenterPage {
     DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
+  @State private activeSensitiveInputId: string = '';
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onCheckServer: () => void = () => {};
@@ -205,6 +208,10 @@ export struct SettingsCenterPage {
 
   private restoreMaskedDefaultSecrets(): void {
     this.cloudApiKey = restoreMaskedSensitiveSettingDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    this.cloudPlannerApiKey = restoreMaskedSensitiveSettingDefault(this.cloudPlannerApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
+    this.cloudDeciderApiKey = restoreMaskedSensitiveSettingDefault(this.cloudDeciderApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
     this.avatarImageApiKey = restoreMaskedSensitiveSettingDefault(this.avatarImageApiKey,
       DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
     this.voiceTtsApiKey = restoreMaskedSensitiveSettingDefault(this.voiceTtsApiKey,
@@ -212,6 +219,8 @@ export struct SettingsCenterPage {
     this.galleryApiKey = restoreMaskedSensitiveSettingDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY);
     this.galleryEmbeddingApiKey =
       restoreMaskedSensitiveSettingDefault(this.galleryEmbeddingApiKey, DEFAULT_GALLERY_EMBEDDING_API_KEY);
+    this.galleryAmapWebKey = restoreMaskedSensitiveSettingDefault(this.galleryAmapWebKey,
+      DEFAULT_GALLERY_AMAP_WEB_KEY);
   }
 
   private upgradeLegacyVoiceTtsBaseUrl(): void {
@@ -219,6 +228,16 @@ export struct SettingsCenterPage {
     if (this.voiceTtsBaseUrl.trim() === LEGACY_MIMO_TTS_BASE_URL) {
       this.voiceTtsBaseUrl = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
     }
+  }
+
+  private closeSensitiveInputs(): void {
+    if (this.activeSensitiveInputId.length > 0) {
+      this.activeSensitiveInputId = '';
+    }
+  }
+
+  private setActiveSensitiveInput(id: string): void {
+    this.activeSensitiveInputId = id;
   }
 
   private hdcInputEditable(): boolean {
@@ -250,6 +269,7 @@ export struct SettingsCenterPage {
   }
 
   private openSection(id: SettingsSectionId): void {
+    this.closeSensitiveInputs();
     this.selectedSectionId = normalizeSettingsSectionId(id);
     this.resetDetailScroll();
     setTimeout(() => {
@@ -258,6 +278,7 @@ export struct SettingsCenterPage {
   }
 
   private closeSection(): void {
+    this.closeSensitiveInputs();
     this.selectedSectionId = SETTINGS_SECTION_NONE;
   }
 
@@ -367,6 +388,7 @@ export struct SettingsCenterPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .margin({ bottom: 14 })
+    .onClick(() => { this.closeSensitiveInputs(); })
   }
 
   @Builder FieldLabel(label: string) {
@@ -375,6 +397,7 @@ export struct SettingsCenterPage {
       .fontColor(SETTINGS_MUTED_TEXT_COLOR)
       .width('100%')
       .margin({ top: 8, bottom: 6 })
+      .onClick(() => { this.closeSensitiveInputs(); })
   }
 
   @Builder DownloadedModelList() {
@@ -449,6 +472,7 @@ export struct SettingsCenterPage {
         // 编辑期间保留原文，避免小数和临时空值被立即改写。
         onValueChange(input);
       },
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onInputBlur: () => {
         // 失焦后由调用点读取当前字段再归一化，避免使用上一轮渲染入参。
         onNormalize();
@@ -465,7 +489,10 @@ export struct SettingsCenterPage {
       .backgroundColor(this.selectedModelVariant === variant ? '#4F68FF' : '#EEF3FF')
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
-      .onClick(() => { this.onSwitchModelVariant(variant); })
+      .onClick(() => {
+        this.closeSensitiveInputs();
+        this.onSwitchModelVariant(variant);
+      })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
@@ -473,7 +500,10 @@ export struct SettingsCenterPage {
       label: label,
       desc: desc,
       selected: selected,
-      onValueChange: onValueChange
+      onValueChange: (value: boolean) => {
+        this.closeSensitiveInputs();
+        onValueChange(value);
+      }
     })
   }
 
@@ -488,6 +518,8 @@ export struct SettingsCenterPage {
       .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
       .borderRadius(SETTINGS_CONTROL_RADIUS)
       .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+      .onClick(() => { this.closeSensitiveInputs(); })
+      .onFocus(() => { this.closeSensitiveInputs(); })
       .onChange((val: string) => {
         this.voiceTtsStylePrompt = val;
       })
@@ -514,6 +546,7 @@ export struct SettingsCenterPage {
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
       .onClick(() => {
+        this.closeSensitiveInputs();
         let selection: VoiceTtsRoleSelection = voiceTtsSelectionFromRolePreset(preset);
         this.voiceTtsRolePreset = selection.rolePreset;
         this.voiceTtsVoice = selection.voice;
@@ -531,7 +564,10 @@ export struct SettingsCenterPage {
       .backgroundColor(this.voiceTtsVoice === voice ? settingsActionColor(SettingsActionKind.Primary) : '#EEF3FF')
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
-      .onClick(() => { this.voiceTtsVoice = voice; })
+      .onClick(() => {
+        this.closeSensitiveInputs();
+        this.voiceTtsVoice = voice;
+      })
   }
 
   @Builder VoiceTtsPresetSettings() {
@@ -790,11 +826,13 @@ export struct SettingsCenterPage {
       SettingsGroupCard({
         title: 'Agent 确认策略',
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AgentConfirmPolicyGroup() }
       })
       SettingsGroupCard({
         title: '数字分身图片服务',
         subtitle: '配置头像生成服务地址、密钥、模型与图片尺寸',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AvatarImageServiceGroup() }
       })
     }
@@ -814,30 +852,37 @@ export struct SettingsCenterPage {
       label: '数字分身图片服务',
       value: this.avatarImageBaseUrl,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.avatarImageBaseUrl = value; }
     })
     SensitiveSettingInput({
+      sensitiveId: 'avatarImageApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
       label: '数字分身图片 API Key',
       value: this.avatarImageApiKey,
       placeholder: '图片服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.avatarImageApiKey = value; }
     })
     SettingInput({
       label: '文生图模型',
       value: this.avatarTextToImageModel,
       placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.avatarTextToImageModel = value; }
     })
     SettingInput({
       label: '图生图模型',
       value: this.avatarImageToImageModel,
       placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.avatarImageToImageModel = value; }
     })
     SettingInput({
       label: '图片尺寸',
       value: this.avatarImageSize,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.avatarImageSize = value; }
     })
   }
@@ -848,26 +893,31 @@ export struct SettingsCenterPage {
       SettingsGroupCard({
         title: '微信汇总',
         subtitle: '默认采集范围和高级滑动参数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.WechatAutoSummarySettings() }
       })
       SettingsGroupCard({
         title: '图库分析',
         subtitle: '图库大模型服务与字段级请求策略',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.GalleryAnalysisGroup() }
       })
       SettingsGroupCard({
         title: 'OCR',
         subtitle: '本地 OCR 回退、关键词预筛和并发控制',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.OcrSettingsGroup() }
       })
       SettingsGroupCard({
         title: 'Embedding',
         subtitle: '图片检索向量服务和端云模式',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.EmbeddingSettingsGroup() }
       })
       SettingsGroupCard({
         title: '地图服务',
         subtitle: '图片位置解析和分析缩放参数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.MapSettingsGroup() }
       })
     }
@@ -880,18 +930,23 @@ export struct SettingsCenterPage {
       label: '图库 API Base URL',
       value: this.galleryApiBaseUrl,
       placeholder: DEFAULT_GALLERY_API_BASE_URL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryApiBaseUrl = value; }
     })
     SensitiveSettingInput({
+      sensitiveId: 'galleryApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
       label: '图库 API Key',
       value: this.galleryApiKey,
       placeholder: '图库分析服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryApiKey = value; }
     })
     SettingInput({
       label: '图库大模型',
       value: this.galleryModel,
       placeholder: DEFAULT_GALLERY_MODEL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryModel = value; }
     })
     this.SettingToggle('字段级并发请求', '同一张图并发请求各分析字段，降低整包 JSON 解析失败概率',
@@ -901,6 +956,7 @@ export struct SettingsCenterPage {
       label: '大模型并发请求数',
       value: this.galleryModelConcurrency,
       placeholder: DEFAULT_GALLERY_MODEL_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryModelConcurrency = value; }
     })
   }
@@ -915,6 +971,7 @@ export struct SettingsCenterPage {
       label: 'OCR 并发请求数',
       value: this.galleryOcrConcurrency,
       placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryOcrConcurrency = value; }
     })
   }
@@ -924,6 +981,7 @@ export struct SettingsCenterPage {
       label: 'Embedding 并发请求数',
       value: this.galleryEmbeddingConcurrency,
       placeholder: DEFAULT_GALLERY_EMBEDDING_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryEmbeddingConcurrency = value; }
     })
     this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding',
@@ -933,18 +991,23 @@ export struct SettingsCenterPage {
       label: 'Embedding Base URL',
       value: this.galleryEmbeddingBaseUrl,
       placeholder: DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryEmbeddingBaseUrl = value; }
     })
     SensitiveSettingInput({
+      sensitiveId: 'galleryEmbeddingApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
       label: 'Embedding API Key',
       value: this.galleryEmbeddingApiKey,
       placeholder: 'Embedding 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryEmbeddingApiKey = value; }
     })
     SettingInput({
       label: 'Embedding 模型',
       value: this.galleryEmbeddingModel,
       placeholder: DEFAULT_GALLERY_EMBEDDING_MODEL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryEmbeddingModel = value; }
     })
   }
@@ -954,12 +1017,16 @@ export struct SettingsCenterPage {
       label: '图片分析缩放比例',
       value: this.galleryImageScale,
       placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryImageScale = value; }
     })
-    SettingInput({
+    SensitiveSettingInput({
+      sensitiveId: 'galleryAmapWebKey',
+      activeSensitiveId: this.activeSensitiveInputId,
       label: '高德 Web 服务 Key',
       value: this.galleryAmapWebKey,
       placeholder: '用于拍摄位置逆地理编码',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryAmapWebKey = value; }
     })
   }
@@ -970,36 +1037,43 @@ export struct SettingsCenterPage {
       SettingsGroupCard({
         title: '云端 Planner/Decider',
         subtitle: '云端智能体服务、模型和连通性测试',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.CloudPlannerDeciderGroup() }
       })
       SettingsGroupCard({
         title: '语音合成服务',
         subtitle: '配置助手朗读的 TTS 服务、模型、音色与流式播放',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.VoiceTtsServiceGroup() }
       })
       SettingsGroupCard({
         title: '上下文压缩',
         subtitle: '聊天上下文压缩阈值和保留轮数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ContextCompressionGroup() }
       })
       SettingsGroupCard({
         title: '本地模型',
         subtitle: '已下载模型、旧目录快捷切换和后端类型',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.LocalModelGroup() }
       })
       SettingsGroupCard({
         title: 'HDC 连接',
         subtitle: '自动发现、手动配对和无线调试目标',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.HdcConnectionGroup() }
       })
       SettingsGroupCard({
         title: '模型下载',
         subtitle: '模型文件服务、ModelScope 仓库和下载进度',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ModelDownloadGroup() }
       })
       SettingsGroupCard({
         title: 'Config 与输出',
         subtitle: '模型配置修改、查看和运行输出',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ConfigOutputGroup() }
       })
     }
@@ -1012,6 +1086,7 @@ export struct SettingsCenterPage {
       label: 'Planner 服务',
       value: this.cloudPlannerBaseUrl,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudPlannerBaseUrl = value; }
     })
     SettingInput({
@@ -1019,24 +1094,39 @@ export struct SettingsCenterPage {
       value: this.cloudPlannerModel,
       placeholder: DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel.length > 0 ?
         DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel : '留空则不传 model',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudPlannerModel = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'cloudPlannerApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: 'Planner API Key',
+      value: this.cloudPlannerApiKey,
+      placeholder: 'Planner 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.cloudPlannerApiKey = value; }
     })
     SettingInput({
       label: 'Decider 服务',
       value: this.cloudDeciderBaseUrl,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudDeciderBaseUrl = value; }
     })
     SensitiveSettingInput({
-      label: '云端 API Key',
-      value: this.cloudApiKey,
-      placeholder: 'Planner / Decider 服务密钥',
-      onValueChange: (value: string) => { this.cloudApiKey = value; }
+      sensitiveId: 'cloudDeciderApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: 'Decider API Key',
+      value: this.cloudDeciderApiKey,
+      placeholder: 'Decider 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.cloudDeciderApiKey = value; }
     })
     SettingInput({
       label: 'Decider Model',
       value: this.cloudDeciderModel,
       placeholder: '留空则不传 model',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudDeciderModel = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
@@ -1047,7 +1137,10 @@ export struct SettingsCenterPage {
     SettingsActionButton({
       label: '测试 Planner',
       kind: SettingsActionKind.Success,
-      onActionClick: async () => { await this.onTestCloudPlanner(); }
+      onActionClick: async () => {
+        this.closeSensitiveInputs();
+        await this.onTestCloudPlanner();
+      }
     })
   }
 
@@ -1056,18 +1149,23 @@ export struct SettingsCenterPage {
       label: '语音合成服务',
       value: this.voiceTtsBaseUrl,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.voiceTtsBaseUrl = value; }
     })
     SensitiveSettingInput({
+      sensitiveId: 'voiceTtsApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
       label: '语音合成 API Key',
       value: this.voiceTtsApiKey,
       placeholder: 'MiMO TTS 服务密钥，格式 tp-xxxxx',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.voiceTtsApiKey = value; }
     })
     SettingInput({
       label: '语音合成模型',
       value: this.voiceTtsModel,
       placeholder: DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.voiceTtsModel = value; }
     })
     this.VoiceTtsPresetSettings()
@@ -1102,12 +1200,14 @@ export struct SettingsCenterPage {
       label: 'backend_type',
       value: this.backendTypeInput,
       placeholder: 'cpu / hiai / nnrt',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.backendTypeInput = value; }
     })
     SettingInput({
       label: 'mllm.backend_type',
       value: this.mllmBackendTypeInput,
       placeholder: 'cpu / hiai / nnrt',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.mllmBackendTypeInput = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.BackendTypeActionRow() } })
@@ -1132,6 +1232,7 @@ export struct SettingsCenterPage {
       value: this.hdcServerIp,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl,
       inputEnabled: this.hdcInputEditable(),
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => {
         this.hdcServerIp = value;
         this.manualHdcServerIp = value;
@@ -1157,6 +1258,8 @@ export struct SettingsCenterPage {
         .borderRadius(SETTINGS_CONTROL_RADIUS)
         .padding({ left: 12, right: 12 })
         .enabled(this.hdcInputEditable())
+        .onClick(() => { this.closeSensitiveInputs(); })
+        .onFocus(() => { this.closeSensitiveInputs(); })
         .onChange((value: string) => {
           this.wirelessIp = value;
           this.onMarkHdcManualEditing();
@@ -1194,6 +1297,7 @@ export struct SettingsCenterPage {
       label: '模型下载服务',
       value: this.serverIp,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.serverIp = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.ModelServerActionRow() } })
@@ -1201,6 +1305,7 @@ export struct SettingsCenterPage {
       label: 'ModelScope 仓库',
       value: this.modelScopeMnnRepo,
       placeholder: 'modelscope仓库("用户名/模型名")',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.modelScopeMnnRepo = value; }
     })
     SettingsActionRow({ contentBuilder: () => { this.ModelScopeActionRow() } })
@@ -1291,11 +1396,13 @@ export struct SettingsCenterPage {
       SettingsGroupCard({
         title: 'Workflow 与日志',
         subtitle: '查看 Workflow 配置、daily-log 和运行日志',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.WorkflowLogGroup() }
       })
       SettingsGroupCard({
         title: 'PC 控制后端',
         subtitle: '启动云端 PC 控制后端供 Agent 自动化使用',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.PcBackendGroup() }
       })
     }
@@ -1338,21 +1445,25 @@ export struct SettingsCenterPage {
       SettingsGroupCard({
         title: '文件查看',
         subtitle: '查看截图、模型文件树和运行日志',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.FileViewerGroup() }
       })
       SettingsGroupCard({
         title: '清理操作',
         subtitle: '删除类操作会先弹窗确认',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.CleanupActionGroup() }
       })
       SettingsGroupCard({
         title: '调试工具',
         subtitle: '进入算子精度测试和 LLM Profile 页面',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.DebugToolsGroup() }
       })
       SettingsGroupCard({
         title: '关于',
         subtitle: '当前应用与设置中心说明',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.AboutSettingsGroup() }
       })
     }

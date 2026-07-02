@@ -4,7 +4,8 @@ import {
   CloudChatMessage,
   CloudChatToolDefinition,
   CloudModelClient,
-  CloudModelConfig
+  CloudModelConfig,
+  cloudPlannerApiKey
 } from './CloudModelClient';
 import {
   ChatToolExecutionContext,
@@ -144,7 +145,7 @@ export class ChatReactAgent {
     let preset = enableThinking ? QWEN_GENERAL_THINKING_PRESET : QWEN_GENERAL_INSTRUCT_PRESET;
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
-      apiKey: config.apiKey,
+      apiKey: cloudPlannerApiKey(config),
       messages: messages,
       temperature: preset.temperature,
       maxTokens: QWEN_CHAT_MAX_TOKENS,

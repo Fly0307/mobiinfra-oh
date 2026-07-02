@@ -1,13 +1,17 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
+  SettingsActionKind,
   isSettingsSectionSelected,
+  maskSensitiveSettingValue,
   normalizeSettingsSectionId,
+  restoreMaskedSensitiveSettingDefault,
   SETTINGS_SECTION_ITEMS,
   SETTINGS_SECTION_NONE,
   SettingsSectionId,
   settingsSectionSubtitle,
   settingsSectionTitle
 } from '../main/ets/pages/settings/SettingsCenterTypes';
+import { settingsActionColor } from '../main/ets/pages/settings/SettingsCenterTheme';
 
 export default function settingsCenterConfigUnitTest() {
   describe('settingsCenterConfigUnitTest', () => {
@@ -36,6 +40,28 @@ export default function settingsCenterConfigUnitTest() {
       expect(normalizeSettingsSectionId(99)).assertEqual(SETTINGS_SECTION_NONE);
       expect(isSettingsSectionSelected(99)).assertFalse();
       expect(isSettingsSectionSelected(SETTINGS_SECTION_NONE)).assertFalse();
+    });
+
+    it('mapsSettingsActionKindsToStableColors', 0, () => {
+      expect(settingsActionColor(SettingsActionKind.Primary)).assertEqual('#4F68FF');
+      expect(settingsActionColor(SettingsActionKind.Secondary)).assertEqual('#607D8B');
+      expect(settingsActionColor(SettingsActionKind.Success)).assertEqual('#38BE8B');
+      expect(settingsActionColor(SettingsActionKind.Warning)).assertEqual('#FF9800');
+      expect(settingsActionColor(SettingsActionKind.Danger)).assertEqual('#F44336');
+      expect(settingsActionColor(SettingsActionKind.Special)).assertEqual('#765BFF');
+    });
+
+    it('masksSensitiveSettingValuesByDefault', 0, () => {
+      expect(maskSensitiveSettingValue('')).assertEqual('');
+      expect(maskSensitiveSettingValue('abc')).assertEqual('•••');
+      expect(maskSensitiveSettingValue('sk-1234567890abcdef')).assertEqual('sk-1••••••••cdef');
+    });
+
+    it('restoresMaskedDefaultSensitiveValues', 0, () => {
+      expect(restoreMaskedSensitiveSettingDefault('sk-1••••••••cdef', 'sk-1234567890abcdef'))
+        .assertEqual('sk-1234567890abcdef');
+      expect(restoreMaskedSensitiveSettingDefault('sk-other••••••••abcd', 'sk-1234567890abcdef'))
+        .assertEqual('sk-other••••••••abcd');
     });
   });
 }

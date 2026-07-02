@@ -12,6 +12,31 @@ export interface SettingsSectionItem {
   subtitle: string;
 }
 
+export enum SettingsActionKind {
+  Primary = 0,
+  Secondary = 1,
+  Success = 2,
+  Warning = 3,
+  Danger = 4,
+  Special = 5
+}
+
+export interface SettingsConfirmConfig {
+  title: string;
+  message: string;
+  confirmText: string;
+}
+
+export interface DownloadedModelItem {
+  id: string;
+  label: string;
+  path: string;
+  repo: string;
+  sizeText: string;
+  statusText: string;
+  ready: boolean;
+}
+
 export const SETTINGS_SECTION_NONE: number = -1;
 
 export const SETTINGS_SECTION_ITEMS: SettingsSectionItem[] = [
@@ -71,4 +96,24 @@ export function normalizeSettingsSectionId(id: number): number {
 
 export function isSettingsSectionSelected(id: number): boolean {
   return normalizeSettingsSectionId(id) !== SETTINGS_SECTION_NONE;
+}
+
+export function maskSensitiveSettingValue(value: string): string {
+  if (value.length === 0) {
+    return '';
+  }
+  if (value.length <= 4) {
+    return '••••'.substring(0, value.length);
+  }
+  return value.substring(0, 4) + '••••••••' + value.substring(value.length - 4);
+}
+
+export function restoreMaskedSensitiveSettingDefault(value: string, defaultValue: string): string {
+  if (defaultValue.length === 0) {
+    return value;
+  }
+  if (value === maskSensitiveSettingValue(defaultValue)) {
+    return defaultValue;
+  }
+  return value;
 }

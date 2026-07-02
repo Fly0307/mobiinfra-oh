@@ -3,6 +3,16 @@ interface JsonRepairContext {
   state: string;
 }
 
+interface BareCoordinateFieldSpec {
+  key: string;
+  count: number;
+}
+
+interface BareCoordinateParseResult {
+  values: string[];
+  endIndex: number;
+}
+
 export class WorkflowJsonRepair {
   static normalizeJsonText(raw: string): string {
     let text = raw.trim();
@@ -32,12 +42,16 @@ export class WorkflowJsonRepair {
     let singleQuoted = WorkflowJsonRepair.repairSingleQuotedJson(text);
     let quotedArrayItems = WorkflowJsonRepair.quoteBareJsonArrayItems(text);
     let closed = WorkflowJsonRepair.closeTruncatedJson(text);
+    let bareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(text);
+    let cjkBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(cjkPunctuation);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, leadingObjectBrace, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(leadingObjectBrace), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, literalCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrappedLiteralCase, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, numericArrayComma, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, bareCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(bareCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, cjkPunctuation, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, withoutParentheses, text);
@@ -54,8 +68,11 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonLiteralCasing(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, cjkBareCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(cjkBareCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(literalCase), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairBareCoordinateArrays(closed), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(literalCase), text);
@@ -128,6 +145,132 @@ export class WorkflowJsonRepair {
 
   private static repairNumberArrayCommas(text: string): string {
     return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static repairBareCoordinateArrays(text: string): string {
+    let specs: BareCoordinateFieldSpec[] = [
+      { key: '"bbox"', count: 4 },
+      { key: '"coords"', count: 2 },
+      { key: '"start_coords"', count: 2 },
+      { key: '"end_coords"', count: 2 }
+    ];
+    let repaired = text;
+    for (let i = 0; i < specs.length; i++) {
+      repaired = WorkflowJsonRepair.repairBareCoordinateField(repaired, specs[i]);
+    }
+    return repaired;
+  }
+
+  private static repairBareCoordinateField(text: string, spec: BareCoordinateFieldSpec): string {
+    let result = '';
+    let searchStart = 0;
+    while (searchStart < text.length) {
+      let keyIndex = text.indexOf(spec.key, searchStart);
+      if (keyIndex < 0) {
+        result += text.substring(searchStart);
+        break;
+      }
+
+      let colonIndex = WorkflowJsonRepair.nextNonWhitespaceIndex(text, keyIndex + spec.key.length);
+      let valueStart = colonIndex >= 0 && text.charAt(colonIndex) === ':' ?
+        WorkflowJsonRepair.nextNonWhitespaceIndex(text, colonIndex + 1) : -1;
+      if (valueStart < 0 || WorkflowJsonRepair.isStructuredJsonValueStart(text.charAt(valueStart))) {
+        result += text.substring(searchStart, keyIndex + spec.key.length);
+        searchStart = keyIndex + spec.key.length;
+        continue;
+      }
+
+      let parsed = WorkflowJsonRepair.parseBareCoordinateValues(text, valueStart, spec.count);
+      if (parsed === null) {
+        result += text.substring(searchStart, keyIndex + spec.key.length);
+        searchStart = keyIndex + spec.key.length;
+        continue;
+      }
+
+      // 模型偶发输出 "bbox":100,200,300,400 这类非法 JSON，修复为数组后再交给 JSON.parse。
+      result += text.substring(searchStart, valueStart);
+      result += '[' + parsed.values.join(', ') + ']';
+      searchStart = parsed.endIndex;
+    }
+    return result;
+  }
+
+  private static parseBareCoordinateValues(text: string, start: number, count: number): BareCoordinateParseResult | null {
+    let values: string[] = [];
+    let index = start;
+    for (let i = 0; i < count; i++) {
+      index = WorkflowJsonRepair.nextNonWhitespaceIndex(text, index);
+      if (index < 0) {
+        return null;
+      }
+      let numberEnd = WorkflowJsonRepair.readJsonNumberEnd(text, index);
+      if (numberEnd <= index) {
+        return null;
+      }
+      values.push(text.substring(index, numberEnd));
+      let nextIndex = WorkflowJsonRepair.nextNonWhitespaceIndex(text, numberEnd);
+      if (i < count - 1) {
+        if (nextIndex < 0 || text.charAt(nextIndex) !== ',') {
+          return null;
+        }
+        index = nextIndex + 1;
+      } else {
+        index = nextIndex >= 0 ? nextIndex : text.length;
+      }
+    }
+
+    let boundaryIndex = WorkflowJsonRepair.nextNonWhitespaceIndex(text, index);
+    if (boundaryIndex >= 0 && !WorkflowJsonRepair.isCoordinateBoundary(text.charAt(boundaryIndex))) {
+      return null;
+    }
+    return { values: values, endIndex: index };
+  }
+
+  private static readJsonNumberEnd(text: string, start: number): number {
+    let index = start;
+    if (index < text.length && text.charAt(index) === '-') {
+      index++;
+    }
+    let integerStart = index;
+    while (index < text.length && WorkflowJsonRepair.isAsciiDigit(text.charAt(index))) {
+      index++;
+    }
+    if (index === integerStart) {
+      return -1;
+    }
+    if (index < text.length && text.charAt(index) === '.') {
+      index++;
+      let decimalStart = index;
+      while (index < text.length && WorkflowJsonRepair.isAsciiDigit(text.charAt(index))) {
+        index++;
+      }
+      if (index === decimalStart) {
+        return -1;
+      }
+    }
+    if (index < text.length && (text.charAt(index) === 'e' || text.charAt(index) === 'E')) {
+      let exponentStart = index;
+      index++;
+      if (index < text.length && (text.charAt(index) === '+' || text.charAt(index) === '-')) {
+        index++;
+      }
+      let digitStart = index;
+      while (index < text.length && WorkflowJsonRepair.isAsciiDigit(text.charAt(index))) {
+        index++;
+      }
+      if (index === digitStart) {
+        return exponentStart;
+      }
+    }
+    return index;
+  }
+
+  private static isStructuredJsonValueStart(ch: string): boolean {
+    return ch === '[' || ch === '{' || ch === '"';
+  }
+
+  private static isCoordinateBoundary(ch: string): boolean {
+    return ch === ',' || ch === '}' || ch === ']';
   }
 
   private static normalizeCjkJsonPunctuation(text: string): string {
@@ -455,6 +598,10 @@ export class WorkflowJsonRepair {
 
   private static isAsciiLetter(ch: string): boolean {
     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+  }
+
+  private static isAsciiDigit(ch: string): boolean {
+    return ch >= '0' && ch <= '9';
   }
 
   private static repairMissingLeadingObjectBrace(text: string): string {

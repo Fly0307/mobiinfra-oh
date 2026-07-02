@@ -22,20 +22,9 @@ export function mobileGuiTaskCloudConfigMissingMessage(): string {
   return '配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。';
 }
 
-function compactLine(value: string): string {
-  return value.trim().replace(/\s+/g, ' ');
-}
-
 export function buildMobileGuiWorkflowTaskDescription(request: MobileGuiTaskRequest): string {
-  let lines: string[] = ['手机 GUI 任务：' + compactLine(request.task)];
-  if (request.appName.trim().length > 0) {
-    lines.push('目标应用名称提示：' + compactLine(request.appName));
-  }
-  if (request.packageName.trim().length > 0) {
-    lines.push('目标应用包名提示：' + compactLine(request.packageName));
-  }
-  lines.push('最大步骤建议：' + String(request.maxSteps));
-  return lines.join('\n');
+  // 聊天工具只传递用户原始目标；App 选择、包名判断和启动动作统一交给 step1 Planner。
+  return request.task.trim();
 }
 
 export function buildMobileGuiWorkflowDefinition(request: MobileGuiTaskRequest): WorkflowDefinition {
@@ -44,15 +33,13 @@ export function buildMobileGuiWorkflowDefinition(request: MobileGuiTaskRequest):
     id: '1',
     name: 'plan_and_launch',
     type: 'gui_task',
-    task_description: taskDescription,
-    package_name: request.packageName.trim().length > 0 ? request.packageName.trim() : undefined
+    task_description: taskDescription
   };
   let deciderStep: WorkflowStep = {
     id: '2',
     name: 'execute_task',
     type: 'gui_task',
     task_description: taskDescription,
-    package_name: request.packageName.trim().length > 0 ? request.packageName.trim() : undefined,
     max_steps: request.maxSteps,
     fail_on_max_steps: true,
     extract_result: true

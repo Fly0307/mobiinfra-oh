@@ -74,15 +74,20 @@ export default function mobileGuiTaskToolUnitTest() {
       expect((schema.required as string[]).indexOf('task') >= 0).assertTrue();
     });
 
-    it('normalizesValidArgumentsWithAppHintsAndMaxSteps', 0, () => {
-      let validation = normalizeMobileGuiTaskArguments('{"task":"打开饿了么查看订单","app_name":"饿了么",' +
-        '"package_name":"me.ele","max_steps":12}');
+    it('normalizesValidArgumentsWithTaskAndMaxStepsOnly', 0, () => {
+      let validation = normalizeMobileGuiTaskArguments('{"task":"打开饿了么查看订单","max_steps":12}');
 
       expect(validation.ok).assertTrue();
       expect(validation.request.task).assertEqual('打开饿了么查看订单');
-      expect(validation.request.appName).assertEqual('饿了么');
-      expect(validation.request.packageName).assertEqual('me.ele');
       expect(validation.request.maxSteps).assertEqual(12);
+    });
+
+    it('rejectsAppHintsAsInvalidArguments', 0, () => {
+      let validation = normalizeMobileGuiTaskArguments('{"task":"打开微信","app_name":"微信",' +
+        '"package_name":"com.tencent.wechat"}');
+
+      expect(validation.ok).assertFalse();
+      expect(validation.errorCode).assertEqual('invalid_arguments');
     });
 
     it('rejectsEmptyTaskAsInvalidArguments', 0, () => {
@@ -255,7 +260,7 @@ export default function mobileGuiTaskToolUnitTest() {
 
     it('returnsUnavailableWhenCallbacksMissing', 0, async () => {
       let tool = createMobileGuiTaskTool();
-      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContext());
+      let output = await tool.execute('{"task":"打开微信"}', testContext());
       let payload = parseJsonCompat<TestPayload>(output);
 
       expect(payload.ok).assertFalse();
@@ -267,7 +272,7 @@ export default function mobileGuiTaskToolUnitTest() {
     it('returnsUnavailableWhenRunCallbackMissing', 0, async () => {
       let confirmCalls = 0;
       let tool = createMobileGuiTaskTool();
-      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContextWithCallbacks({
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
         confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
           confirmCalls++;
           return true;
@@ -285,7 +290,7 @@ export default function mobileGuiTaskToolUnitTest() {
     it('returnsUnavailableWhenConfirmCallbackMissing', 0, async () => {
       let runCalls = 0;
       let tool = createMobileGuiTaskTool();
-      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContextWithCallbacks({
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
         runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
           runCalls++;
           return {
@@ -313,7 +318,7 @@ export default function mobileGuiTaskToolUnitTest() {
       let confirmCalls = 0;
       let runCalls = 0;
       let tool = createMobileGuiTaskTool();
-      let output = await tool.execute('{"task":"打开微信","app_name":"微信"}', testContextWithCallbacks({
+      let output = await tool.execute('{"task":"打开微信"}', testContextWithCallbacks({
         confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
           confirmCalls++;
           return false;
@@ -346,7 +351,7 @@ export default function mobileGuiTaskToolUnitTest() {
       let confirmedTask = '';
       let runTask = '';
       let tool = createMobileGuiTaskTool();
-      let output = await tool.execute('{"task":"打开微信","app_name":"微信","package_name":"com.tencent.mm","max_steps":7}',
+      let output = await tool.execute('{"task":"打开微信","max_steps":7}',
         testContextWithCallbacks({
           confirmMobileGuiTask: async (request: MobileGuiTaskRequest): Promise<boolean> => {
             confirmedTask = request.task;

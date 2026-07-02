@@ -20,6 +20,7 @@ const PLANNER_ONESHOT_HARMONY_PROMPT: string = `## 角色定义
 - 携程: com.ctrip.harmonynext
 - 飞猪: com.fliggy.hmos
 - 饿了么: me.ele.eleme
+- 淘宝闪购: me.ele.eleme
 - 知乎: com.zhihu.hmos
 - 哔哩哔哩: yylx.danmaku.bili
 - 微信: com.tencent.wechat

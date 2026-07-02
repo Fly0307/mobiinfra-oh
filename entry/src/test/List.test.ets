@@ -26,6 +26,7 @@ import pcmWavUnitTest from './PcmWavUnit.test';
 import harmonySpeechRecognizerAsrProviderUnitTest from './HarmonySpeechRecognizerAsrProviderUnit.test';
 import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
+import agentActionParserUnitTest from './AgentActionParserUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -56,4 +57,5 @@ export default function testsuite() {
   harmonySpeechRecognizerAsrProviderUnitTest();
   mobileGuiTaskToolUnitTest();
   mobileGuiTaskWorkflowAdapterUnitTest();
+  agentActionParserUnitTest();
 }

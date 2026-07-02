@@ -58,6 +58,16 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "shareType",
+        "value": "sharekitModel"
+      },
+      {
+        "name": "shareBundleName",
+        "value": "com.example.mnnllmchat"
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",
@@ -78,6 +88,100 @@
             ],
             "actions": [
               "ohos.want.action.home"
+            ]
+          },
+          {
+            "actions": [
+              "ohos.want.action.viewData",
+              "ohos.want.action.sendData",
+              "ohos.want.action.sendMultipleData"
+            ],
+            "domainVerify": true,
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "com.mobiinfra.profile-json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "utd": "com.mobiinfra.profile-json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/vnd.mobiinfra.profile+json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "type": "application/vnd.mobiinfra.profile+json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/octet-stream",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "type": "application/octet-stream",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "type": "application/json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "text/plain",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "type": "text/plain",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "*/*",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "type": "*/*",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "pathRegex": ".*\\.mobi-profile(\\.json)?$",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "datashare",
+                "pathRegex": ".*\\.mobi-profile(\\.json)?$",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              }
             ]
           }
         ]

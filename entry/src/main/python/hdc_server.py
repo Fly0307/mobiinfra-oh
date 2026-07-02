@@ -56,10 +56,7 @@ AUTO_DISCOVERY_DISCOVER_TIMEOUT = float(os.environ.get("HDC_AUTO_DISCOVER_TIMEOU
 AUTO_DISCOVERY_SCAN_BUDGET = float(os.environ.get("HDC_AUTO_SCAN_BUDGET", "12"))
 AUTO_DISCOVERY_MAX_WORKERS = max(8, int(os.environ.get("HDC_AUTO_MAX_WORKERS", "128")))
 AUTO_DISCOVERY_COOLDOWN = float(os.environ.get("HDC_AUTO_COOLDOWN", "30"))
-AUTO_DISCOVERY_MAX_SUBNETS = max(1, int(os.environ.get("HDC_AUTO_MAX_SUBNETS", "8")))
-AUTO_DISCOVERY_EXTRA_PORTS = os.environ.get("HDC_AUTO_PORTS", "")
 AUTO_DISCOVERY_EXTRA_TARGETS = os.environ.get("HDC_AUTO_TARGETS", "")
-AUTO_DISCOVERY_DEFAULT_PORTS = (8710, 10178, 5555)
 
 def make_hdc_tunnel_status(status, message, target="", tunnel_ready=False, fport_ready=False,
                            rport_ready=False, rport_listening=None,
@@ -446,15 +443,6 @@ def split_csv_values(raw):
             values.append(value)
     return values
 
-def parse_extra_ports(raw):
-    ports = []
-    for item in split_csv_values(raw):
-        if item.isdigit():
-            port = int(item)
-            if 0 < port <= 65535 and port not in ports:
-                ports.append(port)
-    return ports
-
 def seed_entry_from_target(target, source):
     parsed = parse_wireless_target(target)
     if not parsed:
@@ -484,15 +472,7 @@ def build_auto_discovery_seeds():
     cache = load_auto_discovery_cache()
     last_target = cache.get("last_target", "")
     add_seed(last_target, "cache-last")
-    targets = cache.get("targets", [])
-    if isinstance(targets, list):
-        sorted_targets = sorted(
-            [item for item in targets if isinstance(item, dict)],
-            key=lambda item: float(item.get("last_success_at", 0) or 0),
-            reverse=True
-        )
-        for item in sorted_targets:
-            add_seed(str(item.get("target", "")), "cache")
+    # Keep the cache list for diagnostics, but do not try older successful IPs directly.
 
     if HDC_TARGET_OVERRIDE:
         add_seed(HDC_TARGET_OVERRIDE, "HDC_TARGET")
@@ -554,45 +534,6 @@ def is_private_lan_ipv4(address):
         return True
     return octets[0] == 172 and 16 <= octets[1] <= 31
 
-def build_port_candidates(seeds):
-    ports = []
-    for seed in seeds:
-        port = int(seed.get("port", 0) or 0)
-        if 0 < port <= 65535 and port not in ports:
-            ports.append(port)
-    for port in parse_extra_ports(AUTO_DISCOVERY_EXTRA_PORTS):
-        if port not in ports:
-            ports.append(port)
-    for port in AUTO_DISCOVERY_DEFAULT_PORTS:
-        if port not in ports:
-            ports.append(port)
-    return ports
-
-def build_prefix2_candidates(seeds, local_addresses=None):
-    prefixes = []
-    for address in local_addresses or []:
-        parsed = parse_wireless_target(f"{address}:1")
-        if parsed:
-            add_unique_value(prefixes, parsed["prefix2"])
-    for seed in seeds:
-        add_unique_value(prefixes, str(seed.get("prefix2", "")))
-    return prefixes
-
-def build_third_octet_order(prefix2, seeds, local_addresses):
-    order = []
-    for address in local_addresses:
-        parsed = parse_wireless_target(f"{address}:1")
-        if parsed and parsed["prefix2"] == prefix2:
-            add_unique_value(order, parsed["third_octet"])
-    for seed in seeds:
-        if seed.get("prefix2") == prefix2:
-            third = int(seed.get("third_octet", -1))
-            if 0 <= third <= 255:
-                add_unique_value(order, third)
-    for third in range(0, 256):
-        add_unique_value(order, third)
-    return order[:AUTO_DISCOVERY_MAX_SUBNETS]
-
 def build_host_octet_order(prefix2, third_octet, seeds):
     order = []
     for seed in seeds:
@@ -603,6 +544,12 @@ def build_host_octet_order(prefix2, third_octet, seeds):
     for host_octet in range(1, 255):
         add_unique_value(order, host_octet)
     return order
+
+def find_last_target_seed(seeds):
+    for seed in seeds:
+        if str(seed.get("source", "")) == "cache-last":
+            return seed
+    return None
 
 def tcp_port_open(host, port, timeout):
     sock = None
@@ -834,35 +781,38 @@ def discover_hdc_candidates():
     if candidates:
         return candidates
 
-    local_addresses = get_local_ipv4_addresses()
-    ports = build_port_candidates(seeds)
-    prefixes = build_prefix2_candidates(seeds, local_addresses)
-    if not ports or not prefixes:
-        print(">> [HDC Auto] No LAN prefix or HDC port is available for auto scan.")
+    last_seed = find_last_target_seed(seeds)
+    if not last_seed:
+        print(">> [HDC Auto] No last_target is available for bounded LAN scan.")
         return []
 
     deadline = time.monotonic() + AUTO_DISCOVERY_SCAN_BUDGET
+    prefix2 = str(last_seed.get("prefix2", ""))
+    third = int(last_seed.get("third_octet", -1))
+    port = int(last_seed.get("port", 0) or 0)
+    if not prefix2 or third < 0 or third > 255 or port <= 0 or port > 65535:
+        print(">> [HDC Auto] last_target is not valid for bounded LAN scan.")
+        return []
+
+    prefix3 = f"{prefix2}.{third}"
+    host_order = build_host_octet_order(prefix2, third, [last_seed])
     print(
-        f">> [HDC Auto] LAN scan starts: prefixes={prefixes}, ports={ports}, "
+        f">> [HDC Auto] LAN scan starts: subnet={prefix3}.0/24, port={port}, "
         f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
     )
-    for prefix2 in prefixes:
-        third_order = build_third_octet_order(prefix2, seeds, local_addresses)
-        for port in ports:
-            for third in third_order:
-                if time.monotonic() >= deadline:
-                    print(">> [HDC Auto] LAN scan budget exhausted.")
-                    return unique_candidates(candidates)
-                prefix3 = f"{prefix2}.{third}"
-                host_order = build_host_octet_order(prefix2, third, seeds)
-                open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
-                if not open_targets:
-                    continue
-                print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
-                for target in open_targets:
-                    candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
-                    if candidate:
-                        return [candidate]
+    if time.monotonic() >= deadline:
+        print(">> [HDC Auto] LAN scan budget exhausted.")
+        return unique_candidates(candidates)
+    open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
+    if time.monotonic() >= deadline:
+        print(">> [HDC Auto] LAN scan budget exhausted.")
+        return unique_candidates(candidates)
+    if open_targets:
+        print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
+    for target in open_targets:
+        candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
+        if candidate:
+            return [candidate]
     return unique_candidates(candidates)
 
 def ensure_auto_hdc_connected(force=False, prompt_user=False, reason=""):

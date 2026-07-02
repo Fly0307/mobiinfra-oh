@@ -293,6 +293,11 @@ export class DataManagerFacade {
     return this.indexService.query(options);
   }
 
+  loadProfileMarkdown(): string {
+    this.ensureReady();
+    return this.indexService.loadProfileMarkdown();
+  }
+
   hasDailyLogData(): boolean {
     this.ensureReady();
     let files = this.storage.findFiles(this.paths.dailyLogRoot, '.md');

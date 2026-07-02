@@ -664,6 +664,10 @@ export class IndexService {
     return this.storage.readJson<ProfileState>(this.storage.join(this.paths.indexesRoot, 'profile', 'state.json'), this.emptyProfileState());
   }
 
+  loadProfileMarkdown(): string {
+    return this.storage.readText(this.storage.join(this.paths.indexesRoot, 'profile', 'profile.md'), '').trim();
+  }
+
   loadEvents(): EventMap {
     let result: EventMap = {};
     let eventDir = this.storage.join(this.paths.indexesRoot, 'events');

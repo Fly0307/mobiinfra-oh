@@ -13,8 +13,14 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR: string = 'avatar';
 export const FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT: string = 'agent';
 export const FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE: string = 'usage_guide';
 
+export enum FirstLaunchOnboardingSlideKind {
+  Preview = 'preview',
+  UsageGuide = 'usage_guide'
+}
+
 export interface FirstLaunchOnboardingSlide {
   id: string;
+  kind: FirstLaunchOnboardingSlideKind;
   title: string;
   description: string;
   mediaResourceName: string;
@@ -73,6 +79,7 @@ export const FIRST_LAUNCH_USAGE_GUIDE_ITEMS: FirstLaunchUsageGuideItem[] = [
 export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
   {
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_DATA_HOME,
+    kind: FirstLaunchOnboardingSlideKind.Preview,
     title: '数据归家',
     description: '汇总聊天、图库、任务和位置线索，让分散在各个 App 里的信息回到你的个人数据中心。',
     mediaResourceName: 'onboarding_data_home',
@@ -81,6 +88,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
   },
   {
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR,
+    kind: FirstLaunchOnboardingSlideKind.Preview,
     title: '数字分身',
     description: '结合个人资料、头像和历史上下文，生成更懂你的助手，用于问答、朗读和任务协作。',
     mediaResourceName: 'onboarding_avatar',
@@ -89,6 +97,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
   },
   {
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT,
+    kind: FirstLaunchOnboardingSlideKind.Preview,
     title: '自动执行',
     description: '让 Agent 根据你的目标规划步骤、调用工具并执行任务，关键动作保留确认边界。',
     mediaResourceName: 'onboarding_agent',
@@ -97,6 +106,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
   },
   {
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE,
+    kind: FirstLaunchOnboardingSlideKind.UsageGuide,
     title: '开始使用',
     description: '三步建立你的个人智能助手：先汇总数据，再生成数字分身，最后让 Agent 执行任务。',
     mediaResourceName: '',

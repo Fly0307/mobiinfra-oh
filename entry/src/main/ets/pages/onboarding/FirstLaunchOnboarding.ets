@@ -232,7 +232,7 @@ export struct FirstLaunchOnboarding {
   build() {
     Column() {
       Row() {
-        Text('MobiInfra')
+        Text('ClawMate')
           .fontSize(18)
           .fontWeight(FontWeight.Bold)
           .fontColor(ONBOARDING_TEXT_PRIMARY)

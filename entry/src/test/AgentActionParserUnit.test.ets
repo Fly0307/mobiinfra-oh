@@ -43,5 +43,18 @@ export default function agentActionParserUnitTest() {
       expect(payload.x).assertEqual(200);
       expect(payload.y).assertEqual(300);
     });
+
+    it('repairsCjkPunctuationBareBboxAndTruncatedJson', 0, () => {
+      // 覆盖模型同时输出中文标点、裸 bbox 序列和截断 JSON 的组合容错。
+      let raw = '{"action":"click"，"parameters":{"target_element":"confirm"，"bbox"：100，200，300，400';
+
+      let parsed = AgentActionParser.parse(raw, true);
+      let payload = AgentActionParser.buildHdcActionPayload(parsed, 1000, 1000) as Object as ClickPayloadForTest;
+
+      expect(parsed.action).assertEqual('click');
+      expect(payload.action).assertEqual('click');
+      expect(payload.x).assertEqual(200);
+      expect(payload.y).assertEqual(300);
+    });
   });
 }

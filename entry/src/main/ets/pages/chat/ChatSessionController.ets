@@ -11,11 +11,13 @@ import {
   chatMessageImagePaths,
   chatMessageThinkingCollapsed,
   chatMessageThinkingContent,
+  chatMessageVoiceMetadataForStorage,
   splitAssistantThinkingContent,
   normalizeChatMode,
   toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from './ChatSessionTypes';
+import { ChatVoiceMetadata, optionalChatVoiceMetadata } from './VoiceInteractionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
 
 export interface ChatSessionViewState {
@@ -123,7 +125,7 @@ export class ChatSessionController {
     let lastMessage = messages[traceIndex];
     let trace = lastMessage.trace.slice();
     trace.push(line);
-    messages[traceIndex] = {
+    let updatedTraceMessage: ChatMessage = {
       id: lastMessage.id,
       role: lastMessage.role,
       kind: lastMessage.kind,
@@ -136,6 +138,11 @@ export class ChatSessionController {
       imagePath: chatMessageImagePath(lastMessage),
       imagePaths: chatMessageImagePaths(lastMessage)
     };
+    let traceVoiceMetadata = chatMessageVoiceMetadataForStorage(lastMessage);
+    if (traceVoiceMetadata !== undefined) {
+      updatedTraceMessage.voice = traceVoiceMetadata;
+    }
+    messages[traceIndex] = updatedTraceMessage;
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
@@ -161,7 +168,7 @@ export class ChatSessionController {
     }
     let sessionImagePath = ChatSessionStorage.adoptImageForSession(filesDir, sessionId, imagePath);
     let resultMessage = messages[resultIndex];
-    messages[resultIndex] = {
+    let updatedResultMessage: ChatMessage = {
       id: resultMessage.id,
       role: resultMessage.role,
       kind: resultMessage.kind,
@@ -174,6 +181,11 @@ export class ChatSessionController {
       imagePath: sessionImagePath,
       imagePaths: [sessionImagePath]
     };
+    let resultVoiceMetadata = chatMessageVoiceMetadataForStorage(resultMessage);
+    if (resultVoiceMetadata !== undefined) {
+      updatedResultMessage.voice = resultVoiceMetadata;
+    }
+    messages[resultIndex] = updatedResultMessage;
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
@@ -347,7 +359,7 @@ export class ChatSessionController {
           thinkingCollapsed = false;
         }
       }
-      messages[i] = {
+      let updatedMessage: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -360,6 +372,60 @@ export class ChatSessionController {
         imagePath: chatMessageImagePath(message),
         imagePaths: chatMessageImagePaths(message)
       };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        updatedMessage.voice = voiceMetadata;
+      }
+      messages[i] = updatedMessage;
+      changed = true;
+      break;
+    }
+    if (!changed) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    session.messages = messages;
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateMessageVoiceMetadataInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    messageId: string, voice?: ChatVoiceMetadata): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let messages = session.messages.slice();
+    let changed = false;
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      if (message.id !== messageId) {
+        continue;
+      }
+      let updatedMessage: ChatMessage = {
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: message.content,
+        thinkingContent: chatMessageThinkingContent(message),
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
+        trace: message.trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
+      };
+      let voiceMetadata = optionalChatVoiceMetadata(voice);
+      if (voiceMetadata !== undefined) {
+        updatedMessage.voice = voiceMetadata;
+      }
+      messages[i] = updatedMessage;
       changed = true;
       break;
     }

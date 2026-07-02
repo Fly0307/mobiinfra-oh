@@ -6,7 +6,7 @@ import {
   ChatMessage
 } from './ChatSessionTypes';
 
-export type DigitalAvatarVisualState = 'idle' | 'thinking';
+export type DigitalAvatarVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted';
 export type DigitalAvatarSize = 'message' | 'hero';
 
 export interface ChatAvatarRenderModel {
@@ -55,6 +55,30 @@ export function digitalAvatarContainerHeight(size: DigitalAvatarSize, hasAvatarF
 
 export function useDigitalAvatarForMessage(message: ChatMessage): boolean {
   return message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT;
+}
+
+export function digitalAvatarVisualStateForVoiceStatus(voiceStatus: string): DigitalAvatarVisualState {
+  if (voiceStatus === 'listening' || voiceStatus === 'transcribing') {
+    return 'listening';
+  }
+  if (voiceStatus === 'thinking' || voiceStatus === 'synthesizing') {
+    return 'thinking';
+  }
+  if (voiceStatus === 'speaking') {
+    return 'speaking';
+  }
+  if (voiceStatus === 'paused' || voiceStatus === 'error') {
+    return 'interrupted';
+  }
+  return 'idle';
+}
+
+export function digitalAvatarVisualStateForMessageVoice(voiceStatus: string, activeMessageId: string,
+  messageId: string): DigitalAvatarVisualState {
+  if (activeMessageId.length === 0 || activeMessageId !== messageId) {
+    return 'idle';
+  }
+  return digitalAvatarVisualStateForVoiceStatus(voiceStatus);
 }
 
 export function chatAvatarRenderModel(message: ChatMessage, modeMark: string,

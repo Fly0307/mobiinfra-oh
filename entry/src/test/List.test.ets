@@ -3,6 +3,7 @@ import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
+import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
@@ -34,6 +35,7 @@ export default function testsuite() {
   workflowStorageUnitTest();
   workflowDateContextUnitTest();
   mainTabConfigUnitTest();
+  firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();
   digitalAvatarTypesUnitTest();
   settingsCenterConfigUnitTest();

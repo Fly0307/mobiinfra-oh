@@ -1547,7 +1547,11 @@ def hdc_prefix():
     return "hdc"
 
 def hdc_input_text_command(text):
-    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
+    return f"{hdc_prefix()} shell uitest uiInput text {shlex.quote(str(text.strip() or ''))}"
+
+def driver_shell_text_command(text):
+    escaped_text = "'" + str(text or '').replace("'", "'\\''") + "'"
+    return f"uitest uiInput text {escaped_text}"
 
 def workflow_driver_for_action(action):
     if harmony_agent is None:
@@ -1669,7 +1673,7 @@ def _workflow_gui_action_impl(payload):
             time.sleep(harmony_agent.DEVICE_WAIT_TIME)
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
-            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
+            harmony_agent.run_driver_call("Driver.shell(text)", lambda d: d.shell(driver_shell_text_command(text)))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
@@ -1682,7 +1686,7 @@ def _workflow_gui_action_impl(payload):
         if driver:
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
-            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
+            harmony_agent.run_driver_call("Driver.shell(text)", lambda d: d.shell(driver_shell_text_command(text)))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
             run_hdc_command(hdc_input_text_command(text))

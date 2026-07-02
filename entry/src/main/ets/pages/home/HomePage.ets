@@ -882,7 +882,7 @@ export struct HomePage {
   }
 
   private buildQwenCollaborationTask(task: string): string {
-    return '打开千问，在下方输入框中输入：' + task + '。然后点击输入框右下角的黑色发送按钮';
+    return '打开千问，在下方输入框中输入：' + task + '。然后点击输入框右下角的黑色向上箭头发送按钮';
   }
 
   private agentTaskButtonLabel(action: string, idleLabel: string): string {

@@ -43,7 +43,7 @@ export default function firstLaunchOnboardingUnitTest(): void {
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[3].id).assertEqual(FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE);
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[3].kind).assertEqual(FirstLaunchOnboardingSlideKind.UsageGuide);
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[3].title).assertEqual('开始使用');
-      expect(FIRST_LAUNCH_ONBOARDING_SLIDES[3].mediaResourceName).assertEqual('');
+      expect(FIRST_LAUNCH_ONBOARDING_SLIDES[3].mediaResourceName).assertUndefined();
     });
 
     it('usesConfirmedUsageGuideCards', 0, () => {

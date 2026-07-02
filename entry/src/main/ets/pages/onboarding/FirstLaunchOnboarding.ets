@@ -2,7 +2,6 @@ import {
   FIRST_LAUNCH_ONBOARDING_SLIDE_AGENT,
   FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR,
   FIRST_LAUNCH_ONBOARDING_SLIDE_DATA_HOME,
-  FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE,
   FIRST_LAUNCH_ONBOARDING_SLIDES,
   FIRST_LAUNCH_USAGE_GUIDE_ITEMS,
   FirstLaunchOnboardingSlideKind,
@@ -202,8 +201,7 @@ export struct FirstLaunchOnboarding {
 
   @Builder
   private SlidePage(slide: FirstLaunchOnboardingSlide) {
-    if (slide.kind === FirstLaunchOnboardingSlideKind.UsageGuide ||
-      slide.id === FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE) {
+    if (slide.kind === FirstLaunchOnboardingSlideKind.UsageGuide) {
       this.UsageGuidePage(slide)
     } else {
       this.PreviewSlidePage(slide)

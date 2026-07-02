@@ -12,7 +12,7 @@ import {
   shouldShowFirstLaunchOnboarding
 } from '../main/ets/pages/onboarding/OnboardingTypes';
 
-export default function firstLaunchOnboardingUnitTest() {
+export default function firstLaunchOnboardingUnitTest(): void {
   describe('firstLaunchOnboardingUnitTest', () => {
     it('keepsVersionedStorageContractStable', 0, () => {
       expect(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY).assertEqual('firstLaunchOnboardingVersion');

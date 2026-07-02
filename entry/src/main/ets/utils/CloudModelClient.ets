@@ -15,6 +15,7 @@ import { GalleryModelJson } from './gallery/GalleryTypes';
 // 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
 export interface CloudModelConfig {
   plannerBaseUrl: string;
+  plannerModel: string;
   deciderBaseUrl: string;
   apiKey: string;
   deciderModel: string;
@@ -939,7 +940,7 @@ export class CloudModelClient {
   }
 
   private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string,
-    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
+    chatTemplateKwargs?: CloudChatTemplateKwargs, model?: string): Promise<string> {
     let message: CloudChatMessage = {
       role: 'user',
       content: content
@@ -947,7 +948,7 @@ export class CloudModelClient {
     let chatOptions: CloudChatOptions | undefined = chatTemplateKwargs === undefined ? undefined : {
       chat_template_kwargs: chatTemplateKwargs
     };
-    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatOptions);
+    return this.chatMessages(baseUrl, [message], apiKey, model, undefined, undefined, chatOptions);
   }
 
   async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
@@ -1126,11 +1127,11 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
+    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false }, config.plannerModel);
   }
 
   async chatPlannerMessages(messages: CloudChatMessage[], config: CloudModelConfig): Promise<string> {
-    return this.chatMessages(config.plannerBaseUrl, messages, config.apiKey, undefined, undefined, undefined, {
+    return this.chatMessages(config.plannerBaseUrl, messages, config.apiKey, config.plannerModel, undefined, undefined, {
       chat_template_kwargs: { enable_thinking: false }
     });
   }

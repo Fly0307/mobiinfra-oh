@@ -153,6 +153,7 @@ export class ChatReactAgent {
       min_p: preset.min_p,
       presence_penalty: preset.presence_penalty,
       repetition_penalty: preset.repetition_penalty,
+      model: config.plannerModel,
       chatTemplateKwargs: {
         enable_thinking: enableThinking
       }

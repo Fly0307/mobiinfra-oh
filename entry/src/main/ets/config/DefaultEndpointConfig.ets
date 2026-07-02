@@ -16,6 +16,10 @@ export interface EndpointDefaultConfig {
    */
   cloudPlannerBaseUrl: string;
   /**
+   * 留空时不向 planner 请求传 model 字段。
+   */
+  cloudPlannerModel: string;
+  /**
    * 云端 decider 服务地址，格式为 http://ip:port。
    */
   cloudDeciderBaseUrl: string;
@@ -29,6 +33,7 @@ export interface EndpointDefaultConfig {
    */
   agentRouterPort: number;
   avatarImageBaseUrl: string;
+  avatarImageApiKey: string;
   avatarImageModel: string;
   avatarImageSize: string;
   avatarImageResponseFormat: string;
@@ -51,11 +56,13 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   modelDownloadServerUrl: 'http://166.111.53.96:9123',
   hdcServerUrl: 'http://192.168.137.1:9124',
   cloudPlannerBaseUrl: 'http://123.60.91.241:9003',
+  cloudPlannerModel: '',
   cloudDeciderBaseUrl: 'http://166.111.53.96:7003',
   cloudApiKey: 'mobiagent-key',
   cloudDeciderModel: '',
   agentRouterPort: 9126,
   avatarImageBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+  avatarImageApiKey: '',
   avatarImageModel: 'doubao-seedream-4-5-251128',
   avatarImageSize: '2K',
   avatarImageResponseFormat: 'url',
@@ -90,3 +97,11 @@ export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
     'decider_model'
   ]
 };
+
+export function configuredEndpointValueOrDefault(configuredValue: string, defaultValue: string): string {
+  let value = configuredValue.trim();
+  if (value.length > 0) {
+    return value;
+  }
+  return defaultValue;
+}

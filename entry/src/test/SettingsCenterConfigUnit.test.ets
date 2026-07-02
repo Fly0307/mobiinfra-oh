@@ -12,6 +12,10 @@ import {
   settingsSectionTitle
 } from '../main/ets/pages/settings/SettingsCenterTypes';
 import { settingsActionColor } from '../main/ets/pages/settings/SettingsCenterTheme';
+import {
+  DEFAULT_ENDPOINT_CONFIG,
+  configuredEndpointValueOrDefault
+} from '../main/ets/config/DefaultEndpointConfig';
 
 export default function settingsCenterConfigUnitTest() {
   describe('settingsCenterConfigUnitTest', () => {
@@ -62,6 +66,20 @@ export default function settingsCenterConfigUnitTest() {
         .assertEqual('sk-1234567890abcdef');
       expect(restoreMaskedSensitiveSettingDefault('sk-other••••••••abcd', 'sk-1234567890abcdef'))
         .assertEqual('sk-other••••••••abcd');
+    });
+
+    it('resolvesConfiguredEndpointValuesWithDefaultFallback', 0, () => {
+      expect(configuredEndpointValueOrDefault('', 'default-model')).assertEqual('default-model');
+      expect(configuredEndpointValueOrDefault('   ', 'default-model')).assertEqual('default-model');
+      expect(configuredEndpointValueOrDefault(' custom-model ', 'default-model')).assertEqual('custom-model');
+    });
+
+    it('exposesModelAndApiDefaultsForFreshInstall', 0, () => {
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl).assertEqual('http://123.60.91.241:9003');
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel).assertEqual('');
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl).assertEqual('http://166.111.53.96:7003');
+      expect(DEFAULT_ENDPOINT_CONFIG.avatarImageModel).assertEqual('doubao-seedream-4-5-251128');
+      expect(DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat).assertEqual('url');
     });
   });
 }

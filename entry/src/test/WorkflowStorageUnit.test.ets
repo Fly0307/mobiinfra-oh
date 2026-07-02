@@ -111,6 +111,7 @@ function prepareTestRoot(path: string): void {
 function testCloudConfig(): CloudModelConfig {
   return {
     plannerBaseUrl: 'http://localhost:8000',
+    plannerModel: 'planner-model',
     deciderBaseUrl: 'http://localhost:8000',
     apiKey: 'test-key',
     deciderModel: 'test-model'

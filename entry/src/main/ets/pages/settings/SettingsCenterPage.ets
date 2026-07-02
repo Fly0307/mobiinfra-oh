@@ -112,6 +112,7 @@ export struct SettingsCenterPage {
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+  @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
@@ -120,7 +121,7 @@ export struct SettingsCenterPage {
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string =
     String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
-  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey;
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
@@ -185,6 +186,8 @@ export struct SettingsCenterPage {
 
   private restoreMaskedDefaultSecrets(): void {
     this.cloudApiKey = restoreMaskedSensitiveSettingDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    this.avatarImageApiKey = restoreMaskedSensitiveSettingDefault(this.avatarImageApiKey,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
     this.galleryApiKey = restoreMaskedSensitiveSettingDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY);
     this.galleryEmbeddingApiKey =
       restoreMaskedSensitiveSettingDefault(this.galleryEmbeddingApiKey, DEFAULT_GALLERY_EMBEDDING_API_KEY);
@@ -900,6 +903,13 @@ export struct SettingsCenterPage {
       value: this.cloudPlannerBaseUrl,
       placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
       onValueChange: (value: string) => { this.cloudPlannerBaseUrl = value; }
+    })
+    SettingInput({
+      label: 'Planner Model',
+      value: this.cloudPlannerModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel.length > 0 ?
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel : '留空则不传 model',
+      onValueChange: (value: string) => { this.cloudPlannerModel = value; }
     })
     SettingInput({
       label: 'Decider 服务',

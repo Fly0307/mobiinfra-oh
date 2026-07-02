@@ -135,7 +135,11 @@ import {
   localWeekdayLabel,
   weekRangeTextFromDate
 } from '../utils/DateUtils';
-import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import {
+  DEFAULT_ENDPOINT_CONFIG,
+  LEGACY_ENDPOINT_CONFIG,
+  configuredEndpointValueOrDefault
+} from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
@@ -331,6 +335,7 @@ PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+PersistentStorage.persistProp('cloudPlannerModel', DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
@@ -338,7 +343,7 @@ PersistentStorage.persistProp('chatContextCompressionThresholdPercent',
   String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT));
 PersistentStorage.persistProp('chatContextRecentRounds', String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT));
 PersistentStorage.persistProp('avatarImageBaseUrl', DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl);
-PersistentStorage.persistProp('avatarImageApiKey', '');
+PersistentStorage.persistProp('avatarImageApiKey', DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
 PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
 PersistentStorage.persistProp('avatarImageToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
 PersistentStorage.persistProp('avatarImageSize', DEFAULT_ENDPOINT_CONFIG.avatarImageSize);
@@ -353,9 +358,17 @@ PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
 PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudPlannerModel', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageApiKey', '');
+PersistentStorage.persistProp('endpointDefault.avatarTextToImageModel', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageToImageModel', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageSize', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageResponseFormat', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageOutputFormat', '');
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
@@ -407,6 +420,7 @@ struct Index {
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+  @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
@@ -414,7 +428,7 @@ struct Index {
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string = String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
-  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey;
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
@@ -1280,7 +1294,8 @@ struct Index {
   }
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
-    return isMobileGuiTaskCloudConfigReadyValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl, this.cloudApiKey);
+    let config = this.getCloudConfig();
+    return isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl, config.apiKey);
   }
 
   private mobileGuiTaskConfigMissingMessage(): string {
@@ -1330,30 +1345,31 @@ struct Index {
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
+    let plannerBaseUrl = configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
     return {
-      baseUrl: this.cloudPlannerBaseUrl,
-      apiKey: this.cloudApiKey,
-      enabled: this.cloudPlannerBaseUrl.trim().length > 0
+      baseUrl: plannerBaseUrl,
+      apiKey: configuredEndpointValueOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey),
+      enabled: plannerBaseUrl.trim().length > 0
     };
   }
 
   private getAvatarProviderConfig(): AvatarProviderConfig {
-    let textModel = this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
-      DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
-    let imageModel = this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel : textModel;
+    let textModel = configuredEndpointValueOrDefault(this.avatarTextToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+    let imageModel = configuredEndpointValueOrDefault(this.avatarImageToImageModel, textModel);
     return {
-      imageBaseUrl: this.avatarImageBaseUrl.trim().length > 0 ? this.avatarImageBaseUrl :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
-      apiKey: this.avatarImageApiKey,
+      imageBaseUrl: configuredEndpointValueOrDefault(this.avatarImageBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl),
+      apiKey: configuredEndpointValueOrDefault(this.avatarImageApiKey, DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey),
       textToImageModel: textModel,
       imageToImageModel: imageModel,
-      size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
-      responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
-      outputFormat: this.avatarImageOutputFormat.trim().length > 0 ? this.avatarImageOutputFormat :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat,
-      sequentialImageGeneration: this.avatarSequentialImageGeneration.trim().length > 0 ?
-        this.avatarSequentialImageGeneration : 'disabled',
+      size: configuredEndpointValueOrDefault(this.avatarImageSize, DEFAULT_ENDPOINT_CONFIG.avatarImageSize),
+      responseFormat: configuredEndpointValueOrDefault(this.avatarImageResponseFormat,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat),
+      outputFormat: configuredEndpointValueOrDefault(this.avatarImageOutputFormat,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat),
+      sequentialImageGeneration: configuredEndpointValueOrDefault(this.avatarSequentialImageGeneration, 'disabled'),
       stream: this.avatarImageStream,
       watermark: this.avatarImageWatermark,
       timeoutMs: this.avatarImageTimeoutMs > 0 ? this.avatarImageTimeoutMs : 60000
@@ -2612,12 +2628,28 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.wirelessHdcTargets, 'endpointDefault.wirelessIp');
     this.cloudPlannerBaseUrl = this.migrateEndpointValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudPlannerBaseUrls, 'endpointDefault.cloudPlannerBaseUrl');
+    this.cloudPlannerModel = this.migrateEndpointValue(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel,
+      [], 'endpointDefault.cloudPlannerModel', false);
     this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
     this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
+    this.avatarImageBaseUrl = this.migrateEndpointValue(this.avatarImageBaseUrl,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, [], 'endpointDefault.avatarImageBaseUrl');
+    this.avatarImageApiKey = this.migrateEndpointValue(this.avatarImageApiKey,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey, [], 'endpointDefault.avatarImageApiKey');
+    this.avatarTextToImageModel = this.migrateEndpointValue(this.avatarTextToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel, [], 'endpointDefault.avatarTextToImageModel');
+    this.avatarImageToImageModel = this.migrateEndpointValue(this.avatarImageToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel, [], 'endpointDefault.avatarImageToImageModel');
+    this.avatarImageSize = this.migrateEndpointValue(this.avatarImageSize, DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      [], 'endpointDefault.avatarImageSize');
+    this.avatarImageResponseFormat = this.migrateEndpointValue(this.avatarImageResponseFormat,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat, [], 'endpointDefault.avatarImageResponseFormat');
+    this.avatarImageOutputFormat = this.migrateEndpointValue(this.avatarImageOutputFormat,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat, [], 'endpointDefault.avatarImageOutputFormat');
   }
 
   private migrateWechatAutoSummaryDefaultValues(): void {
@@ -4252,22 +4284,27 @@ struct Index {
 
   private getCloudConfig(): CloudModelConfig {
     let config: CloudModelConfig = {
-      plannerBaseUrl: this.cloudPlannerBaseUrl,
-      deciderBaseUrl: this.cloudDeciderBaseUrl,
-      apiKey: this.cloudApiKey,
-      deciderModel: this.cloudDeciderModel
+      plannerBaseUrl: configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
+      plannerModel: configuredEndpointValueOrDefault(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
+      deciderBaseUrl: configuredEndpointValueOrDefault(this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
+      apiKey: configuredEndpointValueOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey),
+      deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
     };
     return config;
   }
 
   private isCloudConfigReady(): boolean {
-    return this.cloudPlannerBaseUrl.trim().length > 0 &&
-      this.cloudDeciderBaseUrl.trim().length > 0 &&
-      this.cloudApiKey.trim().length > 0;
+    let config = this.getCloudConfig();
+    return config.plannerBaseUrl.trim().length > 0 &&
+      config.deciderBaseUrl.trim().length > 0 &&
+      config.apiKey.trim().length > 0;
   }
 
   private isCloudPlannerConfigReady(): boolean {
-    return this.cloudPlannerBaseUrl.trim().length > 0 && this.cloudApiKey.trim().length > 0;
+    let config = this.getCloudConfig();
+    return config.plannerBaseUrl.trim().length > 0 && config.apiKey.trim().length > 0;
   }
 
   async testCloudPlanner() {
@@ -4276,9 +4313,10 @@ struct Index {
       return;
     }
     this.cloudThinking = true;
-    this.appendCloudLog(`测试 Planner：${this.cloudPlannerBaseUrl}`);
+    let config = this.getCloudConfig();
+    this.appendCloudLog(`测试 Planner：${config.plannerBaseUrl}`);
     try {
-      let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
+      let response = await this.cloudClient.chatPlanner('请只回复 ok', config);
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
     } catch (e) {
       let err = e as Error;
@@ -5099,7 +5137,8 @@ struct Index {
     this.currentTab = MainTabIndex.Chat;
     this.resetCloudLog('云端 Agent 开始执行：' + task);
     this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
-    this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
+    let config = this.getCloudConfig();
+    this.appendCloudLog(`Planner=${config.plannerBaseUrl}, Decider=${config.deciderBaseUrl}`);
     let runner = this.createAgentLoopRunner();
     this.activeAgentRunner = runner;
     try {

@@ -76,6 +76,12 @@ import {
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
+import {
+  FIRST_LAUNCH_ONBOARDING_STORAGE_KEY,
+  FIRST_LAUNCH_ONBOARDING_VERSION,
+  shouldShowFirstLaunchOnboarding
+} from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
@@ -342,6 +348,7 @@ PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadS
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
+PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -431,6 +438,7 @@ struct Index {
   @State selectedModelVariant: string = '';
   @State downloadedModels: DownloadedModelItem[] = [];
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
+  @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -555,6 +563,15 @@ struct Index {
   private cloudStreamDisplayTimerId: number = -1;
   private cloudStreamDisplayGeneration: number = 0;
   private cloudStreamDisplayVersion: number = 0;
+
+  private shouldDisplayFirstLaunchOnboarding(): boolean {
+    return shouldShowFirstLaunchOnboarding(this.firstLaunchOnboardingVersion);
+  }
+
+  private completeFirstLaunchOnboarding(): void {
+    this.currentTab = MainTabIndex.Home;
+    this.firstLaunchOnboardingVersion = FIRST_LAUNCH_ONBOARDING_VERSION;
+  }
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -5645,6 +5662,13 @@ struct Index {
 
   build() {
     Stack() {
+      if (this.shouldDisplayFirstLaunchOnboarding()) {
+        FirstLaunchOnboarding({
+          onComplete: () => {
+            this.completeFirstLaunchOnboarding();
+          }
+        })
+      } else {
       Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
         TabContent() {
           HomePage({
@@ -5805,6 +5829,7 @@ struct Index {
       .backgroundColor('#F4F8FF')
 
       this.DataManagerProgressOverlay()
+      }
     }
     .width('100%')
     .height('100%')

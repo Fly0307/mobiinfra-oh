@@ -18,7 +18,8 @@ export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   onSetRecommendationCompleted: (id: string, completed: boolean) => void = (id: string, completed: boolean) => {};
   @Prop avatarVersions: AvatarVersionViewModel[] = [];
-  onExecuteAgentTask: (taskDescription: string) => Promise<void> = async (taskDescription: string) => {};
+  onExecuteAgentTask: (taskDescription: string, keepTargetAppAfterFinish: boolean) => Promise<void> =
+    async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {};
   onGenerateAvatar: (mode: AvatarGenerationMode, sourceImage: string) => Promise<void> =
     async (mode: AvatarGenerationMode, sourceImage: string) => {};
   onSaveAvatarReferencePhoto: (sourceImage: string) => Promise<string> =
@@ -29,6 +30,7 @@ export struct HomePage {
   @State selectedRecommendationCompletedOverrideValue: boolean = false;
   @State agentTaskDraft: string = '';
   @State agentTaskSubmitting: boolean = false;
+  @State agentTaskSubmittingAction: string = '';
   @State showAllRecommendations: boolean = false;
   @State avatarGenerationOpen: boolean = false;
   @State avatarGenerating: boolean = false;
@@ -879,8 +881,17 @@ export struct HomePage {
     this.onSetRecommendationCompleted(item.id, completed);
   }
 
-  private async executeAgentTask(): Promise<void> {
-    let task = this.agentTaskDraft.trim();
+  private buildQwenCollaborationTask(task: string): string {
+    return '打开千问，在下方输入框中输入：' + task + '。然后点击输入框右下角的黑色发送按钮';
+  }
+
+  private agentTaskButtonLabel(action: string, idleLabel: string): string {
+    return this.agentTaskSubmitting && this.agentTaskSubmittingAction === action ? '下发中' : idleLabel;
+  }
+
+  private async submitAgentTask(taskDescription: string, keepTargetAppAfterFinish: boolean,
+    submittingAction: string): Promise<void> {
+    let task = taskDescription.trim();
     if (task.length === 0) {
       showToastSafely('请输入要执行的任务', 1200);
       return;
@@ -889,15 +900,26 @@ export struct HomePage {
       return;
     }
     this.agentTaskSubmitting = true;
+    this.agentTaskSubmittingAction = submittingAction;
     try {
-      await this.onExecuteAgentTask(task);
+      await this.onExecuteAgentTask(task, keepTargetAppAfterFinish);
       this.closeRecommendationDetail();
     } catch (e) {
       let err = e as Error;
       showToastSafely('任务下发失败：' + err.message, 1800);
     } finally {
       this.agentTaskSubmitting = false;
+      this.agentTaskSubmittingAction = '';
     }
+  }
+
+  private async executeAgentTask(): Promise<void> {
+    await this.submitAgentTask(this.agentTaskDraft, false, 'execute');
+  }
+
+  private async executeQwenAgentTask(): Promise<void> {
+    let task = this.agentTaskDraft.trim();
+    await this.submitAgentTask(task.length > 0 ? this.buildQwenCollaborationTask(task) : task, true, 'qwen');
   }
 
   @Builder RecommendationFilterButton(label: string, showAll: boolean) {
@@ -1110,19 +1132,34 @@ export struct HomePage {
               .onChange((value: string) => {
                 this.agentTaskDraft = value;
               })
-            Button(this.agentTaskSubmitting ? '下发中' : '执行')
+            Row({ space: 10 }) {
+              Button(this.agentTaskButtonLabel('execute', '执行'))
+                .layoutWeight(1)
+                .height(44)
+                .fontSize(15)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(Color.White)
+                .backgroundColor(this.agentTaskSubmitting ? '#A9B7E9' : item.color)
+                .borderRadius(14)
+                .enabled(!this.agentTaskSubmitting)
+                .onClick(() => {
+                  this.executeAgentTask();
+                })
+              Button(this.agentTaskButtonLabel('qwen', '与千问协同'))
+                .layoutWeight(1)
+                .height(44)
+                .fontSize(15)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(Color.White)
+                .backgroundColor(this.agentTaskSubmitting ? '#A9B7E9' : item.color)
+                .borderRadius(14)
+                .enabled(!this.agentTaskSubmitting)
+                .onClick(() => {
+                  this.executeQwenAgentTask();
+                })
+            }
               .width('100%')
-              .height(44)
-              .fontSize(15)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
-              .backgroundColor(this.agentTaskSubmitting ? '#A9B7E9' : item.color)
-              .borderRadius(14)
               .margin({ top: 12 })
-              .enabled(!this.agentTaskSubmitting)
-              .onClick(() => {
-                this.executeAgentTask();
-              })
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%')

@@ -108,7 +108,7 @@ export class AgentLoopRunner {
     }
   }
 
-  async runCloudTask(task: string): Promise<void> {
+  async runCloudTask(task: string, returnToHostAppOnFinish: boolean): Promise<void> {
     this.mode = 'cloud';
     this.cancellationRequested = false;
     this.cloudActionHistory = [];
@@ -121,7 +121,11 @@ export class AgentLoopRunner {
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
       await this.runAgentSteps(task, 'cloud');
-      await this.returnToHostApp('cloud');
+      if (returnToHostAppOnFinish) {
+        await this.returnToHostApp('cloud');
+      } else {
+        this.log('cloud', '>> [Agent] stay in target app after task completion.');
+      }
       AgentExecutionController.finishExecution('云端 Agent 已完成');
     } catch (e) {
       let err = e as Error;

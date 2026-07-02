@@ -1723,22 +1723,53 @@ export class DataPipelineModelClient {
     this.requestSequence += 1;
     let requestId = this.requestSequence;
     dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}`);
+    let temperatures: number[] = [0, 0.5, 1.0];
     try {
-      let content = await this.cloudClient.chatCompletionText({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        messages: messages,
-        temperature: 0,
-        chatTemplateKwargs: {
-          enable_thinking: false
+      for (let attempt = 0; attempt < temperatures.length; attempt++) {
+        let temperature = temperatures[attempt];
+        let content = await this.cloudClient.chatCompletionText({
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+          messages: messages,
+          temperature: temperature,
+          chatTemplateKwargs: {
+            enable_thinking: false
+          }
+        });
+        dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
+        try {
+          return this.parseJsonObject(content);
+        } catch (e) {
+          let err = e as Error;
+          let canRetry = attempt + 1 < temperatures.length;
+          dataManagerError(`Model request parse failed: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, responseChars=${content.length}, retry=${canRetry}, error=${err.message}`);
+          this.logRawModelOutput(requestId, kind, content);
+          if (!canRetry) {
+            throw err;
+          }
+          dataManagerInfo(`Model request parse retry: id=${requestId}, kind=${kind}, nextTemperature=${temperatures[attempt + 1]}`);
         }
-      });
-      dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
-      return this.parseJsonObject(content);
+      }
+      throw new Error('Model JSON parse retry exhausted');
     } catch (e) {
       let err = e as Error;
       dataManagerError(`Model request failed: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, ms=${Date.now() - startedAt}, error=${err.message}`);
       throw err;
+    }
+  }
+
+  private logRawModelOutput(requestId: number, kind: string, content: string): void {
+    let maxChunkLength = 1800;
+    if (content.length === 0) {
+      dataManagerError(`Model request raw output: id=${requestId}, kind=${kind}, chunk=1/1, text=`);
+      return;
+    }
+    let totalChunks = Math.ceil(content.length / maxChunkLength);
+    for (let index = 0; index < totalChunks; index++) {
+      let start = index * maxChunkLength;
+      let end = Math.min(content.length, start + maxChunkLength);
+      let chunk = content.substring(start, end);
+      dataManagerError(`Model request raw output: id=${requestId}, kind=${kind}, chunk=${index + 1}/${totalChunks}, text=${chunk}`);
     }
   }
 

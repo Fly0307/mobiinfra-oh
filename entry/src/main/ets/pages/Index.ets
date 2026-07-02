@@ -288,6 +288,11 @@ interface CloudAgentTaskSubmitResult {
   error: string;
 }
 
+interface CloudAgentTaskSubmitOptions {
+  switchToChat: boolean;
+  returnToHostAppOnFinish: boolean;
+}
+
 type CloudChatContextCompressionAction = 'none' | 'created' | 'reused' | 'updated';
 
 interface CloudChatContextPreparation {
@@ -5160,12 +5165,15 @@ struct Index {
     return true;
   }
 
-  private async runHomeRecommendationAgentTask(taskText: string): Promise<void> {
-    let result = await this.submitDirectCloudAgentTask(taskText);
+  private async runHomeRecommendationAgentTask(taskText: string, keepTargetAppAfterFinish: boolean): Promise<void> {
+    let options: CloudAgentTaskSubmitOptions = {
+      switchToChat: false,
+      returnToHostAppOnFinish: !keepTargetAppAfterFinish
+    };
+    let result = await this.submitDirectCloudAgentTask(taskText, options);
     if (!result.success) {
       throw new Error(result.error.length > 0 ? result.error : '云端 Agent 后端未就绪');
     }
-    this.currentTab = MainTabIndex.Chat;
   }
 
   private createAgentLoopRunner(): AgentLoopRunner {
@@ -5201,7 +5209,8 @@ struct Index {
     }
   }
 
-  private async submitDirectCloudAgentTask(taskText: string): Promise<CloudAgentTaskSubmitResult> {
+  private async submitDirectCloudAgentTask(taskText: string,
+    options: CloudAgentTaskSubmitOptions): Promise<CloudAgentTaskSubmitResult> {
     let task = taskText.trim();
     if (task.length === 0) {
       return { success: false, error: '请先输入云端 Agent 任务。' };
@@ -5209,14 +5218,16 @@ struct Index {
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
     }
-    this.currentTab = MainTabIndex.Chat;
+    if (options.switchToChat) {
+      this.currentTab = MainTabIndex.Chat;
+    }
     this.resetCloudLog('云端 Agent 开始执行：' + task);
     this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
     this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
     let runner = this.createAgentLoopRunner();
     this.activeAgentRunner = runner;
     try {
-      await runner.runCloudTask(task);
+      await runner.runCloudTask(task, options.returnToHostAppOnFinish);
       this.appendCloudLog('云端 Agent 任务完成。');
       return { success: true, error: '' };
     } catch (e) {
@@ -5443,7 +5454,10 @@ struct Index {
     this.cloudUserInput = chatInputAfterAcceptedSend(this.cloudUserInput, true);
     this.cloudThinking = true;
     try {
-      let result = await this.submitDirectCloudAgentTask(task);
+      let result = await this.submitDirectCloudAgentTask(task, {
+        switchToChat: true,
+        returnToHostAppOnFinish: true
+      });
       if (result.success) {
         this.appendChatMessageForSession(this.cloudTaskSessionId,
           createChatMessage(this.nextChatMessageId('task-result'), 'task',
@@ -5564,8 +5578,8 @@ struct Index {
               this.setHomeRecommendationCompleted(id, completed);
             },
             avatarVersions: this.avatarVersions,
-            onExecuteAgentTask: async (taskDescription: string) => {
-              await this.runHomeRecommendationAgentTask(taskDescription);
+            onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
+              await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
             },
             onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
               await this.generateHomeAvatar(mode, sourceImage);

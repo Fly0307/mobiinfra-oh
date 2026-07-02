@@ -59,7 +59,7 @@ export const FIRST_LAUNCH_USAGE_GUIDE_ITEMS: FirstLaunchUsageGuideItem[] = [
     title: '数字分身',
     entryLabel: '使用入口：首页',
     configLabel: '配置入口：设置 > 个人与隐私',
-    description: '基于个人画像和头像生成数字分身，用于问答、朗读和长期陪伴。',
+    description: '基于个人画像和头像生成数字分身，用于问答、任务执行和长期陪伴。',
     iconText: 'A',
     accentColor: '#8066FF',
     softBackgroundColor: '#F1EEFF'
@@ -90,7 +90,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR,
     kind: FirstLaunchOnboardingSlideKind.Preview,
     title: '数字分身',
-    description: '结合个人资料、头像和历史上下文，生成更懂你的助手，用于问答、朗读和任务协作。',
+    description: '结合个人资料、头像和历史上下文，生成更懂你的助手，用于问答、陪伴和任务协作。',
     mediaResourceName: 'onboarding_avatar',
     accentColor: '#8066FF',
     softBackgroundColor: '#F1EEFF'

@@ -196,11 +196,13 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
         original_agent = hdc_server.harmony_agent
         original_service = hdc_server.wechat_collect_service
         original_is_connected = hdc_server.is_hdc_connected
+        original_get_active_hdc_target = hdc_server.get_active_hdc_target
         fake_service = FakeWechatCollectService()
         try:
             hdc_server.harmony_agent = None
             hdc_server.wechat_collect_service = fake_service
             hdc_server.is_hdc_connected = lambda force=False: True
+            hdc_server.get_active_hdc_target = lambda force=False: ""
 
             result = hdc_server.handle_workflow_action("uidump", {})
 
@@ -210,6 +212,7 @@ class WechatWorkflowBridgeTest(unittest.TestCase):
             hdc_server.harmony_agent = original_agent
             hdc_server.wechat_collect_service = original_service
             hdc_server.is_hdc_connected = original_is_connected
+            hdc_server.get_active_hdc_target = original_get_active_hdc_target
 
     def test_uidump_and_wechat_collect_use_hdc_control_wrapper(self):
         original_agent = hdc_server.harmony_agent

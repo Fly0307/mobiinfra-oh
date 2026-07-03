@@ -49,6 +49,8 @@ DEVICE_CONTROL_LOCK = threading.RLock()
 AGENT_LOOP_STOP_EVENT = threading.Event()
 POLL_FPORT_REFRESH_INTERVAL = 15.0
 LAST_POLL_FPORT_REFRESH = 0.0
+HDC_MANUAL_CONFIG_NOTICE_INTERVAL = 60.0
+HDC_MANUAL_CONFIG_LAST_NOTICE_AT = 0.0
 
 # Agent mode toggle: True = prefix KV cache reuse, False = original chat-based flow
 USE_AGENT_MODE = True
@@ -168,6 +170,22 @@ def clear_hdc_target_cache():
         return
     set_hdc_target("")
 
+def hdc_manual_config_message():
+    return (
+        "未检测到 HDC 设备连接。请先手动配置 HDC：USB 连接后执行 `hdc list targets` "
+        "确认设备在线；无线调试请先执行 `hdc tconn <设备IP:端口>`；如果有多个设备或固定无线目标，"
+        "请设置环境变量 `HDC_TARGET=<target>` 后重启服务。"
+    )
+
+def print_hdc_manual_config_hint(force=False):
+    global HDC_MANUAL_CONFIG_LAST_NOTICE_AT
+    now = time.monotonic()
+    if (not force and HDC_MANUAL_CONFIG_LAST_NOTICE_AT > 0 and
+            now - HDC_MANUAL_CONFIG_LAST_NOTICE_AT < HDC_MANUAL_CONFIG_NOTICE_INTERVAL):
+        return
+    HDC_MANUAL_CONFIG_LAST_NOTICE_AT = now
+    print(f">> [HDC] {hdc_manual_config_message()}")
+
 def keep_cached_hdc_target_after_probe_error(error, now):
     global HDC_TARGET_CHECKED_AT
     if not error or not HDC_TARGET or HDC_TARGET_LAST_OK_AT <= 0:
@@ -241,6 +259,10 @@ def _refresh_hdc_forwarding_for_target(target, verbose=False):
 def _refresh_hdc_forwarding_impl(verbose=False):
     # PC 通过 tcp:9126 转发到手机 App 内 TCP server；每次任务前刷新，避免旧映射残留。
     target = get_hdc_target(force=True)
+    if not target:
+        print_hdc_manual_config_hint(force=verbose)
+        return 1
+
     result = _refresh_hdc_forwarding_for_target(target, verbose)
     if result == 0 or HDC_TARGET_OVERRIDE:
         return result
@@ -1604,9 +1626,11 @@ def run_agent_loop(stop_event=None):
 
     print("初始化 HDC 端口转发...")
     # 由于该脚本可能被多次重启或前置 HDC 挂载占用，先强制清理端口再映射，防止冲突
-    refresh_hdc_forwarding(verbose=True)
-    
-    print(">> 监听模式已启动。等待手机 APP 端派发任务...")
+    forward_result = refresh_hdc_forwarding(verbose=True)
+    if forward_result == 0:
+        print(">> 监听模式已启动。等待手机 APP 端派发任务...")
+    else:
+        print(">> 监听模式暂未就绪：请先完成 HDC 手动配置，再从手机 App 重新触发任务。")
     
     active_task = ""
     

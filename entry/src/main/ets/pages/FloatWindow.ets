@@ -42,9 +42,21 @@ struct FloatWindow {
     }, 0);
   }
 
+  private touchScreenX(event: TouchEvent): number {
+    return event.touches.length > 0 ? event.touches[0].screenX : 0;
+  }
+
+  private touchScreenY(event: TouchEvent): number {
+    return event.touches.length > 0 ? event.touches[0].screenY : 0;
+  }
+
   private handleMoveTouch(event: TouchEvent): void {
     if (event.type === TouchType.Down) {
-      AgentExecutionController.startFloatPanelMove();
+      AgentExecutionController.startFloatPanelMove(this.touchScreenX(event), this.touchScreenY(event));
+      return;
+    }
+    if (event.type === TouchType.Move) {
+      AgentExecutionController.moveFloatPanel(this.touchScreenX(event), this.touchScreenY(event));
       return;
     }
     if (event.type === TouchType.Up || event.type === TouchType.Cancel) {

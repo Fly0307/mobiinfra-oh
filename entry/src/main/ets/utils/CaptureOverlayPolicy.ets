@@ -10,6 +10,25 @@ export interface CaptureOverlayWindowTransition {
   windowTouchable: boolean;
 }
 
+export interface FloatPanelManualMoveInput {
+  startLeft: number;
+  startTop: number;
+  width: number;
+  height: number;
+  startScreenX: number;
+  startScreenY: number;
+  currentScreenX: number;
+  currentScreenY: number;
+  touchScale: number;
+  displayWidth: number;
+  displayHeight: number;
+}
+
+export interface FloatPanelManualMoveRect {
+  left: number;
+  top: number;
+}
+
 export function captureOverlayWindowTransition(hidden: boolean,
   hasFloatWindow: boolean): CaptureOverlayWindowTransition {
   if (hidden) {
@@ -29,4 +48,22 @@ export function captureOverlayWindowTransition(hidden: boolean,
     contentHidden: false,
     windowTouchable: true
   };
+}
+
+// 不可获焦浮窗不能稳定依赖系统 startMoving。ArkUI 触摸坐标按 vp 语义上报，
+// window.moveWindowTo 使用 px，因此手动拖动需要按屏幕密度换算位移后再夹取边界。
+export function resolveFloatPanelManualMoveRect(input: FloatPanelManualMoveInput): FloatPanelManualMoveRect {
+  let maxLeft = Math.max(0, input.displayWidth - input.width);
+  let maxTop = Math.max(0, input.displayHeight - input.height);
+  let scale = input.touchScale > 0 ? input.touchScale : 1;
+  let nextLeft = Math.round(input.startLeft + (input.currentScreenX - input.startScreenX) * scale);
+  let nextTop = Math.round(input.startTop + (input.currentScreenY - input.startScreenY) * scale);
+  return {
+    left: clampNumber(nextLeft, 0, maxLeft),
+    top: clampNumber(nextTop, 0, maxTop)
+  };
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

@@ -6,7 +6,9 @@ import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 import {
   CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
-  captureOverlayWindowTransition
+  captureOverlayWindowTransition,
+  FloatPanelManualMoveRect,
+  resolveFloatPanelManualMoveRect
 } from '../utils/CaptureOverlayPolicy';
 
 const FLOAT_PANEL_COLLAPSED_WIDTH_VP = 88;
@@ -43,6 +45,9 @@ export default class EntryAbility extends UIAbility {
   private floatPanelMoveStartY: number = 0;
   private floatPanelMoveStartWidth: number = 0;
   private floatPanelMoveStartHeight: number = 0;
+  private floatPanelMoveStartScreenX: number = 0;
+  private floatPanelMoveStartScreenY: number = 0;
+  private floatPanelManualMoving: boolean = false;
   private floatPanelRectChangeCallback: ((options: window.RectChangeOptions) => void) | null = null;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -59,8 +64,8 @@ export default class EntryAbility extends UIAbility {
     AgentExecutionController.setFloatPanelLayoutHandler((expanded: boolean) => {
       this.layoutFloatPanelWindow(expanded);
     });
-    AgentExecutionController.setFloatPanelMoveHandler((phase: string) => {
-      this.handleFloatPanelMove(phase);
+    AgentExecutionController.setFloatPanelMoveHandler((phase: string, screenX: number, screenY: number) => {
+      this.handleFloatPanelMove(phase, screenX, screenY);
     });
     AgentExecutionController.setCaptureOverlayHandler(async (hidden: boolean): Promise<boolean> => {
       return await this.handleCaptureOverlayVisibility(hidden);
@@ -426,22 +431,55 @@ export default class EntryAbility extends UIAbility {
     return Math.min(Math.max(preferredWidth, minWidth), availableWidth);
   }
 
-  private handleFloatPanelMove(phase: string): void {
+  private handleFloatPanelMove(phase: string, screenX: number, screenY: number): void {
     if (!this.floatWindow) {
       return;
     }
     if (phase === 'start') {
       this.captureFloatPanelMoveStart();
-      // 系统浮窗移动必须在触摸按下回调链路中调用 startMoving，组件 PanGesture 只会移动内部内容。
-      this.floatWindow.startMoving().catch((err: Error) => {
-        AppLogger.error('FloatWindow', 'Failed to start moving float window. Cause: ' + JSON.stringify(err));
-      });
+      this.floatPanelMoveStartScreenX = screenX;
+      this.floatPanelMoveStartScreenY = screenY;
+      this.floatPanelManualMoving = true;
+      // 小浮窗保持 setWindowFocusable(false) 以不抢前台输入法焦点，因此不能依赖 startMoving。
+      // 拖动改为 TouchType.Move 中手动 moveWindowTo，保留键盘稳定性和拖动能力。
       return;
     }
+    if (phase === 'move') {
+      this.moveFloatPanelByTouch(screenX, screenY);
+      return;
+    }
+    this.floatPanelManualMoving = false;
     this.syncFloatPanelWindowRect();
     if (this.hasFloatPanelMoved()) {
       this.floatPanelHasCustomPosition = true;
       this.updateFloatPanelAnchorFromCurrentRect();
+    }
+  }
+
+  private moveFloatPanelByTouch(screenX: number, screenY: number): void {
+    if (!this.floatWindow || !this.floatPanelManualMoving) {
+      return;
+    }
+    let displaySize = this.getDisplaySize();
+    let moved: FloatPanelManualMoveRect = resolveFloatPanelManualMoveRect({
+      startLeft: this.floatPanelMoveStartX,
+      startTop: this.floatPanelMoveStartY,
+      width: this.floatPanelMoveStartWidth,
+      height: this.floatPanelMoveStartHeight,
+      startScreenX: this.floatPanelMoveStartScreenX,
+      startScreenY: this.floatPanelMoveStartScreenY,
+      currentScreenX: screenX,
+      currentScreenY: screenY,
+      touchScale: displaySize.density,
+      displayWidth: displaySize.width,
+      displayHeight: displaySize.height
+    });
+    try {
+      this.floatWindow.moveWindowTo(moved.left, moved.top);
+      this.floatPanelX = moved.left;
+      this.floatPanelY = moved.top;
+    } catch (err) {
+      AppLogger.error('FloatWindow', 'Failed to move float window manually. Cause: ' + JSON.stringify(err));
     }
   }
 

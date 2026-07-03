@@ -5,7 +5,7 @@ type CancelHandler = () => Promise<void>;
 type VoidHandler = () => void;
 type ReturnToAppHandler = () => Promise<void>;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
-type FloatPanelMoveHandler = (phase: string) => void;
+type FloatPanelMoveHandler = (phase: string, screenX: number, screenY: number) => void;
 type CaptureOverlayHandler = (hidden: boolean) => Promise<boolean>;
 
 const PAUSE_POLL_INTERVAL_MS = 200;
@@ -196,12 +196,16 @@ export class AgentExecutionController {
     AgentExecutionController.floatPanelMoveHandler = handler;
   }
 
-  static startFloatPanelMove(): void {
-    AgentExecutionController.notifyFloatPanelMove('start');
+  static startFloatPanelMove(screenX: number, screenY: number): void {
+    AgentExecutionController.notifyFloatPanelMove('start', screenX, screenY);
+  }
+
+  static moveFloatPanel(screenX: number, screenY: number): void {
+    AgentExecutionController.notifyFloatPanelMove('move', screenX, screenY);
   }
 
   static endFloatPanelMove(): void {
-    AgentExecutionController.notifyFloatPanelMove('end');
+    AgentExecutionController.notifyFloatPanelMove('end', 0, 0);
   }
 
   static setReturnToAppHandler(handler: ReturnToAppHandler | null): void {
@@ -337,9 +341,9 @@ export class AgentExecutionController {
     }
   }
 
-  private static notifyFloatPanelMove(phase: string): void {
+  private static notifyFloatPanelMove(phase: string, screenX: number, screenY: number): void {
     try {
-      AgentExecutionController.floatPanelMoveHandler?.(phase);
+      AgentExecutionController.floatPanelMoveHandler?.(phase, screenX, screenY);
     } catch (e) {
       AgentExecutionController.warn('float panel move handler failed', e as Error);
     }

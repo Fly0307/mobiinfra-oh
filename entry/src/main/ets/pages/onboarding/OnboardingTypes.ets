@@ -108,7 +108,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_USAGE_GUIDE,
     kind: FirstLaunchOnboardingSlideKind.UsageGuide,
     title: '开始使用',
-    description: '三步建立你的个人智能助手：先汇总数据，再生成数字分身，最后让 Agent 执行任务。',
+    description: '三步建立你的个人智能助手：汇总数据，生成数字分身，最后 Agent 执行任务。',
     accentColor: '#4F68FF',
     softBackgroundColor: '#EAF1FF'
   }

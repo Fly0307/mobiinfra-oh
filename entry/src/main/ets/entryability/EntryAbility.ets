@@ -4,6 +4,10 @@ import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
+import {
+  CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY,
+  captureOverlayWindowTransition
+} from '../utils/CaptureOverlayPolicy';
 
 const FLOAT_PANEL_COLLAPSED_WIDTH_VP = 88;
 const FLOAT_PANEL_HEIGHT_VP = 72;
@@ -185,45 +189,77 @@ export default class EntryAbility extends UIAbility {
     this.destroyFloatWindow();
   }
 
-  private async handleCaptureOverlayVisibility(hidden: boolean): Promise<boolean> {
-    if (hidden) {
-      if (!this.floatWindow) {
-        return false;
-      }
-      try {
-        // HarmonyOS Window 没有 hideWindow 接口。截图前只销毁可点击的执行状态面板，
-        // 保留不可触摸的边缘流光层，避免面板内容进入截图并影响视觉识别。
-        let win = this.floatWindow;
-        this.syncFloatPanelWindowRect();
-        this.unregisterFloatPanelRectChange();
-        await win.destroyWindow();
-        if (this.floatWindow === win) {
-          this.floatWindow = null;
-        }
-        return true;
-      } catch (err) {
-        if (this.floatWindow) {
-          this.registerFloatPanelRectChange(this.floatWindow);
-        }
-        AppLogger.error('FloatWindow', 'Failed to hide float window for capture. Cause: ' + JSON.stringify(err));
-        return false;
-      }
+  // 执行期悬浮窗只能展示状态和接收少量控制操作，不能抢走前台业务 App 的焦点。
+  // 否则截图前后的焦点切换可能导致软键盘收起/弹出，进而让 Decider 截图和实际点击布局不一致。
+  private async configureCaptureSafeWindow(win: window.Window, label: string, touchable: boolean): Promise<void> {
+    try {
+      // 即使系统临时把浮窗置为焦点窗口，也尽量保留其他窗口创建的软键盘。
+      win.keepKeyboardOnFocus(true);
+    } catch (err) {
+      AppLogger.error('FloatWindow', 'Failed to keep keyboard on focus for ' + label + '. Cause: ' +
+        JSON.stringify(err));
     }
+    try {
+      // 不可获焦是关键：触摸穿透/禁触摸不能替代焦点控制。
+      await win.setWindowFocusable(false);
+    } catch (err) {
+      AppLogger.error('FloatWindow', 'Failed to disable focus for ' + label + '. Cause: ' + JSON.stringify(err));
+    }
+    try {
+      await win.setWindowTouchable(touchable);
+    } catch (err) {
+      AppLogger.error('FloatWindow', 'Failed to set touchable=' + String(touchable) + ' for ' + label +
+        '. Cause: ' + JSON.stringify(err));
+    }
+  }
 
-    if (!AgentExecutionController.isExecutionActive()) {
+  // 截图隐藏阶段只临时禁用小面板触摸；窗口对象保持存在，避免 destroy/create 触发输入法状态变化。
+  private async setFloatPanelTouchable(touchable: boolean, context: string): Promise<void> {
+    if (!this.floatWindow) {
+      return;
+    }
+    try {
+      await this.floatWindow.setWindowTouchable(touchable);
+    } catch (err) {
+      AppLogger.error('FloatWindow', 'Failed to set float panel touchable during ' + context + '. Cause: ' +
+        JSON.stringify(err));
+    }
+  }
+
+  // 截图前隐藏 overlay 时不再销毁 floatWindow：只让 FloatWindow 页面停止渲染面板内容，
+  // 同时禁用窗口触摸。截图后恢复同一个窗口的内容和触摸能力，减少软键盘与页面避让区域抖动。
+  private async handleCaptureOverlayVisibility(hidden: boolean): Promise<boolean> {
+    if (!hidden && !AgentExecutionController.isExecutionActive()) {
+      // 任务已结束时只清理渲染状态，不重新创建后台浮窗。
+      AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
       return false;
     }
-    if (!this.floatWindow) {
-      // 截图后按原执行态重建状态面板，位置与展开态由已缓存的布局状态恢复。
+    let transition = captureOverlayWindowTransition(hidden, this.floatWindow !== null);
+    if (!transition.applied) {
+      return false;
+    }
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, transition.contentHidden);
+
+    if (transition.shouldCreateWindow) {
+      // 恢复请求可能发生在面板尚未创建的早期阶段；仍按执行态创建正常小面板。
       this.createFloatPanelWindow();
       return true;
     }
+    if (!this.floatWindow) {
+      return false;
+    }
+
     try {
-      this.layoutFloatPanelWindow(AgentExecutionController.isFloatPanelExpanded());
-      await this.floatWindow.showWindow();
+      this.syncFloatPanelWindowRect();
+      if (!hidden) {
+        // 恢复时保持用户拖动后的锚点和展开态，不改变原有浮窗布局策略。
+        this.layoutFloatPanelWindow(AgentExecutionController.isFloatPanelExpanded());
+        await this.floatWindow.showWindow();
+      }
+      await this.setFloatPanelTouchable(transition.windowTouchable, hidden ? 'capture hide' : 'capture restore');
       return true;
     } catch (err) {
-      AppLogger.error('FloatWindow', 'Failed to restore float window after capture. Cause: ' + JSON.stringify(err));
+      AppLogger.error('FloatWindow', 'Failed to switch float panel capture state. Cause: ' + JSON.stringify(err));
       return false;
     }
   }
@@ -270,7 +306,7 @@ export default class EntryAbility extends UIAbility {
       ctx: this.context
     };
 
-    window.createWindow(config).then((win: window.Window) => {
+    window.createWindow(config).then(async (win: window.Window) => {
       this.edgeFlowWindow = win;
       let displaySize = this.getDisplaySize();
       // 浮窗保持真实屏幕大小，流光的贴边压缩由 EdgeFlowWindow 内部的效果层完成。
@@ -281,9 +317,8 @@ export default class EntryAbility extends UIAbility {
       } catch (err) {
         AppLogger.error('FloatWindow', 'Failed to configure edge flow window. Cause: ' + JSON.stringify(err));
       }
-      win.setWindowTouchable(false).catch((err: Error) => {
-        AppLogger.error('FloatWindow', 'Failed to disable edge flow window touch. Cause: ' + JSON.stringify(err));
-      });
+      // 全屏边缘流光层也必须不可获焦；它不可触摸，但仍可能参与窗口焦点管理。
+      await this.configureCaptureSafeWindow(win, 'edge flow window', false);
       win.setUIContent('pages/EdgeFlowWindow', (err) => {
         if (err.code) {
           AppLogger.error('FloatWindow', 'Failed to load edge flow window content. Cause: ' + JSON.stringify(err));
@@ -322,7 +357,7 @@ export default class EntryAbility extends UIAbility {
       ctx: this.context
     };
 
-    window.createWindow(config).then((win: window.Window) => {
+    window.createWindow(config).then(async (win: window.Window) => {
       this.floatWindow = win;
       this.registerFloatPanelRectChange(win);
       this.layoutFloatPanelWindow(AgentExecutionController.isFloatPanelExpanded());
@@ -331,6 +366,8 @@ export default class EntryAbility extends UIAbility {
       } catch (err) {
         AppLogger.error('FloatWindow', 'Failed to configure float window background. Cause: ' + JSON.stringify(err));
       }
+      // 小型控制面板平时可触摸，但不可获焦；截图期间由 handleCaptureOverlayVisibility 临时禁触。
+      await this.configureCaptureSafeWindow(win, 'float panel window', true);
       win.setUIContent('pages/FloatWindow', (err) => {
         if (err.code) {
           AppLogger.error('FloatWindow', 'Failed to load float window content. Cause: ' + JSON.stringify(err));

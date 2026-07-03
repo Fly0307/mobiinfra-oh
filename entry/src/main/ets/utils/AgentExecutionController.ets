@@ -1,4 +1,5 @@
 import { AppLogger } from './AppLogger';
+import { CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY } from './CaptureOverlayPolicy';
 
 type CancelHandler = () => Promise<void>;
 type VoidHandler = () => void;
@@ -49,6 +50,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 截图隐藏态必须从 false 启动，避免 Ability 重建后 FloatWindow 长期透明。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
   }
 
   static isExecutionActive(): boolean {
@@ -76,6 +79,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 每次任务开始都恢复小面板内容，清理上一轮异常中断遗留的截图隐藏态。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
     AgentExecutionController.resetStreamDisplay();
     AgentExecutionController.writeFloatText(text, true, false);
     AgentExecutionController.notifyFloatWindowSync();
@@ -110,6 +115,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 任务结束后不保留截图隐藏态；后续重新创建浮窗时应显示正常面板。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
     AgentExecutionController.resetStreamDisplay();
     AgentExecutionController.writeFloatText(text, false, false);
     AgentExecutionController.notifyFloatWindowSync();
@@ -125,6 +132,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', true);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 用户取消可能发生在截图 finally 前，主动恢复渲染状态避免悬浮窗残留透明。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
     AgentExecutionController.writeFloatText('正在终止任务并返回 App...', false, false);
 
     AgentExecutionController.invokeCancelHandler(AgentExecutionController.localCancelHandler,

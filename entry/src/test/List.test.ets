@@ -27,6 +27,7 @@ import harmonySpeechRecognizerAsrProviderUnitTest from './HarmonySpeechRecognize
 import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
+import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -58,4 +59,5 @@ export default function testsuite() {
   mobileGuiTaskToolUnitTest();
   mobileGuiTaskWorkflowAdapterUnitTest();
   agentActionParserUnitTest();
+  captureOverlayPolicyUnitTest();
 }

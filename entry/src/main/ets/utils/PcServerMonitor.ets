@@ -9,6 +9,7 @@ const PC_SERVER_EVENTS_PATH: string = '/events';
 const PC_SERVER_CHECK_INTERVAL_MS: number = 2000;
 const PC_SERVER_CONNECT_TIMEOUT_MS: number = 1200;
 const PC_SERVER_READ_TIMEOUT_MS: number = 1800;
+const PC_SERVER_DISCONNECT_FAILURE_THRESHOLD: number = 3;
 
 export type PcServerConnectionState = 'checking' | 'connected' | 'disconnected';
 
@@ -42,6 +43,7 @@ export class PcServerMonitor {
   private checkTimerId: number = -1;
   private wsClient: webSocket.WebSocket | null = null;
   private wsConnecting: boolean = false;
+  private consecutiveStatusFailures: number = 0;
 
   constructor(baseUrl: string, stateHandler: PcServerStateHandler) {
     this.baseUrl = this.normalizeHttpUrl(baseUrl);
@@ -62,6 +64,7 @@ export class PcServerMonitor {
 
   stop(): void {
     this.running = false;
+    this.consecutiveStatusFailures = 0;
     if (this.checkTimerId >= 0) {
       clearInterval(this.checkTimerId);
       this.checkTimerId = -1;
@@ -75,13 +78,18 @@ export class PcServerMonitor {
     }
     try {
       let status = await this.fetchStatus();
+      this.consecutiveStatusFailures = 0;
       let message = this.statusMessage(status);
       this.markConnected(message.length > 0 ? message : 'PC Server 已连接');
       this.ensureWebSocket();
     } catch (e) {
       let err = e as Error;
-      AppLogger.debug('PcServer', 'status check failed: ' + (err.message || String(e)));
-      this.markDisconnected('PC Server 未连接');
+      this.consecutiveStatusFailures += 1;
+      AppLogger.debug('PcServer', 'status check failed #' + String(this.consecutiveStatusFailures) + ': ' +
+        (err.message || String(e)));
+      if (this.consecutiveStatusFailures >= PC_SERVER_DISCONNECT_FAILURE_THRESHOLD) {
+        this.markDisconnected('PC Server 未连接');
+      }
     }
   }
 

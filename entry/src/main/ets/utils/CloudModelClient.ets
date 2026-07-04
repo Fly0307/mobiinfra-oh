@@ -101,7 +101,7 @@ export interface CloudChatCompletionOptions {
   baseUrl: string;
   apiKey: string;
   messages: CloudChatMessage[];
-  temperature: number;
+  temperature?: number;
   model?: string;
   maxTokens?: number;
   readTimeout?: number;
@@ -133,8 +133,8 @@ export interface CloudChatStreamDiagnostics {
 
 interface CloudChatRequest {
   messages: CloudChatMessage[];
-  temperature: number;
   stream: boolean;
+  temperature?: number;
   max_tokens?: number;
   model?: string;
   top_p?: number;
@@ -354,9 +354,11 @@ export class CloudModelClient {
   private buildChatRequestBody(options: CloudChatCompletionOptions, stream: boolean = false): CloudChatRequest {
     let requestBody: CloudChatRequest = {
       messages: options.messages,
-      temperature: options.temperature,
       stream: stream
     };
+    if (options.temperature !== undefined) {
+      requestBody.temperature = options.temperature;
+    }
     if (options.maxTokens !== undefined) {
       requestBody.max_tokens = options.maxTokens;
     }
@@ -1202,8 +1204,7 @@ export class CloudModelClient {
     });
   }
 
-  async chatPcAgentPrompt(prompt: string, imageBase64: string, config: CloudModelConfig,
-    maxTokens: number = 256): Promise<string> {
+  async chatPcAgentPrompt(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
     let content: CloudContentPart[] = [];
     if (imageBase64.length > 0) {
       content.push({
@@ -1217,8 +1218,21 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     });
-    return this.chatMessages(config.plannerBaseUrl, [{ role: 'user', content: content }],
-      config.apiKey, undefined, maxTokens);
+    let messages: CloudChatMessage[] = [{ role: 'user', content: content }];
+    let options: CloudChatCompletionOptions = {
+      baseUrl: config.plannerBaseUrl,
+      apiKey: config.apiKey,
+      messages: messages
+    };
+    try {
+      let result = await this.chatCompletionStream(options);
+      return result.content;
+    } catch (e) {
+      let err = e as Error;
+      AppLogger.error('CloudModel', 'chatPcAgentPrompt returning action=error baseUrl=' + config.plannerBaseUrl +
+        ' error=' + (err.message || String(e)));
+      return ArkJSON.stringify({ action: 'error', reason: err.message });
+    }
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {

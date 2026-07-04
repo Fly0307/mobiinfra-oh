@@ -1897,6 +1897,23 @@ struct Index {
     };
   }
 
+  private pcServerCloudChatSystemMessage(): CloudChatMessage {
+    return {
+      role: 'system',
+      content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。'
+    };
+  }
+
+  private buildPcServerCloudChatContext(currentUserMessage: ChatMessage): CloudChatMessage[] {
+    return [
+      this.pcServerCloudChatSystemMessage(),
+      {
+        role: 'user',
+        content: currentUserMessage.content.trim()
+      }
+    ];
+  }
+
   private cloudChatTimeSystemPromptBlock(): string {
     let now = new Date();
     return '当前日期: ' + formatLocalDateKey(now) + '，' + localWeekdayLabel(now) +
@@ -4641,35 +4658,41 @@ struct Index {
       if (sessionWithUser === null) {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
-      let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = await this.attachCurrentImagesToCloudContext(contextPreparation.messages, userMessage);
-      if (contextPreparation.summaryUpdated) {
-        this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
-          contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
-      }
-      if (contextPreparation.noticeNeeded) {
-        this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
-          CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
-      }
-      if (contextPreparation.usingCompressedContext) {
-        let compressionLogPrefix = 'ReAct 云端聊天复用已有压缩上下文';
-        if (contextPreparation.compressionAction === 'created') {
-          compressionLogPrefix = 'ReAct 云端聊天上下文已自动压缩';
-        } else if (contextPreparation.compressionAction === 'updated') {
-          compressionLogPrefix = 'ReAct 云端聊天上下文已增量压缩';
+      let pcServerChatMode = this.isPcServerCloudEndpointEnabled();
+      let baseContextMessages: CloudChatMessage[] = [];
+      if (pcServerChatMode) {
+        baseContextMessages = this.buildPcServerCloudChatContext(userMessage);
+      } else {
+        let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
+        baseContextMessages = contextPreparation.messages;
+        if (contextPreparation.summaryUpdated) {
+          this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
+            contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
         }
-        this.appendCloudLog(compressionLogPrefix + '，压缩前估算 tokens：' +
-          String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
-          String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
-          String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
-          (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
-          (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
+        if (contextPreparation.noticeNeeded) {
+          this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
+            CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
+        }
+        if (contextPreparation.usingCompressedContext) {
+          let compressionLogPrefix = 'ReAct 云端聊天复用已有压缩上下文';
+          if (contextPreparation.compressionAction === 'created') {
+            compressionLogPrefix = 'ReAct 云端聊天上下文已自动压缩';
+          } else if (contextPreparation.compressionAction === 'updated') {
+            compressionLogPrefix = 'ReAct 云端聊天上下文已增量压缩';
+          }
+          this.appendCloudLog(compressionLogPrefix + '，压缩前估算 tokens：' +
+            String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
+            String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
+            String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
+            (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
+            (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
+        }
       }
+      let contextMessages = await this.attachCurrentImagesToCloudContext(baseContextMessages, userMessage);
       if (this.cloudChatCancelRequested) {
         throw new Error('已取消本次回复。');
       }
       await this.ensurePcServerLlmHealthy();
-      let usePcServerNonStreaming = this.isPcServerCloudEndpointEnabled();
       this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT, '',
         new Date().getTime()));
       assistantMessageCreated = true;
@@ -4690,7 +4713,7 @@ struct Index {
           toolTraceLines.push(line);
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         },
-        onContentDelta: usePcServerNonStreaming ? undefined : (delta: string) => {
+        onContentDelta: (delta: string) => {
           streamedContent += delta;
           if (enableThinking) {
             let parsed = parseChatStreamThinkingDelta(delta, streamThinkingState);
@@ -4701,8 +4724,8 @@ struct Index {
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
       };
-      if (usePcServerNonStreaming) {
-        this.appendCloudLog('PC Server 模式：已切换为非流式请求。');
+      if (pcServerChatMode) {
+        this.appendCloudLog('PC Server 模式：使用精简上下文并保持流式请求。');
       }
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;

@@ -497,6 +497,7 @@ struct Index {
   @State hdcAutoStatus: string = 'HDC Server will be auto-discovered after startup.';
   @State pcServerConnected: boolean = false;
   @State pcServerStatusText: string = 'PC Server 未连接';
+  @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
@@ -2535,8 +2536,7 @@ struct Index {
   }
 
   private isPcServerCloudEndpointEnabled(): boolean {
-    return this.cloudPlannerBaseUrl.trim() === PC_SERVER_LLM_BASE_URL &&
-      this.cloudDeciderBaseUrl.trim() === PC_SERVER_LLM_BASE_URL;
+    return this.pcServerCloudEnabled;
   }
 
   private enablePcServerCloudEndpoint(showToast: boolean = true): void {
@@ -2553,6 +2553,7 @@ struct Index {
     this.cloudPlannerBaseUrl = PC_SERVER_LLM_BASE_URL;
     this.cloudDeciderBaseUrl = PC_SERVER_LLM_BASE_URL;
     this.cloudApiKey = '';
+    this.pcServerCloudEnabled = true;
     if (showToast) {
       showToastSafely('已启用 PC Server 云端接口', 1600);
     }
@@ -2562,6 +2563,7 @@ struct Index {
     if (!this.isPcServerCloudEndpointEnabled()) {
       return;
     }
+    this.pcServerCloudEnabled = false;
     this.cloudPlannerBaseUrl = this.pcServerCloudFallbackSaved ?
       this.pcServerCloudFallbackPlannerBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
     this.cloudDeciderBaseUrl = this.pcServerCloudFallbackSaved ?
@@ -5805,7 +5807,7 @@ struct Index {
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
             pcServerConnected: this.pcServerConnected,
-            pcServerCloudEnabled: this.isPcServerCloudEndpointEnabled(),
+            pcServerCloudEnabled: this.pcServerCloudEnabled,
             voiceStatus: this.voiceStatus,
             voicePartialTranscript: this.voicePartialTranscript,
             voiceActiveMessageId: this.voiceActiveMessageId,

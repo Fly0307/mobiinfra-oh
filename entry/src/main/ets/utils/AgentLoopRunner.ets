@@ -293,7 +293,7 @@ export class AgentLoopRunner {
         let response = mode === 'local' ?
           await this.localAgentStep(variable, imageBase64, width, height) :
           (useCloudWithLocalPrompt ?
-            await this.cloudLocalPromptAgentStep(prefix, variable, imageBase64, width, height) :
+            await this.cloudLocalPromptAgentStep(prefix, variable, imageBase64) :
             await this.cloudAgentStep(imageBase64));
         await this.sleep(300);
 
@@ -498,17 +498,12 @@ export class AgentLoopRunner {
     return response;
   }
 
-  private async cloudLocalPromptAgentStep(prefix: string, variable: string, imageBase64: string,
-    width: number, height: number): Promise<string> {
+  private async cloudLocalPromptAgentStep(prefix: string, variable: string, imageBase64: string): Promise<string> {
     let finalVariable = variable;
     if (imageBase64.length > 0) {
-      let imgTag = '<image_placeholder>';
-      if (width > 0 && height > 0) {
-        imgTag = '<img>current_screenshot<hw>' + height.toString() + ',' + width.toString() + '</hw></img>';
-      }
       finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
-        finalVariable.replace('<image_placeholder>', imgTag) :
-        imgTag + finalVariable;
+        finalVariable.replace('<image_placeholder>', '') :
+        finalVariable;
     }
     let prompt = prefix + '\n\n' + finalVariable;
     this.log('cloud', '>> [Cloud Local Prompt Decider]\n' + prompt);

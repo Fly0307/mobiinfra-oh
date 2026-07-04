@@ -1202,6 +1202,25 @@ export class CloudModelClient {
     });
   }
 
+  async chatPcAgentPrompt(prompt: string, imageBase64: string, config: CloudModelConfig,
+    maxTokens: number = 256): Promise<string> {
+    let content: CloudContentPart[] = [];
+    if (imageBase64.length > 0) {
+      content.push({
+        type: 'image_url',
+        image_url: {
+          url: 'data:image/jpeg;base64,' + imageBase64
+        }
+      });
+    }
+    content.push({
+      type: 'text',
+      text: prompt
+    });
+    return this.chatMessages(config.plannerBaseUrl, [{ role: 'user', content: content }],
+      config.apiKey, undefined, maxTokens);
+  }
+
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
     // 通用图文 Decider：完整 prompt 与当前截图作为同一条 user 消息发送。
     let imageUrl: CloudImageUrl = {

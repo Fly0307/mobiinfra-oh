@@ -171,9 +171,10 @@ export class AgentLoopRunner {
       prompt += '\n\n用户任务: ' + task;
     }
 
-    this.log(mode, '>> [Stage 1 - Planner] prompt mode=' + promptMode + ', chars=' + prompt.length + '\n' + prompt);
+    let stageTitle = mode === 'cloud' && promptMode === 'local' ? 'PCAgent Stage 1' : 'Stage 1 - Planner';
+    this.log(mode, '>> [' + stageTitle + '] prompt mode=' + promptMode + ', chars=' + prompt.length + '\n' + prompt);
     let response = mode === 'local' ? await this.runLocalAction(prompt, undefined, undefined, undefined, 'planner') :
-      await this.runCloudPlanner(prompt);
+      (promptMode === 'local' ? await this.runPcAgentPrompt(prompt, '', 'Stage 1') : await this.runCloudPlanner(prompt));
     let data = AgentActionParser.extractJsonMap(response, true);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
     if (action === 'error') {
@@ -256,7 +257,7 @@ export class AgentLoopRunner {
     } else if (useCloudWithLocalPrompt) {
       this.cloudActionHistory = [];
       this.cloudTask = task;
-      this.log('cloud', '>> [Cloud Agent Prefill] local prompt mode, prefix chars=' + prefix.length);
+      this.log('cloud', '>> [PCAgent Prefill] local prompt mode, prefix chars=' + prefix.length);
     } else {
       this.cloudActionHistory = [];
       this.cloudTask = this.extractCloudTask(prefix, task);
@@ -282,8 +283,8 @@ export class AgentLoopRunner {
     try {
       for (let i = 0; i < MAX_AGENT_STEPS; i++) {
         await this.waitForRunnableState();
-        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': 截图');
+        let agentLabel = useCloudWithLocalPrompt ? 'PCAgent' : ((mode === 'cloud' ? 'Cloud' : 'MNN') + ' Agent');
+        AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': 截图');
         let shot = await this.hdcBridge.screenshotWithFactor(screenshotFactor);
         let imageBase64 = shot.image_b64 || '';
         let width = shot.width || 0;
@@ -293,7 +294,7 @@ export class AgentLoopRunner {
         let response = mode === 'local' ?
           await this.localAgentStep(variable, imageBase64, width, height) :
           (useCloudWithLocalPrompt ?
-            await this.cloudLocalPromptAgentStep(prefix, variable, imageBase64) :
+            await this.pcAgentStep(prefix, variable, imageBase64) :
             await this.cloudAgentStep(imageBase64));
         await this.sleep(300);
 
@@ -301,8 +302,8 @@ export class AgentLoopRunner {
         if (parsed.action === 'error') {
           throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
         }
-        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' + parsed.action);
+        AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' +
+          parsed.action);
         this.log(mode, '>> [Agent] parsed step ' + (i + 1) + ': action=' + parsed.action);
         if (AgentActionParser.isTerminal(parsed.action)) {
           completed = true;
@@ -498,7 +499,7 @@ export class AgentLoopRunner {
     return response;
   }
 
-  private async cloudLocalPromptAgentStep(prefix: string, variable: string, imageBase64: string): Promise<string> {
+  private async pcAgentStep(prefix: string, variable: string, imageBase64: string): Promise<string> {
     let finalVariable = variable;
     if (imageBase64.length > 0) {
       finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
@@ -506,16 +507,7 @@ export class AgentLoopRunner {
         finalVariable;
     }
     let prompt = prefix + '\n\n' + finalVariable;
-    this.log('cloud', '>> [Cloud Local Prompt Decider]\n' + prompt);
-    AgentExecutionController.updateFloatText('Cloud thinking...');
-    let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider());
-    this.checkCancellation();
-    AgentExecutionController.updateFloatText('AI Agent running...');
-    this.log('cloud', '>> [Cloud Local Prompt Step] model response:\n' + response);
-    if (!await this.cloudApprovalHandler(response)) {
-      throw new Error('User rejected');
-    }
-    return response;
+    return await this.runPcAgentPrompt(prompt, imageBase64, 'Agent Step');
   }
 
   private async runCloudDeciderPrompt(prompt: string, imageBase64: string): Promise<string> {
@@ -524,6 +516,19 @@ export class AgentLoopRunner {
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Action] model response:\n' + response);
+    if (!await this.cloudApprovalHandler(response)) {
+      throw new Error('User rejected');
+    }
+    return response;
+  }
+
+  private async runPcAgentPrompt(prompt: string, imageBase64: string, stage: string): Promise<string> {
+    AgentExecutionController.updateFloatText('PC Agent thinking...');
+    this.log('cloud', '>> [PCAgent Prompt][' + stage + ']\n' + prompt);
+    let response = await this.cloudClient.chatPcAgentPrompt(prompt, imageBase64, this.cloudConfigProvider());
+    this.checkCancellation();
+    AgentExecutionController.updateFloatText('AI Agent running...');
+    this.log('cloud', '>> [PCAgent Prompt][' + stage + '] model response:\n' + response);
     if (!await this.cloudApprovalHandler(response)) {
       throw new Error('User rejected');
     }

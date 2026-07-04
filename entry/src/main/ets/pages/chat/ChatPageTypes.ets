@@ -4,7 +4,7 @@ export const CLOUD_AGENT_DEFAULT_OUTPUT: string = '请先配置 Planner 和 Deci
 export const CHAT_COMPOSER_MIN_HEIGHT: number = 58;
 export const CHAT_COMPOSER_LINE_HEIGHT: number = 22;
 export const CHAT_COMPOSER_MAX_LINES: number = 4;
-export const CHAT_COMPOSER_CHARS_PER_LINE: number = 12;
+export const CHAT_COMPOSER_CHARS_PER_LINE: number = 10;
 
 export function isSupportedChatMode(mode: string): boolean {
   return mode === CHAT_MODE_CLOUD_AGENT || mode === CHAT_MODE_LOCAL_INFERENCE;
@@ -37,6 +37,34 @@ export function chatDeepThinkingToggleVisible(mode: string): boolean {
 
 export function chatInputAfterAcceptedSend(currentInput: string, accepted: boolean): string {
   return accepted ? '' : currentInput;
+}
+
+export type ChatComposerPrimaryActionRole = 'send' | 'busy' | 'voice_capture';
+
+// 输入栏只有一个主操作按钮：短按发送，长按语音；语音采集中优先展示麦克风状态。
+export function chatComposerPrimaryActionRole(isBusy: boolean, voiceCapturing: boolean): ChatComposerPrimaryActionRole {
+  if (voiceCapturing) {
+    return 'voice_capture';
+  }
+  return isBusy ? 'busy' : 'send';
+}
+
+export function chatComposerVoiceReleaseShouldStop(voiceStatus: string): boolean {
+  return voiceStatus === 'idle' || voiceStatus === 'listening' || voiceStatus === 'transcribing';
+}
+
+export function chatVoiceStatusIsCapturing(voiceStatus: string): boolean {
+  return voiceStatus === 'listening';
+}
+
+// 播放态已由头像动效和气泡按钮表达，输入栏上方只保留录音、转写、合成等过程提示。
+export function chatVoiceStatusBarVisible(voiceStatus: string, _transcript: string = ''): boolean {
+  return voiceStatus !== 'idle' && voiceStatus !== 'speaking';
+}
+
+// ASR 结果已经实时写入可编辑输入框，状态栏只承担状态提示，不再重复展示转写文本。
+export function chatVoiceStatusDetailText(_voiceStatus: string, _transcript: string): string {
+  return '';
 }
 
 export function chatTimeGreeting(hour: number): string {

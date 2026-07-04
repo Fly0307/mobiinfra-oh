@@ -10,6 +10,7 @@ import { AppLogger } from './AppLogger';
 import { AgentLoopNativeApi } from 'libentry.so';
 
 type AgentLoopMode = 'local' | 'cloud';
+export type AgentPromptMode = 'local' | 'cloud';
 type LogHandler = (message: string) => void;
 type ApprovalHandler = (response: string) => Promise<boolean>;
 type CloudConfigProvider = () => CloudModelConfig;
@@ -39,6 +40,7 @@ export class AgentLoopRunner {
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
   private localActionCallCount: number = 0;
+  private cloudPromptMode: AgentPromptMode = 'cloud';
 
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
@@ -51,7 +53,8 @@ export class AgentLoopRunner {
     localLogHandler: LogHandler,
     cloudLogHandler: LogHandler,
     localApprovalHandler: ApprovalHandler,
-    cloudApprovalHandler: ApprovalHandler
+    cloudApprovalHandler: ApprovalHandler,
+    cloudPromptMode: AgentPromptMode = 'cloud'
   ) {
     this.filesDir = filesDir;
     this.modelDirPath = modelDir;
@@ -63,6 +66,7 @@ export class AgentLoopRunner {
     this.cloudLogHandler = cloudLogHandler;
     this.localApprovalHandler = localApprovalHandler;
     this.cloudApprovalHandler = cloudApprovalHandler;
+    this.cloudPromptMode = cloudPromptMode;
   }
 
   getMode(): AgentLoopMode {
@@ -117,10 +121,10 @@ export class AgentLoopRunner {
     try {
       await this.syncAgentConfig();
       await this.hdcBridge.prepareAgentRun();
-      let plannerTarget = await this.runPlanner(task, 'cloud');
+      let plannerTarget = await this.runPlanner(task, 'cloud', this.promptModeForCloudRequest());
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
-      await this.runAgentSteps(task, 'cloud');
+      await this.runAgentSteps(task, 'cloud', this.promptModeForCloudRequest());
       await this.returnToHostApp('cloud');
       AgentExecutionController.finishExecution('云端 Agent 已完成');
     } catch (e) {
@@ -148,7 +152,11 @@ export class AgentLoopRunner {
     }
   }
 
-  private async runPlanner(task: string, mode: AgentLoopMode): Promise<PlannerTarget> {
+  private promptModeForCloudRequest(): AgentPromptMode {
+    return this.cloudPromptMode === 'local' ? 'local' : 'cloud';
+  }
+
+  private async runPlanner(task: string, mode: AgentLoopMode, promptMode: AgentPromptMode = mode): Promise<PlannerTarget> {
     this.checkCancellation();
     let template = AgentPromptTemplates.load('planner_oneshot_harmony.md');
     if (template.trim().length === 0) {
@@ -163,7 +171,7 @@ export class AgentLoopRunner {
       prompt += '\n\n用户任务: ' + task;
     }
 
-    this.log(mode, '>> [Stage 1 - Planner] prompt chars=' + prompt.length + '\n' + prompt);
+    this.log(mode, '>> [Stage 1 - Planner] prompt mode=' + promptMode + ', chars=' + prompt.length + '\n' + prompt);
     let response = mode === 'local' ? await this.runLocalAction(prompt, undefined, undefined, undefined, 'planner') :
       await this.runCloudPlanner(prompt);
     let data = AgentActionParser.extractJsonMap(response, true);
@@ -229,11 +237,11 @@ export class AgentLoopRunner {
     return false;
   }
 
-  private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
+  private async runAgentSteps(task: string, mode: AgentLoopMode, promptMode: AgentPromptMode = mode): Promise<void> {
     this.checkCancellation();
     let useNoReasonPrompt = this.resolveAgentNoReasonMode();
     let prefixFile = useNoReasonPrompt ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
-    this.log(mode, '>> [Agent] prompt mode=' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
+    this.log(mode, '>> [Agent] prompt mode=' + promptMode + '/' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
     this.log(mode, '>> [Agent] prefix source=' + AgentPromptTemplates.promptSource(this.modelDirPath, prefixFile));
     let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
@@ -242,15 +250,20 @@ export class AgentLoopRunner {
       return;
     }
     let prefix = prefixTemplate.replace('{task}', task);
+    let useCloudWithLocalPrompt = mode === 'cloud' && promptMode === 'local';
     if (mode === 'local') {
       await this.localAgentPrefill(prefix);
+    } else if (useCloudWithLocalPrompt) {
+      this.cloudActionHistory = [];
+      this.cloudTask = task;
+      this.log('cloud', '>> [Cloud Agent Prefill] local prompt mode, prefix chars=' + prefix.length);
     } else {
       this.cloudActionHistory = [];
       this.cloudTask = this.extractCloudTask(prefix, task);
       this.log('cloud', '>> [Cloud Agent Prefill] Qwen prompt mode, task=' + this.cloudTask);
     }
 
-    let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
+    let screenshotFactor = mode === 'cloud' && promptMode !== 'local' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
     let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
     this.log(mode, '>> [Agent] variable source=' + AgentPromptTemplates.promptSource(this.modelDirPath, variableFile));
@@ -279,7 +292,9 @@ export class AgentLoopRunner {
         let variable = variableTemplate.replace('{history}', historyText);
         let response = mode === 'local' ?
           await this.localAgentStep(variable, imageBase64, width, height) :
-          await this.cloudAgentStep(imageBase64);
+          (useCloudWithLocalPrompt ?
+            await this.cloudLocalPromptAgentStep(prefix, variable, imageBase64, width, height) :
+            await this.cloudAgentStep(imageBase64));
         await this.sleep(300);
 
         let parsed = AgentActionParser.parse(response, true);
@@ -296,12 +311,13 @@ export class AgentLoopRunner {
         let fullWidth = width * inverseScreenshotFactor;
         let fullHeight = height * inverseScreenshotFactor;
         await this.executeParsedAction(parsed, fullWidth, fullHeight);
-        if (mode === 'cloud') {
+        if (mode === 'cloud' && !useCloudWithLocalPrompt) {
           this.cloudActionHistory.push(AgentActionParser.normalizeCloudHistoryItem(response));
           this.log('cloud', '>> [Cloud History] appended after HDC execution, history=' + this.cloudActionHistory.length);
-        } else {
+        }
+        if (mode === 'local' || useCloudWithLocalPrompt) {
           localHistory.push((i + 1) + ': Action=' + parsed.action);
-          this.log('local', '[Agent] Appended JSON data to history: ' + localHistory[localHistory.length - 1]);
+          this.log(mode, '[Agent] Appended JSON data to history: ' + localHistory[localHistory.length - 1]);
         }
         await this.sleep(700);
       }
@@ -476,6 +492,31 @@ export class AgentLoopRunner {
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
     this.log('cloud', '>> [Cloud Agent Step] model response:\n' + response);
+    if (!await this.cloudApprovalHandler(response)) {
+      throw new Error('User rejected');
+    }
+    return response;
+  }
+
+  private async cloudLocalPromptAgentStep(prefix: string, variable: string, imageBase64: string,
+    width: number, height: number): Promise<string> {
+    let finalVariable = variable;
+    if (imageBase64.length > 0) {
+      let imgTag = '<image_placeholder>';
+      if (width > 0 && height > 0) {
+        imgTag = '<img>current_screenshot<hw>' + height.toString() + ',' + width.toString() + '</hw></img>';
+      }
+      finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
+        finalVariable.replace('<image_placeholder>', imgTag) :
+        imgTag + finalVariable;
+    }
+    let prompt = prefix + '\n\n' + finalVariable;
+    this.log('cloud', '>> [Cloud Local Prompt Decider]\n' + prompt);
+    AgentExecutionController.updateFloatText('Cloud thinking...');
+    let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider());
+    this.checkCancellation();
+    AgentExecutionController.updateFloatText('AI Agent running...');
+    this.log('cloud', '>> [Cloud Local Prompt Step] model response:\n' + response);
     if (!await this.cloudApprovalHandler(response)) {
       throw new Error('User rejected');
     }

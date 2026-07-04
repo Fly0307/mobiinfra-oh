@@ -57,6 +57,18 @@ AUTO_DISCOVERY_SCAN_BUDGET = float(os.environ.get("HDC_AUTO_SCAN_BUDGET", "12"))
 AUTO_DISCOVERY_MAX_WORKERS = max(8, int(os.environ.get("HDC_AUTO_MAX_WORKERS", "128")))
 AUTO_DISCOVERY_COOLDOWN = float(os.environ.get("HDC_AUTO_COOLDOWN", "30"))
 AUTO_DISCOVERY_EXTRA_TARGETS = os.environ.get("HDC_AUTO_TARGETS", "")
+AUTO_DISCOVERY_HISTORY_SCAN_LIMIT = max(1, int(os.environ.get("HDC_AUTO_HISTORY_SCAN_LIMIT", "5")))
+AUTO_DISCOVERY_LOCAL_SUBNET_LIMIT = max(1, int(os.environ.get("HDC_AUTO_LOCAL_SUBNET_LIMIT", "4")))
+
+def hdc_manual_config_message():
+    return (
+        "未检测到 HDC 设备连接。请先手动配置 HDC：USB 连接后执行 `hdc list targets` "
+        "确认设备在线；无线调试请先执行 `hdc tconn <设备IP:端口>`；如果有多个设备或固定无线目标，"
+        "请设置环境变量 `HDC_TARGET=<target>` 后重启服务。"
+    )
+
+def print_hdc_manual_config_hint():
+    print(f">> [HDC] {hdc_manual_config_message()}")
 
 def make_hdc_tunnel_status(status, message, target="", tunnel_ready=False, fport_ready=False,
                            rport_ready=False, rport_listening=None,
@@ -484,6 +496,35 @@ def build_auto_discovery_seeds():
         add_seed(target, "default-config")
     return seeds
 
+def recent_history_scan_seeds(limit=AUTO_DISCOVERY_HISTORY_SCAN_LIMIT):
+    cache = load_auto_discovery_cache()
+    seeds = []
+    seen_targets = set()
+
+    def add_history_seed(target, source):
+        if len(seeds) >= limit:
+            return
+        entry = seed_entry_from_target(target, source)
+        if not entry or entry["target"] in seen_targets:
+            return
+        seen_targets.add(entry["target"])
+        seeds.append(entry)
+
+    add_history_seed(cache.get("last_target", ""), "cache-last")
+    targets = cache.get("targets", [])
+    if not isinstance(targets, list):
+        return seeds
+    for item in targets:
+        if len(seeds) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target", "")).strip()
+        if not target and item.get("host") and item.get("port"):
+            target = f"{item.get('host')}:{item.get('port')}"
+        add_history_seed(target, "cache-history")
+    return seeds
+
 def get_local_ipv4_addresses():
     addresses = []
 
@@ -545,11 +586,51 @@ def build_host_octet_order(prefix2, third_octet, seeds):
         add_unique_value(order, host_octet)
     return order
 
-def find_last_target_seed(seeds):
-    for seed in seeds:
-        if str(seed.get("source", "")) == "cache-last":
-            return seed
-    return None
+def build_auto_discovery_scan_plans(history_seeds):
+    plans = []
+    seen = set()
+
+    def add_plan(prefix2, third_octet, port, source):
+        if not prefix2 or third_octet < 0 or third_octet > 255 or port <= 0 or port > 65535:
+            return
+        key = (prefix2, third_octet, port)
+        if key in seen:
+            return
+        seen.add(key)
+        plan_seeds = [
+            seed for seed in history_seeds
+            if seed.get("prefix2") == prefix2
+            and int(seed.get("third_octet", -1)) == third_octet
+            and int(seed.get("port", 0) or 0) == port
+        ]
+        plans.append({
+            "prefix2": prefix2,
+            "third_octet": third_octet,
+            "prefix3": f"{prefix2}.{third_octet}",
+            "port": port,
+            "source": source,
+            "seeds": plan_seeds,
+        })
+
+    if not history_seeds:
+        return plans
+
+    latest_port = int(history_seeds[0].get("port", 0) or 0)
+    local_addresses = get_local_ipv4_addresses()[:AUTO_DISCOVERY_LOCAL_SUBNET_LIMIT]
+    for address in local_addresses:
+        parsed = parse_wireless_target(f"{address}:{latest_port}")
+        if not parsed:
+            continue
+        add_plan(parsed["prefix2"], int(parsed["third_octet"]), latest_port, f"local-subnet:{address}")
+
+    for seed in history_seeds[:AUTO_DISCOVERY_HISTORY_SCAN_LIMIT]:
+        add_plan(
+            str(seed.get("prefix2", "")),
+            int(seed.get("third_octet", -1)),
+            int(seed.get("port", 0) or 0),
+            str(seed.get("source", "")) or "cache-history",
+        )
+    return plans
 
 def tcp_port_open(host, port, timeout):
     sock = None
@@ -781,38 +862,49 @@ def discover_hdc_candidates():
     if candidates:
         return candidates
 
-    last_seed = find_last_target_seed(seeds)
-    if not last_seed:
-        print(">> [HDC Auto] No last_target is available for bounded LAN scan.")
+    history_scan_seeds = recent_history_scan_seeds()
+    if not history_scan_seeds:
+        print(">> [HDC Auto] No recent history target is available for bounded LAN scan.")
+        return []
+
+    scan_plans = build_auto_discovery_scan_plans(history_scan_seeds)
+    if not scan_plans:
+        print(">> [HDC Auto] No valid subnet is available for bounded LAN scan.")
         return []
 
     deadline = time.monotonic() + AUTO_DISCOVERY_SCAN_BUDGET
-    prefix2 = str(last_seed.get("prefix2", ""))
-    third = int(last_seed.get("third_octet", -1))
-    port = int(last_seed.get("port", 0) or 0)
-    if not prefix2 or third < 0 or third > 255 or port <= 0 or port > 65535:
-        print(">> [HDC Auto] last_target is not valid for bounded LAN scan.")
-        return []
-
-    prefix3 = f"{prefix2}.{third}"
-    host_order = build_host_octet_order(prefix2, third, [last_seed])
     print(
-        f">> [HDC Auto] LAN scan starts: subnet={prefix3}.0/24, port={port}, "
-        f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
+        f">> [HDC Auto] LAN scan will check {len(scan_plans)} subnet plan(s), "
+        f"history_limit={AUTO_DISCOVERY_HISTORY_SCAN_LIMIT}, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
     )
-    if time.monotonic() >= deadline:
-        print(">> [HDC Auto] LAN scan budget exhausted.")
-        return unique_candidates(candidates)
-    open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
-    if time.monotonic() >= deadline:
-        print(">> [HDC Auto] LAN scan budget exhausted.")
-        return unique_candidates(candidates)
-    if open_targets:
-        print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
-    for target in open_targets:
-        candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
-        if candidate:
-            return [candidate]
+    for index, plan in enumerate(scan_plans, start=1):
+        if time.monotonic() >= deadline:
+            print(">> [HDC Auto] LAN scan budget exhausted.")
+            return unique_candidates(candidates)
+        prefix2 = str(plan.get("prefix2", ""))
+        third = int(plan.get("third_octet", -1))
+        prefix3 = str(plan.get("prefix3", "")) or f"{prefix2}.{third}"
+        port = int(plan.get("port", 0) or 0)
+        source = str(plan.get("source", "")) or "lan-scan"
+        plan_seeds = plan.get("seeds", [])
+        if not isinstance(plan_seeds, list):
+            plan_seeds = []
+        host_order = build_host_octet_order(prefix2, third, plan_seeds)
+        print(
+            f">> [HDC Auto] LAN scan starts: subnet={prefix3}.0/24, port={port}, "
+            f"source={source}, plan={index}/{len(scan_plans)}, "
+            f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
+        )
+        open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
+        if time.monotonic() >= deadline:
+            print(">> [HDC Auto] LAN scan budget exhausted.")
+            return unique_candidates(candidates)
+        if open_targets:
+            print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
+        for target in open_targets:
+            candidate = try_hdc_tconn_target(target, f"lan-scan:{source}", precheck=False)
+            if candidate:
+                return [candidate]
     return unique_candidates(candidates)
 
 def ensure_auto_hdc_connected(force=False, prompt_user=False, reason=""):
@@ -1926,7 +2018,7 @@ def ensure_agent_loop_ready():
     if not is_hdc_connected(force=True):
         return {
             'status': 'error',
-            'message': 'HDC target is not connected',
+            'message': hdc_manual_config_message(),
             'hdc_connected': False,
             'tunnel_ready': False,
             'fport_ready': False,
@@ -1991,22 +2083,29 @@ if __name__ == '__main__':
         else:
             print(f">> [HDC Auto] 启动自动发现未完成: {auto_start_result.get('message', '')}")
 
+    initial_hdc_connected = is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED)
+
     # 9126 轮询同时服务 App 端“本地/云端智能体执行”按钮；workflow bridge 仍然按请求直接控制设备。
     if LEGACY_LOOP_ENABLED:
-        start_harmony_agent()
-        if not is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
-            print(">> 未检测到 HDC 设备连接；轮询 Agent loop 已启动，将在连接恢复后继续尝试。")
+        if initial_hdc_connected:
+            start_harmony_agent()
+        else:
+            print_hdc_manual_config_hint()
+            print(">> 轮询 Agent loop 暂未启动；完成 HDC 配置后，请在手机 App 重新触发连接或调用 /api/agent_loop/ensure。")
     else:
         print(">> 旧版 harmony_agent 轮询未启用；workflow bridge 将按请求直接控制设备。")
         
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = SERVER_PORT
     server = ThreadingHTTPServer(('0.0.0.0', PORT), HDCServerHandler)
-    if is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
+    if initial_hdc_connected:
         tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
         print(f">> [HDC] {tunnel.get('message', '')}")
     print(f"HDC 远程控制服务端已启动，监听端口: {PORT}...")
-    print(f"等待手机 App 发送连接指令...")
+    if initial_hdc_connected:
+        print(f"等待手机 App 发送连接指令...")
+    else:
+        print("未检测到 HDC 设备，暂不等待手机 App 派发任务；请完成手动配置后重新触发连接。")
     
     try:
         server.serve_forever()

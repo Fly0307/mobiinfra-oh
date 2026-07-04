@@ -207,8 +207,8 @@ struct ProfileTest {
   }
 
   private async loadAndProfile(configPath: string, label: string, topK: number): Promise<string> {
-    let loadRes = await native.loadModel(configPath);
-    let profileRes = await native.profileGenerate(this.prompt, topK);
+    let loadRes: string = await native.loadModel(configPath);
+    let profileRes: string = await native.profileGenerate(this.prompt, topK);
     return '\n\n######## ' + label + ' ########\nconfig=' + configPath + '\nload=' + loadRes + '\n' + profileRes;
   }
 

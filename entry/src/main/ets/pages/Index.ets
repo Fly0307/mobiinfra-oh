@@ -11,6 +11,7 @@ import fs from '@ohos.file.fs';
 import mnnllm from 'libentry.so';
 import { CollectionPage } from './collection/CollectionPage';
 import { ChatPage } from './chat/ChatPage';
+import { ChatVoiceOrchestrator, ChatVoiceTtsConfig } from './chat/ChatVoiceOrchestrator';
 import { CHAT_MODE_CLOUD_AGENT, chatInputAfterAcceptedSend } from './chat/ChatPageTypes';
 import {
   CHAT_IMAGE_ATTACHMENT_MAX_COUNT,
@@ -36,6 +37,10 @@ import {
   parseChatStreamThinkingDelta,
   splitAssistantThinkingContent
 } from './chat/ChatSessionTypes';
+import {
+  ChatVoiceMetadata,
+  VoiceInteractionStatus
+} from './chat/VoiceInteractionTypes';
 import {
   CHAT_STREAM_DISPLAY_TICK_MS,
   ChatStreamDisplayPacer,
@@ -130,6 +135,7 @@ import {
   mobileGuiTaskRunResultFromWorkflowResult
 } from '../utils/MobileGuiTaskWorkflowAdapter';
 import { GalleryPhotoPicker } from '../utils/gallery/GalleryPhotoPicker';
+import { normalizeVoiceTtsPreset } from '../utils/voice/VoiceTtsPresets';
 import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
@@ -340,6 +346,13 @@ PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.clo
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl);
+PersistentStorage.persistProp('voiceTtsApiKey', '');
+PersistentStorage.persistProp('voiceTtsModel', DEFAULT_ENDPOINT_CONFIG.voiceTtsModel);
+PersistentStorage.persistProp('voiceTtsVoice', DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice);
+PersistentStorage.persistProp('voiceTtsStylePrompt', DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt);
+PersistentStorage.persistProp('voiceTtsRolePreset', DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset);
+PersistentStorage.persistProp('voiceTtsStreamingEnabled', DEFAULT_ENDPOINT_CONFIG.voiceTtsStreamingEnabled);
 PersistentStorage.persistProp('chatContextCompressionThresholdPercent',
   String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT));
 PersistentStorage.persistProp('chatContextRecentRounds', String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT));
@@ -419,6 +432,14 @@ struct Index {
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
+  @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
+  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = '';
+  @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
+  @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
+  @StorageLink('voiceTtsStylePrompt') voiceTtsStylePrompt: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt;
+  @StorageLink('voiceTtsRolePreset') voiceTtsRolePreset: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset;
+  @StorageLink('voiceTtsStreamingEnabled') voiceTtsStreamingEnabled: boolean =
+    DEFAULT_ENDPOINT_CONFIG.voiceTtsStreamingEnabled;
   @StorageLink('chatContextCompressionThresholdPercent') chatContextCompressionThresholdPercent: string =
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string = String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
@@ -460,6 +481,9 @@ struct Index {
   @State cloudAutoConfirm: boolean = true;
   @State cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
+  @State voiceStatus: VoiceInteractionStatus = 'idle';
+  @State voicePartialTranscript: string = '';
+  @State voiceActiveMessageId: string = '';
   @State chatSessions: ChatSessionSummary[] = [];
   @State activeChatSessionId: string = '';
   @State activeChatMessages: ChatMessage[] = [];
@@ -505,7 +529,9 @@ struct Index {
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
+  private profileKnockShareInitToken: number = 0;
   private chatToolRegistry: ChatToolRegistry = createDefaultChatToolRegistry();
+  private chatVoiceOrchestrator: ChatVoiceOrchestrator | null = null;
   private cloudStreamFlushState: ChatStreamUpdateFlushState = chatStreamUpdateStateAfterFlush(0, 0, false);
   private cloudStreamFlushTimerId: number = -1;
   private cloudStreamPendingSessionId: string = '';
@@ -547,7 +573,7 @@ struct Index {
         continue;
       }
       matched = true;
-      messages.push({
+      let renderedMessage: ChatMessage = {
         id: message.id,
         role: message.role,
         kind: message.kind,
@@ -561,7 +587,11 @@ struct Index {
         imagePaths: chatMessageImagePaths(message),
         streamingActive: snapshot.active,
         streamingVersion: this.cloudStreamDisplayVersion
-      });
+      };
+      if (message.voice !== undefined) {
+        renderedMessage.voice = message.voice;
+      }
+      messages.push(renderedMessage);
     }
     return matched ? messages : this.activeChatMessages;
   }
@@ -780,6 +810,81 @@ struct Index {
     let state = ChatSessionController.attachTaskResultImage(this.filesDir, this.currentChatSessionViewState(),
       sessionId, imagePath);
     this.applyChatSessionViewState(state);
+  }
+
+  private voiceTtsConfig(): ChatVoiceTtsConfig {
+    return {
+      baseUrl: this.voiceTtsBaseUrl,
+      apiKey: this.voiceTtsApiKey,
+      model: this.voiceTtsModel,
+      voice: normalizeVoiceTtsPreset(this.voiceTtsVoice),
+      stylePrompt: this.voiceTtsStylePrompt,
+      streamingEnabled: this.voiceTtsStreamingEnabled
+    };
+  }
+
+  private applyVoiceSnapshotFromOrchestrator(): void {
+    let snapshot = this.voiceOrchestrator().snapshot();
+    this.voiceStatus = snapshot.status;
+    this.voicePartialTranscript = snapshot.partialTranscript.length > 0 ? snapshot.partialTranscript :
+      snapshot.finalTranscript;
+    this.voiceActiveMessageId =
+      (snapshot.status === 'speaking' || snapshot.status === 'paused' || snapshot.status === 'synthesizing') ?
+        snapshot.activeMessageId : '';
+  }
+
+  private voiceOrchestrator(): ChatVoiceOrchestrator {
+    if (this.chatVoiceOrchestrator !== null) {
+      return this.chatVoiceOrchestrator;
+    }
+    this.chatVoiceOrchestrator = new ChatVoiceOrchestrator({
+      filesDir: () => this.filesDir,
+      abilityContext: () => this.getUIContext().getHostContext() as common.UIAbilityContext,
+      activeSessionId: () => this.activeChatSessionId,
+      isBusy: () => this.cloudThinking || this.isLocalNativeBusy(),
+      activeInputDraftTarget: () => {
+        if (this.chatMode === CHAT_MODE_LOCAL_INFERENCE) {
+          return {
+            id: CHAT_MODE_LOCAL_INFERENCE,
+            text: this.userInput
+          };
+        }
+        return {
+          id: CHAT_MODE_CLOUD_AGENT,
+          text: this.cloudUserInput
+        };
+      },
+      setInputDraftForTarget: (targetId: string, text: string) => {
+        if (targetId === CHAT_MODE_LOCAL_INFERENCE) {
+          this.userInput = text;
+          return;
+        }
+        if (targetId === CHAT_MODE_CLOUD_AGENT) {
+          this.cloudUserInput = text;
+        }
+      },
+      currentChatSessionViewState: () => this.currentChatSessionViewState(),
+      applyChatSessionViewState: (state: ChatSessionViewState) => { this.applyChatSessionViewState(state); },
+      ttsConfig: () => this.voiceTtsConfig(),
+      onSnapshot: () => { this.applyVoiceSnapshotFromOrchestrator(); }
+    });
+    return this.chatVoiceOrchestrator;
+  }
+
+  private async toggleVoiceInput(): Promise<void> {
+    await this.voiceOrchestrator().toggleVoiceInput();
+  }
+
+  private async stopVoiceInput(): Promise<void> {
+    await this.voiceOrchestrator().stopVoiceInput();
+  }
+
+  private async playAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    await this.voiceOrchestrator().playAssistantMessageVoice(messageId, text);
+  }
+
+  private async replayAssistantMessageVoice(messageId: string, text: string): Promise<void> {
+    await this.voiceOrchestrator().replayAssistantMessageVoice(messageId, text);
   }
 
   private compactTraceText(text: string, maxLength: number = 180): string {
@@ -2298,7 +2403,8 @@ struct Index {
     this.prepareCustomOpp();
     this.initDataManager();
     this.initChatSessions();
-    this.initializeProfileKnockShare(ctx).catch((e: Error) => {
+    let profileKnockShareInitToken = ++this.profileKnockShareInitToken;
+    this.initializeProfileKnockShare(ctx, profileKnockShareInitToken).catch((e: Error) => {
       AppLogger.errorCause('ProfileKnockShare', 'initialize failed', e);
       this.appendCloudLog('一碰分享初始化失败：' + e.message);
     });
@@ -2373,6 +2479,10 @@ struct Index {
   aboutToDisappear(): void {
     this.stopHomeRecommendationDateTimer();
     this.stopPcServerMonitor();
+    if (this.chatVoiceOrchestrator !== null) {
+      this.chatVoiceOrchestrator.shutdown();
+    }
+    this.profileKnockShareInitToken++;
     this.profileKnockShareService.dispose();
   }
 
@@ -2475,8 +2585,11 @@ struct Index {
     this.enablePcServerCloudEndpoint();
   }
 
-  private async initializeProfileKnockShare(ctx: common.UIAbilityContext): Promise<void> {
+  private async initializeProfileKnockShare(ctx: common.UIAbilityContext, initToken: number): Promise<void> {
     let mainWindow = await window.getLastWindow(ctx);
+    if (initToken !== this.profileKnockShareInitToken) {
+      return;
+    }
     let windowId = mainWindow.getWindowProperties().id;
     this.profileKnockShareService.configure({
       filesDir: this.filesDir,
@@ -4481,7 +4594,7 @@ struct Index {
     this.appendCloudLog('ReAct 云端聊天取消：已中断当前 HTTP 请求。');
   }
 
-  async runCloudPlannerOnce() {
+  async runCloudPlannerOnce(voiceMetadata?: ChatVoiceMetadata) {
     if (!this.isCloudConfigReady()) {
       this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
       return;
@@ -4504,7 +4617,7 @@ struct Index {
     let adoptedImageUris = this.adoptedChatImagesForSession(chatSessionId, pendingImageUris);
     let firstAdoptedImageUri = adoptedImageUris.length > 0 ? adoptedImageUris[0] : '';
     let userMessage = createChatMessage(this.nextChatMessageId('user'), 'user', CHAT_MESSAGE_KIND_CHAT, task,
-      new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris);
+      new Date().getTime(), [], firstAdoptedImageUri, adoptedImageUris, voiceMetadata);
     this.appendChatMessageToExactSession(chatSessionId, userMessage);
     let assistantMessageId = this.nextChatMessageId('assistant');
     let assistantMessageCreated = false;
@@ -5263,7 +5376,8 @@ struct Index {
       },
       async (response: string) => {
         return await this.approveCloudAgentResponse(response);
-      }
+      },
+      this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud'
     );
   }
 
@@ -5692,6 +5806,9 @@ struct Index {
             restoringLocalSession: this.restoringLocalSession,
             pcServerConnected: this.pcServerConnected,
             pcServerCloudEnabled: this.isPcServerCloudEndpointEnabled(),
+            voiceStatus: this.voiceStatus,
+            voicePartialTranscript: this.voicePartialTranscript,
+            voiceActiveMessageId: this.voiceActiveMessageId,
             onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
             onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
             onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
@@ -5715,7 +5832,15 @@ struct Index {
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
-            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); }
+            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
+            onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
+            onStopVoiceInput: async () => { await this.stopVoiceInput(); },
+            onPlayVoiceMessage: async (messageId: string, text: string) => {
+              await this.playAssistantMessageVoice(messageId, text);
+            },
+            onReplayVoiceMessage: async (messageId: string, text: string) => {
+              await this.replayAssistantMessageVoice(messageId, text);
+            }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))
         TabContent() {

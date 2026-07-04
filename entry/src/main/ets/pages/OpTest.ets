@@ -111,18 +111,41 @@ struct OpTest {
       .onClick(() => { this.cpuMemory = value })
   }
 
+  // 顶部返回栏固定提供路由返回入口，避免调试页首屏只能滚到底部返回。
+  @Builder PageHeader() {
+    Row() {
+      Button('‹')
+        .width(42)
+        .height(42)
+        .fontSize(28)
+        .fontColor('#11182F')
+        .backgroundColor(Color.White)
+        .borderRadius(14)
+        .onClick(() => { router.back() })
+      Column() {
+        Text('Conv Op Precision Test')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#333333')
+          .width('100%')
+        Text('CPU vs HiAI Delegate (USER_1)')
+          .fontSize(13)
+          .fontColor('#666666')
+          .width('100%')
+          .margin({ top: 2 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+    }
+    .width('90%')
+    .margin({ top: 15, bottom: 10 })
+  }
+
   build() {
     Scroll() {
       Column() {
-      Text('Conv Op Precision Test')
-        .fontSize(22)
-        .fontWeight(FontWeight.Bold)
-        .margin({ top: 15, bottom: 5 })
-
-      Text('CPU vs HiAI Delegate (USER_1)')
-        .fontSize(13)
-        .fontColor('#666666')
-        .margin({ bottom: 10 })
+      this.PageHeader()
 
       // HiAI conv path selector (applies to subsequent test runs)
       Text('HiAI path:')

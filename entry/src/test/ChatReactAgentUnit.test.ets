@@ -100,6 +100,7 @@ interface TestThinkingRunOptions extends ChatReactAgentRunOptions {
 function testConfig(): CloudModelConfig {
   return {
     plannerBaseUrl: 'http://localhost:8000',
+    plannerModel: 'planner-model',
     deciderBaseUrl: 'http://localhost:8000',
     apiKey: 'test-key',
     deciderModel: 'test-model'

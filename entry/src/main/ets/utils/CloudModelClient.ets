@@ -15,9 +15,29 @@ import { GalleryModelJson } from './gallery/GalleryTypes';
 // 请求统一规范化到 /v1/chat/completions，并支持在任务取消时销毁未完成请求。
 export interface CloudModelConfig {
   plannerBaseUrl: string;
+  plannerModel: string;
+  plannerApiKey?: string;
   deciderBaseUrl: string;
+  deciderApiKey?: string;
+  // 历史共享密钥字段，保留给旧调用方和旧配置做兼容兜底。
   apiKey: string;
   deciderModel: string;
+}
+
+export function cloudPlannerApiKey(config: CloudModelConfig): string {
+  let plannerApiKey = config.plannerApiKey;
+  if (plannerApiKey !== undefined && plannerApiKey.trim().length > 0) {
+    return plannerApiKey.trim();
+  }
+  return config.apiKey.trim();
+}
+
+export function cloudDeciderApiKey(config: CloudModelConfig): string {
+  let deciderApiKey = config.deciderApiKey;
+  if (deciderApiKey !== undefined && deciderApiKey.trim().length > 0) {
+    return deciderApiKey.trim();
+  }
+  return config.apiKey.trim();
 }
 
 export interface GalleryCloudModelConfig {
@@ -939,7 +959,7 @@ export class CloudModelClient {
   }
 
   private async chat(baseUrl: string, content: CloudContentPart[], apiKey: string,
-    chatTemplateKwargs?: CloudChatTemplateKwargs): Promise<string> {
+    chatTemplateKwargs?: CloudChatTemplateKwargs, model?: string): Promise<string> {
     let message: CloudChatMessage = {
       role: 'user',
       content: content
@@ -947,7 +967,7 @@ export class CloudModelClient {
     let chatOptions: CloudChatOptions | undefined = chatTemplateKwargs === undefined ? undefined : {
       chat_template_kwargs: chatTemplateKwargs
     };
-    return this.chatMessages(baseUrl, [message], apiKey, undefined, undefined, undefined, chatOptions);
+    return this.chatMessages(baseUrl, [message], apiKey, model, undefined, undefined, chatOptions);
   }
 
   async summarizeGalleryMonth(config: GalleryCloudModelConfig, monthAggregateText: string): Promise<GalleryMonthSummaryResult> {
@@ -1126,13 +1146,15 @@ export class CloudModelClient {
       type: 'text',
       text: prompt
     };
-    return this.chat(config.plannerBaseUrl, [textPart], config.apiKey, { enable_thinking: false });
+    return this.chat(config.plannerBaseUrl, [textPart], cloudPlannerApiKey(config), { enable_thinking: false },
+      config.plannerModel);
   }
 
   async chatPlannerMessages(messages: CloudChatMessage[], config: CloudModelConfig): Promise<string> {
-    return this.chatMessages(config.plannerBaseUrl, messages, config.apiKey, undefined, undefined, undefined, {
-      chat_template_kwargs: { enable_thinking: false }
-    });
+    return this.chatMessages(config.plannerBaseUrl, messages, cloudPlannerApiKey(config), config.plannerModel,
+      undefined, undefined, {
+        chat_template_kwargs: { enable_thinking: false }
+      });
   }
 
   async chatDecider(prompt: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
@@ -1149,7 +1171,7 @@ export class CloudModelClient {
       text: prompt
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      config.apiKey, config.deciderModel, 256);
+      cloudDeciderApiKey(config), config.deciderModel, 256);
   }
 
   async chatImageQuestion(question: string, imageBase64: string, config: CloudModelConfig): Promise<string> {
@@ -1166,7 +1188,7 @@ export class CloudModelClient {
       text: question
     };
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: [imagePart, textPart] }],
-      config.apiKey, config.deciderModel, 1024, 60000);
+      cloudDeciderApiKey(config), config.deciderModel, 1024, 60000);
   }
 
   async chatImagesQuestion(question: string, imageBase64List: string[], config: CloudModelConfig): Promise<string> {
@@ -1203,7 +1225,7 @@ export class CloudModelClient {
       text: question
     });
     return this.chatMessages(config.deciderBaseUrl, [{ role: 'user', content: content }],
-      config.apiKey, config.deciderModel, 1024, 60000);
+      cloudDeciderApiKey(config), config.deciderModel, 1024, 60000);
   }
 
   async analyzeGalleryImage(imageBase64: string, ocrText: string, exifText: string, config: GalleryCloudModelConfig): Promise<string> {
@@ -1323,7 +1345,7 @@ export class CloudModelClient {
       content: [contextPart, imagePart, stepPart]
     };
     let messages: CloudChatMessage[] = [systemMessage, userMessage];
-    return this.chatMessages(config.deciderBaseUrl, messages, config.apiKey, config.deciderModel, 256);
+    return this.chatMessages(config.deciderBaseUrl, messages, cloudDeciderApiKey(config), config.deciderModel, 256);
   }
 
   private galleryAnalysisBasePrompt(ocrText: string, exifText: string): string {

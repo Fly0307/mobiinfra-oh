@@ -14,12 +14,15 @@ const MOBILE_GUI_CHAT_TASK_TITLE: string = '聊天手机 GUI 任务';
 const MOBILE_GUI_CHAT_TASK_CONFIG_FILE_NAME: string = '__chat_mobile_gui_task.json';
 
 export function isMobileGuiTaskCloudConfigReady(plannerBaseUrl: string, deciderBaseUrl: string,
-  apiKey: string): boolean {
-  return plannerBaseUrl.trim().length > 0 && deciderBaseUrl.trim().length > 0 && apiKey.trim().length > 0;
+  plannerApiKey: string, deciderApiKey: string): boolean {
+  return plannerBaseUrl.trim().length > 0 &&
+    deciderBaseUrl.trim().length > 0 &&
+    plannerApiKey.trim().length > 0 &&
+    deciderApiKey.trim().length > 0;
 }
 
 export function mobileGuiTaskCloudConfigMissingMessage(): string {
-  return '配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。';
+  return '配置不完整：请先填写 Planner / Decider 的服务地址和各自 API Key。';
 }
 
 export function buildMobileGuiWorkflowTaskDescription(request: MobileGuiTaskRequest): string {

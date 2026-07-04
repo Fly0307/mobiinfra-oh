@@ -76,6 +76,12 @@ import {
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
 import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
+import {
+  FIRST_LAUNCH_ONBOARDING_STORAGE_KEY,
+  FIRST_LAUNCH_ONBOARDING_VERSION,
+  shouldShowFirstLaunchOnboarding
+} from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
@@ -84,7 +90,9 @@ import {
   CloudChatCompletionOptions,
   CloudChatMessage,
   CloudModelClient,
-  CloudModelConfig
+  CloudModelConfig,
+  cloudDeciderApiKey,
+  cloudPlannerApiKey
 } from '../utils/CloudModelClient';
 import {
   createEmptyCollectionViewModels,
@@ -135,13 +143,19 @@ import { WorkflowRunner } from '../utils/WorkflowRunner';
 import { WorkflowStorage, SystemResourceManagerReader } from '../utils/WorkflowStorage';
 import { WorkflowTask, WorkflowRunResult } from '../utils/WorkflowTypes';
 import { showToastSafely } from '../utils/PromptSafe';
+import { buildCloudOutputLog } from '../utils/CloudLogOutput';
 import {
   currentLocalDateKey,
   formatLocalDateKey,
   localWeekdayLabel,
   weekRangeTextFromDate
 } from '../utils/DateUtils';
-import { DEFAULT_ENDPOINT_CONFIG, LEGACY_ENDPOINT_CONFIG } from '../config/DefaultEndpointConfig';
+import {
+  DEFAULT_ENDPOINT_CONFIG,
+  LEGACY_ENDPOINT_CONFIG,
+  configuredEndpointSecretOrDefault,
+  configuredEndpointValueOrDefault
+} from '../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../config/ModelDownloadConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
@@ -334,14 +348,18 @@ PersistentStorage.persistProp('serverIp', DEFAULT_ENDPOINT_CONFIG.modelDownloadS
 PersistentStorage.persistProp('modelScopeMnnRepo', DEFAULT_MODELSCOPE_MNN_REPO);
 PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
+PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+PersistentStorage.persistProp('cloudPlannerModel', DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
+PersistentStorage.persistProp('cloudPlannerApiKey', DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
 PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
+PersistentStorage.persistProp('cloudDeciderApiKey', DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
 PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
 PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
 PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl);
-PersistentStorage.persistProp('voiceTtsApiKey', '');
+PersistentStorage.persistProp('voiceTtsApiKey', DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey);
 PersistentStorage.persistProp('voiceTtsModel', DEFAULT_ENDPOINT_CONFIG.voiceTtsModel);
 PersistentStorage.persistProp('voiceTtsVoice', DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice);
 PersistentStorage.persistProp('voiceTtsStylePrompt', DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt);
@@ -351,7 +369,7 @@ PersistentStorage.persistProp('chatContextCompressionThresholdPercent',
   String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT));
 PersistentStorage.persistProp('chatContextRecentRounds', String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT));
 PersistentStorage.persistProp('avatarImageBaseUrl', DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl);
-PersistentStorage.persistProp('avatarImageApiKey', '');
+PersistentStorage.persistProp('avatarImageApiKey', DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
 PersistentStorage.persistProp('avatarTextToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
 PersistentStorage.persistProp('avatarImageToImageModel', DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
 PersistentStorage.persistProp('avatarImageSize', DEFAULT_ENDPOINT_CONFIG.avatarImageSize);
@@ -366,9 +384,24 @@ PersistentStorage.persistProp('endpointDefault.serverIp', '');
 PersistentStorage.persistProp('endpointDefault.hdcServerIp', '');
 PersistentStorage.persistProp('endpointDefault.wirelessIp', '');
 PersistentStorage.persistProp('endpointDefault.cloudPlannerBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudPlannerModel', '');
+PersistentStorage.persistProp('endpointDefault.cloudPlannerApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.cloudDeciderApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudApiKey', '');
 PersistentStorage.persistProp('endpointDefault.cloudDeciderModel', '');
+PersistentStorage.persistProp('endpointDefault.voiceTtsBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.voiceTtsApiKey', '');
+PersistentStorage.persistProp('endpointDefault.voiceTtsModel', '');
+PersistentStorage.persistProp('endpointDefault.voiceTtsVoice', '');
+PersistentStorage.persistProp('endpointDefault.voiceTtsStylePrompt', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageBaseUrl', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageApiKey', '');
+PersistentStorage.persistProp('endpointDefault.avatarTextToImageModel', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageToImageModel', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageSize', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageResponseFormat', '');
+PersistentStorage.persistProp('endpointDefault.avatarImageOutputFormat', '');
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
@@ -405,6 +438,7 @@ struct Index {
   @State selectedModelVariant: string = '';
   @State downloadedModels: DownloadedModelItem[] = [];
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
+  @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State backendTypeInput: string = 'cpu';
@@ -420,11 +454,14 @@ struct Index {
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+  @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
+  @StorageLink('cloudPlannerApiKey') cloudPlannerApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+  @StorageLink('cloudDeciderApiKey') cloudDeciderApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
   @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
-  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = '';
+  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey;
   @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
   @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
   @StorageLink('voiceTtsStylePrompt') voiceTtsStylePrompt: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt;
@@ -435,7 +472,7 @@ struct Index {
     String(CHAT_CONTEXT_COMPRESSION_THRESHOLD_PERCENT_DEFAULT);
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string = String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
-  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey;
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
@@ -526,6 +563,15 @@ struct Index {
   private cloudStreamDisplayTimerId: number = -1;
   private cloudStreamDisplayGeneration: number = 0;
   private cloudStreamDisplayVersion: number = 0;
+
+  private shouldDisplayFirstLaunchOnboarding(): boolean {
+    return shouldShowFirstLaunchOnboarding(this.firstLaunchOnboardingVersion);
+  }
+
+  private completeFirstLaunchOnboarding(): void {
+    this.currentTab = MainTabIndex.Home;
+    this.firstLaunchOnboardingVersion = FIRST_LAUNCH_ONBOARDING_VERSION;
+  }
 
   private nextChatMessageId(prefix: string = 'msg'): string {
     return prefix + '-' + String(new Date().getTime()) + '-' + String(this.activeChatMessages.length + 1);
@@ -797,11 +843,13 @@ struct Index {
 
   private voiceTtsConfig(): ChatVoiceTtsConfig {
     return {
-      baseUrl: this.voiceTtsBaseUrl,
-      apiKey: this.voiceTtsApiKey,
-      model: this.voiceTtsModel,
-      voice: normalizeVoiceTtsPreset(this.voiceTtsVoice),
-      stylePrompt: this.voiceTtsStylePrompt,
+      baseUrl: configuredEndpointValueOrDefault(this.voiceTtsBaseUrl, DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl),
+      apiKey: configuredEndpointSecretOrDefault(this.voiceTtsApiKey, DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey),
+      model: configuredEndpointValueOrDefault(this.voiceTtsModel, DEFAULT_ENDPOINT_CONFIG.voiceTtsModel),
+      voice: normalizeVoiceTtsPreset(configuredEndpointValueOrDefault(this.voiceTtsVoice,
+        DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice)),
+      stylePrompt: configuredEndpointValueOrDefault(this.voiceTtsStylePrompt,
+        DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt),
       streamingEnabled: this.voiceTtsStreamingEnabled
     };
   }
@@ -1284,14 +1332,11 @@ struct Index {
   }
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
-  private appendCloudLogToSession(sessionId: string, message: string): void {
+  private appendCloudLogToSession(sessionId: string, message: string, replaceExisting: boolean = false): void {
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
-    let nextLogs = this.cloudOutput.length > 0 ? this.cloudOutput + '\n' + line : line;
-    if (nextLogs.length > 60000) {
-      nextLogs = nextLogs.substring(nextLogs.length - 60000);
-    }
+    let nextLogs = buildCloudOutputLog(this.cloudOutput, line, replaceExisting, 60000);
     this.cloudOutput = nextLogs;
     AppStorage.setOrCreate('cloudAgentLogs', this.cloudOutput);
     let traceLine = this.formatAgentTraceLog(message);
@@ -1305,8 +1350,8 @@ struct Index {
     }
   }
 
-  private appendCloudLog(message: string): void {
-    this.appendCloudLogToSession(this.cloudTaskSessionId, message);
+  private appendCloudLog(message: string, replaceExisting: boolean = false): void {
+    this.appendCloudLogToSession(this.cloudTaskSessionId, message, replaceExisting);
   }
 
   private resetCloudLog(message: string): void {
@@ -1385,7 +1430,9 @@ struct Index {
   }
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
-    return isMobileGuiTaskCloudConfigReadyValue(this.cloudPlannerBaseUrl, this.cloudDeciderBaseUrl, this.cloudApiKey);
+    let config = this.getCloudConfig();
+    return isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl,
+      cloudPlannerApiKey(config), cloudDeciderApiKey(config));
   }
 
   private mobileGuiTaskConfigMissingMessage(): string {
@@ -1435,30 +1482,32 @@ struct Index {
   }
 
   private getDataManagerModelConfig(): DataManagerModelConfig {
+    let plannerBaseUrl = configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
     return {
-      baseUrl: this.cloudPlannerBaseUrl,
-      apiKey: this.cloudApiKey,
-      enabled: this.cloudPlannerBaseUrl.trim().length > 0
+      baseUrl: plannerBaseUrl,
+      apiKey: configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey),
+      enabled: plannerBaseUrl.trim().length > 0
     };
   }
 
   private getAvatarProviderConfig(): AvatarProviderConfig {
-    let textModel = this.avatarTextToImageModel.trim().length > 0 ? this.avatarTextToImageModel :
-      DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
-    let imageModel = this.avatarImageToImageModel.trim().length > 0 ? this.avatarImageToImageModel : textModel;
+    let textModel = configuredEndpointValueOrDefault(this.avatarTextToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel);
+    let imageModel = configuredEndpointValueOrDefault(this.avatarImageToImageModel, textModel);
     return {
-      imageBaseUrl: this.avatarImageBaseUrl.trim().length > 0 ? this.avatarImageBaseUrl :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
-      apiKey: this.avatarImageApiKey,
+      imageBaseUrl: configuredEndpointValueOrDefault(this.avatarImageBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl),
+      apiKey: configuredEndpointSecretOrDefault(this.avatarImageApiKey, DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey),
       textToImageModel: textModel,
       imageToImageModel: imageModel,
-      size: this.avatarImageSize.trim().length > 0 ? this.avatarImageSize : DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
-      responseFormat: this.avatarImageResponseFormat.trim().length > 0 ? this.avatarImageResponseFormat :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat,
-      outputFormat: this.avatarImageOutputFormat.trim().length > 0 ? this.avatarImageOutputFormat :
-        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat,
-      sequentialImageGeneration: this.avatarSequentialImageGeneration.trim().length > 0 ?
-        this.avatarSequentialImageGeneration : 'disabled',
+      size: configuredEndpointValueOrDefault(this.avatarImageSize, DEFAULT_ENDPOINT_CONFIG.avatarImageSize),
+      responseFormat: configuredEndpointValueOrDefault(this.avatarImageResponseFormat,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat),
+      outputFormat: configuredEndpointValueOrDefault(this.avatarImageOutputFormat,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat),
+      sequentialImageGeneration: configuredEndpointValueOrDefault(this.avatarSequentialImageGeneration, 'disabled'),
       stream: this.avatarImageStream,
       watermark: this.avatarImageWatermark,
       timeoutMs: this.avatarImageTimeoutMs > 0 ? this.avatarImageTimeoutMs : 60000
@@ -1992,7 +2041,7 @@ struct Index {
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
-      apiKey: config.apiKey,
+      apiKey: cloudPlannerApiKey(config),
       messages: messages,
       temperature: 0.7,
       maxTokens: 4096,
@@ -2682,7 +2731,7 @@ struct Index {
     let config = this.getCloudConfig();
     let options: CloudChatCompletionOptions = {
       baseUrl: config.plannerBaseUrl,
-      apiKey: config.apiKey,
+      apiKey: cloudPlannerApiKey(config),
       messages: this.buildProfileAffinityMessages(localProfile, remoteProfile),
       temperature: 0.2,
       maxTokens: 2048,
@@ -2725,12 +2774,42 @@ struct Index {
       LEGACY_ENDPOINT_CONFIG.wirelessHdcTargets, 'endpointDefault.wirelessIp');
     this.cloudPlannerBaseUrl = this.migrateEndpointValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudPlannerBaseUrls, 'endpointDefault.cloudPlannerBaseUrl');
+    this.cloudPlannerModel = this.migrateEndpointValue(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel,
+      [], 'endpointDefault.cloudPlannerModel', false);
     this.cloudDeciderBaseUrl = this.migrateEndpointValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderBaseUrls, 'endpointDefault.cloudDeciderBaseUrl');
     this.cloudApiKey = this.migrateEndpointValue(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey,
       LEGACY_ENDPOINT_CONFIG.cloudApiKeys, 'endpointDefault.cloudApiKey');
+    this.cloudPlannerApiKey = this.migrateSplitCloudApiKey(this.cloudPlannerApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey, 'endpointDefault.cloudPlannerApiKey');
+    this.cloudDeciderApiKey = this.migrateSplitCloudApiKey(this.cloudDeciderApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey, 'endpointDefault.cloudDeciderApiKey');
     this.cloudDeciderModel = this.migrateEndpointValue(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel,
       LEGACY_ENDPOINT_CONFIG.cloudDeciderModels, 'endpointDefault.cloudDeciderModel', false);
+    this.voiceTtsBaseUrl = this.migrateEndpointValue(this.voiceTtsBaseUrl, DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+      LEGACY_ENDPOINT_CONFIG.voiceTtsBaseUrls, 'endpointDefault.voiceTtsBaseUrl');
+    this.voiceTtsApiKey = this.migrateEndpointValue(this.voiceTtsApiKey, DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey,
+      [], 'endpointDefault.voiceTtsApiKey');
+    this.voiceTtsModel = this.migrateEndpointValue(this.voiceTtsModel, DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
+      [], 'endpointDefault.voiceTtsModel');
+    this.voiceTtsVoice = this.migrateEndpointValue(this.voiceTtsVoice, DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice,
+      [], 'endpointDefault.voiceTtsVoice');
+    this.voiceTtsStylePrompt = this.migrateEndpointValue(this.voiceTtsStylePrompt,
+      DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt, [], 'endpointDefault.voiceTtsStylePrompt');
+    this.avatarImageBaseUrl = this.migrateEndpointValue(this.avatarImageBaseUrl,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, [], 'endpointDefault.avatarImageBaseUrl');
+    this.avatarImageApiKey = this.migrateEndpointValue(this.avatarImageApiKey,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey, [], 'endpointDefault.avatarImageApiKey');
+    this.avatarTextToImageModel = this.migrateEndpointValue(this.avatarTextToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel, [], 'endpointDefault.avatarTextToImageModel');
+    this.avatarImageToImageModel = this.migrateEndpointValue(this.avatarImageToImageModel,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageModel, [], 'endpointDefault.avatarImageToImageModel');
+    this.avatarImageSize = this.migrateEndpointValue(this.avatarImageSize, DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      [], 'endpointDefault.avatarImageSize');
+    this.avatarImageResponseFormat = this.migrateEndpointValue(this.avatarImageResponseFormat,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat, [], 'endpointDefault.avatarImageResponseFormat');
+    this.avatarImageOutputFormat = this.migrateEndpointValue(this.avatarImageOutputFormat,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageOutputFormat, [], 'endpointDefault.avatarImageOutputFormat');
   }
 
   private migrateWechatAutoSummaryDefaultValues(): void {
@@ -2773,6 +2852,20 @@ struct Index {
     let nextValue = shouldUseConfiguredDefault ? configuredDefault : currentValue;
     AppStorage.setOrCreate(snapshotKey, configuredDefault);
     return nextValue;
+  }
+
+  private migrateSplitCloudApiKey(currentValue: string, configuredDefault: string, snapshotKey: string): string {
+    let lastAppliedDefault = AppStorage.get(snapshotKey) as string;
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    let firstSplitDefault = lastAppliedDefault === undefined || lastAppliedDefault.length === 0;
+    let shouldInheritLegacyKey = firstSplitDefault &&
+      legacyApiKey !== DEFAULT_ENDPOINT_CONFIG.cloudApiKey &&
+      (currentValue.trim().length === 0 || currentValue === configuredDefault);
+    if (shouldInheritLegacyKey) {
+      AppStorage.setOrCreate(snapshotKey, configuredDefault);
+      return legacyApiKey;
+    }
+    return this.migrateEndpointValue(currentValue, configuredDefault, LEGACY_ENDPOINT_CONFIG.cloudApiKeys, snapshotKey);
   }
 
   private prepareCustomOpp(): boolean {
@@ -4364,34 +4457,46 @@ struct Index {
   }
 
   private getCloudConfig(): CloudModelConfig {
+    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
+    let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
     let config: CloudModelConfig = {
-      plannerBaseUrl: this.cloudPlannerBaseUrl,
-      deciderBaseUrl: this.cloudDeciderBaseUrl,
-      apiKey: this.cloudApiKey,
-      deciderModel: this.cloudDeciderModel
+      plannerBaseUrl: configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
+      plannerModel: configuredEndpointValueOrDefault(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
+      plannerApiKey: plannerApiKey,
+      deciderBaseUrl: configuredEndpointValueOrDefault(this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
+      deciderApiKey: deciderApiKey,
+      apiKey: plannerApiKey,
+      deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
     };
     return config;
   }
 
   private isCloudConfigReady(): boolean {
-    return this.cloudPlannerBaseUrl.trim().length > 0 &&
-      this.cloudDeciderBaseUrl.trim().length > 0 &&
-      this.cloudApiKey.trim().length > 0;
+    let config = this.getCloudConfig();
+    return config.plannerBaseUrl.trim().length > 0 &&
+      config.deciderBaseUrl.trim().length > 0 &&
+      cloudPlannerApiKey(config).trim().length > 0 &&
+      cloudDeciderApiKey(config).trim().length > 0;
   }
 
   private isCloudPlannerConfigReady(): boolean {
-    return this.cloudPlannerBaseUrl.trim().length > 0 && this.cloudApiKey.trim().length > 0;
+    let config = this.getCloudConfig();
+    return config.plannerBaseUrl.trim().length > 0 && cloudPlannerApiKey(config).trim().length > 0;
   }
 
   async testCloudPlanner() {
-    if (!this.isCloudConfigReady()) {
-      this.appendCloudLog('配置不完整：请先填写 Planner / Decider 的服务地址和 API Key。');
+    if (!this.isCloudPlannerConfigReady()) {
+      this.appendCloudLog('配置不完整：请先填写 Planner 服务地址和 API Key。', true);
       return;
     }
     this.cloudThinking = true;
-    this.appendCloudLog(`测试 Planner：${this.cloudPlannerBaseUrl}`);
+    let config = this.getCloudConfig();
+    this.appendCloudLog(`测试 Planner：${config.plannerBaseUrl}`, true);
     try {
-      let response = await this.cloudClient.chatPlanner('请只回复 ok', this.getCloudConfig());
+      let response = await this.cloudClient.chatPlanner('请只回复 ok', config);
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
     } catch (e) {
       let err = e as Error;
@@ -5212,7 +5317,8 @@ struct Index {
     this.currentTab = MainTabIndex.Chat;
     this.resetCloudLog('云端 Agent 开始执行：' + task);
     this.appendCloudLog('Agent loop 已迁移到 App 内；PC 仅通过 HDC bridge 提供截图和动作执行。');
-    this.appendCloudLog(`Planner=${this.cloudPlannerBaseUrl}, Decider=${this.cloudDeciderBaseUrl}`);
+    let config = this.getCloudConfig();
+    this.appendCloudLog(`Planner=${config.plannerBaseUrl}, Decider=${config.deciderBaseUrl}`);
     let runner = this.createAgentLoopRunner();
     this.activeAgentRunner = runner;
     try {
@@ -5556,6 +5662,13 @@ struct Index {
 
   build() {
     Stack() {
+      if (this.shouldDisplayFirstLaunchOnboarding()) {
+        FirstLaunchOnboarding({
+          onComplete: () => {
+            this.completeFirstLaunchOnboarding();
+          }
+        })
+      } else {
       Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
         TabContent() {
           HomePage({
@@ -5716,6 +5829,7 @@ struct Index {
       .backgroundColor('#F4F8FF')
 
       this.DataManagerProgressOverlay()
+      }
     }
     .width('100%')
     .height('100%')

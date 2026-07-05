@@ -1,4 +1,4 @@
-import { router } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
@@ -53,30 +53,43 @@ import {
   normalizeWechatAutoSummaryWait
 } from '../../utils/wechat/WechatAutoSummaryTypes';
 import {
+  DownloadedModelItem,
   isSettingsSectionSelected,
   normalizeSettingsSectionId,
+  restoreMaskedSensitiveSettingDefault,
   SETTINGS_SECTION_ITEMS,
   SETTINGS_SECTION_NONE,
+  SettingsActionKind,
+  SettingsConfirmConfig,
   SettingsSectionItem,
   SettingsSectionId,
   settingsSectionSubtitle,
   settingsSectionTitle
 } from './SettingsCenterTypes';
+import {
+  SETTINGS_BUTTON_HEIGHT,
+  SETTINGS_CONTROL_RADIUS,
+  SETTINGS_FIELD_HEIGHT,
+  SETTINGS_INPUT_BACKGROUND_COLOR,
+  SETTINGS_MUTED_TEXT_COLOR,
+  SETTINGS_PAGE_BACKGROUND_COLOR,
+  SETTINGS_PAGE_HORIZONTAL_PADDING,
+  SETTINGS_SECONDARY_TEXT_COLOR,
+  settingsActionColor
+} from './SettingsCenterTheme';
+import {
+  SensitiveSettingInput,
+  SettingInput,
+  SettingsActionButton,
+  SettingsActionRow,
+  SettingsGroupCard,
+  SettingsOutputPanel,
+  SettingToggle as SettingToggleControl
+} from './SettingsCenterControls';
 
 registerGallerySettingsDefaults();
 
 const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
-
-interface DownloadedModelItem {
-  id: string;
-  label: string;
-  path: string;
-  repo: string;
-  sizeText: string;
-  statusText: string;
-  ready: boolean;
-}
-
 @Component
 export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
@@ -108,11 +121,14 @@ export struct SettingsCenterPage {
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+  @StorageLink('cloudPlannerModel') cloudPlannerModel: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel;
+  @StorageLink('cloudPlannerApiKey') cloudPlannerApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
   @StorageLink('cloudDeciderBaseUrl') cloudDeciderBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+  @StorageLink('cloudDeciderApiKey') cloudDeciderApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
   @StorageLink('cloudApiKey') cloudApiKey: string = DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
   @StorageLink('cloudDeciderModel') cloudDeciderModel: string = DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel;
   @StorageLink('voiceTtsBaseUrl') voiceTtsBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
-  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = '';
+  @StorageLink('voiceTtsApiKey') voiceTtsApiKey: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey;
   @StorageLink('voiceTtsModel') voiceTtsModel: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsModel;
   @StorageLink('voiceTtsVoice') voiceTtsVoice: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice;
   @StorageLink('voiceTtsStylePrompt') voiceTtsStylePrompt: string = DEFAULT_ENDPOINT_CONFIG.voiceTtsStylePrompt;
@@ -124,7 +140,7 @@ export struct SettingsCenterPage {
   @StorageLink('chatContextRecentRounds') chatContextRecentRounds: string =
     String(CHAT_CONTEXT_RECENT_ROUNDS_DEFAULT);
   @StorageLink('avatarImageBaseUrl') avatarImageBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl;
-  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = '';
+  @StorageLink('avatarImageApiKey') avatarImageApiKey: string = DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey;
   @StorageLink('avatarTextToImageModel') avatarTextToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageToImageModel') avatarImageToImageModel: string = DEFAULT_ENDPOINT_CONFIG.avatarImageModel;
   @StorageLink('avatarImageSize') avatarImageSize: string = DEFAULT_ENDPOINT_CONFIG.avatarImageSize;
@@ -158,6 +174,8 @@ export struct SettingsCenterPage {
     DEFAULT_WECHAT_AUTO_SUMMARY_MAX_HISTORY_SWIPES;
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
+  @State private activeSensitiveInputId: string = '';
+  private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
   onCheckServer: () => void = () => {};
   onDownloadAll: () => void = () => {};
@@ -184,7 +202,25 @@ export struct SettingsCenterPage {
   onUpdateConfigBackendType: (target: string) => void = (target: string) => {};
 
   aboutToAppear(): void {
+    this.restoreMaskedDefaultSecrets();
     this.upgradeLegacyVoiceTtsBaseUrl();
+  }
+
+  private restoreMaskedDefaultSecrets(): void {
+    this.cloudApiKey = restoreMaskedSensitiveSettingDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
+    this.cloudPlannerApiKey = restoreMaskedSensitiveSettingDefault(this.cloudPlannerApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
+    this.cloudDeciderApiKey = restoreMaskedSensitiveSettingDefault(this.cloudDeciderApiKey,
+      DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
+    this.avatarImageApiKey = restoreMaskedSensitiveSettingDefault(this.avatarImageApiKey,
+      DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey);
+    this.voiceTtsApiKey = restoreMaskedSensitiveSettingDefault(this.voiceTtsApiKey,
+      DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey);
+    this.galleryApiKey = restoreMaskedSensitiveSettingDefault(this.galleryApiKey, DEFAULT_GALLERY_API_KEY);
+    this.galleryEmbeddingApiKey =
+      restoreMaskedSensitiveSettingDefault(this.galleryEmbeddingApiKey, DEFAULT_GALLERY_EMBEDDING_API_KEY);
+    this.galleryAmapWebKey = restoreMaskedSensitiveSettingDefault(this.galleryAmapWebKey,
+      DEFAULT_GALLERY_AMAP_WEB_KEY);
   }
 
   private upgradeLegacyVoiceTtsBaseUrl(): void {
@@ -192,6 +228,16 @@ export struct SettingsCenterPage {
     if (this.voiceTtsBaseUrl.trim() === LEGACY_MIMO_TTS_BASE_URL) {
       this.voiceTtsBaseUrl = DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl;
     }
+  }
+
+  private closeSensitiveInputs(): void {
+    if (this.activeSensitiveInputId.length > 0) {
+      this.activeSensitiveInputId = '';
+    }
+  }
+
+  private setActiveSensitiveInput(id: string): void {
+    this.activeSensitiveInputId = id;
   }
 
   private hdcInputEditable(): boolean {
@@ -211,16 +257,28 @@ export struct SettingsCenterPage {
       return '#2D9B73';
     }
     if (this.hdcAutoConnecting) {
-      return '#4F68FF';
+      return settingsActionColor(SettingsActionKind.Primary);
     }
     return '#D26B31';
   }
 
+  private resetDetailScroll(): void {
+    try {
+      this.detailScroller.scrollEdge(Edge.Top);
+    } catch (e) {}
+  }
+
   private openSection(id: SettingsSectionId): void {
+    this.closeSensitiveInputs();
     this.selectedSectionId = normalizeSettingsSectionId(id);
+    this.resetDetailScroll();
+    setTimeout(() => {
+      this.resetDetailScroll();
+    }, 0);
   }
 
   private closeSection(): void {
+    this.closeSensitiveInputs();
     this.selectedSectionId = SETTINGS_SECTION_NONE;
   }
 
@@ -259,6 +317,61 @@ export struct SettingsCenterPage {
     return '';
   }
 
+  private confirmDanger(config: SettingsConfirmConfig, action: () => void): void {
+    promptAction.showDialog({
+      title: config.title,
+      message: config.message,
+      buttons: [
+        { text: '取消', color: settingsActionColor(SettingsActionKind.Secondary) },
+        { text: config.confirmText, color: settingsActionColor(SettingsActionKind.Danger) }
+      ]
+    }).then((data: promptAction.ShowDialogSuccessResponse) => {
+      if (data.index === 1) {
+        action();
+      }
+    }).catch(() => {});
+  }
+
+  private confirmDeleteModelFiles(): void {
+    this.confirmDanger({
+      title: '删除模型',
+      message: '确认执行该操作？将删除本地模型文件，后续需要重新下载或重新选择模型。',
+      confirmText: '删除'
+    }, () => { this.onDeleteModelFiles(); });
+  }
+
+  private confirmClearScreenshots(): void {
+    this.confirmDanger({
+      title: '清理截图',
+      message: '确认执行该操作？将清理当前保存的截图调试产物。',
+      confirmText: '清理'
+    }, () => { this.onClearScreenshots(); });
+  }
+
+  private confirmDeleteDebugOutputs(): void {
+    this.confirmDanger({
+      title: '清理调试输出',
+      message: '确认执行该操作？将删除调试输出文件，操作不可撤回。',
+      confirmText: '清理'
+    }, () => { this.onDeleteDebugOutputs(); });
+  }
+
+  private confirmDeleteModelConfigJson(): void {
+    this.confirmDanger({
+      title: '删除 Config',
+      message: '确认执行该操作？将删除模型 Config 文件，后续需要重新生成或下载。',
+      confirmText: '删除'
+    }, () => { this.onDeleteModelConfigJson(); });
+  }
+
+  private confirmDeleteChunkVisionOmFiles(): void {
+    this.confirmDanger({
+      title: '删除 vision.om',
+      message: '确认执行该操作？将删除 vision.om 相关文件，操作不可撤回。',
+      confirmText: '删除'
+    }, () => { this.onDeleteChunkVisionOmFiles(); });
+  }
+
   @Builder SectionTitle(id: SettingsSectionId) {
     Column() {
       Text(settingsSectionTitle(id))
@@ -275,26 +388,16 @@ export struct SettingsCenterPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .margin({ bottom: 14 })
+    .onClick(() => { this.closeSensitiveInputs(); })
   }
 
   @Builder FieldLabel(label: string) {
     Text(label)
       .fontSize(13)
-      .fontColor('#6F7684')
+      .fontColor(SETTINGS_MUTED_TEXT_COLOR)
       .width('100%')
       .margin({ top: 8, bottom: 6 })
-  }
-
-  @Builder SettingInput(label: string, value: string, placeholder: string, onValueChange: (value: string) => void) {
-    this.FieldLabel(label)
-    TextInput({ placeholder: placeholder, text: value })
-      .height(42)
-      .width('100%')
-      .fontSize(13)
-      .backgroundColor('#F2F5FC')
-      .borderRadius(12)
-      .padding({ left: 12, right: 12 })
-      .onChange((val: string) => { onValueChange(val); })
+      .onClick(() => { this.closeSensitiveInputs(); })
   }
 
   @Builder DownloadedModelList() {
@@ -361,22 +464,20 @@ export struct SettingsCenterPage {
 
   @Builder WechatAutoSummaryInput(label: string, value: string, placeholder: string,
     onValueChange: (value: string) => void, onNormalize: () => void) {
-    this.FieldLabel(label)
-    TextInput({ placeholder: placeholder, text: value })
-      .height(42)
-      .width('100%')
-      .fontSize(13)
-      .backgroundColor('#F2F5FC')
-      .borderRadius(12)
-      .padding({ left: 12, right: 12 })
-      .onChange((input: string) => {
+    SettingInput({
+      label: label,
+      value: value,
+      placeholder: placeholder,
+      onValueChange: (input: string) => {
         // 编辑期间保留原文，避免小数和临时空值被立即改写。
         onValueChange(input);
-      })
-      .onBlur(() => {
+      },
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onInputBlur: () => {
         // 失焦后由调用点读取当前字段再归一化，避免使用上一轮渲染入参。
         onNormalize();
-      })
+      }
+    })
   }
 
   @Builder VariantButton(label: string, variant: string) {
@@ -388,34 +489,22 @@ export struct SettingsCenterPage {
       .backgroundColor(this.selectedModelVariant === variant ? '#4F68FF' : '#EEF3FF')
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
-      .onClick(() => { this.onSwitchModelVariant(variant); })
+      .onClick(() => {
+        this.closeSensitiveInputs();
+        this.onSwitchModelVariant(variant);
+      })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
-    Row() {
-      Checkbox({ name: label, group: 'settingsCenter' })
-        .select(selected)
-        .selectedColor('#5B68FF')
-        .onChange((value: boolean) => { onValueChange(value); })
-      Column() {
-        Text(label)
-          .fontSize(14)
-          .fontColor('#11182F')
-          .width('100%')
-        Text(desc)
-          .fontSize(12)
-          .fontColor('#7B8290')
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 2 })
+    SettingToggleControl({
+      label: label,
+      desc: desc,
+      selected: selected,
+      onValueChange: (value: boolean) => {
+        this.closeSensitiveInputs();
+        onValueChange(value);
       }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 8 })
-    }
-    .width('100%')
-    .padding({ top: 8, bottom: 8 })
+    })
   }
 
   @Builder VoiceTtsStylePromptTextArea() {
@@ -425,10 +514,12 @@ export struct SettingsCenterPage {
       .maxLines(5)
       .fontSize(13)
       .lineHeight(20)
-      .fontColor('#11182F')
-      .backgroundColor('#F2F5FC')
-      .borderRadius(12)
+      .fontColor(SETTINGS_MUTED_TEXT_COLOR)
+      .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
+      .borderRadius(SETTINGS_CONTROL_RADIUS)
       .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+      .onClick(() => { this.closeSensitiveInputs(); })
+      .onFocus(() => { this.closeSensitiveInputs(); })
       .onChange((val: string) => {
         this.voiceTtsStylePrompt = val;
       })
@@ -449,11 +540,13 @@ export struct SettingsCenterPage {
       .height(36)
       .width('48%')
       .fontSize(12)
-      .fontColor(this.voiceTtsRolePreset === preset.id ? Color.White : '#4F68FF')
-      .backgroundColor(this.voiceTtsRolePreset === preset.id ? '#4F68FF' : '#EEF3FF')
+      .fontColor(this.voiceTtsRolePreset === preset.id ? Color.White : settingsActionColor(SettingsActionKind.Primary))
+      .backgroundColor(this.voiceTtsRolePreset === preset.id ? settingsActionColor(SettingsActionKind.Primary) :
+        '#EEF3FF')
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
       .onClick(() => {
+        this.closeSensitiveInputs();
         let selection: VoiceTtsRoleSelection = voiceTtsSelectionFromRolePreset(preset);
         this.voiceTtsRolePreset = selection.rolePreset;
         this.voiceTtsVoice = selection.voice;
@@ -467,11 +560,14 @@ export struct SettingsCenterPage {
       .height(34)
       .width('31%')
       .fontSize(11)
-      .fontColor(this.voiceTtsVoice === voice ? Color.White : '#4F68FF')
-      .backgroundColor(this.voiceTtsVoice === voice ? '#4F68FF' : '#EEF3FF')
+      .fontColor(this.voiceTtsVoice === voice ? Color.White : settingsActionColor(SettingsActionKind.Primary))
+      .backgroundColor(this.voiceTtsVoice === voice ? settingsActionColor(SettingsActionKind.Primary) : '#EEF3FF')
       .borderRadius(10)
       .margin({ right: 6, bottom: 8 })
-      .onClick(() => { this.voiceTtsVoice = voice; })
+      .onClick(() => {
+        this.closeSensitiveInputs();
+        this.voiceTtsVoice = voice;
+      })
   }
 
   @Builder VoiceTtsPresetSettings() {
@@ -492,32 +588,6 @@ export struct SettingsCenterPage {
     }
     .width('100%')
     this.VoiceTtsStylePromptInput()
-  }
-
-  @Builder OutputPanel(title: string, content: string) {
-    Column() {
-      Text(title)
-        .fontSize(13)
-        .fontColor('#6F7684')
-        .width('100%')
-      Scroll() {
-        Text(content.length > 0 ? content : '暂无输出')
-          .fontSize(12)
-          .fontFamily('monospace')
-          .fontColor('#333333')
-          .width('100%')
-          .padding(12)
-      }
-      .constraintSize({ minHeight: 72, maxHeight: 130 })
-      .width('100%')
-      .backgroundColor('#EEF4FF')
-      .borderRadius(12)
-      .margin({ top: 6 })
-      .border({ width: 1, color: '#D9E5FF' })
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%')
-    .margin({ top: 10 })
   }
 
   private isWechatAutoSummaryEnabled(): boolean {
@@ -547,9 +617,9 @@ export struct SettingsCenterPage {
             this.wechatAutoSummaryDefaultMaxContacts = String(
               normalizeWechatAutoSummaryMaxContacts(this.wechatAutoSummaryDefaultMaxContacts));
           })
-        Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
-          .fontSize(12)
-          .fontColor('#D26B31')
+      Text('将保存微信原始消息 JSON/Markdown，并生成联系人级 daily-log。')
+        .fontSize(12)
+        .fontColor('#D26B31')
           .width('100%')
           .margin({ top: 8, bottom: 8 })
 
@@ -753,475 +823,744 @@ export struct SettingsCenterPage {
   @Builder PrivacySection() {
     Column() {
       this.SectionTitle(SettingsSectionId.PersonalPrivacy)
-      this.SettingToggle('本地 Agent 自动同意', '关闭后每次端侧模型动作都会弹窗确认', this.autoConfirm,
-        (value: boolean) => { this.autoConfirm = value; })
-      this.SettingToggle('云端 Agent 自动同意', '关闭后云端模型动作需要手动确认后发给 PC', this.cloudAutoConfirm,
-        (value: boolean) => { this.cloudAutoConfirm = value; })
-      this.SettingInput('数字分身图片服务', this.avatarImageBaseUrl, '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
-        (value: string) => { this.avatarImageBaseUrl = value; })
-      this.SettingInput('数字分身图片 API Key', this.avatarImageApiKey, '图片服务密钥',
-        (value: string) => { this.avatarImageApiKey = value; })
-      this.SettingInput('文生图模型', this.avatarTextToImageModel, DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
-        (value: string) => { this.avatarTextToImageModel = value; })
-      this.SettingInput('图生图模型', this.avatarImageToImageModel, DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
-        (value: string) => { this.avatarImageToImageModel = value; })
-      this.SettingInput('图片尺寸', this.avatarImageSize, '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
-        (value: string) => { this.avatarImageSize = value; })
+      SettingsGroupCard({
+        title: 'Agent 确认策略',
+        subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.AgentConfirmPolicyGroup() }
+      })
+      SettingsGroupCard({
+        title: '数字分身图片服务',
+        subtitle: '配置头像生成服务地址、密钥、模型与图片尺寸',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.AvatarImageServiceGroup() }
+      })
     }
-    .width('92%')
-    .padding(18)
-    .backgroundColor(Color.White)
-    .borderRadius(20)
-    .margin({ top: 16 })
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder AgentConfirmPolicyGroup() {
+    this.SettingToggle('本地 Agent 自动同意', '关闭后每次端侧模型动作都会弹窗确认', this.autoConfirm,
+      (value: boolean) => { this.autoConfirm = value; })
+    this.SettingToggle('云端 Agent 自动同意', '关闭后云端模型动作需要手动确认后发给 PC', this.cloudAutoConfirm,
+      (value: boolean) => { this.cloudAutoConfirm = value; })
+  }
+
+  @Builder AvatarImageServiceGroup() {
+    SettingInput({
+      label: '数字分身图片服务',
+      value: this.avatarImageBaseUrl,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.avatarImageBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'avatarImageApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: '数字分身图片 API Key',
+      value: this.avatarImageApiKey,
+      placeholder: '图片服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.avatarImageApiKey = value; }
+    })
+    SettingInput({
+      label: '文生图模型',
+      value: this.avatarTextToImageModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.avatarTextToImageModel = value; }
+    })
+    SettingInput({
+      label: '图生图模型',
+      value: this.avatarImageToImageModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.avatarImageModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.avatarImageToImageModel = value; }
+    })
+    SettingInput({
+      label: '图片尺寸',
+      value: this.avatarImageSize,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageSize,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.avatarImageSize = value; }
+    })
   }
 
   @Builder DataCollectionSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.DataCollection)
-      this.WechatAutoSummarySettings()
-      this.SettingInput('图库 API Base URL', this.galleryApiBaseUrl, DEFAULT_GALLERY_API_BASE_URL,
-        (value: string) => { this.galleryApiBaseUrl = value; })
-      this.SettingInput('图库 API Key', this.galleryApiKey, '图库分析服务密钥',
-        (value: string) => { this.galleryApiKey = value; })
-      this.SettingInput('图库大模型', this.galleryModel, DEFAULT_GALLERY_MODEL,
-        (value: string) => { this.galleryModel = value; })
-      this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启', this.gallerySkipOcr === 'true',
-        (value: boolean) => { this.gallerySkipOcr = value ? 'true' : 'false'; })
-      this.SettingToggle('OCR 关键词预筛', '自动分析时先用 OCR 关键词过滤图片', this.galleryUseOcrKeywordFilter === 'true',
-        (value: boolean) => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; })
-      this.SettingToggle('字段级并发请求', '同一张图并发请求各分析字段，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true',
-        (value: boolean) => { this.galleryParallelFieldRequests = value ? 'true' : 'false'; })
-      this.SettingInput('OCR 并发请求数', this.galleryOcrConcurrency, DEFAULT_GALLERY_OCR_CONCURRENCY,
-        (value: string) => { this.galleryOcrConcurrency = value; })
-      this.SettingInput('大模型并发请求数', this.galleryModelConcurrency, DEFAULT_GALLERY_MODEL_CONCURRENCY,
-        (value: string) => { this.galleryModelConcurrency = value; })
-      this.SettingInput('Embedding 并发请求数', this.galleryEmbeddingConcurrency, DEFAULT_GALLERY_EMBEDDING_CONCURRENCY,
-        (value: string) => { this.galleryEmbeddingConcurrency = value; })
-      this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding', this.galleryEmbeddingMode === 'remote',
-        (value: boolean) => { this.galleryEmbeddingMode = value ? 'remote' : 'huawei_local'; })
-      this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, DEFAULT_GALLERY_EMBEDDING_BASE_URL,
-        (value: string) => { this.galleryEmbeddingBaseUrl = value; })
-      this.SettingInput('Embedding API Key', this.galleryEmbeddingApiKey, 'Embedding 服务密钥',
-        (value: string) => { this.galleryEmbeddingApiKey = value; })
-      this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, DEFAULT_GALLERY_EMBEDDING_MODEL,
-        (value: string) => { this.galleryEmbeddingModel = value; })
-      this.SettingInput('图片分析缩放比例', this.galleryImageScale, DEFAULT_GALLERY_IMAGE_SCALE,
-        (value: string) => { this.galleryImageScale = value; })
-      this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码',
-        (value: string) => { this.galleryAmapWebKey = value; })
+      SettingsGroupCard({
+        title: '微信汇总',
+        subtitle: '默认采集范围和高级滑动参数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.WechatAutoSummarySettings() }
+      })
+      SettingsGroupCard({
+        title: '图库分析',
+        subtitle: '图库大模型服务与字段级请求策略',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.GalleryAnalysisGroup() }
+      })
+      SettingsGroupCard({
+        title: 'OCR',
+        subtitle: '本地 OCR 回退、关键词预筛和并发控制',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.OcrSettingsGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Embedding',
+        subtitle: '图片检索向量服务和端云模式',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.EmbeddingSettingsGroup() }
+      })
+      SettingsGroupCard({
+        title: '地图服务',
+        subtitle: '图片位置解析和分析缩放参数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.MapSettingsGroup() }
+      })
     }
-    .width('92%')
-    .padding(18)
-    .backgroundColor(Color.White)
-    .borderRadius(20)
-    .margin({ top: 16 })
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder GalleryAnalysisGroup() {
+    SettingInput({
+      label: '图库 API Base URL',
+      value: this.galleryApiBaseUrl,
+      placeholder: DEFAULT_GALLERY_API_BASE_URL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryApiBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'galleryApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: '图库 API Key',
+      value: this.galleryApiKey,
+      placeholder: '图库分析服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.galleryApiKey = value; }
+    })
+    SettingInput({
+      label: '图库大模型',
+      value: this.galleryModel,
+      placeholder: DEFAULT_GALLERY_MODEL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryModel = value; }
+    })
+    this.SettingToggle('字段级并发请求', '同一张图并发请求各分析字段，降低整包 JSON 解析失败概率',
+      this.galleryParallelFieldRequests === 'true',
+      (value: boolean) => { this.galleryParallelFieldRequests = value ? 'true' : 'false'; })
+    SettingInput({
+      label: '大模型并发请求数',
+      value: this.galleryModelConcurrency,
+      placeholder: DEFAULT_GALLERY_MODEL_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryModelConcurrency = value; }
+    })
+  }
+
+  @Builder OcrSettingsGroup() {
+    this.SettingToggle('跳过本地 OCR', '模拟器不支持 CoreVision OCR 时开启', this.gallerySkipOcr === 'true',
+      (value: boolean) => { this.gallerySkipOcr = value ? 'true' : 'false'; })
+    this.SettingToggle('OCR 关键词预筛', '自动分析时先用 OCR 关键词过滤图片',
+      this.galleryUseOcrKeywordFilter === 'true',
+      (value: boolean) => { this.galleryUseOcrKeywordFilter = value ? 'true' : 'false'; })
+    SettingInput({
+      label: 'OCR 并发请求数',
+      value: this.galleryOcrConcurrency,
+      placeholder: DEFAULT_GALLERY_OCR_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryOcrConcurrency = value; }
+    })
+  }
+
+  @Builder EmbeddingSettingsGroup() {
+    SettingInput({
+      label: 'Embedding 并发请求数',
+      value: this.galleryEmbeddingConcurrency,
+      placeholder: DEFAULT_GALLERY_EMBEDDING_CONCURRENCY,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryEmbeddingConcurrency = value; }
+    })
+    this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding',
+      this.galleryEmbeddingMode === 'remote',
+      (value: boolean) => { this.galleryEmbeddingMode = value ? 'remote' : 'huawei_local'; })
+    SettingInput({
+      label: 'Embedding Base URL',
+      value: this.galleryEmbeddingBaseUrl,
+      placeholder: DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryEmbeddingBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'galleryEmbeddingApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: 'Embedding API Key',
+      value: this.galleryEmbeddingApiKey,
+      placeholder: 'Embedding 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.galleryEmbeddingApiKey = value; }
+    })
+    SettingInput({
+      label: 'Embedding 模型',
+      value: this.galleryEmbeddingModel,
+      placeholder: DEFAULT_GALLERY_EMBEDDING_MODEL,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryEmbeddingModel = value; }
+    })
+  }
+
+  @Builder MapSettingsGroup() {
+    SettingInput({
+      label: '图片分析缩放比例',
+      value: this.galleryImageScale,
+      placeholder: DEFAULT_GALLERY_IMAGE_SCALE,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.galleryImageScale = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'galleryAmapWebKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: '高德 Web 服务 Key',
+      value: this.galleryAmapWebKey,
+      placeholder: '用于拍摄位置逆地理编码',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.galleryAmapWebKey = value; }
+    })
   }
 
   @Builder ModelAgentsSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.ModelAgents)
-      this.SettingInput('Planner 服务', this.cloudPlannerBaseUrl, '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
-        (value: string) => { this.cloudPlannerBaseUrl = value; })
-      this.SettingInput('Decider 服务', this.cloudDeciderBaseUrl, '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
-        (value: string) => { this.cloudDeciderBaseUrl = value; })
-      this.SettingInput('云端 API Key', this.cloudApiKey, 'Planner / Decider 服务密钥',
-        (value: string) => { this.cloudApiKey = value; })
-      this.SettingInput('Decider Model', this.cloudDeciderModel, '留空则不传 model',
-        (value: string) => { this.cloudDeciderModel = value; })
-      this.SettingInput('语音合成服务', this.voiceTtsBaseUrl, '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
-        (value: string) => { this.voiceTtsBaseUrl = value; })
-      this.SettingInput('语音合成 API Key', this.voiceTtsApiKey, 'MiMO TTS 服务密钥，格式 tp-xxxxx',
-        (value: string) => { this.voiceTtsApiKey = value; })
-      this.SettingInput('语音合成模型', this.voiceTtsModel, DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
-        (value: string) => { this.voiceTtsModel = value; })
-      this.VoiceTtsPresetSettings()
-      this.WechatAutoSummaryInput('上下文压缩阈值(%)', this.chatContextCompressionThresholdPercent, '默认 85，范围 50-95',
-        (value: string) => { this.chatContextCompressionThresholdPercent = value; },
-        () => {
-          this.chatContextCompressionThresholdPercent =
-            String(normalizeChatContextCompressionThresholdPercent(this.chatContextCompressionThresholdPercent));
-        })
-      this.WechatAutoSummaryInput('压缩保留轮数', this.chatContextRecentRounds, '默认 8，范围 2-20',
-        (value: string) => { this.chatContextRecentRounds = value; },
-        () => {
-          this.chatContextRecentRounds = String(normalizeChatContextRecentRounds(this.chatContextRecentRounds));
-        })
-      this.SettingInput('模型下载服务', this.serverIp, '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
-        (value: string) => { this.serverIp = value; })
+      SettingsGroupCard({
+        title: '云端 Planner/Decider',
+        subtitle: '云端智能体服务、模型和连通性测试',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.CloudPlannerDeciderGroup() }
+      })
+      SettingsGroupCard({
+        title: '语音合成服务',
+        subtitle: '配置助手朗读的 TTS 服务、模型、音色与流式播放',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.VoiceTtsServiceGroup() }
+      })
+      SettingsGroupCard({
+        title: '上下文压缩',
+        subtitle: '聊天上下文压缩阈值和保留轮数',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.ContextCompressionGroup() }
+      })
+      SettingsGroupCard({
+        title: '本地模型',
+        subtitle: '已下载模型、旧目录快捷切换和后端类型',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.LocalModelGroup() }
+      })
+      SettingsGroupCard({
+        title: 'HDC 连接',
+        subtitle: '自动发现、手动配对和无线调试目标',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.HdcConnectionGroup() }
+      })
+      SettingsGroupCard({
+        title: '模型下载',
+        subtitle: '模型文件服务、ModelScope 仓库和下载进度',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.ModelDownloadGroup() }
+      })
+      SettingsGroupCard({
+        title: 'Config 与输出',
+        subtitle: '模型配置修改、查看和运行输出',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.ConfigOutputGroup() }
+      })
+    }
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
 
-      this.DownloadedModelList()
+  @Builder CloudPlannerDeciderGroup() {
+    SettingInput({
+      label: 'Planner 服务',
+      value: this.cloudPlannerBaseUrl,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.cloudPlannerBaseUrl = value; }
+    })
+    SettingInput({
+      label: 'Planner Model',
+      value: this.cloudPlannerModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel.length > 0 ?
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel : '留空则不传 model',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.cloudPlannerModel = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'cloudPlannerApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: 'Planner API Key',
+      value: this.cloudPlannerApiKey,
+      placeholder: 'Planner 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.cloudPlannerApiKey = value; }
+    })
+    SettingInput({
+      label: 'Decider 服务',
+      value: this.cloudDeciderBaseUrl,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.cloudDeciderBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'cloudDeciderApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: 'Decider API Key',
+      value: this.cloudDeciderApiKey,
+      placeholder: 'Decider 服务密钥',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.cloudDeciderApiKey = value; }
+    })
+    SettingInput({
+      label: 'Decider Model',
+      value: this.cloudDeciderModel,
+      placeholder: '留空则不传 model',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.cloudDeciderModel = value; }
+    })
+    SettingsActionRow({ contentBuilder: () => { this.CloudPlannerActionRow() } })
+    SettingsOutputPanel({ title: 'Planner 测试结果', content: this.cloudOutput })
+  }
 
-      this.FieldLabel('旧模型目录快捷切换')
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.VariantButton('默认', '')
-        this.VariantButton('modelv2', 'modelv2')
-        this.VariantButton('modelv3', 'modelv3')
-        this.VariantButton('modelv4', 'modelv4')
-        this.VariantButton('model_omc', 'model_omc')
+  @Builder CloudPlannerActionRow() {
+    SettingsActionButton({
+      label: '测试 Planner',
+      kind: SettingsActionKind.Success,
+      onActionClick: async () => {
+        this.closeSensitiveInputs();
+        await this.onTestCloudPlanner();
       }
-      .width('100%')
+    })
+  }
 
-      this.SettingInput('backend_type', this.backendTypeInput, 'cpu / hiai / nnrt',
-        (value: string) => { this.backendTypeInput = value; })
-      this.SettingInput('mllm.backend_type', this.mllmBackendTypeInput, 'cpu / hiai / nnrt',
-        (value: string) => { this.mllmBackendTypeInput = value; })
-      Row() {
-        Button('更新 base')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .onClick(() => { this.onUpdateConfigBackendType('base'); })
-        Button('更新 mllm')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onUpdateConfigBackendType('mllm'); })
+  @Builder VoiceTtsServiceGroup() {
+    SettingInput({
+      label: '语音合成服务',
+      value: this.voiceTtsBaseUrl,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.voiceTtsBaseUrl = value; }
+    })
+    SensitiveSettingInput({
+      sensitiveId: 'voiceTtsApiKey',
+      activeSensitiveId: this.activeSensitiveInputId,
+      label: '语音合成 API Key',
+      value: this.voiceTtsApiKey,
+      placeholder: 'MiMO TTS 服务密钥，格式 tp-xxxxx',
+      onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
+      onValueChange: (value: string) => { this.voiceTtsApiKey = value; }
+    })
+    SettingInput({
+      label: '语音合成模型',
+      value: this.voiceTtsModel,
+      placeholder: DEFAULT_ENDPOINT_CONFIG.voiceTtsModel,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.voiceTtsModel = value; }
+    })
+    this.VoiceTtsPresetSettings()
+  }
+
+  @Builder ContextCompressionGroup() {
+    this.WechatAutoSummaryInput('上下文压缩阈值(%)', this.chatContextCompressionThresholdPercent, '默认 85，范围 50-95',
+      (value: string) => { this.chatContextCompressionThresholdPercent = value; },
+      () => {
+        this.chatContextCompressionThresholdPercent =
+          String(normalizeChatContextCompressionThresholdPercent(this.chatContextCompressionThresholdPercent));
+      })
+    this.WechatAutoSummaryInput('压缩保留轮数', this.chatContextRecentRounds, '默认 8，范围 2-20',
+      (value: string) => { this.chatContextRecentRounds = value; },
+      () => {
+        this.chatContextRecentRounds = String(normalizeChatContextRecentRounds(this.chatContextRecentRounds));
+      })
+  }
+
+  @Builder LocalModelGroup() {
+    this.DownloadedModelList()
+    this.FieldLabel('旧模型目录快捷切换')
+    Flex({ wrap: FlexWrap.Wrap }) {
+      this.VariantButton('默认', '')
+      this.VariantButton('modelv2', 'modelv2')
+      this.VariantButton('modelv3', 'modelv3')
+      this.VariantButton('modelv4', 'modelv4')
+      this.VariantButton('model_omc', 'model_omc')
+    }
+    .width('100%')
+    SettingInput({
+      label: 'backend_type',
+      value: this.backendTypeInput,
+      placeholder: 'cpu / hiai / nnrt',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.backendTypeInput = value; }
+    })
+    SettingInput({
+      label: 'mllm.backend_type',
+      value: this.mllmBackendTypeInput,
+      placeholder: 'cpu / hiai / nnrt',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.mllmBackendTypeInput = value; }
+    })
+    SettingsActionRow({ contentBuilder: () => { this.BackendTypeActionRow() } })
+  }
+
+  @Builder BackendTypeActionRow() {
+    SettingsActionButton({
+      label: '更新 base',
+      kind: SettingsActionKind.Primary,
+      onActionClick: () => { this.onUpdateConfigBackendType('base'); }
+    })
+    SettingsActionButton({
+      label: '更新 mllm',
+      kind: SettingsActionKind.Secondary,
+      onActionClick: () => { this.onUpdateConfigBackendType('mllm'); }
+    })
+  }
+
+  @Builder HdcConnectionGroup() {
+    SettingInput({
+      label: 'HDC Server',
+      value: this.hdcServerIp,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl,
+      inputEnabled: this.hdcInputEditable(),
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => {
+        this.hdcServerIp = value;
+        this.manualHdcServerIp = value;
+        this.onMarkHdcManualEditing();
       }
+    })
+    Text(this.hdcAutoStatus)
+      .fontSize(12)
+      .fontColor(this.hdcStatusColor())
       .width('100%')
-      .margin({ top: 10 })
-
-      this.FieldLabel('HDC Server')
-      TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.hdcServerUrl, text: this.hdcServerIp })
-        .height(42)
-        .width('100%')
+      .maxLines(2)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .margin({ top: 8, bottom: 8 })
+    SettingsActionRow({ contentBuilder: () => { this.HdcPairActionRow() } })
+    this.FieldLabel('无线 HDC 目标')
+    Row() {
+      TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
+        .height(SETTINGS_FIELD_HEIGHT)
+        .layoutWeight(1)
         .fontSize(13)
         .fontColor(this.hdcInputTextColor())
         .backgroundColor(this.hdcInputBackgroundColor())
-        .borderRadius(12)
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
         .padding({ left: 12, right: 12 })
         .enabled(this.hdcInputEditable())
+        .onClick(() => { this.closeSensitiveInputs(); })
+        .onFocus(() => { this.closeSensitiveInputs(); })
         .onChange((value: string) => {
-          this.hdcServerIp = value;
-          this.manualHdcServerIp = value;
+          this.wirelessIp = value;
           this.onMarkHdcManualEditing();
         })
-      Text(this.hdcAutoStatus)
-        .fontSize(12)
-        .fontColor(this.hdcStatusColor())
-        .width('100%')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .margin({ top: 8, bottom: 8 })
-      Row() {
-        Button(this.hdcAutoConnecting ? '自动连接中' : '自动连接')
-          .height(38)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4F68FF')
-          .borderRadius(12)
-          .enabled(!this.hdcAutoConnecting)
-          .onClick(async () => { await this.onDiscoverHdc(); })
-        Button('手动配对')
-          .height(38)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor(this.hdcManualPairing ? '#765BFF' : '#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onSetHdcManualPairing(); })
-      }
-      .width('100%')
-
-      this.FieldLabel('无线 HDC 目标')
-      Row() {
-        TextInput({ placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget, text: this.wirelessIp })
-          .height(42)
-          .layoutWeight(1)
-          .fontSize(13)
-          .fontColor(this.hdcInputTextColor())
-          .backgroundColor(this.hdcInputBackgroundColor())
-          .borderRadius(12)
-          .padding({ left: 12, right: 12 })
-          .enabled(this.hdcInputEditable())
-          .onChange((value: string) => {
-            this.wirelessIp = value;
-            this.onMarkHdcManualEditing();
-          })
-        Button('连接测试')
-          .height(42)
-          .width(92)
-          .fontSize(13)
-          .backgroundColor('#765BFF')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .enabled(this.hdcInputEditable())
-          .onClick(async () => { await this.onTestAndConnectHdc(); })
-      }
-      .width('100%')
-
-      Row() {
-        Button('测试 Planner')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#38BE8B')
-          .borderRadius(12)
-          .onClick(async () => { await this.onTestCloudPlanner(); })
-        Button('检查模型')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .enabled(!this.downloading)
-          .onClick(() => { this.onCheckServer(); })
-      }
-      .width('100%')
-      .margin({ top: 14 })
-
-      Row() {
-        Button('下载全部')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FF7043')
-          .borderRadius(12)
-          .enabled(!this.downloading && this.connected)
-          .onClick(() => { this.onDownloadAll(); })
-        Button('删除模型')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#F44336')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .enabled(!this.downloading)
-          .onClick(() => { this.onDeleteModelFiles(); })
-      }
-      .width('100%')
-      .margin({ top: 10 })
-
-      this.FieldLabel('ModelScope 仓库')
-      TextInput({ placeholder: 'modelscope仓库("用户名/模型名")', text: this.modelScopeMnnRepo })
-        .height(42)
-        .width('100%')
-        .fontSize(12)
-        .backgroundColor('#F2F5FC')
-        .borderRadius(12)
-        .padding({ left: 12, right: 12 })
-        .onChange((value: string) => { this.modelScopeMnnRepo = value; })
-
-      Row() {
-        Button('从 ModelScope 下载')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .enabled(!this.downloading)
-          .onClick(async () => {
-            showToastSafely('开始 ModelScope 下载');
-            await this.onDownloadModelScopeModel();
-          })
-        Button(this.modelScopePauseRequested ? '暂停中' : '暂停下载')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor(this.modelScopePauseRequested ? '#A9B0BE' : '#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .enabled(this.modelScopeDownloading && !this.modelScopePauseRequested)
-          .onClick(() => { this.onPauseModelScopeDownload(); })
-      }
-      .width('100%')
-      .margin({ top: 10 })
-
-      this.ModelDownloadProgressPanel()
-
-      Row() {
-        Text('线程数')
-          .fontSize(14)
-          .fontColor('#666666')
-          .width(58)
-        TextInput({ text: this.threadNumInput })
-          .type(InputType.Number)
-          .width(76)
-          .height(40)
-          .backgroundColor('#F2F5FC')
-          .borderRadius(12)
-          .onChange((value: string) => { this.threadNumInput = value; })
-        Button('修改 Config')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onUpdateConfigThreadNum(); })
-        Button('查看 Config')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onShowConfigJson(); })
-      }
-      .width('100%')
-      .margin({ top: 14 })
-
-      this.OutputPanel('本地输出', this.output)
-      this.OutputPanel('云端输出', this.cloudOutput)
+      Button('连接测试')
+        .height(SETTINGS_FIELD_HEIGHT)
+        .width(92)
+        .fontSize(13)
+        .fontColor(Color.White)
+        .backgroundColor(settingsActionColor(SettingsActionKind.Special))
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .margin({ left: 10 })
+        .enabled(this.hdcInputEditable())
+        .onClick(async () => { await this.onTestAndConnectHdc(); })
     }
-    .width('92%')
-    .padding(18)
-    .backgroundColor(Color.White)
-    .borderRadius(20)
-    .margin({ top: 16 })
+    .width('100%')
+  }
+
+  @Builder HdcPairActionRow() {
+    SettingsActionButton({
+      label: this.hdcAutoConnecting ? '自动连接中' : '自动连接',
+      kind: SettingsActionKind.Primary,
+      actionEnabled: !this.hdcAutoConnecting,
+      onActionClick: async () => { await this.onDiscoverHdc(); }
+    })
+    SettingsActionButton({
+      label: '手动配对',
+      kind: this.hdcManualPairing ? SettingsActionKind.Special : SettingsActionKind.Secondary,
+      onActionClick: () => { this.onSetHdcManualPairing(); }
+    })
+  }
+
+  @Builder ModelDownloadGroup() {
+    SettingInput({
+      label: '模型下载服务',
+      value: this.serverIp,
+      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.serverIp = value; }
+    })
+    SettingsActionRow({ contentBuilder: () => { this.ModelServerActionRow() } })
+    SettingInput({
+      label: 'ModelScope 仓库',
+      value: this.modelScopeMnnRepo,
+      placeholder: 'modelscope仓库("用户名/模型名")',
+      onInputFocus: () => { this.closeSensitiveInputs(); },
+      onValueChange: (value: string) => { this.modelScopeMnnRepo = value; }
+    })
+    SettingsActionRow({ contentBuilder: () => { this.ModelScopeActionRow() } })
+    this.ModelDownloadProgressPanel()
+  }
+
+  @Builder ModelServerActionRow() {
+    SettingsActionButton({
+      label: '检查模型',
+      kind: SettingsActionKind.Primary,
+      actionEnabled: !this.downloading,
+      onActionClick: () => { this.onCheckServer(); }
+    })
+    SettingsActionButton({
+      label: '下载全部',
+      kind: SettingsActionKind.Warning,
+      actionEnabled: !this.downloading && this.connected,
+      onActionClick: () => { this.onDownloadAll(); }
+    })
+    SettingsActionButton({
+      label: '删除模型',
+      kind: SettingsActionKind.Danger,
+      actionEnabled: !this.downloading,
+      onActionClick: () => { this.confirmDeleteModelFiles(); }
+    })
+  }
+
+  @Builder ModelScopeActionRow() {
+    SettingsActionButton({
+      label: '从 ModelScope 下载',
+      kind: SettingsActionKind.Primary,
+      actionEnabled: !this.downloading,
+      onActionClick: async () => {
+        showToastSafely('开始 ModelScope 下载');
+        await this.onDownloadModelScopeModel();
+      }
+    })
+    SettingsActionButton({
+      label: this.modelScopePauseRequested ? '暂停中' : '暂停下载',
+      kind: SettingsActionKind.Secondary,
+      actionEnabled: this.modelScopeDownloading && !this.modelScopePauseRequested,
+      onActionClick: () => { this.onPauseModelScopeDownload(); }
+    })
+  }
+
+  @Builder ConfigOutputGroup() {
+    Row() {
+      Text('线程数')
+        .fontSize(14)
+        .fontColor(SETTINGS_MUTED_TEXT_COLOR)
+        .width(58)
+      TextInput({ text: this.threadNumInput })
+        .type(InputType.Number)
+        .width(76)
+        .height(SETTINGS_BUTTON_HEIGHT)
+        .fontSize(13)
+        .backgroundColor(SETTINGS_INPUT_BACKGROUND_COLOR)
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .padding({ left: 10, right: 10 })
+        .onChange((value: string) => { this.threadNumInput = value; })
+      Button('修改 Config')
+        .height(SETTINGS_BUTTON_HEIGHT)
+        .layoutWeight(1)
+        .fontSize(12)
+        .fontColor(Color.White)
+        .backgroundColor(settingsActionColor(SettingsActionKind.Primary))
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .margin({ left: 10 })
+        .onClick(() => { this.onUpdateConfigThreadNum(); })
+      Button('查看 Config')
+        .height(SETTINGS_BUTTON_HEIGHT)
+        .layoutWeight(1)
+        .fontSize(12)
+        .fontColor(Color.White)
+        .backgroundColor(settingsActionColor(SettingsActionKind.Success))
+        .borderRadius(SETTINGS_CONTROL_RADIUS)
+        .margin({ left: 10 })
+        .onClick(() => { this.onShowConfigJson(); })
+    }
+    .width('100%')
+    SettingsOutputPanel({ title: '本地输出', content: this.output })
+    SettingsOutputPanel({ title: '云端输出', content: this.cloudOutput })
   }
 
   @Builder TaskAutomationSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.TaskAutomation)
-      Row() {
-        Button('Workflow 文件')
-          .height(42)
-          .layoutWeight(1)
-          .fontSize(13)
-          .backgroundColor('#4F68FF')
-          .borderRadius(12)
-          .onClick(() => { router.pushUrl({ url: 'pages/task/WorkflowFileViewer' }); })
-        Button('Runtime Logs')
-          .height(42)
-          .layoutWeight(1)
-          .fontSize(13)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { router.pushUrl({ url: 'pages/LogView' }); })
-      }
-      .width('100%')
-      Button('启动云端 PC 控制后端')
-        .width('100%')
-        .height(44)
-        .fontSize(13)
-        .backgroundColor('#765BFF')
-        .borderRadius(12)
-        .margin({ top: 12 })
-        .onClick(async () => { await this.onStartCloudBackend(); })
+      SettingsGroupCard({
+        title: 'Workflow 与日志',
+        subtitle: '查看 Workflow 配置、daily-log 和运行日志',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.WorkflowLogGroup() }
+      })
+      SettingsGroupCard({
+        title: 'PC 控制后端',
+        subtitle: '启动云端 PC 控制后端供 Agent 自动化使用',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.PcBackendGroup() }
+      })
     }
-    .width('92%')
-    .padding(18)
-    .backgroundColor(Color.White)
-    .borderRadius(20)
-    .margin({ top: 16 })
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
+    .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder WorkflowLogGroup() {
+    SettingsActionRow({ contentBuilder: () => { this.WorkflowLogActionRow() } })
+  }
+
+  @Builder WorkflowLogActionRow() {
+    SettingsActionButton({
+      label: 'Workflow 文件',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { router.pushUrl({ url: 'pages/task/WorkflowFileViewer' }); }
+    })
+    SettingsActionButton({
+      label: 'Runtime Logs',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+    })
+  }
+
+  @Builder PcBackendGroup() {
+    SettingsActionRow({ contentBuilder: () => { this.PcBackendActionRow() } })
+  }
+
+  @Builder PcBackendActionRow() {
+    SettingsActionButton({
+      label: '启动云端 PC 控制后端',
+      kind: SettingsActionKind.Special,
+      onActionClick: async () => { await this.onStartCloudBackend(); }
+    })
   }
 
   @Builder StorageAboutSection() {
     Column() {
       this.SectionTitle(SettingsSectionId.StorageAbout)
-      Row() {
-        Button('清理截图')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FF6B4A')
-          .borderRadius(12)
-          .onClick(() => { this.onClearScreenshots(); })
-        Button('清理调试输出')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#F44336')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onDeleteDebugOutputs(); })
-      }
-      .width('100%')
-      .margin({ bottom: 10 })
-      Row() {
-        Button('Op Precision Test')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FF9800')
-          .borderRadius(12)
-          .onClick(() => { router.pushUrl({ url: 'pages/OpTest' }); })
-        Button('LLM Op Profile')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#455A64')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { router.pushUrl({ url: 'pages/ProfileTest' }); })
-      }
-      .width('100%')
-      .margin({ bottom: 10 })
-      Row() {
-        Button('Runtime Logs')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .onClick(() => { router.pushUrl({ url: 'pages/LogView' }); })
-      }
-      .width('100%')
-      .margin({ bottom: 10 })
-      Row() {
-        Button('列出截图')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#38BE8B')
-          .borderRadius(12)
-          .onClick(() => { this.onListScreenshots(); })
-        Button('删除 Config')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#F44336')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onDeleteModelConfigJson(); })
-      }
-      .width('100%')
-      .margin({ bottom: 10 })
-      Row() {
-        Button('模型文件树')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#4B8BFF')
-          .borderRadius(12)
-          .onClick(() => { this.onListModelFilesTree(); })
-        Button('删除 vision.om')
-          .height(40)
-          .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#FF7043')
-          .borderRadius(12)
-          .margin({ left: 10 })
-          .onClick(() => { this.onDeleteChunkVisionOmFiles(); })
-      }
-      .width('100%')
-      Text('MobiInfer LLM Chat')
-        .fontSize(13)
-        .fontColor('#7B8290')
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .margin({ top: 16 })
+      SettingsGroupCard({
+        title: '文件查看',
+        subtitle: '查看截图、模型文件树和运行日志',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.FileViewerGroup() }
+      })
+      SettingsGroupCard({
+        title: '清理操作',
+        subtitle: '删除类操作会先弹窗确认',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.CleanupActionGroup() }
+      })
+      SettingsGroupCard({
+        title: '调试工具',
+        subtitle: '进入算子精度测试和 LLM Profile 页面',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.DebugToolsGroup() }
+      })
+      SettingsGroupCard({
+        title: '关于',
+        subtitle: '当前应用与设置中心说明',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.AboutSettingsGroup() }
+      })
     }
-    .width('92%')
-    .padding(18)
-    .backgroundColor(Color.White)
-    .borderRadius(20)
+    .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
     .margin({ top: 16, bottom: 110 })
+  }
+
+  @Builder FileViewerGroup() {
+    SettingsActionRow({ contentBuilder: () => { this.FileViewerActionRow() } })
+  }
+
+  @Builder FileViewerActionRow() {
+    SettingsActionButton({
+      label: '列出截图',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { this.onListScreenshots(); }
+    })
+    SettingsActionButton({
+      label: '模型文件树',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { this.onListModelFilesTree(); }
+    })
+    SettingsActionButton({
+      label: 'Runtime Logs',
+      kind: SettingsActionKind.Success,
+      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+    })
+  }
+
+  @Builder CleanupActionGroup() {
+    SettingsActionRow({ contentBuilder: () => { this.CleanupPrimaryActionRow() } })
+    SettingsActionRow({ contentBuilder: () => { this.CleanupModelActionRow() } })
+  }
+
+  @Builder CleanupPrimaryActionRow() {
+    SettingsActionButton({
+      label: '清理截图',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmClearScreenshots(); }
+    })
+    SettingsActionButton({
+      label: '清理调试输出',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmDeleteDebugOutputs(); }
+    })
+  }
+
+  @Builder CleanupModelActionRow() {
+    SettingsActionButton({
+      label: '删除 Config',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmDeleteModelConfigJson(); }
+    })
+    SettingsActionButton({
+      label: '删除 vision.om',
+      kind: SettingsActionKind.Danger,
+      onActionClick: () => { this.confirmDeleteChunkVisionOmFiles(); }
+    })
+  }
+
+  @Builder DebugToolsGroup() {
+    SettingsActionRow({ contentBuilder: () => { this.DebugToolsActionRow() } })
+  }
+
+  @Builder DebugToolsActionRow() {
+    SettingsActionButton({
+      label: 'Op Precision Test',
+      kind: SettingsActionKind.Warning,
+      onActionClick: () => { router.pushUrl({ url: 'pages/OpTest' }); }
+    })
+    SettingsActionButton({
+      label: 'LLM Op Profile',
+      kind: SettingsActionKind.Secondary,
+      onActionClick: () => { router.pushUrl({ url: 'pages/ProfileTest' }); }
+    })
+  }
+
+  @Builder AboutSettingsGroup() {
+    Text('MobiInfer LLM Chat')
+      .fontSize(13)
+      .fontColor(SETTINGS_SECONDARY_TEXT_COLOR)
+      .width('100%')
+      .textAlign(TextAlign.Center)
+      .margin({ top: 6, bottom: 4 })
   }
 
   build() {
     Column() {
       if (isSettingsSectionSelected(this.selectedSectionId)) {
         this.SettingsDetailHeader()
-        Scroll() {
-          this.SelectedSectionContent()
+        Scroll(this.detailScroller) {
+          Column() {
+            this.SelectedSectionContent()
+          }
+          .width('100%')
+          .constraintSize({ minHeight: '100%' })
+          .justifyContent(FlexAlign.Start)
         }
         .width('100%')
         .layoutWeight(1)
@@ -1235,6 +1574,6 @@ export struct SettingsCenterPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F4F8FF')
+    .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
   }
 }

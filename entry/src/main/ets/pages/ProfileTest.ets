@@ -2,6 +2,7 @@ import native from 'libentry.so';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
+import { router } from '@kit.ArkUI';
 import pasteboard from '@ohos.pasteboard';
 import promptAction from '@ohos.promptAction';
 
@@ -299,18 +300,41 @@ struct ProfileTest {
       });
   }
 
-  build() {
-    Scroll() {
+  // 顶部返回栏与设置页调试工具入口配套，提供首屏可见的返回路径。
+  @Builder PageHeader() {
+    Row() {
+      Button('‹')
+        .width(42)
+        .height(42)
+        .fontSize(28)
+        .fontColor('#11182F')
+        .backgroundColor(Color.White)
+        .borderRadius(14)
+        .onClick(() => { router.back(); })
       Column() {
         Text('LLM Op Profile')
           .fontSize(22)
           .fontWeight(FontWeight.Bold)
-          .margin({ top: 16, bottom: 6 })
-
+          .fontColor('#333333')
+          .width('100%')
         Text('Profile real generate path with MNN Executor callbacks.')
           .fontSize(13)
           .fontColor('#666666')
-          .margin({ bottom: 12 })
+          .width('100%')
+          .margin({ top: 2 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+    }
+    .width('90%')
+    .margin({ top: 16, bottom: 12 })
+  }
+
+  build() {
+    Scroll() {
+      Column() {
+        this.PageHeader()
 
         Text('Model config path')
           .fontSize(12)

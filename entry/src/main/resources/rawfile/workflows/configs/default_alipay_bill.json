@@ -15,13 +15,15 @@
                       "id":  1,
                       "type":  "gui_task",
                       "task_description":  "打开支付宝",
-                      "on_error":  "stop"
+                      "on_error":  "stop",
+                      "name":  ""
                   },
                   {
                       "id":  2,
                       "type":  "gui_task",
-                      "task_description":  "点击我的，进入账单页面，查看当前界面账单信息",
-                      "on_error":  "stop"
+                      "task_description":  "打开支付宝，点击底部“我的”图标，进入账单页面，查看当前界面账单信息",
+                      "on_error":  "stop",
+                      "name":  ""
                   },
                   {
                       "id":  3,
@@ -39,5 +41,8 @@
                                      "question":  "帮我用一段话简要总结当前页面上的支付宝账单信息（不要使用markdown格式，也不要分点，尽量按照账单出现顺序描述每一条记录的类型、对象、金额和时间）"
                                  }
                   }
-              ]
+              ],
+    "context":  {
+
+                }
 }

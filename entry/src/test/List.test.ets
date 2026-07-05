@@ -3,6 +3,7 @@ import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
 import mainTabConfigUnitTest from './MainTabConfigUnit.test';
+import firstLaunchOnboardingUnitTest from './FirstLaunchOnboardingUnit.test';
 import chatPageTypesUnitTest from './ChatPageTypesUnit.test';
 import digitalAvatarTypesUnitTest from './DigitalAvatarTypesUnit.test';
 import settingsCenterConfigUnitTest from './SettingsCenterConfigUnit.test';
@@ -27,6 +28,7 @@ import harmonySpeechRecognizerAsrProviderUnitTest from './HarmonySpeechRecognize
 import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
+import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -34,6 +36,7 @@ export default function testsuite() {
   workflowStorageUnitTest();
   workflowDateContextUnitTest();
   mainTabConfigUnitTest();
+  firstLaunchOnboardingUnitTest();
   chatPageTypesUnitTest();
   digitalAvatarTypesUnitTest();
   settingsCenterConfigUnitTest();
@@ -58,4 +61,5 @@ export default function testsuite() {
   mobileGuiTaskToolUnitTest();
   mobileGuiTaskWorkflowAdapterUnitTest();
   agentActionParserUnitTest();
+  captureOverlayPolicyUnitTest();
 }

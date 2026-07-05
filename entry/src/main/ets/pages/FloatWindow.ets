@@ -9,6 +9,8 @@ struct FloatWindow {
   @StorageLink('floatText') @Watch('onFloatTextChanged') floatText: string = 'AI Agent 运行中...'
   @StorageLink('agentPauseRequested') pauseRequested: boolean = false
   @StorageLink('agentFloatPanelExpanded') panelExpanded: boolean = false
+  // 截图隐藏状态由 EntryAbility 切换；页面保留透明根节点，只停止渲染可见控制面板。
+  @StorageLink('agentCaptureOverlayHidden') captureOverlayHidden: boolean = false
   private textScroller: Scroller = new Scroller()
   private autoScrollText: boolean = true
   private lastToggleAt: number = 0
@@ -40,9 +42,21 @@ struct FloatWindow {
     }, 0);
   }
 
+  private touchScreenX(event: TouchEvent): number {
+    return event.touches.length > 0 ? event.touches[0].screenX : 0;
+  }
+
+  private touchScreenY(event: TouchEvent): number {
+    return event.touches.length > 0 ? event.touches[0].screenY : 0;
+  }
+
   private handleMoveTouch(event: TouchEvent): void {
     if (event.type === TouchType.Down) {
-      AgentExecutionController.startFloatPanelMove();
+      AgentExecutionController.startFloatPanelMove(this.touchScreenX(event), this.touchScreenY(event));
+      return;
+    }
+    if (event.type === TouchType.Move) {
+      AgentExecutionController.moveFloatPanel(this.touchScreenX(event), this.touchScreenY(event));
       return;
     }
     if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
@@ -52,7 +66,8 @@ struct FloatWindow {
 
   build() {
     Stack({ alignContent: Alignment.End }) {
-      if (this.panelExpanded) {
+      // captureOverlayHidden=true 时不要销毁窗口或页面，只让内容为空，避免窗口重建影响前台输入法。
+      if (!this.captureOverlayHidden && this.panelExpanded) {
         Row() {
           Column() {
             Text(this.statusLabel())
@@ -163,7 +178,7 @@ struct FloatWindow {
         .padding({ left: 12, right: 18, top: 10, bottom: 10 })
         .backgroundColor('#00000000')
         .shadow({ radius: 10, color: '#18000000', offsetX: 0, offsetY: 2 })
-      } else {
+      } else if (!this.captureOverlayHidden) {
         Row() {
           Text(this.statusLabel())
             .width(36)

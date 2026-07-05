@@ -36,9 +36,11 @@ function mobileGuiRequest(): MobileGuiTaskRequest {
 export default function mobileGuiTaskWorkflowAdapterUnitTest() {
   describe('mobileGuiTaskWorkflowAdapterUnitTest', () => {
     it('treatsDeciderModelAsOptionalForCloudConfig', 0, () => {
-      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', 'key')).assertTrue();
-      expect(isMobileGuiTaskCloudConfigReady('http://planner', '', 'key')).assertFalse();
-      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', '  ')).assertFalse();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', 'planner-key',
+        'decider-key')).assertTrue();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', '', 'planner-key', 'decider-key')).assertFalse();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', '  ', 'decider-key')).assertFalse();
+      expect(isMobileGuiTaskCloudConfigReady('http://planner', 'http://decider', 'planner-key', '  ')).assertFalse();
       expect(mobileGuiTaskCloudConfigMissingMessage().indexOf('Decider 模型') < 0).assertTrue();
     });
 

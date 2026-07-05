@@ -22,6 +22,8 @@ interface PlannerTarget {
 
 const MAX_AGENT_STEPS: number = 15;
 const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
+const LOCAL_MNN_SCREENSHOT_WIDTH: number = 270;
+const LOCAL_MNN_SCREENSHOT_HEIGHT: number = 600;
 
 export class AgentLoopRunner {
   private filesDir: string;
@@ -268,6 +270,7 @@ export class AgentLoopRunner {
       this.log('cloud', '>> [Cloud Agent Prefill] Qwen prompt mode, task=' + this.cloudTask);
     }
 
+    let useFixedLocalScreenshot = mode === 'local';
     let screenshotFactor = mode === 'cloud' && promptMode !== 'local' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
     let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
@@ -289,7 +292,9 @@ export class AgentLoopRunner {
         await this.waitForRunnableState();
         let agentLabel = useCloudWithLocalPrompt ? 'PCAgent' : ((mode === 'cloud' ? 'Cloud' : 'MNN') + ' Agent');
         AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': 截图');
-        let shot = await this.hdcBridge.screenshotWithFactor(screenshotFactor);
+        let shot = useFixedLocalScreenshot ?
+          await this.hdcBridge.screenshotWithSize(LOCAL_MNN_SCREENSHOT_WIDTH, LOCAL_MNN_SCREENSHOT_HEIGHT) :
+          await this.hdcBridge.screenshotWithFactor(screenshotFactor);
         let imageBase64 = shot.image_b64 || '';
         let width = shot.width || 0;
         let height = shot.height || 0;
@@ -362,7 +367,9 @@ export class AgentLoopRunner {
     let history: string[] = [];
     for (let i = 0; i < MAX_AGENT_STEPS; i++) {
       await this.waitForRunnableState();
-      let shot = await this.hdcBridge.screenshotWithFactor(0.25);
+      let shot = mode === 'local' ?
+        await this.hdcBridge.screenshotWithSize(LOCAL_MNN_SCREENSHOT_WIDTH, LOCAL_MNN_SCREENSHOT_HEIGHT) :
+        await this.hdcBridge.screenshotWithFactor(0.25);
       let imageBase64 = shot.image_b64 || '';
       let width = shot.width || 0;
       let height = shot.height || 0;

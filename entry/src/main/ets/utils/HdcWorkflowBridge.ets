@@ -22,8 +22,6 @@ interface ScreenshotPayload {
   factor: number;
   style?: string;
   manage_overlay?: boolean;
-  target_width?: number;
-  target_height?: number;
 }
 
 interface ExecuteDeciderPayload {
@@ -157,14 +155,6 @@ export class HdcWorkflowBridge {
   }
 
   async screenshotWithFactor(factor: number): Promise<HdcBridgeResponse> {
-    return await this.screenshotWithOptions(factor);
-  }
-
-  async screenshotWithSize(width: number, height: number): Promise<HdcBridgeResponse> {
-    return await this.screenshotWithOptions(0.25, width, height);
-  }
-
-  private async screenshotWithOptions(factor: number, targetWidth?: number, targetHeight?: number): Promise<HdcBridgeResponse> {
     let restoreToken = await AgentExecutionController.hideCaptureOverlay();
     try {
       if (restoreToken) {
@@ -175,10 +165,6 @@ export class HdcWorkflowBridge {
         style: factor <= 0.25 ? 'local' : 'mobiagent',
         manage_overlay: false
       };
-      if (targetWidth !== undefined && targetHeight !== undefined) {
-        payload.target_width = targetWidth;
-        payload.target_height = targetHeight;
-      }
       let response = await this.request('screenshot', payload as Object as WorkflowJsonMap);
       if (response.status !== 'ok' || !response.image_b64) {
         throw new Error(response.message || 'screenshot failed');

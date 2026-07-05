@@ -78,12 +78,6 @@ interface DedupPromptPayload {
   existing_records: DedupExistingPayload[];
 }
 
-interface SummaryPromptPayload {
-  level: string;
-  event_count: number;
-  items: string[];
-}
-
 interface BatchEventPromptPayload {
   event_id: string;
   event_date: string;
@@ -442,13 +436,6 @@ const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '{"entities":[{"name":"规范显示名","aliases":["同一对象的其他候选名称"]}]}。\n\n' +
   '输出名称和别名必须来自输入候选，不要补充输入中不存在的名称，不要输出 markdown 或解释。';
 
-const SUMMARY_SYSTEM_PROMPT: string =
-  '你是个人事件摘要助手。根据输入的一组事件或下级摘要，生成简短、可检索的中文概括。\n\n' +
-  '只返回严格 JSON：\n' +
-  '{"summary":"摘要文本"}。\n\n' +
-  '摘要应陈述事实，不猜测，不遗漏主要活动类型，不输出 markdown。\n' +
-  'summary 最多 160 个汉字，只概括主要活动类型和显著事件，不要逐条复述输入。';
-
 const PROFILE_SYSTEM_PROMPT: string =
   '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。\n\n' +
   '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：\n' +
@@ -672,25 +659,6 @@ export class DataPipelineModelClient {
     }
   }
 
-  async generateSummary(level: string, items: string[], eventCount: number, config: DataManagerModelConfig): Promise<string> {
-    if (!this.isEnabled(config)) {
-      return '';
-    }
-    let promptPayload: SummaryPromptPayload = {
-      level: level,
-      event_count: eventCount,
-      items: items.map((item: string) => summarizeText(item, 280))
-    };
-    try {
-      let payload = await this.callJson(config, 'summary', SUMMARY_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload));
-      return normalizeFreeText(payload['summary']);
-    } catch (e) {
-      let err = e as Error;
-      dataManagerError(`Summary fallback: level=${level}, error=${err.message}`);
-      return '';
-    }
-  }
-
   async resolveEntities(entityType: string, mentions: EntityMention[], config: DataManagerModelConfig): Promise<EntityMention[]> {
     if (!this.isEnabled(config) || mentions.length === 0) {
       return [];
@@ -700,7 +668,7 @@ export class DataPipelineModelClient {
       mentions: mentions
     };
     try {
-      let payload = await this.callJson(config, 'entity.resolve', ENTITY_RESOLUTION_SYSTEM_PROMPT,
+      let payload = await this.callJson(config, 'entity.resolve.' + entityType, ENTITY_RESOLUTION_SYSTEM_PROMPT,
         stringifyJsonCompat(promptPayload as Object, 2));
       let rawEntities = Array.isArray(payload['entities']) ? payload['entities'] as JsonMap[] : [];
       let resolved: EntityMention[] = [];

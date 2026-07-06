@@ -337,14 +337,14 @@ export class AgentLoopRunner {
   }
 
   private resolveAgentNoReasonMode(): boolean {
-    let hasReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix.md', 'e2e_v2_agent_variable.md');
-    if (hasReasonPrompts) {
-      return false;
-    }
     let hasNoReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix_noreason.md',
       'e2e_v2_agent_variable_noreason.md');
     if (hasNoReasonPrompts) {
       return true;
+    }
+    let hasReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix.md', 'e2e_v2_agent_variable.md');
+    if (hasReasonPrompts) {
+      return false;
     }
     return this.noReasonMode;
   }

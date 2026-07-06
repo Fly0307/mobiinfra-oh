@@ -3836,6 +3836,7 @@ struct Index {
   // ========== Step 1: Check connection, list files ==========
   async checkServer() {
     this.output = `正在连接 ${this.serverIp} ...`;
+    AppLogger.info('PCServer', 'connect start url=' + this.serverIp);
     // 每个 httpRequest 对应一个 HTTP 请求任务，不复用。
     let httpReq = http.createHttp();
     try {
@@ -3848,6 +3849,7 @@ struct Index {
       let resp = await httpReq.request(`${this.serverIp}/api/files`, listOptions);
       if (resp.responseCode !== 200) {
         this.output = `连接失败: HTTP ${resp.responseCode}`;
+        AppLogger.warn('PCServer', 'connect failed url=' + this.serverIp + ', http=' + resp.responseCode.toString());
         return;
       }
       let files: ServerFile[] = ArkJSON.parse(resp.result as string) as ServerFile[];
@@ -3866,10 +3868,14 @@ struct Index {
       listing += '点击“下载全部”开始下载';
       this.output = listing;
       this.connected = true;
+      AppLogger.info('PCServer', 'connected url=' + this.serverIp + ', files=' +
+        this.serverFiles.length.toString() + ', totalBytes=' + this.totalBytesAll.toString());
     } catch (e) {
       let err = e as BusinessError;
       this.output = `连接失败: code=${err.code} ${err.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
       this.connected = false;
+      AppLogger.warn('PCServer', 'disconnected url=' + this.serverIp + ', code=' +
+        String(err.code) + ', message=' + err.message);
     } finally {
       httpReq.destroy();
     }

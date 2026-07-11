@@ -28,6 +28,23 @@ export default function captureOverlayPolicyUnitTest() {
       expect(transition.windowTouchable).assertTrue();
     });
 
+    it('hidesEdgeFlowWhenPanelWindowIsNotReady', 0, () => {
+      let transition = captureOverlayWindowTransition(true, false, true);
+
+      expect(transition.applied).assertTrue();
+      expect(transition.shouldCreateWindow).assertFalse();
+      expect(transition.shouldDestroyWindow).assertFalse();
+      expect(transition.contentHidden).assertTrue();
+      expect(transition.windowTouchable).assertFalse();
+    });
+
+    it('skipsCaptureHideWhenNoOverlayWindowExists', 0, () => {
+      let transition = captureOverlayWindowTransition(true, false, false);
+
+      expect(transition.applied).assertFalse();
+      expect(transition.contentHidden).assertFalse();
+    });
+
     it('keepsStorageKeyStableForFloatWindowBinding', 0, () => {
       expect(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY).assertEqual('agentCaptureOverlayHidden');
     });

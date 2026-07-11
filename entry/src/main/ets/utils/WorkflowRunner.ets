@@ -985,6 +985,10 @@ export class WorkflowRunner {
         result.finalScreenshot = shot;
         break;
       }
+      let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsedAction, width * 2, height * 2);
+      if (swipeFallbackDiagnostic.length > 0) {
+        this.log('Decider swipe fallback: ' + swipeFallbackDiagnostic);
+      }
       let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
       this.clearWorkflowScreenshotCache();
       await this.hdcBridge.guiAction(hdcPayload);

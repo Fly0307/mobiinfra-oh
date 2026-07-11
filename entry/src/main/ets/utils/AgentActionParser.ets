@@ -108,6 +108,9 @@ export class AgentActionParser {
   static parse(raw: string, failOnParseError: boolean = true): ParsedAgentAction {
     let data = AgentActionParser.extractJsonMap(raw, failOnParseError);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
+    if (failOnParseError && action.length === 0) {
+      throw new Error('Agent JSON parse failed: response missing action');
+    }
     let paramsValue = data['parameters'];
     if (paramsValue === undefined || paramsValue === null) {
       paramsValue = data['coordinates'];
@@ -432,6 +435,9 @@ export class AgentActionParser {
       return [];
     }
     let items = value as Object[];
+    if (items.length === 1 && Array.isArray(items[0])) {
+      return AgentActionParser.valueToNumberArray(items[0] as WorkflowJsonValue);
+    }
     let result: number[] = [];
     for (let i = 0; i < items.length; i++) {
       let parsed = Number(String(items[i]));

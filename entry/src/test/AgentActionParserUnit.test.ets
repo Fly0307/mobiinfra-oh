@@ -1,5 +1,9 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { AgentActionParser } from '../main/ets/utils/AgentActionParser';
+import {
+  AgentActionParseRetry,
+  AgentActionParseRetryInfo
+} from '../main/ets/utils/AgentActionParseRetry';
 
 interface SwipePayloadForTest {
   action?: string;
@@ -101,6 +105,57 @@ export default function agentActionParserUnitTest() {
       expect(payload.action).assertEqual('click_input');
       expect(payload.x).assertEqual(500);
       expect(payload.y).assertEqual(235);
+    });
+
+    it('repairsMissingReasoningPrefixAndNestedCalendarBbox', 0, () => {
+      let raw = '9月的日历。任务要求选择9月15日，我看到9月15日的日期在视图中。我将点击9月15日以选择该日\n' +
+        '期。","action":"click","parameters":' +
+        '{"target_element":"日历中2026年9月15日的日期单元格","bbox":[[286,699,427,770]}}}';
+
+      let parsed = AgentActionParser.parse(raw, true);
+      let payload = AgentActionParser.buildHdcActionPayload(parsed, 1000, 1000) as Object as ClickPayloadForTest;
+
+      expect(parsed.action).assertEqual('click');
+      expect(payload.action).assertEqual('click');
+      expect(payload.x).assertEqual(356);
+      expect(payload.y).assertEqual(734);
+    });
+
+    it('retriesUnrepairableJsonUpToThreeTimesOnSameScreen', 0, async () => {
+      let requestCount = 0;
+      let retryCount = 0;
+      let failure = '';
+      try {
+        await AgentActionParseRetry.request(async (): Promise<string> => {
+          requestCount += 1;
+          return 'not-json';
+        }, (info: AgentActionParseRetryInfo): void => {
+          retryCount = info.retryNumber;
+        });
+      } catch (e) {
+        let err = e as Error;
+        failure = err.message || String(e);
+      }
+
+      expect(requestCount).assertEqual(4);
+      expect(retryCount).assertEqual(3);
+      expect(failure).assertContain('after 3 same-screen retries');
+    });
+
+    it('returnsRepairedActionWhenSameScreenRetrySucceeds', 0, async () => {
+      let requestCount = 0;
+      let retryCount = 0;
+      let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+        requestCount += 1;
+        return requestCount === 1 ? 'not-json' :
+          '{"action":"click","parameters":{"bbox":[100,200,300,400]}}';
+      }, (info: AgentActionParseRetryInfo): void => {
+        retryCount = info.retryNumber;
+      });
+
+      expect(parsed.action).assertEqual('click');
+      expect(requestCount).assertEqual(2);
+      expect(retryCount).assertEqual(1);
     });
   });
 }

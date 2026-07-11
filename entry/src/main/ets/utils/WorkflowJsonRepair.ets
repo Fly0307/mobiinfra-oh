@@ -22,10 +22,38 @@ export class WorkflowJsonRepair {
     }
     text = text.replace(/^```(?:json)?\s*/i, '');
     text = text.replace(/\s*```$/, '');
+    text = WorkflowJsonRepair.repairLeadingReasoningFragment(text.trim());
     text = WorkflowJsonRepair.repairMissingLeadingObjectBrace(text.trim());
     text = WorkflowJsonRepair.extractFirstJsonObjectText(text);
     text = WorkflowJsonRepair.repairMissingLeadingObjectBrace(text.trim());
     return WorkflowJsonRepair.repairLeadingBrokenObjectQuote(text.trim());
+  }
+
+  // 模型偶发省略 {"reasoning":" 前缀，只留下自然语言 + ","action":...。
+  // 在提取首个花括号前补回完整对象，否则会误把 parameters 子对象当作顶层 JSON。
+  private static repairLeadingReasoningFragment(text: string): string {
+    let trimmed = text.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return trimmed;
+    }
+    let actionMarker = trimmed.search(/"\s*,\s*"action"\s*:/i);
+    if (actionMarker <= 0) {
+      return trimmed;
+    }
+    let reasoning = trimmed.substring(0, actionMarker).trim();
+    if (reasoning.length === 0) {
+      return trimmed;
+    }
+    return '{"reasoning":"' + WorkflowJsonRepair.escapeJsonStringContent(reasoning) +
+      trimmed.substring(actionMarker);
+  }
+
+  private static escapeJsonStringContent(value: string): string {
+    return value.replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t');
   }
 
   static repairCandidates(text: string): string[] {
@@ -47,6 +75,7 @@ export class WorkflowJsonRepair {
     let bareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(text);
     let cjkBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(cjkPunctuation);
     let duplicateColonBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(duplicateColons);
+    let nestedCoordinateArrays = WorkflowJsonRepair.repairNestedCoordinateArrays(text);
     let stringContent = WorkflowJsonRepair.repairJsonStringContent(text);
     let stringContentBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(stringContent);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
@@ -73,6 +102,8 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, cjkDuplicateColons, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, duplicateColonBareCoordinateArrays, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(duplicateColonBareCoordinateArrays), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, nestedCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(nestedCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(cjkPunctuation), text);
@@ -90,6 +121,8 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(cjkPunctuation), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(withoutParentheses), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(closed), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates,
+      WorkflowJsonRepair.repairNestedCoordinateArrays(stringContent), text);
     return candidates;
   }
 
@@ -160,6 +193,13 @@ export class WorkflowJsonRepair {
 
   private static repairDuplicateKeyColons(text: string): string {
     return text.replace(/("[A-Za-z_][A-Za-z0-9_]*"\s*:)\s*:+/g, '$1');
+  }
+
+  private static repairNestedCoordinateArrays(text: string): string {
+    let repaired = text.replace(/("bbox"\s*:\s*)\[\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]\s*\]?/g,
+      '$1[$2,$3,$4,$5]');
+    return repaired.replace(/("(?:coords|start_coords|end_coords)"\s*:\s*)\[\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]\s*\]?/g,
+      '$1[$2,$3]');
   }
 
   private static repairBareCoordinateArrays(text: string): string {

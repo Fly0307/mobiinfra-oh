@@ -116,7 +116,13 @@ class WorkflowScreenshotTest(unittest.TestCase):
 
 
 class HdcServerWorkflowInputTest(unittest.TestCase):
-    def test_click_input_uses_driver_text_input_when_driver_is_available(self):
+    def setUp(self):
+        hdc_server.workflow_clear_input_target()
+
+    def tearDown(self):
+        hdc_server.workflow_clear_input_target()
+
+    def test_click_input_uses_driver_shell_text_when_driver_is_available(self):
         fake_agent = FakeHarmonyAgent()
         hdc_commands = []
 
@@ -132,9 +138,80 @@ class HdcServerWorkflowInputTest(unittest.TestCase):
 
         self.assertEqual("ok", result["status"])
         self.assertIn(("click", 100, 200), fake_agent.d.events)
-        self.assertIn(("input_text", "小赵"), fake_agent.d.events)
+        self.assertIn(("shell", "uitest uiInput text '小赵'"), fake_agent.d.events)
         self.assertEqual(("ENTER", 2054), fake_agent.enter_pressed)
         self.assertEqual([], hdc_commands)
+
+    def test_input_reactivates_previous_click_input_target(self):
+        fake_agent = FakeHarmonyAgent()
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "run_hdc_command", lambda command: None):
+            hdc_server._workflow_gui_action_impl({
+                "action": "click_input",
+                "x": 100,
+                "y": 200,
+                "text": "小赵"
+            })
+            result = hdc_server._workflow_gui_action_impl({
+                "action": "input",
+                "text": "华为mate80手机"
+            })
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(2, fake_agent.d.events.count(("click", 100, 200)))
+        self.assertIn(("shell", "uitest uiInput text '华为mate80手机'"), fake_agent.d.events)
+
+    def test_input_uses_explicit_target_coordinates(self):
+        fake_agent = FakeHarmonyAgent()
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "run_hdc_command", lambda command: None):
+            result = hdc_server._workflow_gui_action_impl({
+                "action": "input",
+                "x": 310,
+                "y": 420,
+                "text": "华为mate80手机"
+            })
+
+        self.assertEqual("ok", result["status"])
+        self.assertIn(("click", 310, 420), fake_agent.d.events)
+        self.assertIn(("shell", "uitest uiInput text '华为mate80手机'"), fake_agent.d.events)
+
+    def test_input_without_known_target_is_rejected(self):
+        fake_agent = FakeHarmonyAgent()
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "run_hdc_command", lambda command: None):
+            with self.assertRaisesRegex(RuntimeError, "unknown focus"):
+                hdc_server._workflow_gui_action_impl({
+                    "action": "input",
+                    "text": "华为mate80手机"
+                })
+
+        self.assertNotIn(("shell", "uitest uiInput text '华为mate80手机'"), fake_agent.d.events)
+
+    def test_input_like_click_target_can_be_reused_by_input(self):
+        fake_agent = FakeHarmonyAgent()
+        hdc_commands = []
+
+        with patch.object(hdc_server, "harmony_agent", fake_agent), \
+                patch.object(hdc_server, "run_hdc_command", lambda command: hdc_commands.append(command)):
+            hdc_server._workflow_gui_action_impl({
+                "action": "click",
+                "x": 88,
+                "y": 99,
+                "target_element": "搜索框"
+            })
+            result = hdc_server._workflow_gui_action_impl({
+                "action": "input",
+                "text": "华为mate80手机"
+            })
+
+        self.assertEqual("ok", result["status"])
+        self.assertTrue(any(command.endswith("shell uitest uiInput click 88 99") for command in hdc_commands))
+        self.assertEqual(1, fake_agent.d.events.count(("click", 88, 99)))
+        self.assertIn(("shell", "uitest uiInput text '华为mate80手机'"), fake_agent.d.events)
 
 
 class AppStartIdentityValidationTest(unittest.TestCase):

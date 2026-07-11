@@ -65,6 +65,27 @@ API_TIMEOUT = 30
 DECIDER_MAX_TOKENS = 256
 GROUNDER_MAX_TOKENS = 128
 DEVICE_WAIT_TIME = 0.5
+INPUT_TARGET_KEYWORDS = (
+    "input box",
+    "input field",
+    "search box",
+    "search field",
+    "search bar",
+    "text input",
+    "text field",
+    "textbox",
+    "text box",
+    "edittext",
+    "edit box",
+    "输入框",
+    "输入栏",
+    "搜索框",
+    "搜索栏",
+    "搜索输入",
+    "文本框",
+    "编辑框",
+)
+LAST_INPUT_TARGET = None
 APP_LAUNCH_WAIT_TIME = 0.8
 APP_STOP_WAIT = 3
 APP_FRESH_START_WAIT_TIME = 0.8
@@ -752,6 +773,7 @@ def create_driver_for_target(driver_cls, target):
 def reset_driver():
     """触发式重置：清理并重新初始化 Driver，丢弃无用的轮询阈值逻辑"""
     global d
+    clear_input_target()
     with DEVICE_CONTROL_LOCK:
         try:
             import sys
@@ -1179,6 +1201,57 @@ def convert_qwen3_coordinates_to_absolute(bbox, width, height, is_bbox=True):
     y = min(y, 1000)
     return [int(x * width / 1000), int(y * height / 1000)]
 
+def remember_input_target(x, y):
+    global LAST_INPUT_TARGET
+    LAST_INPUT_TARGET = (int(x), int(y))
+
+def clear_input_target():
+    global LAST_INPUT_TARGET
+    LAST_INPUT_TARGET = None
+
+def action_target_looks_input(data, params):
+    values = (
+        params.get("target_element") if isinstance(params, dict) else "",
+        params.get("targetElement") if isinstance(params, dict) else "",
+        data.get("target_element") if isinstance(data, dict) else "",
+        data.get("targetElement") if isinstance(data, dict) else "",
+    )
+    text = " ".join(str(value or "") for value in values).strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in INPUT_TARGET_KEYWORDS)
+
+def resolve_input_target(params, width, height):
+    if isinstance(params, dict):
+        if params.get("coords"):
+            x, y = convert_qwen3_coordinates_to_absolute(params["coords"], width, height, is_bbox=False)
+            return int(x), int(y)
+        if params.get("bbox"):
+            x1, y1, x2, y2 = convert_qwen3_coordinates_to_absolute(params["bbox"], width, height)
+            return (x1 + x2) // 2, (y1 + y2) // 2
+        if params.get("x") is not None and params.get("y") is not None:
+            return int(params.get("x", 0)), int(params.get("y", 0))
+    return LAST_INPUT_TARGET
+
+def require_input_target(params, width, height):
+    point = resolve_input_target(params, width, height)
+    if point is None:
+        raise ValueError(
+            "Input action requires coords/bbox or a previous click_input/input-like click; "
+            "refusing to type into unknown focus"
+        )
+    return point
+
+def activate_input_target(x, y):
+    if d:
+        run_driver_call("Driver.click(input_focus)", lambda driver: driver.click(int(x), int(y)))
+    else:
+        run_hdc_action_command(
+            "input focus click",
+            f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}"
+        )
+    time.sleep(DEVICE_WAIT_TIME)
+
 def press_harmony_key(key_name, fallback_code):
     return run_with_device_control(
         f"press_harmony_key({key_name})",
@@ -1244,6 +1317,10 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
                 "decider click",
                 f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}"
             )
+        if action_target_looks_input(data, params):
+            remember_input_target(x, y)
+        else:
+            clear_input_target()
         time.sleep(DEVICE_WAIT_TIME)
         
     elif action == "click_input":
@@ -1261,24 +1338,22 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             
         if d:
             print(f">> [Agent] Clicking at {px}, {py}")
-            run_driver_call("Driver.click", lambda driver: driver.click(px, py))
-            time.sleep(DEVICE_WAIT_TIME)
+            activate_input_target(px, py)
+            remember_input_target(px, py)
             run_driver_call("Driver.shell(clear_input)", lambda driver: driver.shell("uitest uiInput keyEvent 2072 2017"))
             run_driver_call("Driver.press_key(2071)", lambda driver: driver.press_key(2071))
             run_driver_call("Driver.input_text", lambda driver: driver.input_text(text))
             press_harmony_key("ENTER", 2054)
         else:
-            run_hdc_action_command(
-                "decider click_input click",
-                f"{hdc_prefix()} shell uitest uiInput click {px} {py}"
-            )
-            time.sleep(DEVICE_WAIT_TIME)
+            activate_input_target(px, py)
+            remember_input_target(px, py)
             run_hdc_action_command(
                 "decider click_input text",
                 hdc_input_text_command(text)
             )
         
     elif action == "swipe":
+        clear_input_target()
         # 优先支持显式起止坐标；缺省时按方向使用屏幕比例坐标，适配不同分辨率。
         start_coords = params.get("start_coords")
         end_coords = params.get("end_coords")
@@ -1327,6 +1402,9 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
     elif action == "input":
         text = params.get("text", "")
         print(f">> Input Text: {text}")
+        px, py = require_input_target(params, width, height)
+        activate_input_target(px, py)
+        remember_input_target(px, py)
         if d:
             run_driver_call("Driver.shell(clear_input)", lambda driver: driver.shell("uitest uiInput keyEvent 2072 2017"))
             run_driver_call("Driver.press_key(2071)", lambda driver: driver.press_key(2071))
@@ -1345,15 +1423,18 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
             )
 
     elif action == "open_app":
+        clear_input_target()
         app_name = params.get("app_name", "")
         if not app_name:
             raise ValueError("Open_app action missing required parameter: 'app_name'")
         launch_app(app_name)
 
     elif action == "press_home":
+        clear_input_target()
         press_harmony_key("HOME", 1)
 
     elif action == "press_back":
+        clear_input_target()
         press_harmony_key("BACK", 2)
 
     elif action == "wait":

@@ -38,6 +38,27 @@ HDC_WORKFLOW_USE_DRIVER_ACTIONS = os.environ.get(
 HDC_WORKFLOW_USE_DRIVER_INPUT = os.environ.get(
     "HDC_WORKFLOW_USE_DRIVER_INPUT", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
+WORKFLOW_INPUT_TARGET_KEYWORDS = (
+    "input box",
+    "input field",
+    "search box",
+    "search field",
+    "search bar",
+    "text input",
+    "text field",
+    "textbox",
+    "text box",
+    "edittext",
+    "edit box",
+    "输入框",
+    "输入栏",
+    "搜索框",
+    "搜索栏",
+    "搜索输入",
+    "文本框",
+    "编辑框",
+)
+_workflow_last_input_target = None
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
@@ -1666,6 +1687,44 @@ def workflow_driver_for_action(action):
         print(f">> [Workflow输入警告] Driver 初始化失败，回退到 HDC inputText: {ex}")
     return None
 
+def workflow_input_focus_wait():
+    return float(getattr(harmony_agent, 'DEVICE_WAIT_TIME', 0.5))
+
+def workflow_remember_input_target(x, y):
+    global _workflow_last_input_target
+    _workflow_last_input_target = (int(x), int(y))
+
+def workflow_clear_input_target():
+    global _workflow_last_input_target
+    _workflow_last_input_target = None
+
+def workflow_payload_input_point(payload):
+    if payload.get('x') is not None and payload.get('y') is not None:
+        return int(payload.get('x', 0)), int(payload.get('y', 0))
+    return _workflow_last_input_target
+
+def workflow_target_element_looks_input(payload):
+    text = str(payload.get('target_element') or payload.get('targetElement') or '').strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in WORKFLOW_INPUT_TARGET_KEYWORDS)
+
+def workflow_activate_input_target(driver, x, y):
+    if driver:
+        harmony_agent.run_driver_call("Driver.click(input_focus)", lambda d: d.click(int(x), int(y)))
+    else:
+        run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
+    time.sleep(workflow_input_focus_wait())
+
+def workflow_require_input_target(payload):
+    point = workflow_payload_input_point(payload)
+    if point is None:
+        raise RuntimeError(
+            "input requires x/y or a previous click_input/input-like click; "
+            "refusing to type into unknown focus"
+        )
+    return point
+
 def payload_bool(payload, key, default):
     value = payload.get(key, default)
     if isinstance(value, bool):
@@ -1754,27 +1813,32 @@ def _workflow_gui_action_impl(payload):
             harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
+        if workflow_target_element_looks_input(payload):
+            workflow_remember_input_target(x, y)
+        else:
+            workflow_clear_input_target()
         return {'status': 'ok', 'message': f'click {x},{y}'}
 
     if action == 'click_input':
         x = int(payload.get('x', 0))
         y = int(payload.get('y', 0))
         text = str(payload.get('text', ''))
+        workflow_activate_input_target(driver, x, y)
+        workflow_remember_input_target(x, y)
         if driver:
-            harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
             harmony_agent.run_driver_call("Driver.shell(text)", lambda d: d.shell(driver_shell_text_command(text)))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
             run_hdc_command(hdc_input_text_command(text))
         return {'status': 'ok', 'message': f'click_input {x},{y}'}
 
     if action == 'input':
         text = str(payload.get('text', ''))
+        x, y = workflow_require_input_target(payload)
+        workflow_activate_input_target(driver, x, y)
+        workflow_remember_input_target(x, y)
         if driver:
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
@@ -1785,6 +1849,7 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': 'input'}
 
     if action == 'swipe_with_coords':
+        workflow_clear_input_target()
         sx = int(payload.get('start_x', 0))
         sy = int(payload.get('start_y', 0))
         ex = int(payload.get('end_x', 0))
@@ -1796,6 +1861,7 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'swipe {sx},{sy}->{ex},{ey}'}
 
     if action == 'swipe':
+        workflow_clear_input_target()
         direction = str(payload.get('direction', 'up')).lower()
         if driver:
             if direction == 'up':
@@ -1826,6 +1892,8 @@ def _workflow_gui_action_impl(payload):
 
     if action == 'keyevent':
         key = str(payload.get('key', 'BACK')).upper()
+        if key in ('BACK', 'HOME'):
+            workflow_clear_input_target()
         if key == 'BACK':
             if driver:
                 harmony_agent.press_harmony_key('BACK', 2)
@@ -1851,12 +1919,14 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'sleep {seconds}'}
 
     if action == 'app_start':
+        workflow_clear_input_target()
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
         return build_app_start_result(app_name, package_name, reset_first)
 
     if action == 'app_stop':
+        workflow_clear_input_target()
         package_name = str(payload.get('package_name', ''))
         if not package_name:
             raise RuntimeError('app_stop requires package_name')
@@ -1888,6 +1958,7 @@ def handle_workflow_action(action, payload):
 
     if action == 'prepare_agent_run':
         ensure_workflow_agent_ready()
+        workflow_clear_input_target()
         harmony_agent.reset_driver()
         return {
             'status': 'ok',

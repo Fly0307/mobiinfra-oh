@@ -39,6 +39,8 @@ interface ClickInputActionPayload {
 interface InputActionPayload {
   action: string;
   text: string;
+  x?: number;
+  y?: number;
   target_element?: string;
 }
 
@@ -172,6 +174,11 @@ export class AgentActionParser {
         action: 'input',
         text: AgentActionParser.getMapString(params, 'text')
       };
+      if (params['coords'] !== undefined || params['bbox'] !== undefined) {
+        let point = AgentActionParser.resolveClickPoint(params, width, height);
+        payload.x = point.x;
+        payload.y = point.y;
+      }
       let targetElement = AgentActionParser.getTargetElement(parsed);
       if (targetElement.length > 0) {
         payload.target_element = targetElement;

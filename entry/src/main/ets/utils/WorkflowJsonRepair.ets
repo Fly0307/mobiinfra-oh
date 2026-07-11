@@ -42,8 +42,13 @@ export class WorkflowJsonRepair {
     let singleQuoted = WorkflowJsonRepair.repairSingleQuotedJson(text);
     let quotedArrayItems = WorkflowJsonRepair.quoteBareJsonArrayItems(text);
     let closed = WorkflowJsonRepair.closeTruncatedJson(text);
+    let duplicateColons = WorkflowJsonRepair.repairDuplicateKeyColons(text);
+    let cjkDuplicateColons = WorkflowJsonRepair.repairDuplicateKeyColons(cjkPunctuation);
     let bareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(text);
     let cjkBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(cjkPunctuation);
+    let duplicateColonBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(duplicateColons);
+    let stringContent = WorkflowJsonRepair.repairJsonStringContent(text);
+    let stringContentBareCoordinateArrays = WorkflowJsonRepair.repairBareCoordinateArrays(stringContent);
     WorkflowJsonRepair.addRepairCandidate(candidates, unwrapped, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, leadingObjectBrace, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(leadingObjectBrace), text);
@@ -64,6 +69,10 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(singleQuoted), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, quotedArrayItems, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.quoteBareJsonArrayItems(cjkPunctuation), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, duplicateColons, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, cjkDuplicateColons, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, duplicateColonBareCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(duplicateColonBareCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairNumberArrayCommas(cjkPunctuation), text);
@@ -73,7 +82,9 @@ export class WorkflowJsonRepair {
     WorkflowJsonRepair.addRepairCandidate(candidates, closed, text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairBareCoordinateArrays(closed), text);
-    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(text), text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, stringContent, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, stringContentBareCoordinateArrays, text);
+    WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.closeTruncatedJson(stringContentBareCoordinateArrays), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(unwrapped), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(literalCase), text);
     WorkflowJsonRepair.addRepairCandidate(candidates, WorkflowJsonRepair.repairJsonStringContent(cjkPunctuation), text);
@@ -145,6 +156,10 @@ export class WorkflowJsonRepair {
 
   private static repairNumberArrayCommas(text: string): string {
     return text.replace(/(\d+)\s+(\d+)/g, '$1, $2');
+  }
+
+  private static repairDuplicateKeyColons(text: string): string {
+    return text.replace(/("[A-Za-z_][A-Za-z0-9_]*"\s*:)\s*:+/g, '$1');
   }
 
   private static repairBareCoordinateArrays(text: string): string {
@@ -220,10 +235,14 @@ export class WorkflowJsonRepair {
     }
 
     let boundaryIndex = WorkflowJsonRepair.nextNonWhitespaceIndex(text, index);
+    let endIndex = index;
     if (boundaryIndex >= 0 && !WorkflowJsonRepair.isCoordinateBoundary(text.charAt(boundaryIndex))) {
       return null;
     }
-    return { values: values, endIndex: index };
+    if (boundaryIndex >= 0 && text.charAt(boundaryIndex) === ']') {
+      endIndex = boundaryIndex + 1;
+    }
+    return { values: values, endIndex: endIndex };
   }
 
   private static readJsonNumberEnd(text: string, start: number): number {

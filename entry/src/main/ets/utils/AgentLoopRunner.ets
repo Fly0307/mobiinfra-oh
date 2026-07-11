@@ -372,6 +372,10 @@ export class AgentLoopRunner {
 
   private async executeParsedAction(parsed: ParsedAgentAction, width: number, height: number): Promise<HdcBridgeResponse> {
     this.checkCancellation();
+    let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsed, width, height);
+    if (swipeFallbackDiagnostic.length > 0) {
+      this.log(this.mode, '>> [Agent] Swipe fallback: ' + swipeFallbackDiagnostic);
+    }
     let payload = AgentActionParser.buildHdcActionPayload(parsed, width, height);
     this.log(this.mode, '>> [Agent] HDC action payload:\n' + ArkJSON.stringify(payload));
     return await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);

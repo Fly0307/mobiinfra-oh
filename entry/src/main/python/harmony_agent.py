@@ -896,6 +896,155 @@ def extract_json_payload(raw_text):
                 if key in wrapper_keys or depth == 0:
                     _collect_wrapped_candidates(candidates, seen_candidates, nested_value, depth + 1)
 
+    def _repair_duplicate_key_colons(value):
+        return re.sub(r'("[A-Za-z_][A-Za-z0-9_]*"\s*:)\s*:+', r'\1', value)
+
+    def _repair_bare_coordinate_arrays(value):
+        number = r'-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'
+        specs = {
+            "bbox": 4,
+            "coords": 2,
+            "start_coords": 2,
+            "end_coords": 2,
+        }
+        repaired = value
+        for key, count in specs.items():
+            pattern = (
+                rf'("{key}"\s*:\s*)'
+                rf'({number}(?:\s*,\s*{number}){{{count - 1}}})'
+                rf'(\s*\])?'
+                rf'(?=\s*(?:[,}}\]]|$))'
+            )
+            repaired = re.sub(pattern, lambda match: match.group(1) + '[' + match.group(2) + ']', repaired)
+        return repaired
+
+    def _next_non_whitespace_index(value, start):
+        for index in range(start, len(value)):
+            if value[index] not in ' \t\r\n':
+                return index
+        return -1
+
+    def _find_next_unescaped_quote(value, start):
+        escaped = False
+        for index in range(start, len(value)):
+            ch = value[index]
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                return index
+        return -1
+
+    def _comma_starts_next_object_field(value, comma_index):
+        key_start = _next_non_whitespace_index(value, comma_index + 1)
+        if key_start < 0 or value[key_start] != '"':
+            return False
+        key_end = _find_next_unescaped_quote(value, key_start + 1)
+        if key_end < 0:
+            return False
+        after_key = _next_non_whitespace_index(value, key_end + 1)
+        return after_key >= 0 and value[after_key] == ':'
+
+    def _repair_json_string_content(value):
+        result = []
+        contexts = []
+        in_string = False
+        escaped = False
+        string_role = ''
+
+        def peek_context():
+            return contexts[-1] if contexts else None
+
+        def mark_value_finished():
+            top = peek_context()
+            if top is not None:
+                top["state"] = "commaOrEnd"
+
+        def update_context(ch):
+            if ch == '{':
+                contexts.append({"kind": "object", "state": "keyOrEnd"})
+            elif ch == '[':
+                contexts.append({"kind": "array", "state": "valueOrEnd"})
+            elif ch in '}]':
+                if contexts:
+                    contexts.pop()
+                mark_value_finished()
+            else:
+                top = peek_context()
+                if top is None:
+                    return
+                if ch == ':' and top["kind"] == "object":
+                    top["state"] = "value"
+                elif ch == ',':
+                    top["state"] = "keyOrEnd" if top["kind"] == "object" else "valueOrEnd"
+
+        def json_string_role():
+            top = peek_context()
+            if top is not None and top["kind"] == "object" and top["state"] == "keyOrEnd":
+                return "key"
+            return "value"
+
+        def finish_string(role):
+            top = peek_context()
+            if role == "key" and top is not None and top["kind"] == "object":
+                top["state"] = "colon"
+            else:
+                mark_value_finished()
+
+        def is_json_string_close_at(quote_index, role):
+            next_index = _next_non_whitespace_index(value, quote_index + 1)
+            next_ch = value[next_index] if next_index >= 0 else ''
+            if role == "key":
+                return next_ch == ':'
+            if next_ch == '' or next_ch in '}]':
+                return True
+            if next_ch != ',':
+                return False
+            top = peek_context()
+            if top is None or top["kind"] == "array":
+                return True
+            return _comma_starts_next_object_field(value, next_index)
+
+        for index, ch in enumerate(value):
+            if not in_string:
+                if ch == '"':
+                    in_string = True
+                    escaped = False
+                    string_role = json_string_role()
+                else:
+                    update_context(ch)
+                result.append(ch)
+                continue
+
+            if escaped:
+                result.append(ch)
+                escaped = False
+                continue
+            if ch == '\\':
+                result.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                if is_json_string_close_at(index, string_role):
+                    in_string = False
+                    finish_string(string_role)
+                    string_role = ''
+                    result.append(ch)
+                else:
+                    result.append('\\"')
+                continue
+            if ch == '\n':
+                result.append('\\n')
+                continue
+            if ch == '\r':
+                continue
+            if ch == '\t':
+                result.append('\\t')
+                continue
+            result.append(ch)
+        return ''.join(result)
+
     if raw_text is None:
         return None
 
@@ -947,6 +1096,16 @@ def extract_json_payload(raw_text):
         _collect_wrapped_candidates(candidates, seen_candidates, wrapped_payload)
 
     _append_candidate(candidates, seen_candidates, text)
+    duplicate_colon_text = _repair_duplicate_key_colons(text)
+    string_repaired_text = _repair_json_string_content(text)
+    bare_coordinate_text = _repair_bare_coordinate_arrays(text)
+    _append_candidate(candidates, seen_candidates, duplicate_colon_text)
+    _append_candidate(candidates, seen_candidates, _repair_bare_coordinate_arrays(duplicate_colon_text))
+    _append_candidate(candidates, seen_candidates, _repair_json_string_content(duplicate_colon_text))
+    _append_candidate(candidates, seen_candidates, bare_coordinate_text)
+    _append_candidate(candidates, seen_candidates, string_repaired_text)
+    _append_candidate(candidates, seen_candidates, _repair_bare_coordinate_arrays(string_repaired_text))
+    _append_candidate(candidates, seen_candidates, _repair_json_string_content(bare_coordinate_text))
 
     def _attempt_close_truncated_json(candidate):
         candidate = candidate.strip()
@@ -1252,6 +1411,28 @@ def activate_input_target(x, y):
         )
     time.sleep(DEVICE_WAIT_TIME)
 
+def should_use_explicit_swipe_coords(start, end, direction, width, height):
+    normalized = str(direction or "").lower()
+    if not normalized:
+        return True
+    sx, sy = start
+    ex, ey = end
+    dx = abs(ex - sx)
+    dy = abs(ey - sy)
+    if normalized in ("up", "down"):
+        if dy < height * 0.12 or dy < dx:
+            return False
+        if sy < height * 0.28 or sy > height * 0.88:
+            return False
+        return ey > sy if normalized == "down" else ey < sy
+    if normalized in ("left", "right"):
+        if dx < width * 0.12 or dx < dy:
+            return False
+        if sx < width * 0.12 or sx > width * 0.88:
+            return False
+        return ex > sx if normalized == "right" else ex < sx
+    return True
+
 def press_harmony_key(key_name, fallback_code):
     return run_with_device_control(
         f"press_harmony_key({key_name})",
@@ -1357,18 +1538,24 @@ def _execute_action_and_get_details_impl(plan, img_size=(1000, 1000)):
         # 优先支持显式起止坐标；缺省时按方向使用屏幕比例坐标，适配不同分辨率。
         start_coords = params.get("start_coords")
         end_coords = params.get("end_coords")
+        used_explicit_swipe = False
         if start_coords and end_coords:
             sx, sy = convert_qwen3_coordinates_to_absolute(start_coords, width, height, is_bbox=False)
             ex, ey = convert_qwen3_coordinates_to_absolute(end_coords, width, height, is_bbox=False)
-            print(f">> Swipe from [{sx}, {sy}] to [{ex}, {ey}]")
-            if d:
-                run_driver_call("Driver.swipe", lambda driver: driver.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000))
+            direction = params.get("direction", "")
+            if should_use_explicit_swipe_coords((sx, sy), (ex, ey), direction, width, height):
+                used_explicit_swipe = True
+                print(f">> Swipe from [{sx}, {sy}] to [{ex}, {ey}]")
+                if d:
+                    run_driver_call("Driver.swipe", lambda driver: driver.swipe(int(sx), int(sy), int(ex), int(ey), speed=1000))
+                else:
+                    run_hdc_action_command(
+                        "decider swipe coords",
+                        f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
+                    )
             else:
-                run_hdc_action_command(
-                    "decider swipe coords",
-                    f"{hdc_prefix()} shell uitest uiInput swipe {int(sx)} {int(sy)} {int(ex)} {int(ey)}"
-                )
-        else:
+                print(f">> Swipe coords [{sx}, {sy}] -> [{ex}, {ey}] are unsafe for direction={direction}; fallback to directional swipe.")
+        if not used_explicit_swipe:
             direction = params.get("direction", "UP")
             print(f">> Swipe direction: {direction}")
             direction_lower = direction.lower()

@@ -1305,6 +1305,7 @@ function isObjectLikeChatName(value: string): boolean {
     '上海',
     '杭州',
     '数据归家首页',
+    'clawmate首页',
     'workflow日志页面',
     'mockdailylog数据',
     'hdc导入脚本'

@@ -1,43 +1,47 @@
-// 跨页面头部组件：保持“数据归家”各 tab 的品牌区和隐私状态样式一致。
+// 跨页面头部组件：保持 ClawMate 各 tab 的品牌区和隐私状态样式一致。
 @Component
 export struct AppHeader {
   title: string = '';
   subtitle: string = '';
+  icon: Resource = $r('app.media.header_companion');
 
   build() {
     Row() {
       Row() {
-        Stack() {
-          Text('H')
-            .fontSize(21)
-            .fontColor(Color.White)
-            .fontWeight(FontWeight.Bold)
+        Stack({ alignContent: Alignment.Center }) {
+          Image(this.icon)
+            .width(36)
+            .height(36)
+            .objectFit(ImageFit.Contain)
         }
-        .width(50)
-        .height(50)
-        .backgroundColor('#5968FF')
-        .borderRadius(15)
-        .shadow({ radius: 12, color: '#365968FF', offsetX: 0, offsetY: 5 })
+        .width(40)
+        .height(40)
 
         Column() {
           Text(this.title)
-            .fontSize(24)
+            .fontSize(25)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#11182F')
+            .fontColor('#172033')
+            .lineHeight(32)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           if (this.subtitle.length > 0) {
             Text(this.subtitle)
               .fontSize(14)
               .fontColor('#717684')
+              .lineHeight(18)
               .margin({ top: 3 })
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
         .alignItems(HorizontalAlign.Start)
-        .margin({ left: 12 })
+        .justifyContent(FlexAlign.Center)
+        .height(this.subtitle.length > 0 ? 52 : 40)
+        .margin({ left: 9 })
       }
+      .height(52)
+      .alignItems(VerticalAlign.Center)
       .layoutWeight(1)
 
       Row() {
@@ -46,9 +50,10 @@ export struct AppHeader {
         Text('>').fontSize(16).fontColor('#8B909A')
       }
       .width(118)
+      .alignItems(VerticalAlign.Center)
     }
+    .alignItems(VerticalAlign.Center)
     .width('100%')
     .padding({ left: 22, right: 18, top: 24, bottom: 10 })
   }
 }
-

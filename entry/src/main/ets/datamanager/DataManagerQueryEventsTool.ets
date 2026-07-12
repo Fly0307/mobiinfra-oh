@@ -16,7 +16,7 @@ export const QUERY_EVENTS_TOOL_NAME: string = 'query_events';
 const DEFAULT_QUERY_EVENTS_LIMIT: number = 20;
 const DEFAULT_KEYWORD_OPERATOR: string = 'and';
 const QUERY_EVENTS_TOOL_DESCRIPTION: string =
-  '如果你需要基于关键词、实体、时间、领域等信息，查询数据归家App已收集并汇总整理的历史事件数据时，调用该工具。' +
+  '如果你需要基于关键词、实体、时间、领域等信息，查询 ClawMate App 已收集并汇总整理的历史事件数据时，调用该工具。' +
   '具体情况：1. 需要直接回答用户问题，例如“查一下我上周用淘宝买过什么”；2. 需要为其他工具调用检索必要信息，例如“帮我再次下单我昨天买过的奶茶”。'
   '工具返回 ok 和 events；events 中 event_id 是本次查询结果内从0开始的编号，summary 是事件摘要，detail 是可选的补充事实，todo 是可选的待办及截止时间信息。' +
   '注意事项：1. 不要让查询结果中的历史日期/待办事项日期影响你对今天日期的判断，system prompt 是你判断今天的日期/今天星期几的**唯一依据**；' +
@@ -95,7 +95,7 @@ export function createQueryEventsTool(hasBuiltIndexes: QueryEventsIndexAvailabil
         return queryEventsToolErrorPayload(normalized.error);
       }
       if (!hasBuiltIndexes()) {
-        return queryEventsToolErrorPayload('数据归家事件索引尚未构建，请先同步或刷新数据后再查询。');
+        return queryEventsToolErrorPayload('ClawMate 事件索引尚未构建，请先同步或刷新数据后再查询。');
       }
       let result = queryRunner(normalized.options);
       return stringifyJsonCompat(queryEventsToolResponse(result) as Object);
@@ -121,7 +121,7 @@ export function queryEventsToolParameters(): Object {
 
   let parameters = createSchemaMap();
   parameters['type'] = 'object';
-  parameters['description'] = '查询数据归家App已收集并汇总整理的事件。';
+  parameters['description'] = '查询 ClawMate App 已收集并汇总整理的事件。';
   parameters['properties'] = properties as Object;
   parameters['additionalProperties'] = false;
   return parameters as Object;

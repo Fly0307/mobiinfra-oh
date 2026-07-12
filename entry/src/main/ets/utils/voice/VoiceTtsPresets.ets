@@ -29,7 +29,7 @@ export const MIMO_CHINESE_VOICE_PRESETS: VoiceTtsVoicePreset[] = [
 export const VOICE_TTS_ROLE_PRESETS: VoiceTtsRolePreset[] = [
   {
     id: 'data_home',
-    label: '数据归家',
+    label: 'ClawMate',
     voice: '冰糖',
     stylePrompt: '用温和清晰的中文语气朗读，适合整理回顾信息。'
   },

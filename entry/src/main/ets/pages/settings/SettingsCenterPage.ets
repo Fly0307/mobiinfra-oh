@@ -788,7 +788,7 @@ export struct SettingsCenterPage {
 
   @Builder SettingsSectionList() {
     Column() {
-      AppHeader({ title: '设置中心', subtitle: '服务、采集、模型、任务与存储' })
+      AppHeader({ title: '设置中心', icon: $r('app.media.header_settings') })
       ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
         this.SettingsListItem(item)
       }, (item: SettingsSectionItem) => String(item.id))
@@ -1588,8 +1588,8 @@ export struct SettingsCenterPage {
   }
 
   build() {
-    Column() {
-      if (isSettingsSectionSelected(this.selectedSectionId)) {
+    if (isSettingsSectionSelected(this.selectedSectionId)) {
+      Column() {
         this.SettingsDetailHeader()
         Scroll(this.detailScroller) {
           Column() {
@@ -1601,16 +1601,17 @@ export struct SettingsCenterPage {
         }
         .width('100%')
         .layoutWeight(1)
-      } else {
-        Scroll() {
-          this.SettingsSectionList()
-        }
-        .width('100%')
-        .layoutWeight(1)
       }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+    } else {
+      Scroll() {
+        this.SettingsSectionList()
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
   }
 }

@@ -24,7 +24,7 @@ export default function voiceTtsPresetsUnitTest() {
 
     it('mapsAssistantRolePresetsToDefaultVoiceAndStyle', 0, () => {
       let dataRole = voiceTtsRolePresetById('data_home');
-      expect(dataRole.label).assertEqual('数据归家');
+      expect(dataRole.label).assertEqual('ClawMate');
       expect(dataRole.voice).assertEqual('冰糖');
       expect(dataRole.stylePrompt.indexOf('温和')).assertLarger(-1);
       expect(dataRole.stylePrompt.indexOf('整理回顾')).assertLarger(-1);

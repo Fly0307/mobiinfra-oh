@@ -196,7 +196,7 @@ import {
   WechatAutoSummaryResponse
 } from '../utils/wechat/WechatAutoSummaryTypes';
 
-// 首页总入口：负责把“数据归家”业务 UI、本地端侧推理、云端 Planner/Decider、
+// 首页总入口：负责把 ClawMate 业务 UI、本地端侧推理、云端 Planner/Decider、
 // 模型下载/调试工具和 PC 侧 HDC Agent 控制入口串起来。各业务 tab 的展示 UI
 // 下沉到 home/collection/task，避免 Index.ets 继续膨胀。
 const AUTO_HDC_SERVER_URL: string = 'http://127.0.0.1:19124';
@@ -1917,7 +1917,7 @@ struct Index {
   }
 
   private cloudChatSystemMessage(): CloudChatMessage {
-    let roleBlock = '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。';
+    let roleBlock = '你是 ClawMate 移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。';
     let timeBlock = this.cloudChatTimeSystemPromptBlock();
     let profileBlock = this.cloudChatProfileSystemPromptBlock();
     let content = roleBlock + '\n\n' + timeBlock;

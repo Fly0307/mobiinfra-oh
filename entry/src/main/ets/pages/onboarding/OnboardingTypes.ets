@@ -46,7 +46,7 @@ export interface FirstLaunchUsageGuideItem {
 export const FIRST_LAUNCH_USAGE_GUIDE_ITEMS: FirstLaunchUsageGuideItem[] = [
   {
     id: 'usage_data_home',
-    title: '数据归家',
+    title: 'ClawMate',
     entryLabel: '使用入口：汇总',
     configLabel: '配置入口：设置 > 数据采集',
     description: '同步聊天、图库和位置线索，在汇总页查看整理后的个人事件。',
@@ -80,7 +80,7 @@ export const FIRST_LAUNCH_ONBOARDING_SLIDES: FirstLaunchOnboardingSlide[] = [
   {
     id: FIRST_LAUNCH_ONBOARDING_SLIDE_DATA_HOME,
     kind: FirstLaunchOnboardingSlideKind.Preview,
-    title: '数据归家',
+    title: 'ClawMate',
     description: '汇总聊天、图库、任务和位置线索，让分散在各个 App 里的信息回到你的个人数据中心。',
     mediaResourceName: 'onboarding_data_home',
     accentColor: '#4F68FF',

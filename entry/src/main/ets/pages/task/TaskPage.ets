@@ -96,7 +96,7 @@ const CHILD_BRANCH_THEN = 'then';
 const CHILD_BRANCH_ELSE = 'else';
 const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 
-// 定时任务页从 App 沙箱中的 workflow JSON 加载任务配置。
+// 自定义任务页从 App 沙箱中的 workflow JSON 加载任务配置。
 // 新增的图编辑器只改变前端展示和编辑方式，保存结果仍然是一份可执行的 workflow JSON。
 @Component
 export struct TaskPage {
@@ -4182,7 +4182,11 @@ export struct TaskPage {
     Scroll() {
       Column() {
         if (this.configViewOpen) {
-          AppHeader({ title: '配置任务', subtitle: 'Workflow 编排与文件管理' })
+          AppHeader({
+            title: '配置任务',
+            subtitle: 'Workflow 编排与文件管理',
+            icon: $r('app.media.header_task')
+          })
           this.ConfigHeaderPanel()
           this.CreatePanel()
           if (this.editorOpen && this.editingTaskId.length === 0) {
@@ -4206,7 +4210,7 @@ export struct TaskPage {
           this.TaskSceneList()
           this.FileManagerPanel()
         } else {
-          AppHeader({ title: '定时任务', subtitle: '任务队列' })
+          AppHeader({ title: '自定义任务', icon: $r('app.media.header_task') })
           this.TaskExecutionHeaderPanel()
           this.TaskExecutionList()
           this.BatchRunPanel()

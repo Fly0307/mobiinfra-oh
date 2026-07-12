@@ -494,9 +494,9 @@ export class WorkflowRunner {
 
     returnedToApp = await this.returnToHostApp();
     if (returnedToApp) {
-      this.log('Workflow 收尾：已切回数据归家 App。');
+      this.log('Workflow 收尾：已切回 ClawMate App。');
     } else {
-      this.log('Workflow 收尾：切回数据归家 App 失败，请手动确认前台界面。');
+      this.log('Workflow 收尾：切回 ClawMate App 失败，请手动确认前台界面。');
     }
 
     if (status === 'success') {

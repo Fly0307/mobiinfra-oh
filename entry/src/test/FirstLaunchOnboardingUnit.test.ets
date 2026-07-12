@@ -30,7 +30,7 @@ export default function firstLaunchOnboardingUnitTest(): void {
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES.length).assertEqual(4);
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[0].id).assertEqual(FIRST_LAUNCH_ONBOARDING_SLIDE_DATA_HOME);
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[0].kind).assertEqual(FirstLaunchOnboardingSlideKind.Preview);
-      expect(FIRST_LAUNCH_ONBOARDING_SLIDES[0].title).assertEqual('数据归家');
+      expect(FIRST_LAUNCH_ONBOARDING_SLIDES[0].title).assertEqual('ClawMate');
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[0].mediaResourceName).assertEqual('onboarding_data_home');
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[1].id).assertEqual(FIRST_LAUNCH_ONBOARDING_SLIDE_AVATAR);
       expect(FIRST_LAUNCH_ONBOARDING_SLIDES[1].kind).assertEqual(FirstLaunchOnboardingSlideKind.Preview);
@@ -49,7 +49,7 @@ export default function firstLaunchOnboardingUnitTest(): void {
     it('usesConfirmedUsageGuideCards', 0, () => {
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS.length).assertEqual(3);
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].id).assertEqual('usage_data_home');
-      expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].title).assertEqual('数据归家');
+      expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].title).assertEqual('ClawMate');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].entryLabel).assertEqual('使用入口：汇总');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].configLabel).assertEqual('配置入口：设置 > 数据采集');
       expect(FIRST_LAUNCH_USAGE_GUIDE_ITEMS[0].description)

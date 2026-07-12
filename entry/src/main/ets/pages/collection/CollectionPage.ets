@@ -33,7 +33,7 @@ import {
 const COLLECTION_GROUPS_PER_PAGE: number = 5;
 const COLLECTION_SECTION_GAP: number = 18;
 
-// 数据采集页：按 workflow 场景切换展示对应任务采集到的已整理数据。
+// 足迹汇总页：按 workflow 场景切换展示对应任务采集到的已整理数据。
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
@@ -416,23 +416,60 @@ export struct CollectionPage {
       .maxLines(1)
   }
 
-  @Builder PreferenceLine(color: string, name: string, value: string, widthValue: string) {
-    // 消费偏好条形图的最小复用单元。
-    Row() {
-      Row().width(7).height(7).backgroundColor(color).borderRadius(4)
-      Text(name).fontSize(12).fontColor('#4C5260').width(66).margin({ left: 6 }).maxLines(1)
-      Stack({ alignContent: Alignment.Start }) {
-        Row().width('100%').height(4).backgroundColor('#F0F1F6').borderRadius(3)
-        Row().width(widthValue).height(4).backgroundColor(color).borderRadius(3)
-      }.layoutWeight(1).height(5)
-      Text(value).fontSize(12).fontColor('#7A808C').width(36).textAlign(TextAlign.End)
-    }.width('100%').margin({ bottom: 12 })
+  @Builder CollectionActionCard(icon: string, title: string, description: string,
+    accentColor: string, softColor: string, borderColor: string, onTap: () => void) {
+    Column() {
+      Row({ space: 8 }) {
+        Text(icon)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(accentColor)
+          .width(32)
+          .height(32)
+          .textAlign(TextAlign.Center)
+          .backgroundColor(softColor)
+          .borderRadius(10)
+
+        Text(title)
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#172033')
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text('›')
+          .fontSize(20)
+          .fontColor(accentColor)
+      }
+      .width('100%')
+      .height(32)
+      .alignItems(VerticalAlign.Center)
+
+      Text(description)
+        .fontSize(11)
+        .fontColor('#747C8C')
+        .lineHeight(16)
+        .width('100%')
+        .margin({ top: 8 })
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .alignItems(HorizontalAlign.Start)
+    .layoutWeight(1)
+    .height(100)
+    .padding(12)
+    .backgroundColor(Color.White)
+    .border({ width: 1, color: borderColor })
+    .borderRadius(18)
+    .shadow({ radius: 10, color: '#10000000', offsetX: 0, offsetY: 4 })
+    .onClick(onTap)
   }
 
   build() {
     Scroll() {
       Column() {
-        AppHeader({ title: '数据采集', subtitle: '按模块查看已采集内容' })
+        AppHeader({ title: '你的足迹', icon: $r('app.media.header_footprint') })
 
         Scroll() {
           Row() {
@@ -489,58 +526,20 @@ export struct CollectionPage {
           this.GroupPagination()
         }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
 
-        Column() {
-          Row() {
-            Text('消费偏好').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#151A28').layoutWeight(1)
-            Text('近30天').fontSize(13).fontColor('#7F8592')
-          }.width('100%')
-          Row() {
-            Stack() {
-              Progress({ value: 72, total: 100, type: ProgressType.Ring }).width(112).height(112).color('#8066FF').backgroundColor('#EDF0F8')
-              Column() {
-                Text('主要品类').fontSize(12).fontColor('#4C5260')
-                Text('分布').fontSize(12).fontColor('#4C5260').margin({ top: 3 })
-              }
-            }.width(120).height(132)
-            Column() {
-              this.PreferenceLine('#8066FF', '数码家电', '42%', '78%')
-              this.PreferenceLine('#5B8DFF', '食品饮料', '28%', '60%')
-              this.PreferenceLine('#FFB14B', '服饰鞋包', '18%', '42%')
-              this.PreferenceLine('#42C995', '美妆个护', '12%', '28%')
-            }.layoutWeight(1).margin({ left: 12 })
-          }.width('100%').margin({ top: 16 })
-          Row() {
-            Text('AI').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#8066FF')
-            Text('你在数码和食品品类的消费较多').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#6D62F5').layoutWeight(1).margin({ left: 10 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text('详情').fontSize(12).fontColor('#9AA0AA')
-          }.width('100%').height(46).padding({ left: 16, right: 12 }).backgroundColor('#F2EEFF').borderRadius(12)
-        }.width('86%').padding(20).backgroundColor('#F9FBFF').borderRadius(16).margin({ top: COLLECTION_SECTION_GAP })
-
         this.WechatAutoSummaryCard()
 
-        Column() {
-          Text('+  新增采集源').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)
-          Text('连接更多平台，采集更多数据').fontSize(12).fontColor('#E8E2FF').margin({ top: 4 })
+        Row({ space: 12 }) {
+          this.CollectionActionCard('＋', '新增采集源', '连接更多平台与数据源',
+            '#725CFF', '#F1EEFF', '#E5DEFF', () => {
+              this.onOpenDataCollectionSettings();
+            })
+          this.CollectionActionCard('图', '图库分析', '相册、截图 OCR 与分类整理',
+            '#3F7FEF', '#EDF4FF', '#DCE9FF', () => {
+              router.pushUrl({ url: 'pages/gallery/GalleryPage' });
+            })
         }
-        .justifyContent(FlexAlign.Center)
         .width('86%')
-        .height(72)
-        .backgroundColor('#725CFF')
-        .borderRadius(18)
         .margin({ top: COLLECTION_SECTION_GAP })
-        .onClick(() => { this.onOpenDataCollectionSettings(); })
-
-        Column() {
-          Text('图库分析').fontSize(17).fontWeight(FontWeight.Bold).fontColor(Color.White)
-          Text('采集相册、截图和文档图片，进行 OCR 与分类整理').fontSize(12).fontColor('#E9F7FF').margin({ top: 4 })
-        }
-        .justifyContent(FlexAlign.Center)
-        .width('86%')
-        .height(72)
-        .backgroundColor('#4B8BFF')
-        .borderRadius(18)
-        .margin({ top: COLLECTION_SECTION_GAP })
-        .onClick(() => { router.pushUrl({ url: 'pages/gallery/GalleryPage' }); })
         Blank().height(110)
       }.width('100%')
     }.width('100%').height('100%').backgroundColor('#F4F8FF')

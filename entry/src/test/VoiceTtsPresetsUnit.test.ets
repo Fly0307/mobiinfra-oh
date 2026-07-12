@@ -55,8 +55,8 @@ export default function voiceTtsPresetsUnitTest() {
     it('keepsDefaultTtsEndpointAndRolePresetAligned', 0, () => {
       let dataRole = voiceTtsRolePresetById('data_home');
 
-      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl).assertEqual('https://token-plan-cn.xiaomimimo.com/v1');
-      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey).assertEqual('');
+      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl).assertEqual('https://api.xiaomimimo.com/v1');
+      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey.length > 0).assertTrue();
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsModel).assertEqual('mimo-v2.5-tts');
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsRolePreset).assertEqual(dataRole.id);
       expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsVoice).assertEqual(dataRole.voice);

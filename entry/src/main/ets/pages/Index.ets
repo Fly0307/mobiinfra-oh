@@ -4848,6 +4848,7 @@ struct Index {
           return await this.runMobileGuiTaskForChatSession(chatSessionId, request);
         },
         enableThinking: enableThinking,
+        enableTools: !pcServerChatMode,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);

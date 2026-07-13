@@ -28,6 +28,7 @@ export interface ChatReactAgentRunOptions {
   confirmMobileGuiTask?: MobileGuiTaskConfirmCallback;
   runMobileGuiTask?: MobileGuiTaskRunCallback;
   enableThinking?: boolean;
+  enableTools?: boolean;
   onTrace?: ChatReactTraceHandler;
   onContentDelta?: ChatReactContentDeltaHandler;
 }
@@ -85,14 +86,15 @@ export class ChatReactAgent {
     options: ChatReactAgentRunOptions = {}): Promise<ChatReactAgentResult> {
     let maxIterations = this.normalizeMaxIterations(options.maxIterations);
     let workingMessages = messages.slice();
-    let tools = this.registry.getOpenAiTools();
+    let toolsEnabled = options.enableTools !== false;
+    let tools = toolsEnabled ? this.registry.getOpenAiTools() : [];
     let toolCallCount = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
       let completionOptions = this.buildCompletionOptions(workingMessages, config, tools,
         options.enableThinking === true);
       let result = await this.requestCompletion(completionOptions, options);
-      if (result.toolCalls.length === 0) {
+      if (!toolsEnabled || result.toolCalls.length === 0) {
         let finalContent = result.content.trim();
         return {
           content: finalContent.length > 0 ? finalContent : CHAT_REACT_EMPTY_CONTENT_MESSAGE,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { ChatReactAgent, ChatReactAgentRunOptions } from '../main/ets/utils/ChatReactAgent';
+import { CHAT_REACT_EMPTY_CONTENT_MESSAGE, ChatReactAgent, ChatReactAgentRunOptions } from '../main/ets/utils/ChatReactAgent';
 import {
   ChatTool,
   ChatToolExecutionContext,
@@ -330,6 +330,22 @@ export default function chatReactAgentUnitTest() {
       expect(client.callMessages[1][2].tool_call_id).assertEqual('call-1');
       expect(traces.length).assertEqual(1);
       expect(traces[0].indexOf('lookup_note') >= 0).assertTrue();
+    });
+
+    it('doesNotSendOrExecuteToolsWhenDisabled', 0, async () => {
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-1', 'lookup_note', '{"query":"咖啡"}')])
+      ]);
+      let registry = new ChatToolRegistry();
+      registry.registerTool(fakeLookupTool('{"ok":true,"text":"咖啡记录"}'));
+      let agent = new ChatReactAgent(client, registry);
+
+      let result = await agent.run([userMessage('查一下咖啡')], testConfig(), { enableTools: false });
+
+      expect(client.callToolCounts.length).assertEqual(1);
+      expect(client.callToolCounts[0]).assertEqual(0);
+      expect(result.toolCallCount).assertEqual(0);
+      expect(result.content).assertEqual(CHAT_REACT_EMPTY_CONTENT_MESSAGE);
     });
 
     it('passesMobileGuiCallbacksIntoToolExecutionContext', 0, async () => {

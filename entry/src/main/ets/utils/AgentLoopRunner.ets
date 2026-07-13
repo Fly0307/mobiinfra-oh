@@ -5,6 +5,7 @@ import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
+import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
 import { AgentLoopNativeApi } from 'libentry.so';
@@ -295,14 +296,20 @@ export class AgentLoopRunner {
         let height = shot.height || 0;
         let historyText = localHistory.length > 0 ? localHistory.join('  ') : '(No history)';
         let variable = variableTemplate.replace('{history}', historyText);
-        let response = mode === 'local' ?
-          await this.localAgentStep(variable, imageBase64, width, height) :
-          (useCloudWithLocalPrompt ?
-            await this.pcAgentStep(prefix, variable, imageBase64) :
-            await this.cloudAgentStep(imageBase64));
-        await this.sleep(300);
-
-        let parsed = AgentActionParser.parse(response, true);
+        let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+          let candidate = mode === 'local' ?
+            await this.localAgentStep(variable, imageBase64, width, height) :
+            await this.cloudAgentStep(imageBase64);
+          await this.sleep(300);
+          return candidate;
+        }, (info: AgentActionParseRetryInfo): void => {
+          this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+            String(info.maxRetries) + ': ' + info.errorMessage);
+          AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
+            ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': JSON解析失败，同屏重试 ' +
+            String(info.retryNumber) + '/' + String(info.maxRetries));
+        });
+        let response = parsed.raw;
         if (parsed.action === 'error') {
           throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
         }
@@ -370,11 +377,20 @@ export class AgentLoopRunner {
       let prompt = template.replace('{task}', task).replace('<task>', task)
         .replace('{history}', historyText).replace('<history>', historyText)
         .replace('{history_str}', historyText);
-      let response = mode === 'local' ?
-        await this.runLocalAction(prompt, imageBase64, width, height, 'full-step-' + (i + 1)) :
-        await this.runCloudDeciderPrompt(prompt, imageBase64);
-      await this.sleep(300);
-      let parsed = AgentActionParser.parse(response, true);
+      let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+        let candidate = mode === 'local' ?
+          await this.runLocalAction(prompt, imageBase64, width, height, 'full-step-' + (i + 1)) :
+          await this.runCloudDeciderPrompt(prompt, imageBase64);
+        await this.sleep(300);
+        return candidate;
+      }, (info: AgentActionParseRetryInfo): void => {
+        this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+          String(info.maxRetries) + ': ' + info.errorMessage);
+        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
+          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': JSON解析失败，同屏重试 ' +
+          String(info.retryNumber) + '/' + String(info.maxRetries));
+      });
+      let response = parsed.raw;
       if (AgentActionParser.isTerminal(parsed.action)) {
         break;
       }
@@ -389,6 +405,10 @@ export class AgentLoopRunner {
 
   private async executeParsedAction(parsed: ParsedAgentAction, width: number, height: number): Promise<HdcBridgeResponse> {
     this.checkCancellation();
+    let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsed, width, height);
+    if (swipeFallbackDiagnostic.length > 0) {
+      this.log(this.mode, '>> [Agent] Swipe fallback: ' + swipeFallbackDiagnostic);
+    }
     let payload = AgentActionParser.buildHdcActionPayload(parsed, width, height);
     this.log(this.mode, '>> [Agent] HDC action payload:\n' + ArkJSON.stringify(payload));
     return await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);

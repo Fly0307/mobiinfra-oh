@@ -24,8 +24,15 @@ import {
   DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS,
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
+  GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
+import {
+  hiddenDefaultSettingEditorValue,
+  hiddenDefaultSettingPlaceholder,
+  migrateDefaultSettingValue
+} from '../../utils/DefaultSettingVisibility';
 import { showToastSafely } from '../../utils/PromptSafe';
 import {
   MIMO_CHINESE_VOICE_PRESETS,
@@ -202,8 +209,25 @@ export struct SettingsCenterPage {
   onUpdateConfigBackendType: (target: string) => void = (target: string) => {};
 
   aboutToAppear(): void {
+    this.migrateGalleryDefaultValues();
     this.restoreMaskedDefaultSecrets();
     this.upgradeLegacyVoiceTtsBaseUrl();
+  }
+
+  private migrateGalleryDefaultValues(): void {
+    this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
+      DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
+    this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
+      DEFAULT_GALLERY_AMAP_WEB_KEY, [''], GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT);
+  }
+
+  private migrateGalleryDefaultValue(currentValue: string, configuredDefault: string, legacyDefaults: string[],
+    snapshotKey: string): string {
+    let storedSnapshot = AppStorage.get(snapshotKey) as string;
+    let lastAppliedDefault = storedSnapshot === undefined ? '' : storedSnapshot;
+    let nextValue = migrateDefaultSettingValue(currentValue, configuredDefault, legacyDefaults, lastAppliedDefault);
+    AppStorage.setOrCreate(snapshotKey, configuredDefault);
+    return nextValue;
   }
 
   private restoreMaskedDefaultSecrets(): void {
@@ -764,7 +788,7 @@ export struct SettingsCenterPage {
 
   @Builder SettingsSectionList() {
     Column() {
-      AppHeader({ title: '设置中心', subtitle: '服务、采集、模型、任务与存储' })
+      AppHeader({ title: '设置中心', icon: $r('app.media.header_settings') })
       ForEach(SETTINGS_SECTION_ITEMS, (item: SettingsSectionItem) => {
         this.SettingsListItem(item)
       }, (item: SettingsSectionItem) => String(item.id))
@@ -850,8 +874,9 @@ export struct SettingsCenterPage {
   @Builder AvatarImageServiceGroup() {
     SettingInput({
       label: '数字分身图片服务',
-      value: this.avatarImageBaseUrl,
-      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl,
+      value: hiddenDefaultSettingEditorValue(this.avatarImageBaseUrl, DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl),
+      placeholder: hiddenDefaultSettingPlaceholder(this.avatarImageBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.avatarImageBaseUrl, '输入图片服务 URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.avatarImageBaseUrl = value; }
     })
@@ -860,6 +885,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: '数字分身图片 API Key',
       value: this.avatarImageApiKey,
+      defaultValue: DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey,
       placeholder: '图片服务密钥',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.avatarImageApiKey = value; }
@@ -928,8 +954,9 @@ export struct SettingsCenterPage {
   @Builder GalleryAnalysisGroup() {
     SettingInput({
       label: '图库 API Base URL',
-      value: this.galleryApiBaseUrl,
-      placeholder: DEFAULT_GALLERY_API_BASE_URL,
+      value: hiddenDefaultSettingEditorValue(this.galleryApiBaseUrl, DEFAULT_GALLERY_API_BASE_URL),
+      placeholder: hiddenDefaultSettingPlaceholder(this.galleryApiBaseUrl, DEFAULT_GALLERY_API_BASE_URL,
+        '输入图库 API Base URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryApiBaseUrl = value; }
     })
@@ -938,6 +965,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: '图库 API Key',
       value: this.galleryApiKey,
+      defaultValue: DEFAULT_GALLERY_API_KEY,
       placeholder: '图库分析服务密钥',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryApiKey = value; }
@@ -989,8 +1017,9 @@ export struct SettingsCenterPage {
       (value: boolean) => { this.galleryEmbeddingMode = value ? 'remote' : 'huawei_local'; })
     SettingInput({
       label: 'Embedding Base URL',
-      value: this.galleryEmbeddingBaseUrl,
-      placeholder: DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+      value: hiddenDefaultSettingEditorValue(this.galleryEmbeddingBaseUrl, DEFAULT_GALLERY_EMBEDDING_BASE_URL),
+      placeholder: hiddenDefaultSettingPlaceholder(this.galleryEmbeddingBaseUrl, DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+        '输入 Embedding Base URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.galleryEmbeddingBaseUrl = value; }
     })
@@ -999,6 +1028,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: 'Embedding API Key',
       value: this.galleryEmbeddingApiKey,
+      defaultValue: DEFAULT_GALLERY_EMBEDDING_API_KEY,
       placeholder: 'Embedding 服务密钥',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryEmbeddingApiKey = value; }
@@ -1025,6 +1055,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: '高德 Web 服务 Key',
       value: this.galleryAmapWebKey,
+      defaultValue: DEFAULT_GALLERY_AMAP_WEB_KEY,
       placeholder: '用于拍摄位置逆地理编码',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.galleryAmapWebKey = value; }
@@ -1084,8 +1115,9 @@ export struct SettingsCenterPage {
   @Builder CloudPlannerDeciderGroup() {
     SettingInput({
       label: 'Planner 服务',
-      value: this.cloudPlannerBaseUrl,
-      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl,
+      value: hiddenDefaultSettingEditorValue(this.cloudPlannerBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
+      placeholder: hiddenDefaultSettingPlaceholder(this.cloudPlannerBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl, '输入 Planner 服务 URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudPlannerBaseUrl = value; }
     })
@@ -1102,14 +1134,16 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: 'Planner API Key',
       value: this.cloudPlannerApiKey,
+      defaultValue: DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey,
       placeholder: 'Planner 服务密钥',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.cloudPlannerApiKey = value; }
     })
     SettingInput({
       label: 'Decider 服务',
-      value: this.cloudDeciderBaseUrl,
-      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl,
+      value: hiddenDefaultSettingEditorValue(this.cloudDeciderBaseUrl, DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
+      placeholder: hiddenDefaultSettingPlaceholder(this.cloudDeciderBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl, '输入 Decider 服务 URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.cloudDeciderBaseUrl = value; }
     })
@@ -1118,6 +1152,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: 'Decider API Key',
       value: this.cloudDeciderApiKey,
+      defaultValue: DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey,
       placeholder: 'Decider 服务密钥',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.cloudDeciderApiKey = value; }
@@ -1147,8 +1182,9 @@ export struct SettingsCenterPage {
   @Builder VoiceTtsServiceGroup() {
     SettingInput({
       label: '语音合成服务',
-      value: this.voiceTtsBaseUrl,
-      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl,
+      value: hiddenDefaultSettingEditorValue(this.voiceTtsBaseUrl, DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl),
+      placeholder: hiddenDefaultSettingPlaceholder(this.voiceTtsBaseUrl,
+        DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl, '输入语音合成服务 URL'),
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.voiceTtsBaseUrl = value; }
     })
@@ -1157,6 +1193,7 @@ export struct SettingsCenterPage {
       activeSensitiveId: this.activeSensitiveInputId,
       label: '语音合成 API Key',
       value: this.voiceTtsApiKey,
+      defaultValue: DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey,
       placeholder: 'MiMO TTS 服务密钥，格式 tp-xxxxx',
       onActiveSensitiveChange: (value: string) => { this.setActiveSensitiveInput(value); },
       onValueChange: (value: string) => { this.voiceTtsApiKey = value; }
@@ -1551,8 +1588,8 @@ export struct SettingsCenterPage {
   }
 
   build() {
-    Column() {
-      if (isSettingsSectionSelected(this.selectedSectionId)) {
+    if (isSettingsSectionSelected(this.selectedSectionId)) {
+      Column() {
         this.SettingsDetailHeader()
         Scroll(this.detailScroller) {
           Column() {
@@ -1564,16 +1601,17 @@ export struct SettingsCenterPage {
         }
         .width('100%')
         .layoutWeight(1)
-      } else {
-        Scroll() {
-          this.SettingsSectionList()
-        }
-        .width('100%')
-        .layoutWeight(1)
       }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+    } else {
+      Scroll() {
+        this.SettingsSectionList()
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
   }
 }

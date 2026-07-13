@@ -8,6 +8,7 @@ import { WorkflowDateContext } from './WorkflowDateContext';
 import { WorkflowStorage } from './WorkflowStorage';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser } from './AgentActionParser';
+import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
 import {
   WorkflowCondition,
   WorkflowDefinition,
@@ -493,9 +494,9 @@ export class WorkflowRunner {
 
     returnedToApp = await this.returnToHostApp();
     if (returnedToApp) {
-      this.log('Workflow 收尾：已切回数据归家 App。');
+      this.log('Workflow 收尾：已切回 ClawMate App。');
     } else {
-      this.log('Workflow 收尾：切回数据归家 App 失败，请手动确认前台界面。');
+      this.log('Workflow 收尾：切回 ClawMate App 失败，请手动确认前台界面。');
     }
 
     if (status === 'success') {
@@ -964,15 +965,24 @@ export class WorkflowRunner {
       result.recentScreenshots = this.appendResultExtractionScreenshotWindow(result.recentScreenshots, shot,
         resultExtractionScreenshotCount);
       this.log('Decider 截图完成：' + width + 'x' + height);
-      let response = '';
-      try {
-        response = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64, this.cloudConfigProvider());
-      } catch (e) {
-        let err = e as Error;
-        throw new Error('Decider request failed: ' + (err.message || String(e)));
-      }
-      this.log('Decider response:\n' + response);
-      let parsedAction = AgentActionParser.parse(response);
+      let parsedAction = await AgentActionParseRetry.request(async (): Promise<string> => {
+        let candidate = '';
+        try {
+          candidate = await this.cloudClient.chatQwenDecider(deciderTask, history, imageBase64,
+            this.cloudConfigProvider());
+        } catch (e) {
+          let err = e as Error;
+          throw new Error('Decider request failed: ' + (err.message || String(e)));
+        }
+        this.log('Decider response:\n' + candidate);
+        return candidate;
+      }, (info: AgentActionParseRetryInfo): void => {
+        this.log('Decider JSON 解析失败，同屏重试 ' + String(info.retryNumber) + '/' +
+          String(info.maxRetries) + '：' + info.errorMessage);
+        AgentExecutionController.updateFloatText('Decider ' + (i + 1) + '/' + maxSteps +
+          ': JSON解析失败，同屏重试 ' + String(info.retryNumber) + '/' + String(info.maxRetries));
+      });
+      let response = parsedAction.raw;
       let parsed = parsedAction.data;
       let action = parsedAction.action;
       AgentExecutionController.updateFloatText(this.buildDeciderFloatText(parsed, i + 1, maxSteps));
@@ -984,6 +994,10 @@ export class WorkflowRunner {
         result.finalResponse = response;
         result.finalScreenshot = shot;
         break;
+      }
+      let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsedAction, width * 2, height * 2);
+      if (swipeFallbackDiagnostic.length > 0) {
+        this.log('Decider swipe fallback: ' + swipeFallbackDiagnostic);
       }
       let hdcPayload = AgentActionParser.buildHdcActionPayload(parsedAction, width * 2, height * 2);
       this.clearWorkflowScreenshotCache();

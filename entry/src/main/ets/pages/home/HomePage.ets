@@ -12,7 +12,7 @@ import { promptAction } from '@kit.ArkUI';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
 
-// “数据归家”首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
+// ClawMate 首页展示层：只做静态画像、推荐和进度概览，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
@@ -1182,8 +1182,8 @@ export struct HomePage {
       Scroll() {
         Column() {
           AppHeader({
-            title: '数据归家',
-            pcServerVisible: true
+            title: '你的智伴',
+            icon: $r('app.media.header_companion')
           })
 
         Column() {

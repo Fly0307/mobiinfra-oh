@@ -26,6 +26,21 @@ import {
   cloudPlannerApiKey
 } from '../main/ets/utils/CloudModelClient';
 import { buildCloudOutputLog } from '../main/ets/utils/CloudLogOutput';
+import {
+  hiddenDefaultSettingEditorValue,
+  hiddenDefaultSettingPlaceholder,
+  migrateDefaultSettingValue,
+  settingUsesDefaultValue
+} from '../main/ets/utils/DefaultSettingVisibility';
+import {
+  DEFAULT_GALLERY_AMAP_WEB_KEY,
+  DEFAULT_GALLERY_API_BASE_URL,
+  DEFAULT_GALLERY_API_KEY,
+  DEFAULT_GALLERY_EMBEDDING_API_KEY,
+  DEFAULT_GALLERY_EMBEDDING_BASE_URL,
+  DEFAULT_GALLERY_EMBEDDING_MODEL,
+  DEFAULT_GALLERY_MODEL
+} from '../main/ets/utils/gallery/GallerySettingsDefaults';
 
 export default function settingsCenterConfigUnitTest() {
   describe('settingsCenterConfigUnitTest', () => {
@@ -100,6 +115,26 @@ export default function settingsCenterConfigUnitTest() {
       expect(configuredEndpointValueOrDefault(' custom-model ', 'default-model')).assertEqual('custom-model');
     });
 
+    it('hidesDefaultEndpointValuesButKeepsCustomOverridesVisible', 0, () => {
+      expect(settingUsesDefaultValue('https://internal.example/v1', 'https://internal.example/v1')).assertTrue();
+      expect(settingUsesDefaultValue('', 'https://internal.example/v1')).assertTrue();
+      expect(settingUsesDefaultValue('https://custom.example/v1', 'https://internal.example/v1')).assertFalse();
+      expect(hiddenDefaultSettingEditorValue('https://internal.example/v1', 'https://internal.example/v1'))
+        .assertEqual('');
+      expect(hiddenDefaultSettingPlaceholder('https://internal.example/v1', 'https://internal.example/v1',
+        '输入 URL')).assertEqual('默认（输入新值以覆盖）');
+      expect(hiddenDefaultSettingEditorValue('https://custom.example/v1', 'https://internal.example/v1'))
+        .assertEqual('https://custom.example/v1');
+    });
+
+    it('migratesOldDefaultsWithoutOverwritingCustomValues', 0, () => {
+      expect(migrateDefaultSettingValue('', 'new-default-key', [''], '')).assertEqual('new-default-key');
+      expect(migrateDefaultSettingValue('old-default-key', 'new-default-key', [], 'old-default-key'))
+        .assertEqual('new-default-key');
+      expect(migrateDefaultSettingValue('custom-key', 'new-default-key', [''], 'old-default-key'))
+        .assertEqual('custom-key');
+    });
+
     it('resetsCloudOutputForFocusedPlannerTests', 0, () => {
       expect(buildCloudOutputLog('old log', '[now] 测试 Planner：http://127.0.0.1:9003', true, 60000))
         .assertEqual('[now] 测试 Planner：http://127.0.0.1:9003');
@@ -110,11 +145,21 @@ export default function settingsCenterConfigUnitTest() {
     it('exposesModelAndApiDefaultsForFreshInstall', 0, () => {
       expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl).assertEqual('http://123.60.91.241:9003');
       expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel).assertEqual('');
-      expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl).assertEqual('http://166.111.53.96:7003');
+      expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl).assertEqual('http://123.60.91.241:8080');
       expect(DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey).assertEqual('mobiagent-key');
       expect(DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey).assertEqual('mobiagent-key');
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageModel).assertEqual('doubao-seedream-4-5-251128');
+      expect(DEFAULT_ENDPOINT_CONFIG.avatarImageApiKey.length > 0).assertTrue();
       expect(DEFAULT_ENDPOINT_CONFIG.avatarImageResponseFormat).assertEqual('url');
+      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl).assertEqual('https://api.xiaomimimo.com/v1');
+      expect(DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey.length > 0).assertTrue();
+      expect(DEFAULT_GALLERY_API_BASE_URL).assertEqual('https://api.modelbest.cn/v1');
+      expect(DEFAULT_GALLERY_API_KEY.length > 0).assertTrue();
+      expect(DEFAULT_GALLERY_MODEL).assertEqual('MiniCPM-V-4.6-Instruct');
+      expect(DEFAULT_GALLERY_EMBEDDING_BASE_URL).assertEqual('https://api.siliconflow.cn/v1');
+      expect(DEFAULT_GALLERY_EMBEDDING_API_KEY.length > 0).assertTrue();
+      expect(DEFAULT_GALLERY_EMBEDDING_MODEL).assertEqual('BAAI/bge-m3');
+      expect(DEFAULT_GALLERY_AMAP_WEB_KEY.length > 0).assertTrue();
     });
 
     it('resolvesSeparatePlannerAndDeciderApiKeys', 0, () => {

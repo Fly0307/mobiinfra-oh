@@ -30,13 +30,14 @@ export interface FloatPanelManualMoveRect {
 }
 
 export function captureOverlayWindowTransition(hidden: boolean,
-  hasFloatWindow: boolean): CaptureOverlayWindowTransition {
+  hasFloatWindow: boolean, hasEdgeFlowWindow: boolean = false): CaptureOverlayWindowTransition {
   if (hidden) {
+    let hasOverlayWindow = hasFloatWindow || hasEdgeFlowWindow;
     return {
-      applied: hasFloatWindow,
+      applied: hasOverlayWindow,
       shouldCreateWindow: false,
       shouldDestroyWindow: false,
-      contentHidden: hasFloatWindow,
+      contentHidden: hasOverlayWindow,
       windowTouchable: false
     };
   }

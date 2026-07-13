@@ -231,15 +231,16 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
-  // 截图前隐藏 overlay 时不再销毁 floatWindow：只让 FloatWindow 页面停止渲染面板内容，
-  // 同时禁用窗口触摸。截图后恢复同一个窗口的内容和触摸能力，减少软键盘与页面避让区域抖动。
+  // 截图前隐藏 overlay 时不销毁窗口：FloatWindow 停止渲染面板内容并禁触，
+  // EdgeFlowWindow 同步移除 HDS 流光效果。截图后恢复原窗口，避免软键盘与页面避让区域抖动。
   private async handleCaptureOverlayVisibility(hidden: boolean): Promise<boolean> {
     if (!hidden && !AgentExecutionController.isExecutionActive()) {
       // 任务已结束时只清理渲染状态，不重新创建后台浮窗。
       AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
       return false;
     }
-    let transition = captureOverlayWindowTransition(hidden, this.floatWindow !== null);
+    let transition = captureOverlayWindowTransition(hidden, this.floatWindow !== null,
+      this.edgeFlowWindow !== null);
     if (!transition.applied) {
       return false;
     }
@@ -251,7 +252,8 @@ export default class EntryAbility extends UIAbility {
       return true;
     }
     if (!this.floatWindow) {
-      return false;
+      // 流光窗口可能先于小面板完成创建；此时隐藏状态仍已生效，截图可以继续。
+      return transition.applied;
     }
 
     try {

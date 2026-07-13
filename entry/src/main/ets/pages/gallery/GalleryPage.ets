@@ -34,8 +34,16 @@ import {
   DEFAULT_GALLERY_PARALLEL_FIELD_REQUESTS,
   DEFAULT_GALLERY_SKIP_OCR,
   DEFAULT_GALLERY_USE_OCR_KEYWORD_FILTER,
+  GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT,
+  GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT,
   registerGallerySettingsDefaults
 } from '../../utils/gallery/GallerySettingsDefaults';
+import {
+  hiddenDefaultSettingEditorValue,
+  hiddenDefaultSettingPlaceholder,
+  migrateDefaultSettingValue
+} from '../../utils/DefaultSettingVisibility';
+import { SensitiveSettingInput } from '../settings/SettingsCenterControls';
 import { GalleryStorage } from '../../utils/gallery/GalleryStorage';
 import { AppLogger } from '../../utils/AppLogger';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -77,6 +85,7 @@ struct GalleryPage {
   @State resultDisplayLimit: number = GALLERY_RESULT_PAGE_SIZE;
   @State lastRunText: string = '尚未开始';
   @State settingsOpen: boolean = false;
+  @State activeSensitiveInputId: string = '';
   @State manualAnalyzing: boolean = false;
   // 扫描进度展示使用这些运行态字段；它们可能先于 scan-session 落盘状态更新。
   @State autoScanStatus: string = 'idle';
@@ -143,6 +152,7 @@ struct GalleryPage {
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    this.migrateGalleryDefaultValues();
     this.ensureDefaultSettings();
     this.locationCacheRecords = GalleryStorage.loadLocationCache(this.filesDir);
     this.replaceResults(GalleryStorage.loadResults(this.filesDir));
@@ -177,6 +187,22 @@ struct GalleryPage {
     }
     this.galleryAmapWebKey = configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY);
     this.galleryImageScale = this.normalizeScale(this.galleryImageScale, DEFAULT_GALLERY_IMAGE_SCALE);
+  }
+
+  private migrateGalleryDefaultValues(): void {
+    this.galleryEmbeddingApiKey = this.migrateGalleryDefaultValue(this.galleryEmbeddingApiKey,
+      DEFAULT_GALLERY_EMBEDDING_API_KEY, [''], GALLERY_EMBEDDING_API_KEY_DEFAULT_SNAPSHOT);
+    this.galleryAmapWebKey = this.migrateGalleryDefaultValue(this.galleryAmapWebKey,
+      DEFAULT_GALLERY_AMAP_WEB_KEY, [''], GALLERY_AMAP_WEB_KEY_DEFAULT_SNAPSHOT);
+  }
+
+  private migrateGalleryDefaultValue(currentValue: string, configuredDefault: string, legacyDefaults: string[],
+    snapshotKey: string): string {
+    let storedSnapshot = AppStorage.get(snapshotKey) as string;
+    let lastAppliedDefault = storedSnapshot === undefined ? '' : storedSnapshot;
+    let nextValue = migrateDefaultSettingValue(currentValue, configuredDefault, legacyDefaults, lastAppliedDefault);
+    AppStorage.setOrCreate(snapshotKey, configuredDefault);
+    return nextValue;
   }
 
   private visibleCount(): string {
@@ -1421,10 +1447,14 @@ struct GalleryPage {
     this.galleryEmbeddingConcurrency = this.normalizeConcurrency(value, this.galleryEmbeddingConcurrency, maxValue);
   }
 
-  @Builder SettingInput(label: string, value: string, placeholder: string, fieldId: number) {
+  @Builder SettingInput(label: string, value: string, placeholder: string, fieldId: number,
+    defaultValue: string = '', hideDefaultValue: boolean = false) {
     Column() {
       Text(label).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#2F3645').width('100%')
-      TextInput({ placeholder: placeholder, text: value })
+      TextInput({
+        placeholder: hideDefaultValue ? hiddenDefaultSettingPlaceholder(value, defaultValue, placeholder) : placeholder,
+        text: hideDefaultValue ? hiddenDefaultSettingEditorValue(value, defaultValue) : value
+      })
         .width('100%')
         .height(42)
         .fontSize(12)
@@ -1479,7 +1509,10 @@ struct GalleryPage {
           .width('100%')
           .height('100%')
           .backgroundColor('#66000000')
-          .onClick(() => { this.settingsOpen = false; })
+          .onClick(() => {
+            this.activeSensitiveInputId = '';
+            this.settingsOpen = false;
+          })
 
         Column() {
           Row() {
@@ -1490,25 +1523,57 @@ struct GalleryPage {
             Text('关闭')
               .fontSize(13)
               .fontColor('#5B68FF')
-              .onClick(() => { this.settingsOpen = false; })
+              .onClick(() => {
+                this.activeSensitiveInputId = '';
+                this.settingsOpen = false;
+              })
           }.width('100%')
 
           Scroll() {
             Column() {
               ForEach([this.settingsRevision], (_revision: number) => {
                 Column() {
-                  this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, 'https://api.example.com/v1', 0)
-                  this.SettingInput('API Key', this.galleryApiKey, 'Bearer token 或服务密钥', 1)
+                  this.SettingInput('云端 API Base URL', this.galleryApiBaseUrl, '输入云端 API Base URL', 0,
+                    DEFAULT_GALLERY_API_BASE_URL, true)
+                  SensitiveSettingInput({
+                    sensitiveId: 'galleryPageApiKey',
+                    activeSensitiveId: this.activeSensitiveInputId,
+                    label: 'API Key',
+                    value: this.galleryApiKey,
+                    defaultValue: DEFAULT_GALLERY_API_KEY,
+                    placeholder: 'Bearer token 或服务密钥',
+                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
+                    onValueChange: (value: string) => { this.updateSetting(1, value); }
+                  })
                   this.SettingInput('大模型名称', this.galleryModel, 'MiniCPM-V-4.6-Instruct', 2)
                   this.SettingToggle('跳过本地 OCR', '设备不支持 CoreVision OCR 时开启，直接让大模型分析图片', this.gallerySkipOcr === 'true', 3)
                   this.SettingToggle('OCR 关键词预筛', '自动全库分析时先用 OCR 关键词过滤，手动选择图片不受影响', this.galleryUseOcrKeywordFilter === 'true', 9)
                   this.SettingToggle('字段级并发请求', '同一张图并发请求 title/category/summary/details/tags/importance，降低整包 JSON 解析失败概率', this.galleryParallelFieldRequests === 'true', 11)
-                  this.SettingInput('高德 Web 服务 Key', this.galleryAmapWebKey, '用于拍摄位置逆地理编码', 10)
+                  SensitiveSettingInput({
+                    sensitiveId: 'galleryPageAmapWebKey',
+                    activeSensitiveId: this.activeSensitiveInputId,
+                    label: '高德 Web 服务 Key',
+                    value: this.galleryAmapWebKey,
+                    defaultValue: DEFAULT_GALLERY_AMAP_WEB_KEY,
+                    placeholder: '用于拍摄位置逆地理编码',
+                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
+                    onValueChange: (value: string) => { this.updateSetting(10, value); }
+                  })
                   this.ConcurrencyInput('OCR 并发请求数', this.galleryOcrConcurrency, '范围 1-6，默认 3', 6, 0)
                   this.ConcurrencyInput('大模型并发请求数', this.galleryModelConcurrency, '范围 1-4，默认 2', 4, 1)
                   this.SettingToggle('使用云端 Embedding API', '关闭时使用华为端侧 Embedding；开启时使用 SiliconFlow / bge-m3', this.galleryEmbeddingMode === 'remote', 4)
-                  this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, 'https://api.siliconflow.cn/v1', 5)
-                  this.SettingInput('Embedding API Key', this.galleryEmbeddingApiKey, 'SiliconFlow 服务密钥', 6)
+                  this.SettingInput('Embedding Base URL', this.galleryEmbeddingBaseUrl, '输入 Embedding Base URL', 5,
+                    DEFAULT_GALLERY_EMBEDDING_BASE_URL, true)
+                  SensitiveSettingInput({
+                    sensitiveId: 'galleryPageEmbeddingApiKey',
+                    activeSensitiveId: this.activeSensitiveInputId,
+                    label: 'Embedding API Key',
+                    value: this.galleryEmbeddingApiKey,
+                    defaultValue: DEFAULT_GALLERY_EMBEDDING_API_KEY,
+                    placeholder: 'SiliconFlow 服务密钥',
+                    onActiveSensitiveChange: (value: string) => { this.activeSensitiveInputId = value; },
+                    onValueChange: (value: string) => { this.updateSetting(6, value); }
+                  })
                   this.SettingInput('Embedding 模型', this.galleryEmbeddingModel, 'BAAI/bge-m3', 7)
                   this.ConcurrencyInput('Embedding 并发请求数', this.galleryEmbeddingConcurrency, '范围 1-4，默认 2', 4, 2)
                   this.SettingInput('图片分析缩放比例', this.galleryImageScale, '0.10 - 1.00，默认 0.25', 8)
@@ -1554,6 +1619,7 @@ struct GalleryPage {
               .borderRadius(12)
               .margin({ left: 10 })
               .onClick(() => {
+                this.activeSensitiveInputId = '';
                 this.settingsOpen = false;
                 showToastSafely('图库采集设置已保存', 1200);
               })
@@ -1642,6 +1708,7 @@ struct GalleryPage {
           .borderRadius(10)
           .onClick(() => {
             if (configuredEndpointSecretOrDefault(this.galleryAmapWebKey, DEFAULT_GALLERY_AMAP_WEB_KEY).length === 0) {
+              this.activeSensitiveInputId = '';
               this.settingsOpen = true;
               return;
             }

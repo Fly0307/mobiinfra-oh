@@ -78,21 +78,21 @@ export const DEFAULT_ENDPOINT_CONFIG: EndpointDefaultConfig = {
   hdcServerUrl: 'http://192.168.137.1:9124',
   cloudPlannerBaseUrl: 'http://123.60.91.241:9003',
   cloudPlannerModel: '',
-  cloudDeciderBaseUrl: 'http://166.111.53.96:7003',
+  cloudDeciderBaseUrl: 'http://123.60.91.241:8080',
   cloudPlannerApiKey: 'mobiagent-key',
   cloudDeciderApiKey: 'mobiagent-key',
   cloudApiKey: 'mobiagent-key',
   cloudDeciderModel: '',
   agentRouterPort: 9126,
   avatarImageBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
-  avatarImageApiKey: '',
+  avatarImageApiKey: '366e8f5f-ab9c-414d-a896-ee48b3960f68',
   avatarImageModel: 'doubao-seedream-4-5-251128',
   avatarImageSize: '2K',
   avatarImageResponseFormat: 'url',
   avatarImageOutputFormat: 'jpeg',
   avatarImageWatermark: true,
-  voiceTtsBaseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
-  voiceTtsApiKey: '',
+  voiceTtsBaseUrl: 'https://api.xiaomimimo.com/v1',
+  voiceTtsApiKey: 'sk-cpqsokhs4onu7oagswcrbm9oo6ydd1dbpzybjp9gkyglc0nn',
   voiceTtsModel: 'mimo-v2.5-tts',
   voiceTtsVoice: '冰糖',
   voiceTtsStylePrompt: '用温和清晰的中文语气朗读，适合整理回顾信息。',
@@ -127,7 +127,8 @@ export const LEGACY_ENDPOINT_CONFIG: LegacyEndpointConfig = {
     'decider_model'
   ],
   voiceTtsBaseUrls: [
-    'https://api.xiaomimimo.com'
+    'https://api.xiaomimimo.com',
+    'https://token-plan-cn.xiaomimimo.com/v1'
   ]
 };
 

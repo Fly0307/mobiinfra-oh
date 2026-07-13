@@ -39,6 +39,8 @@ interface ClickInputActionPayload {
 interface InputActionPayload {
   action: string;
   text: string;
+  x?: number;
+  y?: number;
   target_element?: string;
 }
 
@@ -106,6 +108,9 @@ export class AgentActionParser {
   static parse(raw: string, failOnParseError: boolean = true): ParsedAgentAction {
     let data = AgentActionParser.extractJsonMap(raw, failOnParseError);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
+    if (failOnParseError && action.length === 0) {
+      throw new Error('Agent JSON parse failed: response missing action');
+    }
     let paramsValue = data['parameters'];
     if (paramsValue === undefined || paramsValue === null) {
       paramsValue = data['coordinates'];
@@ -172,6 +177,11 @@ export class AgentActionParser {
         action: 'input',
         text: AgentActionParser.getMapString(params, 'text')
       };
+      if (params['coords'] !== undefined || params['bbox'] !== undefined) {
+        let point = AgentActionParser.resolveClickPoint(params, width, height);
+        payload.x = point.x;
+        payload.y = point.y;
+      }
       let targetElement = AgentActionParser.getTargetElement(parsed);
       if (targetElement.length > 0) {
         payload.target_element = targetElement;
@@ -182,25 +192,29 @@ export class AgentActionParser {
     if (action === 'swipe') {
       let startCoords = AgentActionParser.getNumberArray(params, 'start_coords');
       let endCoords = AgentActionParser.getNumberArray(params, 'end_coords');
+      let explicitDirection = AgentActionParser.getMapString(params, 'direction');
+      let direction = explicitDirection.length > 0 ? explicitDirection : 'UP';
       if (startCoords.length >= 2 && endCoords.length >= 2) {
         let start = AgentActionParser.convertNormalizedPoint(startCoords[0], startCoords[1], width, height);
         let end = AgentActionParser.convertNormalizedPoint(endCoords[0], endCoords[1], width, height);
-        let payload: SwipeWithCoordsActionPayload = {
-          action: 'swipe_with_coords',
-          start_x: start.x,
-          start_y: start.y,
-          end_x: end.x,
-          end_y: end.y
-        };
-        let targetElement = AgentActionParser.getTargetElement(parsed);
-        if (targetElement.length > 0) {
-          payload.target_element = targetElement;
+        if (AgentActionParser.shouldUseExplicitSwipeCoords(start, end, explicitDirection, width, height)) {
+          let payload: SwipeWithCoordsActionPayload = {
+            action: 'swipe_with_coords',
+            start_x: start.x,
+            start_y: start.y,
+            end_x: end.x,
+            end_y: end.y
+          };
+          let targetElement = AgentActionParser.getTargetElement(parsed);
+          if (targetElement.length > 0) {
+            payload.target_element = targetElement;
+          }
+          return payload as Object as WorkflowJsonMap;
         }
-        return payload as Object as WorkflowJsonMap;
       }
       let payload: SwipeActionPayload = {
         action: 'swipe',
-        direction: AgentActionParser.getMapString(params, 'direction', 'UP'),
+        direction: direction,
         width: width,
         height: height
       };
@@ -251,6 +265,29 @@ export class AgentActionParser {
     }
 
     throw new Error('Unknown action: ' + action);
+  }
+
+  static getSwipeFallbackDiagnostic(parsed: ParsedAgentAction, width: number, height: number): string {
+    if (parsed.action !== 'swipe') {
+      return '';
+    }
+    let params = parsed.parameters;
+    let direction = AgentActionParser.getMapString(params, 'direction');
+    let startCoords = AgentActionParser.getNumberArray(params, 'start_coords');
+    let endCoords = AgentActionParser.getNumberArray(params, 'end_coords');
+    if (direction.length === 0 || startCoords.length < 2 || endCoords.length < 2) {
+      return '';
+    }
+    let start = AgentActionParser.convertNormalizedPoint(startCoords[0], startCoords[1], width, height);
+    let end = AgentActionParser.convertNormalizedPoint(endCoords[0], endCoords[1], width, height);
+    let reason = AgentActionParser.explicitSwipeRejectionReason(start, end, direction, width, height);
+    if (reason.length === 0) {
+      return '';
+    }
+    return 'explicit swipe coords rejected: direction=' + direction.toUpperCase() +
+      ', start=[' + String(start.x) + ',' + String(start.y) + ']' +
+      ', end=[' + String(end.x) + ',' + String(end.y) + ']' +
+      ', reason=' + reason + '; using direction-based swipe';
   }
 
   static getMapString(map: WorkflowJsonMap, key: string, fallback: string = ''): string {
@@ -331,6 +368,52 @@ export class AgentActionParser {
     return point;
   }
 
+  private static shouldUseExplicitSwipeCoords(start: Point, end: Point, direction: string, width: number,
+    height: number): boolean {
+    return AgentActionParser.explicitSwipeRejectionReason(start, end, direction, width, height).length === 0;
+  }
+
+  private static explicitSwipeRejectionReason(start: Point, end: Point, direction: string, width: number,
+    height: number): string {
+    let normalized = direction.toLowerCase();
+    if (normalized.length === 0) {
+      return '';
+    }
+    let dx = Math.abs(end.x - start.x);
+    let dy = Math.abs(end.y - start.y);
+    if (normalized === 'up' || normalized === 'down') {
+      if (dy < height * 0.12) {
+        return 'vertical distance too short';
+      }
+      if (dy < dx) {
+        return 'gesture is not primarily vertical';
+      }
+      if (start.y < height * 0.28 || start.y > height * 0.88) {
+        return 'start point is outside the safe vertical area';
+      }
+      if (normalized === 'down' ? end.y <= start.y : end.y >= start.y) {
+        return 'coordinates conflict with direction';
+      }
+      return '';
+    }
+    if (normalized === 'left' || normalized === 'right') {
+      if (dx < width * 0.12) {
+        return 'horizontal distance too short';
+      }
+      if (dx < dy) {
+        return 'gesture is not primarily horizontal';
+      }
+      if (start.x < width * 0.12 || start.x > width * 0.88) {
+        return 'start point is outside the safe horizontal area';
+      }
+      if (normalized === 'right' ? end.x <= start.x : end.x >= start.x) {
+        return 'coordinates conflict with direction';
+      }
+      return '';
+    }
+    return '';
+  }
+
   private static normalizedToAbsolute(value: number, size: number): number {
     let clamped = Math.min(value, 1000);
     return AgentActionParser.truncate(clamped * size / 1000);
@@ -352,6 +435,9 @@ export class AgentActionParser {
       return [];
     }
     let items = value as Object[];
+    if (items.length === 1 && Array.isArray(items[0])) {
+      return AgentActionParser.valueToNumberArray(items[0] as WorkflowJsonValue);
+    }
     let result: number[] = [];
     for (let i = 0; i < items.length; i++) {
       let parsed = Number(String(items[i]));

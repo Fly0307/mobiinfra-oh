@@ -24,6 +24,11 @@ import {
   SETTINGS_TITLE_COLOR,
   settingsActionColor
 } from './SettingsCenterTheme';
+import {
+  hiddenDefaultSettingEditorValue,
+  hiddenDefaultSettingPlaceholder,
+  settingUsesDefaultValue
+} from '../../utils/DefaultSettingVisibility';
 
 // 设置分组卡片负责统一分组标题、间距和卡片外观，业务内容通过 Builder 注入。
 @Component
@@ -134,6 +139,7 @@ export struct SensitiveSettingInput {
   @Prop activeSensitiveId: string = '';
   label: string = '';
   value: string = '';
+  defaultValue: string = '';
   placeholder: string = '';
   onValueChange: (value: string) => void = (value: string) => {};
   onActiveSensitiveChange: (value: string) => void = (value: string) => {};
@@ -141,6 +147,9 @@ export struct SensitiveSettingInput {
   @State private autoFocusEditor: boolean = false;
 
   private previewText(): string {
+    if (settingUsesDefaultValue(this.value, this.defaultValue)) {
+      return '默认';
+    }
     let maskedValue = maskSensitiveSettingValue(this.value);
     if (maskedValue.length > 0) {
       return maskedValue;
@@ -149,7 +158,7 @@ export struct SensitiveSettingInput {
   }
 
   private previewTextColor(): string {
-    return this.value.length > 0 ? SETTINGS_SECONDARY_TEXT_COLOR : '#A9B0BE';
+    return settingUsesDefaultValue(this.value, this.defaultValue) ? '#A9B0BE' : SETTINGS_SECONDARY_TEXT_COLOR;
   }
 
   private effectiveSensitiveId(): string {
@@ -208,14 +217,14 @@ export struct SensitiveSettingInput {
     if (isMaskedSensitiveSettingValue(this.value)) {
       return '';
     }
-    return this.value;
+    return hiddenDefaultSettingEditorValue(this.value, this.defaultValue);
   }
 
   private editorPlaceholder(): string {
     if (isMaskedSensitiveSettingValue(this.value)) {
       return '当前密钥已被遮罩，请重新输入';
     }
-    return this.placeholder;
+    return hiddenDefaultSettingPlaceholder(this.value, this.defaultValue, this.placeholder);
   }
 
   private handleEditorChange(value: string): void {

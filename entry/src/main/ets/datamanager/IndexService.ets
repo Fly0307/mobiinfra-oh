@@ -73,12 +73,6 @@ export interface IndexBuildResult {
   updatedAt: string;
 }
 
-interface TemporalSummary {
-  text: string;
-  input_hash: string;
-  generation: string;
-}
-
 type EventMap = Record<string, IndexedEvent>;
 type ObjectMap = Record<string, Object>;
 
@@ -178,6 +172,30 @@ type EntityDefinitionMap = Record<string, EntityDefinition>;
 interface EntityDocument {
   entities: EntityDefinitionMap;
   alias_postings: StringArrayMap;
+  mention_assignments?: StringMap;
+}
+
+interface EntityMentionCatalogEntry {
+  type: string;
+  name: string;
+  aliases: string[];
+  event_ids: string[];
+}
+
+type EntityMentionCatalogMap = Record<string, EntityMentionCatalogEntry>;
+type EntityMentionCatalogByType = Record<string, EntityMentionCatalogMap>;
+
+interface EntityBuildStats {
+  reusedMentionCount: number;
+  newMentionCount: number;
+  candidateCount: number;
+  llmCallCount: number;
+}
+
+interface EntityCandidateScore {
+  key: string;
+  score: number;
+  eventCount: number;
 }
 
 interface ImageReferenceCandidate {
@@ -197,7 +215,6 @@ const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 interface TemporalDayNode {
   date: string;
   event_ids: string[];
-  summary: TemporalSummary;
 }
 
 interface TemporalWeekNode {
@@ -205,14 +222,12 @@ interface TemporalWeekNode {
   start_date: string;
   end_date: string;
   event_ids: string[];
-  summary: TemporalSummary;
   days: TemporalDayNode[];
 }
 
 interface TemporalDocument {
   month: string;
   event_ids: string[];
-  summary: TemporalSummary;
   weeks: TemporalWeekNode[];
 }
 
@@ -379,12 +394,9 @@ export class IndexService {
     this.storage.ensureDir(this.storage.join(this.paths.indexesRoot, 'home-todo'));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'home-todo', 'index.json'), this.buildHomeTodoDocument(events));
     let previousEntity = this.storage.readJson<EntityDocument>(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), this.emptyEntityDocument());
-    let currentIds = Object.keys(events).sort();
-    let previousIds = Object.keys(previousEvents).sort();
-    let entityDocument = reuseAllowed && counters.enrichedEvents === 0 && this.sameStringArrays(currentIds, previousIds) &&
-      this.hasEntityIndexData(previousEntity) ? previousEntity : await this.buildEntityDocument(events, modelConfig);
+    let entityDocument = await this.buildEntityDocument(events, modelConfig, previousEntity, reuseAllowed && this.hasEntityIndexData(previousEntity));
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'entity', 'index.json'), entityDocument);
-    await this.writeTemporalDocuments(events, modelConfig, reuseAllowed);
+    this.writeTemporalDocuments(events);
     this.emitProgress(progress, '生成画像', '正在生成用户画像', 90, 100, 90);
     let profile = await this.buildProfileDocument(events, modelConfig, reuseAllowed, progress);
     dataManagerInfo(`Index profile built: eventCount=${profile.event_count}, claimCount=${profile.claim_count}`);
@@ -402,7 +414,8 @@ export class IndexService {
     };
     this.storage.writeJsonAtomic(this.storage.join(this.paths.indexesRoot, 'manifest.json'), manifest);
     dataManagerInfo(`Index build done: events=${Object.keys(events).length}, reused=${counters.reusedEvents}, enriched=${counters.enrichedEvents}, manifest=${this.storage.join(this.paths.indexesRoot, 'manifest.json')}`);
-    this.emitProgress(progress, '写入索引', '索引写入完成', 98, 100, 98);
+    // Keep the index handoff aligned with DataManagerFacade's collection grouping range.
+    this.emitProgress(progress, '写入索引', '索引写入完成', 96, 100, 96);
     return {
       sourceFiles: statePaths.length,
       eventCount: Object.keys(events).length,
@@ -1680,84 +1693,212 @@ export class IndexService {
     return document;
   }
 
-  private async buildEntityDocument(events: EventMap, modelConfig: DataManagerModelConfig): Promise<EntityDocument> {
-    let mentionsByType: Record<string, Record<string, EntityMention>> = {};
-    ENTITY_TYPE_KEYS.forEach((type: string) => mentionsByType[type] = new Object() as Record<string, EntityMention>);
+  private async buildEntityDocument(events: EventMap, modelConfig: DataManagerModelConfig,
+    previousDocument?: EntityDocument, incrementalAllowed?: boolean): Promise<EntityDocument> {
+    let catalog = this.buildEntityMentionCatalog(events);
+    if (incrementalAllowed && previousDocument) {
+      return await this.buildIncrementalEntityDocument(events, catalog, previousDocument, modelConfig);
+    }
+    return await this.buildFullEntityDocument(events, catalog, modelConfig);
+  }
+
+  private buildEntityMentionCatalog(events: EventMap): EntityMentionCatalogByType {
+    let mentionsByType = this.emptyEntityMentionCatalog();
     Object.keys(events).sort().forEach((eventId: string) => {
       let event = events[eventId];
       let mentions = normalizeEntityMentions(event.entity_mentions || []);
       event.entity_mentions = mentions;
       mentions.forEach((mention: EntityMention) => {
         let token = this.entityNameToken(mention.name);
-        if (token.length === 0) {
+        let mentionMap = mentionsByType[mention.type];
+        if (token.length === 0 || !mentionMap) {
           return;
         }
-        let existing = mentionsByType[mention.type][token];
+        let existing = mentionMap[token];
         if (!existing) {
-          mentionsByType[mention.type][token] = {
+          mentionMap[token] = {
             type: mention.type,
             name: mention.name,
-            aliases: stableUnique(mention.aliases || [])
+            aliases: stableUnique(mention.aliases || []),
+            event_ids: [eventId]
           };
         } else {
           existing.aliases = this.uniqueEntityNames(existing.aliases.concat(mention.aliases || []));
+          existing.event_ids = stableUnique(existing.event_ids.concat([eventId])).sort();
         }
       });
     });
+    return mentionsByType;
+  }
 
+  private async buildFullEntityDocument(events: EventMap, mentionsByType: EntityMentionCatalogByType,
+    modelConfig: DataManagerModelConfig): Promise<EntityDocument> {
     let assignments: StringMap = createStringMap();
     let entities: EntityDefinitionMap = {};
+    let stats = this.emptyEntityBuildStats();
     for (let entityType of ENTITY_TYPE_KEYS) {
       let mentionMap = mentionsByType[entityType];
-      let tokens = Object.keys(mentionMap);
+      let tokens = Object.keys(mentionMap).sort();
       if (tokens.length === 0) {
         continue;
       }
-      let sourceDisplay: StringMap = createStringMap();
-      tokens.forEach((token: string) => {
-        let mention = mentionMap[token];
-        [mention.name].concat(mention.aliases || []).forEach((name: string) => {
-          let nameToken = this.entityNameToken(name);
-          if (nameToken.length > 0 && sourceDisplay[nameToken] === undefined) {
-            sourceDisplay[nameToken] = normalizeEntityName(name);
-          }
-        });
-      });
+      stats.newMentionCount += tokens.length;
+      let promptMentions = tokens.map((token: string): EntityMention => this.catalogEntryToMention(mentionMap[token]));
+      let sourceDisplay = this.entitySourceDisplay(promptMentions);
 
-      let resolved = await this.modelClient.resolveEntities(entityType, tokens.map((token: string): EntityMention => mentionMap[token]), modelConfig);
+      let resolved: EntityMention[] = [];
+      if (this.isEntityModelEnabled(modelConfig)) {
+        stats.llmCallCount++;
+        resolved = await this.modelClient.resolveEntities(entityType, promptMentions, modelConfig);
+      }
       resolved.forEach((mention: EntityMention) => {
         let canonicalToken = this.entityNameToken(mention.name);
         if (sourceDisplay[canonicalToken] === undefined) {
           return;
         }
-        let coveredTokens: string[] = [canonicalToken];
-        (mention.aliases || []).forEach((alias: string) => {
-          let aliasToken = this.entityNameToken(alias);
-          if (sourceDisplay[aliasToken] !== undefined) {
-            coveredTokens.push(aliasToken);
-          }
-        });
-        coveredTokens = stableUnique(coveredTokens);
+        let coveredTokens = this.coveredEntityTokens(mention, sourceDisplay);
         let key = this.addEntityDefinition(entities, entityType, sourceDisplay[canonicalToken],
           coveredTokens.filter((token: string) => token !== canonicalToken).map((token: string) => sourceDisplay[token]));
-        coveredTokens.forEach((token: string) => assignments[entityType + '\n' + token] = key);
+        coveredTokens.forEach((token: string) => assignments[this.entityAssignmentKey(entityType, token)] = key);
       });
 
       tokens.forEach((token: string) => {
-        let assignmentKey = entityType + '\n' + token;
+        let assignmentKey = this.entityAssignmentKey(entityType, token);
         if (assignments[assignmentKey] === undefined) {
           assignments[assignmentKey] = this.addEntityDefinition(entities, entityType, mentionMap[token].name, []);
         }
       });
     }
+    let document = this.finalizeEntityDocument(events, entities, assignments);
+    dataManagerInfo(`Entity index built: mode=full, newMentionCount=${stats.newMentionCount}, reusedMentionCount=${stats.reusedMentionCount}, candidateCount=${stats.candidateCount}, llmCallCount=${stats.llmCallCount}`);
+    return document;
+  }
 
-    let aliasPostings: StringArrayMap = {};
+  private async buildIncrementalEntityDocument(events: EventMap, mentionsByType: EntityMentionCatalogByType,
+    previousDocument: EntityDocument, modelConfig: DataManagerModelConfig): Promise<EntityDocument> {
+    let entities = this.copyEntityDefinitions(previousDocument);
+    let previousAssignments = this.previousEntityAssignments(previousDocument, entities);
+    let assignments: StringMap = createStringMap();
+    let pendingByType = this.emptyEntityMentionCatalog();
+    let stats = this.emptyEntityBuildStats();
+
+    for (let entityType of ENTITY_TYPE_KEYS) {
+      let mentionMap = mentionsByType[entityType];
+      Object.keys(mentionMap).sort().forEach((token: string) => {
+        let entry = mentionMap[token];
+        let assignmentKey = this.entityAssignmentKey(entityType, token);
+        let reusedKey = previousAssignments[assignmentKey];
+        if (reusedKey !== undefined && entities[reusedKey]) {
+          assignments[assignmentKey] = reusedKey;
+          this.addEntityDefinitionAliases(entities, reusedKey, [entry.name].concat(entry.aliases || []));
+          stats.reusedMentionCount++;
+          return;
+        }
+        let exactKey = this.exactEntityKeyForMention(entry, previousAssignments, entities);
+        if (exactKey.length > 0) {
+          assignments[assignmentKey] = exactKey;
+          this.addEntityDefinitionAliases(entities, exactKey, [entry.name].concat(entry.aliases || []));
+          stats.reusedMentionCount++;
+          return;
+        }
+        pendingByType[entityType][token] = entry;
+      });
+    }
+
+    for (let entityType of ENTITY_TYPE_KEYS) {
+      let pendingMap = pendingByType[entityType];
+      let pendingTokens = Object.keys(pendingMap).sort();
+      stats.newMentionCount += pendingTokens.length;
+      if (pendingTokens.length > 0) {
+        await this.resolvePendingEntityMentions(entityType, pendingMap, entities, assignments, modelConfig, stats);
+      }
+    }
+
+    let document = this.finalizeEntityDocument(events, entities, assignments);
+    dataManagerInfo(`Entity index built: mode=incremental, newMentionCount=${stats.newMentionCount}, reusedMentionCount=${stats.reusedMentionCount}, candidateCount=${stats.candidateCount}, llmCallCount=${stats.llmCallCount}`);
+    return document;
+  }
+
+  private async resolvePendingEntityMentions(entityType: string, pendingMap: EntityMentionCatalogMap,
+    entities: EntityDefinitionMap, assignments: StringMap, modelConfig: DataManagerModelConfig,
+    stats: EntityBuildStats): Promise<void> {
+    let pendingTokens = Object.keys(pendingMap).sort();
+    let chunkSize = 60;
+    for (let offset = 0; offset < pendingTokens.length; offset += chunkSize) {
+      let chunkTokens = pendingTokens.slice(offset, Math.min(offset + chunkSize, pendingTokens.length));
+      let chunkEntries = chunkTokens.map((token: string): EntityMentionCatalogEntry => pendingMap[token]);
+      let candidateLimit = pendingTokens.length > chunkSize ? 20 : 30;
+      let candidateKeys = this.entityCandidateKeysForPending(entityType, chunkEntries, entities, candidateLimit);
+      stats.candidateCount += candidateKeys.length;
+      let promptMentions: EntityMention[] = chunkEntries.map((entry: EntityMentionCatalogEntry): EntityMention => this.catalogEntryToMention(entry));
+      candidateKeys.forEach((key: string) => {
+        let definition = entities[key];
+        if (definition) {
+          promptMentions.push(this.entityDefinitionPromptMention(definition));
+        }
+      });
+      let sourceDisplay = this.entitySourceDisplay(promptMentions);
+      let candidateAssignments = this.deriveEntityAssignmentsFromDefinitionKeys(entities, candidateKeys);
+      let pendingSet: BooleanMap = {};
+      chunkTokens.forEach((token: string) => pendingSet[this.entityAssignmentKey(entityType, token)] = true);
+
+      let resolved: EntityMention[] = [];
+      if (this.isEntityModelEnabled(modelConfig)) {
+        stats.llmCallCount++;
+        resolved = await this.modelClient.resolveEntities(entityType, promptMentions, modelConfig);
+      }
+      resolved.forEach((mention: EntityMention) => {
+        this.applyIncrementalResolvedEntity(entityType, mention, sourceDisplay, candidateAssignments,
+          pendingSet, entities, assignments);
+      });
+      chunkTokens.forEach((token: string) => {
+        let assignmentKey = this.entityAssignmentKey(entityType, token);
+        if (assignments[assignmentKey] === undefined) {
+          assignments[assignmentKey] = this.addEntityDefinition(entities, entityType, pendingMap[token].name, []);
+        }
+      });
+    }
+  }
+
+  private applyIncrementalResolvedEntity(entityType: string, mention: EntityMention, sourceDisplay: StringMap,
+    candidateAssignments: StringMap, pendingSet: BooleanMap, entities: EntityDefinitionMap, assignments: StringMap): void {
+    let coveredTokens = this.coveredEntityTokens(mention, sourceDisplay);
+    let pendingTokens: string[] = [];
+    let historicalKeys: string[] = [];
+    coveredTokens.forEach((token: string) => {
+      let assignmentKey = this.entityAssignmentKey(entityType, token);
+      if (pendingSet[assignmentKey]) {
+        pendingTokens.push(token);
+      }
+      let historicalKey = candidateAssignments[assignmentKey];
+      if (historicalKey !== undefined && entities[historicalKey]) {
+        historicalKeys.push(historicalKey);
+      }
+    });
+    pendingTokens = stableUnique(pendingTokens);
+    if (pendingTokens.length === 0) {
+      return;
+    }
+    historicalKeys = stableUnique(historicalKeys);
+    let targetKey = historicalKeys.length > 0 ? this.bestHistoricalEntityKey(historicalKeys, entities) : '';
+    if (targetKey.length === 0) {
+      let canonicalToken = this.pendingCanonicalToken(mention, pendingSet, sourceDisplay, pendingTokens);
+      targetKey = this.addEntityDefinition(entities, entityType, sourceDisplay[canonicalToken],
+        pendingTokens.filter((token: string) => token !== canonicalToken).map((token: string) => sourceDisplay[token]));
+    } else {
+      this.addEntityDefinitionAliases(entities, targetKey, pendingTokens.map((token: string) => sourceDisplay[token]));
+    }
+    pendingTokens.forEach((token: string) => assignments[this.entityAssignmentKey(entityType, token)] = targetKey);
+  }
+
+  private finalizeEntityDocument(events: EventMap, entities: EntityDefinitionMap, assignments: StringMap): EntityDocument {
+    Object.keys(entities).forEach((key: string) => entities[key].event_ids = []);
     Object.keys(events).sort().forEach((eventId: string) => {
       let event = events[eventId];
       let mentions = normalizeEntityMentions(event.entity_mentions || []);
       let displayKeys: string[] = [];
       mentions.forEach((mention: EntityMention) => {
-        let key = assignments[mention.type + '\n' + this.entityNameToken(mention.name)];
+        let key = assignments[this.entityAssignmentKey(mention.type, this.entityNameToken(mention.name))];
         let existing = key ? entities[key] : undefined;
         if (!existing) {
           return;
@@ -1767,12 +1908,284 @@ export class IndexService {
       });
       event.entities = stableUnique(displayKeys);
     });
-    Object.keys(entities).forEach((key: string) => {
-      let definition = entities[key];
-      definition.event_ids = stableUnique(definition.event_ids || []).sort();
-      if (definition.event_ids.length === 0) {
+    let nonEmptyEntities = this.nonEmptyEntityDefinitions(entities);
+    let document: EntityDocument = {
+      entities: nonEmptyEntities,
+      alias_postings: this.buildEntityAliasPostings(nonEmptyEntities),
+      mention_assignments: this.nonEmptyEntityAssignments(assignments, nonEmptyEntities)
+    };
+    return document;
+  }
+
+  private emptyEntityMentionCatalog(): EntityMentionCatalogByType {
+    let catalog = new Object() as EntityMentionCatalogByType;
+    ENTITY_TYPE_KEYS.forEach((type: string) => catalog[type] = new Object() as EntityMentionCatalogMap);
+    return catalog;
+  }
+
+  private emptyEntityBuildStats(): EntityBuildStats {
+    let stats: EntityBuildStats = {
+      reusedMentionCount: 0,
+      newMentionCount: 0,
+      candidateCount: 0,
+      llmCallCount: 0
+    };
+    return stats;
+  }
+
+  private isEntityModelEnabled(modelConfig: DataManagerModelConfig): boolean {
+    return modelConfig.enabled && modelConfig.baseUrl.trim().length > 0;
+  }
+
+  private catalogEntryToMention(entry: EntityMentionCatalogEntry): EntityMention {
+    let mention: EntityMention = {
+      type: entry.type,
+      name: entry.name,
+      aliases: (entry.aliases || []).slice()
+    };
+    return mention;
+  }
+
+  private entityDefinitionPromptMention(definition: EntityDefinition): EntityMention {
+    let mention: EntityMention = {
+      type: definition.type,
+      name: definition.name,
+      aliases: (definition.aliases || []).slice(0, 8)
+    };
+    return mention;
+  }
+
+  private entitySourceDisplay(mentions: EntityMention[]): StringMap {
+    let sourceDisplay: StringMap = createStringMap();
+    mentions.forEach((mention: EntityMention) => {
+      [mention.name].concat(mention.aliases || []).forEach((name: string) => {
+        let token = this.entityNameToken(name);
+        if (token.length > 0 && sourceDisplay[token] === undefined) {
+          sourceDisplay[token] = normalizeEntityName(name);
+        }
+      });
+    });
+    return sourceDisplay;
+  }
+
+  private coveredEntityTokens(mention: EntityMention, sourceDisplay: StringMap): string[] {
+    let tokens: string[] = [];
+    [mention.name].concat(mention.aliases || []).forEach((name: string) => {
+      let token = this.entityNameToken(name);
+      if (token.length > 0 && sourceDisplay[token] !== undefined) {
+        tokens.push(token);
+      }
+    });
+    return stableUnique(tokens);
+  }
+
+  private copyEntityDefinitions(document: EntityDocument): EntityDefinitionMap {
+    let result: EntityDefinitionMap = {};
+    let source = document.entities || {};
+    Object.keys(source).sort().forEach((key: string) => {
+      let definition = source[key];
+      let entityType = normalizeFreeText(definition.type).toLowerCase();
+      let name = normalizeEntityName(definition.name);
+      if (ENTITY_TYPE_KEYS.indexOf(entityType) < 0 || name.length === 0 || key.length === 0) {
         return;
       }
+      let copied: EntityDefinition = {
+        type: entityType,
+        name: name,
+        aliases: this.uniqueEntityNames(definition.aliases || []),
+        event_ids: stableUnique(definition.event_ids || []).sort()
+      };
+      result[key] = copied;
+    });
+    return result;
+  }
+
+  private previousEntityAssignments(document: EntityDocument, entities: EntityDefinitionMap): StringMap {
+    let result: StringMap = createStringMap();
+    let rawAssignments = document.mention_assignments;
+    if (rawAssignments && !Array.isArray(rawAssignments)) {
+      let currentAssignments: StringMap = rawAssignments;
+      Object.keys(currentAssignments).sort().forEach((assignmentKey: string) => {
+        let entityKey = currentAssignments[assignmentKey];
+        if (this.isValidEntityAssignmentKey(assignmentKey) && entityKey !== undefined && entities[entityKey]) {
+          result[assignmentKey] = entityKey;
+        }
+      });
+    }
+    let derived = this.deriveEntityAssignmentsFromDefinitions(entities);
+    Object.keys(derived).sort().forEach((assignmentKey: string) => {
+      if (result[assignmentKey] === undefined) {
+        result[assignmentKey] = derived[assignmentKey];
+      }
+    });
+    return result;
+  }
+
+  private deriveEntityAssignmentsFromDefinitions(definitions: EntityDefinitionMap): StringMap {
+    return this.deriveEntityAssignmentsFromDefinitionKeys(definitions, Object.keys(definitions).sort());
+  }
+
+  private deriveEntityAssignmentsFromDefinitionKeys(definitions: EntityDefinitionMap, keys: string[]): StringMap {
+    let assignments: StringMap = createStringMap();
+    let conflicts: BooleanMap = {};
+    keys.forEach((key: string) => {
+      let definition = definitions[key];
+      if (!definition) {
+        return;
+      }
+      this.entityDefinitionTokens(definition).forEach((token: string) => {
+        let assignmentKey = this.entityAssignmentKey(definition.type, token);
+        let existing = assignments[assignmentKey];
+        if (existing === undefined) {
+          assignments[assignmentKey] = key;
+        } else if (existing !== key) {
+          conflicts[assignmentKey] = true;
+        }
+      });
+    });
+    let filtered: StringMap = createStringMap();
+    Object.keys(assignments).sort().forEach((assignmentKey: string) => {
+      if (!conflicts[assignmentKey]) {
+        filtered[assignmentKey] = assignments[assignmentKey];
+      }
+    });
+    return filtered;
+  }
+
+  private exactEntityKeyForMention(entry: EntityMentionCatalogEntry, assignments: StringMap,
+    entities: EntityDefinitionMap): string {
+    let tokens = this.entityMentionTokens(entry);
+    for (let token of tokens) {
+      let key = assignments[this.entityAssignmentKey(entry.type, token)];
+      if (key !== undefined && entities[key]) {
+        return key;
+      }
+    }
+    return '';
+  }
+
+  private entityCandidateKeysForPending(entityType: string, entries: EntityMentionCatalogEntry[],
+    entities: EntityDefinitionMap, limit: number): string[] {
+    let pendingTokens: string[] = [];
+    entries.forEach((entry: EntityMentionCatalogEntry) => pendingTokens = stableUnique(pendingTokens.concat(this.entityMentionTokens(entry))));
+    let scores: Record<string, EntityCandidateScore> = {};
+    Object.keys(entities).sort().forEach((key: string) => {
+      let definition = entities[key];
+      if (!definition || definition.type !== entityType) {
+        return;
+      }
+      let bestScore = 0;
+      let definitionTokens = this.entityDefinitionTokens(definition);
+      pendingTokens.forEach((pendingToken: string) => {
+        definitionTokens.forEach((definitionToken: string) => {
+          bestScore = Math.max(bestScore, this.entityTokenRelationScore(pendingToken, definitionToken));
+        });
+      });
+      if (bestScore > 0) {
+        let score: EntityCandidateScore = {
+          key: key,
+          score: bestScore,
+          eventCount: (definition.event_ids || []).length
+        };
+        scores[key] = score;
+      }
+    });
+    return Object.keys(scores).sort((leftKey: string, rightKey: string): number => {
+      let left = scores[leftKey];
+      let right = scores[rightKey];
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+      if (left.eventCount !== right.eventCount) {
+        return right.eventCount - left.eventCount;
+      }
+      return left.key.localeCompare(right.key);
+    }).slice(0, limit);
+  }
+
+  private entityTokenRelationScore(left: string, right: string): number {
+    if (left.length === 0 || right.length === 0) {
+      return 0;
+    }
+    if (left === right) {
+      return 100;
+    }
+    if (left.length < 2 || right.length < 2) {
+      return 0;
+    }
+    if (left.startsWith(right) || right.startsWith(left)) {
+      return 70;
+    }
+    if (left.indexOf(right) >= 0 || right.indexOf(left) >= 0) {
+      return 50;
+    }
+    return 0;
+  }
+
+  private entityMentionTokens(entry: EntityMentionCatalogEntry): string[] {
+    let tokens: string[] = [];
+    [entry.name].concat(entry.aliases || []).forEach((name: string) => {
+      let token = this.entityNameToken(name);
+      if (token.length > 0) {
+        tokens.push(token);
+      }
+    });
+    return stableUnique(tokens);
+  }
+
+  private entityDefinitionTokens(definition: EntityDefinition): string[] {
+    let tokens: string[] = [];
+    [definition.name].concat(definition.aliases || []).forEach((name: string) => {
+      let token = this.entityNameToken(name);
+      if (token.length > 0) {
+        tokens.push(token);
+      }
+    });
+    return stableUnique(tokens);
+  }
+
+  private bestHistoricalEntityKey(keys: string[], entities: EntityDefinitionMap): string {
+    let sorted = keys.slice().sort((leftKey: string, rightKey: string): number => {
+      let left = entities[leftKey];
+      let right = entities[rightKey];
+      let leftCount = left ? (left.event_ids || []).length : 0;
+      let rightCount = right ? (right.event_ids || []).length : 0;
+      if (leftCount !== rightCount) {
+        return rightCount - leftCount;
+      }
+      return leftKey.localeCompare(rightKey);
+    });
+    return sorted.length > 0 ? sorted[0] : '';
+  }
+
+  private pendingCanonicalToken(mention: EntityMention, pendingSet: BooleanMap, sourceDisplay: StringMap,
+    pendingTokens: string[]): string {
+    let canonicalToken = this.entityNameToken(mention.name);
+    if (sourceDisplay[canonicalToken] !== undefined && pendingSet[this.entityAssignmentKey(mention.type, canonicalToken)]) {
+      return canonicalToken;
+    }
+    for (let alias of mention.aliases || []) {
+      let aliasToken = this.entityNameToken(alias);
+      if (sourceDisplay[aliasToken] !== undefined && pendingSet[this.entityAssignmentKey(mention.type, aliasToken)]) {
+        return aliasToken;
+      }
+    }
+    return pendingTokens[0];
+  }
+
+  private addEntityDefinitionAliases(definitions: EntityDefinitionMap, key: string, aliases: string[]): void {
+    let existing = definitions[key];
+    if (!existing) {
+      return;
+    }
+    existing.aliases = this.uniqueEntityNames((existing.aliases || []).concat(aliases))
+      .filter((alias: string) => this.entityNameToken(alias) !== this.entityNameToken(existing.name));
+  }
+
+  private buildEntityAliasPostings(entities: EntityDefinitionMap): StringArrayMap {
+    let aliasPostings: StringArrayMap = {};
+    Object.keys(entities).sort().forEach((key: string) => {
+      let definition = entities[key];
       [definition.name].concat(definition.aliases || []).forEach((name: string) => {
         let lookup = entityLookupKey(definition.type, name);
         if (!aliasPostings[lookup]) {
@@ -1782,11 +2195,27 @@ export class IndexService {
       });
     });
     Object.keys(aliasPostings).forEach((key: string) => aliasPostings[key] = stableUnique(aliasPostings[key]).sort());
-    let document: EntityDocument = {
-      entities: this.nonEmptyEntityDefinitions(entities),
-      alias_postings: aliasPostings
-    };
-    return document;
+    return aliasPostings;
+  }
+
+  private nonEmptyEntityAssignments(assignments: StringMap, entities: EntityDefinitionMap): StringMap {
+    let result: StringMap = createStringMap();
+    Object.keys(assignments).sort().forEach((assignmentKey: string) => {
+      let entityKey = assignments[assignmentKey];
+      if (this.isValidEntityAssignmentKey(assignmentKey) && entityKey !== undefined && entities[entityKey]) {
+        result[assignmentKey] = entityKey;
+      }
+    });
+    return result;
+  }
+
+  private entityAssignmentKey(entityType: string, token: string): string {
+    return entityType + '\n' + token;
+  }
+
+  private isValidEntityAssignmentKey(value: string): boolean {
+    let parts = value.split('\n');
+    return parts.length === 2 && ENTITY_TYPE_KEYS.indexOf(parts[0]) >= 0 && parts[1].length > 0;
   }
 
   private addEntityDefinition(definitions: EntityDefinitionMap, entityType: string, name: string, aliases: string[]): string {
@@ -1834,7 +2263,7 @@ export class IndexService {
     return normalizeLookupText(normalizeEntityName(value));
   }
 
-  private async writeTemporalDocuments(events: EventMap, modelConfig: DataManagerModelConfig, reuseAllowed: boolean): Promise<void> {
+  private writeTemporalDocuments(events: EventMap): void {
     let monthGroups: EventGroupMap = {};
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
@@ -1847,7 +2276,6 @@ export class IndexService {
       }
       monthGroups[month].push(event);
     });
-    let previousDocuments = reuseAllowed ? this.loadTemporalDocuments() : new Object() as TemporalDocumentMap;
     let desired: ObjectMap = {};
     for (let month of Object.keys(monthGroups).sort()) {
       let monthEvents = monthGroups[month].sort((left: IndexedEvent, right: IndexedEvent) => {
@@ -1863,28 +2291,12 @@ export class IndexService {
         }
         dayMap[event.event_date].push(event);
       });
-      let previousDocument = previousDocuments[month];
-      let previousDays: Record<string, TemporalDayNode> = {};
-      let previousWeeks: Record<string, TemporalWeekNode> = {};
-      if (previousDocument && Array.isArray(previousDocument.weeks)) {
-        previousDocument.weeks.forEach((week: TemporalWeekNode) => {
-          previousWeeks[week.week_id] = week;
-          (week.days || []).forEach((day: TemporalDayNode) => previousDays[day.date] = day);
-        });
-      }
       let dayNodes: TemporalDayNode[] = [];
       for (let day of Object.keys(dayMap).sort()) {
         let dayEvents = dayMap[day];
-        let dayInputHash = this.storage.sha256Text(dayEvents.map((event: IndexedEvent) => event.event_id + '\u001f' + event.summary + '\u001f' + event.normalized_fact).join('\u001e'));
         let dayNode: TemporalDayNode = {
           date: day,
-          event_ids: dayEvents.map((event: IndexedEvent) => event.event_id),
-          summary: await this.generateTemporalSummary('day',
-            dayEvents.map((event: IndexedEvent) => event.summary || event.normalized_fact),
-            dayEvents.length,
-            dayInputHash,
-            previousDays[day] ? previousDays[day].summary : undefined,
-            modelConfig)
+          event_ids: dayEvents.map((event: IndexedEvent) => event.event_id)
         };
         dayNodes.push(dayNode);
       }
@@ -1904,32 +2316,18 @@ export class IndexService {
         days.forEach((node: TemporalDayNode) => {
           eventIds = eventIds.concat(node.event_ids || []);
         });
-        let weekInputHash = this.storage.sha256Text(days.map((node: TemporalDayNode) => node.date + '\u001f' + node.summary.text + '\u001f' + (node.event_ids || []).join(',')).join('\u001e'));
         let weekNode: TemporalWeekNode = {
           week_id: week,
           start_date: this.weekStartDate(week, month),
           end_date: this.weekEndDate(week, month),
           event_ids: stableUnique(eventIds),
-          summary: await this.generateTemporalSummary('week',
-            days.map((node: TemporalDayNode) => node.summary.text),
-            eventIds.length,
-            weekInputHash,
-            previousWeeks[week] ? previousWeeks[week].summary : undefined,
-            modelConfig),
           days: days
         };
         weekNodes.push(weekNode);
       }
-      let monthInputHash = this.storage.sha256Text(weekNodes.map((node: TemporalWeekNode) => node.week_id + '\u001f' + node.summary.text + '\u001f' + (node.event_ids || []).join(',')).join('\u001e'));
       let temporalDocument: TemporalDocument = {
         month: month,
         event_ids: monthEvents.map((event: IndexedEvent) => event.event_id),
-        summary: await this.generateTemporalSummary('month',
-          weekNodes.map((node: TemporalWeekNode) => node.summary.text),
-          monthEvents.length,
-          monthInputHash,
-          previousDocument ? previousDocument.summary : undefined,
-          modelConfig),
         weeks: weekNodes
       };
       desired[month + '.json'] = temporalDocument as Object;
@@ -1951,31 +2349,14 @@ export class IndexService {
     return result;
   }
 
-  private async generateTemporalSummary(level: string, items: string[], eventCount: number, inputHash: string,
-    previous: TemporalSummary | undefined, modelConfig: DataManagerModelConfig): Promise<TemporalSummary> {
-    if (previous && previous.input_hash === inputHash && normalizeFreeText(previous.text).length > 0) {
-      return previous;
-    }
-    let modelText = await this.modelClient.generateSummary(level, items, eventCount, modelConfig);
-    if (modelText.length > 0) {
-      return {
-        text: modelText,
-        input_hash: inputHash,
-        generation: 'model'
-      };
-    }
-    return this.heuristicSummary(level, items, eventCount, inputHash, modelConfig.enabled ? 'heuristic_fallback' : 'heuristic');
-  }
-
   private async buildProfileDocument(events: EventMap, modelConfig: DataManagerModelConfig, reuseAllowed: boolean, progress?: DataManagerProgressCallback): Promise<ProfileState> {
     let byDomain: EventGroupMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => byDomain[domain] = []);
+    let profileDomains = this.profileDomainKeys();
+    profileDomains.forEach((domain: string) => byDomain[domain] = []);
     Object.keys(events).forEach((eventId: string) => {
       let event = events[eventId];
-      let domains = normalizeDomains(event.profile_domains || event.domains || []);
-      if (domains.length === 0) {
-        domains = ['other'];
-      }
+      let domains = normalizeDomains(event.profile_domains || event.domains || [])
+        .filter((domain: string): boolean => domain !== 'other');
       domains.forEach((domain: string) => {
         if (!byDomain[domain]) {
           byDomain[domain] = [];
@@ -1986,8 +2367,8 @@ export class IndexService {
     let previous = this.loadProfileState();
     let domainsState: ProfileDomainMap = {};
     let domainIndex = 0;
-    for (let domain of DOMAIN_KEYS) {
-      this.emitProgress(progress, '生成画像', `生成${displayDomainName(domain)}画像`, domainIndex, DOMAIN_KEYS.length, 90 + Math.round(domainIndex * 7 / Math.max(1, DOMAIN_KEYS.length)));
+    for (let domain of profileDomains) {
+      this.emitProgress(progress, '生成画像', `生成${displayDomainName(domain)}画像`, domainIndex, profileDomains.length, 90 + Math.round(domainIndex * 7 / Math.max(1, profileDomains.length)));
       let domainEvents = byDomain[domain] || [];
       domainEvents.sort((left: IndexedEvent, right: IndexedEvent) => {
         if (left.event_date !== right.event_date) {
@@ -1995,18 +2376,10 @@ export class IndexService {
         }
         return left.event_id.localeCompare(right.event_id);
       });
-      let previousClaims = previous.domains && previous.domains[domain] ? previous.domains[domain].claims : [];
       let eventIds = domainEvents.map((event: IndexedEvent) => event.event_id);
       let inputHash = this.profileDomainInputHash(domain, domainEvents, modelConfig);
-      let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
       let domainState: ProfileDomainState;
-      if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
-        domainState = this.copyProfileDomain(previousDomain);
-        domainState.event_ids = eventIds;
-        domainState.event_count = eventIds.length;
-        domainState.date_range = this.eventDateRange(domainEvents);
-        dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
-      } else if (domainEvents.length === 0) {
+      if (domainEvents.length === 0) {
         domainState = {
           domain: domain,
           display_name: DOMAIN_DISPLAY_NAMES[domain] || domain,
@@ -2020,9 +2393,19 @@ export class IndexService {
           generation: 'empty'
         };
       } else {
-        let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
-        let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
-        domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
+        let previousClaims = previous.domains && previous.domains[domain] ? previous.domains[domain].claims : [];
+        let previousDomain = previous.domains && previous.domains[domain] ? previous.domains[domain] : undefined;
+        if (reuseAllowed && previousDomain && previousDomain.input_hash === inputHash && isProfileDomainStateReusable(previousDomain, eventIds.length)) {
+          domainState = this.copyProfileDomain(previousDomain);
+          domainState.event_ids = eventIds;
+          domainState.event_count = eventIds.length;
+          domainState.date_range = this.eventDateRange(domainEvents);
+          dataManagerInfo(`Profile domain reused: domain=${domain}, events=${eventIds.length}, claims=${domainState.claims.length}`);
+        } else {
+          let payload: ProfileModelPayload = await this.modelClient.generateProfile(domain, domainEvents, previousClaims, modelConfig);
+          let claims = this.normalizeProfileClaims(payload.claims, domainEvents, domain);
+          domainState = buildProfileDomainStateFromPayload(domain, inputHash, eventIds, domainEvents.length, this.eventDateRange(domainEvents), payload, claims);
+        }
       }
       domainsState[domain] = domainState;
       domainIndex++;
@@ -2036,6 +2419,10 @@ export class IndexService {
     };
     profile.claim_count = this.profileClaimCount(profile);
     return profile;
+  }
+
+  private profileDomainKeys(): string[] {
+    return DOMAIN_KEYS.filter((domain: string): boolean => domain !== 'other');
   }
 
   private emitProgress(progress: DataManagerProgressCallback | undefined, stage: string, message: string, current: number, total: number, percent: number): void {
@@ -2188,7 +2575,7 @@ export class IndexService {
       `- 画像条目：${profile.claim_count} 条`,
       ''
     ];
-    DOMAIN_KEYS.forEach((domain: string) => {
+    this.profileDomainKeys().forEach((domain: string) => {
       let doc = profile.domains[domain];
       lines.push(`## ${displayDomainName(domain)}`, '');
       if (!doc) {
@@ -2275,17 +2662,6 @@ export class IndexService {
     return result;
   }
 
-  private heuristicSummary(level: string, items: string[], eventCount: number, inputHash: string, generation: string): TemporalSummary {
-    let prefix = level === 'day' ? '当天' : (level === 'week' ? '本周' : '本月');
-    let details = items.map((item: string) => summarizeText(item, 90)).filter((item: string) => item.length > 0).join('；');
-    let text = `${prefix}共${eventCount}条事件：${details.length > 0 ? details : '无事件'}`;
-    return {
-      text: summarizeText(text, 360),
-      input_hash: inputHash,
-      generation: generation
-    };
-  }
-
   private weekGroupKey(day: string): string {
     let time = dateToTime(day);
     if (time <= 0) {
@@ -2329,7 +2705,7 @@ export class IndexService {
 
   private profileClaimCount(profile: ProfileState): number {
     let count = 0;
-    DOMAIN_KEYS.forEach((domain: string) => {
+    this.profileDomainKeys().forEach((domain: string) => {
       let doc = profile.domains[domain];
       count += doc ? doc.claims.length : 0;
     });
@@ -2338,7 +2714,7 @@ export class IndexService {
 
   private emptyProfileState(): ProfileState {
     let domains: ProfileDomainMap = {};
-    DOMAIN_KEYS.forEach((domain: string) => {
+    this.profileDomainKeys().forEach((domain: string) => {
       let range: StringMap = createStringMap();
       range['start_date'] = '';
       range['end_date'] = '';
@@ -2438,9 +2814,11 @@ export class IndexService {
   private emptyEntityDocument(): EntityDocument {
     let entities: EntityDefinitionMap = {};
     let aliasPostings: StringArrayMap = {};
+    let mentionAssignments: StringMap = createStringMap();
     let document: EntityDocument = {
       entities: entities,
-      alias_postings: aliasPostings
+      alias_postings: aliasPostings,
+      mention_assignments: mentionAssignments
     };
     return document;
   }
@@ -2450,15 +2828,9 @@ export class IndexService {
   }
 
   private emptyTemporalDocument(): TemporalDocument {
-    let summary: TemporalSummary = {
-      text: '',
-      input_hash: '',
-      generation: ''
-    };
     return {
       month: '',
       event_ids: [],
-      summary: summary,
       weeks: []
     };
   }

@@ -17,6 +17,11 @@ export interface ChatTool {
   parameters: Object;
   strict?: boolean;
   execute: (argsText: string, context: ChatToolExecutionContext) => Promise<string>;
+  /**
+   * 判断工具结果是否代表本轮聊天必须终止的用户意图。终止后不再把结果交给模型重试，
+   * 适用于用户明确拒绝或取消具有真实设备副作用的操作。
+   */
+  terminalResultMessage?: (content: string) => string | null;
 }
 
 export interface ChatToolExecutionResult {
@@ -26,6 +31,8 @@ export interface ChatToolExecutionResult {
   content: string;
   traceLine: string;
   success: boolean;
+  terminal: boolean;
+  terminalMessage: string;
 }
 
 interface ChatToolArgumentValidation {
@@ -86,13 +93,17 @@ export class ChatToolRegistry {
     try {
       let rawContent = await tool.execute(normalized.normalizedArgs, context);
       let content = this.truncateResult(rawContent);
+      let terminalMessage = tool.terminalResultMessage === undefined ? null :
+        tool.terminalResultMessage(rawContent);
       return {
         toolName: toolName,
         toolCallId: toolCall.id,
         argumentsText: normalized.normalizedArgs,
         content: content,
         traceLine: this.buildTraceLine(toolName, normalized.normalizedArgs, rawContent),
-        success: true
+        success: true,
+        terminal: terminalMessage !== null,
+        terminalMessage: terminalMessage === null ? '' : terminalMessage
       };
     } catch (e) {
       let err = e as Error;
@@ -145,7 +156,9 @@ export class ChatToolRegistry {
       argumentsText: argumentsText,
       content: content,
       traceLine: this.buildTraceLine(toolName, argumentsText, content),
-      success: false
+      success: false,
+      terminal: false,
+      terminalMessage: ''
     };
   }
 

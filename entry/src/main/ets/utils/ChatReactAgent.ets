@@ -118,6 +118,16 @@ export class ChatReactAgent {
         if (options.onTrace !== undefined) {
           options.onTrace(toolResult.traceLine);
         }
+        if (toolResult.terminal) {
+          // 用户已经拒绝或取消具备设备副作用的操作，不再请求下一轮模型，避免再次发起同一工具调用。
+          return {
+            content: toolResult.terminalMessage,
+            iterations: iteration,
+            toolCallCount: toolCallCount,
+            reachedLimit: false,
+            finishReason: 'tool_terminal'
+          };
+        }
         workingMessages.push({
           role: 'tool',
           content: toolResult.content,

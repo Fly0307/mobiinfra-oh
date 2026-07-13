@@ -141,7 +141,8 @@ export function mobileGuiTaskRunResultFromWorkflowResult(filesDir: string,
       status: 'cancelled',
       errorCode: 'user_cancelled',
       error: result.message,
-      recoverable: true,
+      // 用户已在执行过程中终止任务，不应由聊天 Agent 自动再次发起同一 GUI 操作。
+      recoverable: false,
       summary: '',
       runDir: relativeRunDir,
       returnedToApp: result.returnedToApp

@@ -102,8 +102,6 @@ export struct SettingsCenterPage {
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
   @Link threadNumInput: string;
-  @Link backendTypeInput: string;
-  @Link mllmBackendTypeInput: string;
   @Link selectedSectionId: number;
   @Link output: string;
   @Link cloudOutput: string;
@@ -111,19 +109,16 @@ export struct SettingsCenterPage {
   @Link modelDownloadProgressPercent: number;
   @Link modelDownloadProgressText: string;
   @Link modelDownloadProgressTitle: string;
-  @Prop downloading: boolean = false;
-  @Prop connected: boolean = false;
-  @Prop modelScopeDownloading: boolean = false;
-  @Prop modelScopePauseRequested: boolean = false;
+  @Link downloading: boolean;
+  @Link modelScopeDownloading: boolean;
+  @Link modelScopePauseRequested: boolean;
   @Prop hdcAutoStatus: string = '';
   @Prop hdcAutoConnected: boolean = false;
   @Prop hdcAutoConnecting: boolean = false;
   @Prop hdcManualPairing: boolean = false;
-  @Prop selectedModelVariant: string = '';
   @Prop downloadedModels: DownloadedModelItem[] = [];
   @Prop selectedModelId: string = '';
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
-  @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
@@ -184,9 +179,6 @@ export struct SettingsCenterPage {
   @State private activeSensitiveInputId: string = '';
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
-  onCheckServer: () => void = () => {};
-  onDownloadAll: () => void = () => {};
-  onDeleteModelFiles: () => void = () => {};
   onDownloadModelScopeModel: () => Promise<void> = async () => {};
   onPauseModelScopeDownload: () => void = () => {};
   onUpdateConfigThreadNum: () => void = () => {};
@@ -199,14 +191,13 @@ export struct SettingsCenterPage {
   onStartCloudBackend: () => Promise<void> = async () => {};
   onClearScreenshots: () => void = () => {};
   onDeleteDebugOutputs: () => void = () => {};
-  onSwitchModelVariant: (variant: string) => void = (variant: string) => {};
   onSwitchDownloadedModel: (modelId: string) => void = (modelId: string) => {};
+  onDeleteDownloadedModel: (modelId: string) => void = (modelId: string) => {};
   onRefreshDownloadedModels: () => void = () => {};
   onListScreenshots: () => void = () => {};
   onDeleteModelConfigJson: () => void = () => {};
   onListModelFilesTree: () => void = () => {};
   onDeleteChunkVisionOmFiles: () => void = () => {};
-  onUpdateConfigBackendType: (target: string) => void = (target: string) => {};
 
   aboutToAppear(): void {
     this.migrateGalleryDefaultValues();
@@ -356,14 +347,6 @@ export struct SettingsCenterPage {
     }).catch(() => {});
   }
 
-  private confirmDeleteModelFiles(): void {
-    this.confirmDanger({
-      title: '删除模型',
-      message: '确认执行该操作？将删除本地模型文件，后续需要重新下载或重新选择模型。',
-      confirmText: '删除'
-    }, () => { this.onDeleteModelFiles(); });
-  }
-
   private confirmClearScreenshots(): void {
     this.confirmDanger({
       title: '清理截图',
@@ -396,6 +379,14 @@ export struct SettingsCenterPage {
     }, () => { this.onDeleteChunkVisionOmFiles(); });
   }
 
+  private confirmDeleteDownloadedModel(item: DownloadedModelItem): void {
+    this.confirmDanger({
+      title: '删除模型',
+      message: '确认删除“' + item.label + '”及其全部文件？此操作不可撤回。',
+      confirmText: '删除'
+    }, () => { this.onDeleteDownloadedModel(item.id); });
+  }
+
   @Builder SectionTitle(id: SettingsSectionId) {
     Column() {
       Text(settingsSectionTitle(id))
@@ -425,13 +416,7 @@ export struct SettingsCenterPage {
   }
 
   @Builder DownloadedModelList() {
-    this.FieldLabel('已下载模型')
     Row() {
-      Text(this.downloadedModels.length > 0 ? '点击可加载模型切换后续本地加载路径' : '未扫描到模型目录')
-        .fontSize(12)
-        .fontColor('#7B8290')
-        .layoutWeight(1)
-        .maxLines(2)
       Button('刷新')
         .height(32)
         .width(72)
@@ -467,12 +452,22 @@ export struct SettingsCenterPage {
             Button(this.selectedModelId === item.id ? (item.statusText === '下载完成' ? '已完成' : '当前') :
               (item.ready ? '切换' : '未完成'))
               .height(32)
-              .width(72)
+              .width(64)
               .fontSize(12)
               .backgroundColor(this.selectedModelId === item.id || !item.ready ? '#A9B0BE' : '#4F68FF')
               .borderRadius(10)
               .enabled(this.selectedModelId !== item.id && item.ready)
               .onClick(() => { this.onSwitchDownloadedModel(item.id); })
+            Button('删除')
+              .height(32)
+              .width(56)
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor(settingsActionColor(SettingsActionKind.Danger))
+              .borderRadius(10)
+              .margin({ left: 8 })
+              .enabled(!this.downloading && !this.modelScopeDownloading)
+              .onClick(() => { this.confirmDeleteDownloadedModel(item); })
           }
           .width('100%')
           .padding({ left: 10, right: 10, top: 9, bottom: 9 })
@@ -502,21 +497,6 @@ export struct SettingsCenterPage {
         onNormalize();
       }
     })
-  }
-
-  @Builder VariantButton(label: string, variant: string) {
-    Button(label)
-      .height(36)
-      .width('31%')
-      .fontSize(11)
-      .fontColor(this.selectedModelVariant === variant ? Color.White : '#4F68FF')
-      .backgroundColor(this.selectedModelVariant === variant ? '#4F68FF' : '#EEF3FF')
-      .borderRadius(10)
-      .margin({ right: 6, bottom: 8 })
-      .onClick(() => {
-        this.closeSensitiveInputs();
-        this.onSwitchModelVariant(variant);
-      })
   }
 
   @Builder SettingToggle(label: string, desc: string, selected: boolean, onValueChange: (value: boolean) => void) {
@@ -1066,6 +1046,18 @@ export struct SettingsCenterPage {
     Column() {
       this.SectionTitle(SettingsSectionId.ModelAgents)
       SettingsGroupCard({
+        title: '本地模型',
+        subtitle: '已下载模型管理与加载路径切换',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.LocalModelGroup() }
+      })
+      SettingsGroupCard({
+        title: '本地模型下载',
+        subtitle: '从 ModelScope 仓库下载本地模型',
+        onHeaderClick: () => { this.closeSensitiveInputs(); },
+        contentBuilder: () => { this.ModelDownloadGroup() }
+      })
+      SettingsGroupCard({
         title: '云端 Planner/Decider',
         subtitle: '云端智能体服务、模型和连通性测试',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
@@ -1082,30 +1074,6 @@ export struct SettingsCenterPage {
         subtitle: '聊天上下文压缩阈值和保留轮数',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.ContextCompressionGroup() }
-      })
-      SettingsGroupCard({
-        title: '本地模型',
-        subtitle: '已下载模型、旧目录快捷切换和后端类型',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.LocalModelGroup() }
-      })
-      SettingsGroupCard({
-        title: 'HDC 连接',
-        subtitle: '自动发现、手动配对和无线调试目标',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.HdcConnectionGroup() }
-      })
-      SettingsGroupCard({
-        title: '模型下载',
-        subtitle: '模型文件服务、ModelScope 仓库和下载进度',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.ModelDownloadGroup() }
-      })
-      SettingsGroupCard({
-        title: 'Config 与输出',
-        subtitle: '模型配置修改、查看和运行输出',
-        onHeaderClick: () => { this.closeSensitiveInputs(); },
-        contentBuilder: () => { this.ConfigOutputGroup() }
       })
     }
     .width(SETTINGS_PAGE_HORIZONTAL_PADDING)
@@ -1224,43 +1192,6 @@ export struct SettingsCenterPage {
 
   @Builder LocalModelGroup() {
     this.DownloadedModelList()
-    this.FieldLabel('旧模型目录快捷切换')
-    Flex({ wrap: FlexWrap.Wrap }) {
-      this.VariantButton('默认', '')
-      this.VariantButton('modelv2', 'modelv2')
-      this.VariantButton('modelv3', 'modelv3')
-      this.VariantButton('modelv4', 'modelv4')
-      this.VariantButton('model_omc', 'model_omc')
-    }
-    .width('100%')
-    SettingInput({
-      label: 'backend_type',
-      value: this.backendTypeInput,
-      placeholder: 'cpu / hiai / nnrt',
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.backendTypeInput = value; }
-    })
-    SettingInput({
-      label: 'mllm.backend_type',
-      value: this.mllmBackendTypeInput,
-      placeholder: 'cpu / hiai / nnrt',
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.mllmBackendTypeInput = value; }
-    })
-    SettingsActionRow({ contentBuilder: () => { this.BackendTypeActionRow() } })
-  }
-
-  @Builder BackendTypeActionRow() {
-    SettingsActionButton({
-      label: '更新 base',
-      kind: SettingsActionKind.Primary,
-      onActionClick: () => { this.onUpdateConfigBackendType('base'); }
-    })
-    SettingsActionButton({
-      label: '更新 mllm',
-      kind: SettingsActionKind.Secondary,
-      onActionClick: () => { this.onUpdateConfigBackendType('mllm'); }
-    })
   }
 
   @Builder HdcConnectionGroup() {
@@ -1331,17 +1262,10 @@ export struct SettingsCenterPage {
 
   @Builder ModelDownloadGroup() {
     SettingInput({
-      label: '模型下载服务',
-      value: this.serverIp,
-      placeholder: '默认 ' + DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl,
-      onInputFocus: () => { this.closeSensitiveInputs(); },
-      onValueChange: (value: string) => { this.serverIp = value; }
-    })
-    SettingsActionRow({ contentBuilder: () => { this.ModelServerActionRow() } })
-    SettingInput({
-      label: 'ModelScope 仓库',
+      label: '',
       value: this.modelScopeMnnRepo,
-      placeholder: 'modelscope仓库("用户名/模型名")',
+      placeholder: '输入 owner/repo',
+      inputEnabled: !this.downloading && !this.modelScopeDownloading,
       onInputFocus: () => { this.closeSensitiveInputs(); },
       onValueChange: (value: string) => { this.modelScopeMnnRepo = value; }
     })
@@ -1349,42 +1273,15 @@ export struct SettingsCenterPage {
     this.ModelDownloadProgressPanel()
   }
 
-  @Builder ModelServerActionRow() {
-    SettingsActionButton({
-      label: '检查模型',
-      kind: SettingsActionKind.Primary,
-      actionEnabled: !this.downloading,
-      onActionClick: () => { this.onCheckServer(); }
-    })
-    SettingsActionButton({
-      label: '下载全部',
-      kind: SettingsActionKind.Warning,
-      actionEnabled: !this.downloading && this.connected,
-      onActionClick: () => { this.onDownloadAll(); }
-    })
-    SettingsActionButton({
-      label: '删除模型',
-      kind: SettingsActionKind.Danger,
-      actionEnabled: !this.downloading,
-      onActionClick: () => { this.confirmDeleteModelFiles(); }
-    })
-  }
-
   @Builder ModelScopeActionRow() {
     SettingsActionButton({
-      label: '从 ModelScope 下载',
+      label: this.modelScopePauseRequested ? '继续下载' : '从 ModelScope 下载',
       kind: SettingsActionKind.Primary,
-      actionEnabled: !this.downloading,
+      actionEnabled: !this.downloading && !this.modelScopeDownloading,
       onActionClick: async () => {
-        showToastSafely('开始 ModelScope 下载');
+        showToastSafely(this.modelScopePauseRequested ? '继续 ModelScope 下载' : '开始 ModelScope 下载');
         await this.onDownloadModelScopeModel();
       }
-    })
-    SettingsActionButton({
-      label: this.modelScopePauseRequested ? '暂停中' : '暂停下载',
-      kind: SettingsActionKind.Secondary,
-      actionEnabled: this.modelScopeDownloading && !this.modelScopePauseRequested,
-      onActionClick: () => { this.onPauseModelScopeDownload(); }
     })
   }
 

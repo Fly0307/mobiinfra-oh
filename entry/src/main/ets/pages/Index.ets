@@ -433,7 +433,7 @@ PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT
 @Entry
 @Component
 struct Index {
-  @State output: string = '请先检查服务器连接';
+  @State output: string = '';
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
@@ -551,6 +551,7 @@ struct Index {
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
   private modelScopeActiveHttpReq: http.HttpRequest | null = null;
+  private modelScopeActiveStreamCancel: (() => void) | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
   private avatarForegroundEnsuring: boolean = false;
@@ -4291,6 +4292,7 @@ struct Index {
       let fileHandle: fs.File;
       let failed = false;
       let resolved = false;
+      let pauseStream: () => void = () => {};
       try {
         if (startOffset > 0) {
           fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
@@ -4314,9 +4316,14 @@ struct Index {
         if (self.modelScopeActiveHttpReq === httpReq) {
           self.modelScopeActiveHttpReq = null;
         }
+        if (self.modelScopeActiveStreamCancel === pauseStream) {
+          self.modelScopeActiveStreamCancel = null;
+        }
         httpReq.destroy();
         resolve(size);
       };
+      pauseStream = (): void => { finish(-2); };
+      self.modelScopeActiveStreamCancel = pauseStream;
       httpReq.on('dataReceive', (data: ArrayBuffer) => {
         if (self.modelScopePauseRequested) {
           failed = true;
@@ -4363,6 +4370,12 @@ struct Index {
           httpReq.off('dataReceive');
           httpReq.off('dataReceiveProgress');
           httpReq.off('dataEnd');
+          if (self.modelScopeActiveHttpReq === httpReq) {
+            self.modelScopeActiveHttpReq = null;
+          }
+          if (self.modelScopeActiveStreamCancel === pauseStream) {
+            self.modelScopeActiveStreamCancel = null;
+          }
           httpReq.destroy();
           resolve(fileSize);
         };
@@ -4474,12 +4487,16 @@ struct Index {
   }
 
   pauseModelScopeDownload(): void {
-    if (!this.modelScopeDownloading) {
+    if (!this.modelScopeDownloading && this.modelScopeActiveStreamCancel === null && this.modelScopeActiveHttpReq === null) {
       return;
     }
     this.modelScopePauseRequested = true;
     AppLogger.info('ModelDownload', 'pause requested repo=' + this.modelScopeMnnRepo);
     this.updateModelDownloadMessage('正在暂停 ModelScope 下载...');
+    if (this.modelScopeActiveStreamCancel !== null) {
+      this.modelScopeActiveStreamCancel();
+      return;
+    }
     if (this.modelScopeActiveHttpReq !== null) {
       try {
         this.modelScopeActiveHttpReq.destroy();
@@ -4519,6 +4536,10 @@ struct Index {
       this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
       AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
       let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
+      if (this.modelScopePauseRequested) {
+        this.updateModelDownloadMessage('已暂停，再次点击可继续');
+        return;
+      }
       if (files.length === 0) {
         let message = 'ModelScope 文件清单为空: ' + this.modelScopeMnnRepo;
         this.updateModelDownloadMessage(message);
@@ -4559,6 +4580,12 @@ struct Index {
           completedBytes += files[j].size;
         }
       }
+      if (this.modelScopePauseRequested) {
+        this.updateModelDownloadProgress(completedBytes, totalBytes, '已暂停，再次点击可继续');
+        AppLogger.info('ModelDownload', 'paused after file loop repo=' + this.modelScopeMnnRepo + ', saved=' +
+          this.formatSize(completedBytes));
+        return;
+      }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
         try {
@@ -4585,6 +4612,7 @@ struct Index {
       AppLogger.error('ModelDownload', message);
     } finally {
       this.modelScopeActiveHttpReq = null;
+      this.modelScopeActiveStreamCancel = null;
       this.refreshDownloadedModels();
       this.modelScopeDownloading = false;
       this.downloading = false;
@@ -5608,6 +5636,9 @@ struct Index {
       showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
       return;
     }
+    if (!await this.ensureLocalChatModelIsAvailable()) {
+      return;
+    }
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       return;
@@ -5682,6 +5713,44 @@ struct Index {
       }
       this.isThinking = false;
     }
+  }
+
+  private async ensureLocalChatModelIsAvailable(): Promise<boolean> {
+    if (this.modelLoaded) {
+      return true;
+    }
+    let modelStatus = this.modelLoadableStatus(this.modelDir);
+    if (modelStatus === '下载完成' || modelStatus === '可加载') {
+      return true;
+    }
+    if (this.downloading) {
+      showToastSafely('本地模型正在下载，请等待完成后再发送', 1800);
+      return false;
+    }
+    let shouldOpenModelSettings = await this.confirmModelScopeDownloadForLocalChat(modelStatus);
+    if (!shouldOpenModelSettings) {
+      return false;
+    }
+    this.settingsSectionId = SettingsSectionId.ModelAgents;
+    this.currentTab = MainTabIndex.Settings;
+    await this.downloadModelScopeModel();
+    return false;
+  }
+
+  private async confirmModelScopeDownloadForLocalChat(modelStatus: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '本地 Agent 未下载',
+        message: '未检测到可加载的本地 Agent 模型（' + modelStatus + '）。\n\n是否前往设置页，从 ModelScope 仓库“' +
+          this.modelScopeMnnRepo + '”下载？',
+        buttons: [
+          { text: '暂不前往', color: '#666666' },
+          { text: '前往设置', color: '#4F68FF' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => { resolve(false); });
+    });
   }
 
   private async submitLocalAgentTask(): Promise<void> {

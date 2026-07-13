@@ -1183,7 +1183,8 @@ export struct HomePage {
         Column() {
           AppHeader({
             title: '你的智伴',
-            icon: $r('app.media.header_companion')
+            icon: $r('app.media.header_companion'),
+            pcServerVisible: true
           })
 
         Column() {

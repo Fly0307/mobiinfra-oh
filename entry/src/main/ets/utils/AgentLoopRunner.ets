@@ -299,14 +299,16 @@ export class AgentLoopRunner {
         let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
           let candidate = mode === 'local' ?
             await this.localAgentStep(variable, imageBase64, width, height) :
-            await this.cloudAgentStep(imageBase64);
+            (useCloudWithLocalPrompt ?
+              await this.pcAgentStep(prefix, variable, imageBase64) :
+              await this.cloudAgentStep(imageBase64));
           await this.sleep(300);
           return candidate;
         }, (info: AgentActionParseRetryInfo): void => {
           this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
             String(info.maxRetries) + ': ' + info.errorMessage);
-          AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-            ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': JSON解析失败，同屏重试 ' +
+          AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS +
+            ': JSON解析失败，同屏重试 ' +
             String(info.retryNumber) + '/' + String(info.maxRetries));
         });
         let response = parsed.raw;

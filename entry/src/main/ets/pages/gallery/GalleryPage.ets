@@ -365,7 +365,11 @@ struct GalleryPage {
       this.progressRevision += 1;
       this.refreshAnalyzeStats();
       this.setLastRun(new Date().getTime());
-      showToastSafely('图库分析完成', 1500);
+      if (this.scanFailed > 0) {
+        showToastSafely('调用 AI 分析失败：' + this.scanFailed.toString() + ' 张，请查看失败详情或日志', 2200);
+      } else {
+        showToastSafely('图库分析完成', 1500);
+      }
     } catch (e) {
       this.analyzing = false;
       this.manualAnalyzing = false;
@@ -521,7 +525,11 @@ struct GalleryPage {
     } else {
       this.setLastRunLabel('已暂停');
     }
-    showToastSafely(sessionCompleted ? '自动分析完成' : '自动分析已暂停', 1500);
+    if (session.failed > 0) {
+      showToastSafely('调用 AI 分析失败：' + session.failed.toString() + ' 张，请查看失败详情或日志', 2200);
+    } else {
+      showToastSafely(sessionCompleted ? '自动分析完成' : '自动分析已暂停', 1500);
+    }
   }
 
   private async ensureGalleryReadPermission(ctx: common.UIAbilityContext): Promise<boolean> {
@@ -2882,17 +2890,10 @@ struct GalleryPage {
     if (item.error && item.error.length > 0) {
       return '分析失败';
     }
-    let status = item.embeddingStatus ? item.embeddingStatus : '';
-    if (status === 'ok') {
+    if (item.rawModelText && item.rawModelText.trim().length > 0) {
       return '已入库';
     }
-    if (status === 'skipped' || status.length === 0) {
-      return '未入库';
-    }
-    if (status.indexOf('failed') === 0) {
-      return 'Embedding 失败';
-    }
-    return status;
+    return '未入库';
   }
 
   private previewUri(item: GalleryAnalysisResult): string {

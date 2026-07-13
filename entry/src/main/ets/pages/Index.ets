@@ -130,6 +130,11 @@ import {
 } from '../utils/MobileGuiTaskTool';
 import { MobileGuiTaskRequest, MobileGuiTaskRunResult } from '../utils/MobileGuiTaskTypes';
 import {
+  PC_SERVER_DEFAULT_URL,
+  PcServerMonitor,
+  PcServerState
+} from '../utils/PcServerMonitor';
+import {
   buildMobileGuiWorkflowTask,
   classifyMobileGuiWorkflowFailure,
   isMobileGuiTaskCloudConfigReady as isMobileGuiTaskCloudConfigReadyValue,
@@ -341,6 +346,7 @@ const MODEL_DOWNLOAD_COMPLETE_FILE: string = '.download_complete';
 const PROFILE_MODEL_CONFIG_PATH_KEY: string = 'profileModelConfigPath';
 const SELECTED_MODEL_ID_KEY: string = 'selectedModelId';
 const LEGACY_MODEL_DIRS: string[] = ['model', 'modelv2', 'modelv3', 'modelv4', 'model_omc'];
+const PC_SERVER_LLM_BASE_URL: string = 'http://127.0.0.1:8090';
 
 type JsonValue = Object | string | number | boolean | null;
 type JsonMap = Record<string, JsonValue>;
@@ -407,6 +413,8 @@ PersistentStorage.persistProp('endpointDefault.avatarImageToImageModel', '');
 PersistentStorage.persistProp('endpointDefault.avatarImageSize', '');
 PersistentStorage.persistProp('endpointDefault.avatarImageResponseFormat', '');
 PersistentStorage.persistProp('endpointDefault.avatarImageOutputFormat', '');
+PersistentStorage.persistProp('pcServerUrl', PC_SERVER_DEFAULT_URL);
+PersistentStorage.persistProp('pcServerConnected', false);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_ENABLED_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_ENABLED);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_DAYS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_DAYS);
 PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_MAX_CONTACTS_KEY, DEFAULT_WECHAT_AUTO_SUMMARY_MAX_CONTACTS);
@@ -456,6 +464,7 @@ struct Index {
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
   @StorageLink('hdcServerIp') hdcServerIp: string = DEFAULT_ENDPOINT_CONFIG.hdcServerUrl;
+  @StorageLink('pcServerUrl') pcServerUrl: string = PC_SERVER_DEFAULT_URL;
   @StorageLink('manualHdcServerIp') manualHdcServerIp: string = '';
   @StorageLink('wirelessIp') wirelessIp: string = DEFAULT_ENDPOINT_CONFIG.wirelessHdcTarget;
   @StorageLink('cloudPlannerBaseUrl') cloudPlannerBaseUrl: string = DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
@@ -528,6 +537,9 @@ struct Index {
   @State hdcAutoConnecting: boolean = false;
   @State hdcManualPairing: boolean = false;
   @State hdcAutoStatus: string = 'HDC Server will be auto-discovered after startup.';
+  @State pcServerConnected: boolean = false;
+  @State pcServerStatusText: string = 'PC Server 未连接';
+  @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
@@ -550,6 +562,14 @@ struct Index {
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
+  private pcServerMonitor: PcServerMonitor | null = null;
+  private pcServerConnectedPromptShown: boolean = false;
+  private pcServerCloudFallbackPlannerBaseUrl: string = '';
+  private pcServerCloudFallbackDeciderBaseUrl: string = '';
+  private pcServerCloudFallbackApiKey: string = '';
+  private pcServerCloudFallbackPlannerApiKey: string = '';
+  private pcServerCloudFallbackDeciderApiKey: string = '';
+  private pcServerCloudFallbackSaved: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
@@ -1435,6 +1455,9 @@ struct Index {
   }
 
   private isMobileGuiTaskCloudConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     let config = this.getCloudConfig();
     return isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl,
       cloudPlannerApiKey(config), cloudDeciderApiKey(config));
@@ -1928,6 +1951,23 @@ struct Index {
       role: 'system',
       content: content
     };
+  }
+
+  private pcServerCloudChatSystemMessage(): CloudChatMessage {
+    return {
+      role: 'system',
+      content: '你是“数据归家”移动端 App 的智能体助手，该 App 会收集、整理并展示从移动设备上收集到的事件和数据。你能够回答用户问题、调用 App 内部工具、完成用户要求的任务。'
+    };
+  }
+
+  private buildPcServerCloudChatContext(currentUserMessage: ChatMessage): CloudChatMessage[] {
+    return [
+      this.pcServerCloudChatSystemMessage(),
+      {
+        role: 'user',
+        content: currentUserMessage.content.trim()
+      }
+    ];
   }
 
   private cloudChatTimeSystemPromptBlock(): string {
@@ -2497,11 +2537,13 @@ struct Index {
     this.discoverHdcServer(false, false).catch(() => {
       this.hdcAutoConnecting = false;
     });
+    this.startPcServerMonitor();
   }
 
   onPageShow(): void {
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
+    this.startPcServerMonitor();
   }
 
   onPageHide(): void {
@@ -2510,11 +2552,122 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopHomeRecommendationDateTimer();
+    this.stopPcServerMonitor();
     if (this.chatVoiceOrchestrator !== null) {
       this.chatVoiceOrchestrator.shutdown();
     }
     this.profileKnockShareInitToken++;
     this.profileKnockShareService.dispose();
+  }
+
+  private startPcServerMonitor(): void {
+    if (this.pcServerMonitor !== null) {
+      return;
+    }
+    this.pcServerMonitor = new PcServerMonitor(this.pcServerUrl, (state: PcServerState, becameConnected: boolean) => {
+      this.applyPcServerState(state, becameConnected);
+    });
+    this.pcServerMonitor.start();
+  }
+
+  private stopPcServerMonitor(): void {
+    if (this.pcServerMonitor === null) {
+      return;
+    }
+    this.pcServerMonitor.stop();
+    this.pcServerMonitor = null;
+  }
+
+  private applyPcServerState(state: PcServerState, becameConnected: boolean): void {
+    let wasConnected = this.pcServerConnected;
+    this.pcServerConnected = state.state === 'connected';
+    this.pcServerStatusText = this.pcServerConnected ? '已连接 PC Server' : state.message;
+    AppStorage.setOrCreate('pcServerConnected', this.pcServerConnected);
+    AppStorage.setOrCreate('pcServerStatusText', this.pcServerStatusText);
+    if (wasConnected && !this.pcServerConnected && this.isPcServerCloudEndpointEnabled()) {
+      this.disablePcServerCloudEndpoint(false);
+    }
+    if (becameConnected) {
+      this.enablePcServerCloudEndpoint(false);
+      this.showPcServerConnectedPrompt();
+    }
+  }
+
+  private showPcServerConnectedPrompt(): void {
+    if (this.pcServerConnectedPromptShown) {
+      return;
+    }
+    this.pcServerConnectedPromptShown = true;
+    showToastSafely('已连接 PC Server', 2200);
+    promptAction.showDialog({
+      title: '已连接 PC Server',
+      message: '手机 App 已连接到 PC Server，事件通道已建立。',
+      buttons: [
+        { text: '知道了', color: '#5968FF' }
+      ]
+    }).catch(() => {});
+  }
+
+  private isPcServerCloudEndpointEnabled(): boolean {
+    return this.pcServerCloudEnabled;
+  }
+
+  private enablePcServerCloudEndpoint(showToast: boolean = true): void {
+    if (!this.pcServerConnected) {
+      showToastSafely('PC Server 未连接', 1500);
+      return;
+    }
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      this.pcServerCloudFallbackPlannerBaseUrl = this.cloudPlannerBaseUrl;
+      this.pcServerCloudFallbackDeciderBaseUrl = this.cloudDeciderBaseUrl;
+      this.pcServerCloudFallbackApiKey = this.cloudApiKey;
+      this.pcServerCloudFallbackPlannerApiKey = this.cloudPlannerApiKey;
+      this.pcServerCloudFallbackDeciderApiKey = this.cloudDeciderApiKey;
+      this.pcServerCloudFallbackSaved = true;
+    }
+    this.cloudPlannerBaseUrl = PC_SERVER_LLM_BASE_URL;
+    this.cloudDeciderBaseUrl = PC_SERVER_LLM_BASE_URL;
+    this.cloudApiKey = '';
+    this.cloudPlannerApiKey = '';
+    this.cloudDeciderApiKey = '';
+    this.pcServerCloudEnabled = true;
+    if (showToast) {
+      showToastSafely('已启用 PC Server 云端接口', 1600);
+    }
+  }
+
+  private disablePcServerCloudEndpoint(showToast: boolean = true): void {
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      return;
+    }
+    this.pcServerCloudEnabled = false;
+    this.cloudPlannerBaseUrl = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackPlannerBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl;
+    this.cloudDeciderBaseUrl = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackDeciderBaseUrl : DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl;
+    this.cloudApiKey = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackApiKey : DEFAULT_ENDPOINT_CONFIG.cloudApiKey;
+    this.cloudPlannerApiKey = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackPlannerApiKey : DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey;
+    this.cloudDeciderApiKey = this.pcServerCloudFallbackSaved ?
+      this.pcServerCloudFallbackDeciderApiKey : DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey;
+    this.pcServerCloudFallbackPlannerBaseUrl = '';
+    this.pcServerCloudFallbackDeciderBaseUrl = '';
+    this.pcServerCloudFallbackApiKey = '';
+    this.pcServerCloudFallbackPlannerApiKey = '';
+    this.pcServerCloudFallbackDeciderApiKey = '';
+    this.pcServerCloudFallbackSaved = false;
+    if (showToast) {
+      showToastSafely('已恢复原云端接口', 1600);
+    }
+  }
+
+  private togglePcServerCloudEndpoint(): void {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      this.disablePcServerCloudEndpoint();
+      return;
+    }
+    this.enablePcServerCloudEndpoint();
   }
 
   private async initializeProfileKnockShare(ctx: common.UIAbilityContext, initToken: number): Promise<void> {
@@ -3683,6 +3836,7 @@ struct Index {
   // ========== Step 1: Check connection, list files ==========
   async checkServer() {
     this.output = `正在连接 ${this.serverIp} ...`;
+    AppLogger.info('PCServer', 'connect start url=' + this.serverIp);
     // 每个 httpRequest 对应一个 HTTP 请求任务，不复用。
     let httpReq = http.createHttp();
     try {
@@ -3695,6 +3849,7 @@ struct Index {
       let resp = await httpReq.request(`${this.serverIp}/api/files`, listOptions);
       if (resp.responseCode !== 200) {
         this.output = `连接失败: HTTP ${resp.responseCode}`;
+        AppLogger.warn('PCServer', 'connect failed url=' + this.serverIp + ', http=' + resp.responseCode.toString());
         return;
       }
       let files: ServerFile[] = ArkJSON.parse(resp.result as string) as ServerFile[];
@@ -3713,10 +3868,14 @@ struct Index {
       listing += '点击“下载全部”开始下载';
       this.output = listing;
       this.connected = true;
+      AppLogger.info('PCServer', 'connected url=' + this.serverIp + ', files=' +
+        this.serverFiles.length.toString() + ', totalBytes=' + this.totalBytesAll.toString());
     } catch (e) {
       let err = e as BusinessError;
       this.output = `连接失败: code=${err.code} ${err.message}\n\n请检查:\n1. 服务器 python serve_model.py 是否运行\n2. 防火墙是否开放端口\n3. 手机网络是否可达服务器`;
       this.connected = false;
+      AppLogger.warn('PCServer', 'disconnected url=' + this.serverIp + ', code=' +
+        String(err.code) + ', message=' + err.message);
     } finally {
       httpReq.destroy();
     }
@@ -4462,6 +4621,17 @@ struct Index {
   }
 
   private getCloudConfig(): CloudModelConfig {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return {
+        plannerBaseUrl: PC_SERVER_LLM_BASE_URL,
+        plannerModel: '',
+        plannerApiKey: '',
+        deciderBaseUrl: PC_SERVER_LLM_BASE_URL,
+        deciderApiKey: '',
+        apiKey: '',
+        deciderModel: ''
+      };
+    }
     let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
     let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
     let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
@@ -4480,11 +4650,72 @@ struct Index {
   }
 
   private isCloudConfigReady(): boolean {
+    if (this.isPcServerCloudEndpointEnabled()) {
+      return true;
+    }
     let config = this.getCloudConfig();
     return config.plannerBaseUrl.trim().length > 0 &&
       config.deciderBaseUrl.trim().length > 0 &&
       cloudPlannerApiKey(config).trim().length > 0 &&
       cloudDeciderApiKey(config).trim().length > 0;
+  }
+
+  private pcServerLlmHealthUrl(): string {
+    return PC_SERVER_LLM_BASE_URL + '/health';
+  }
+
+  private async ensurePcServerLlmHealthy(): Promise<void> {
+    if (!this.isPcServerCloudEndpointEnabled()) {
+      return;
+    }
+    let httpReq = http.createHttp();
+    let url = this.pcServerLlmHealthUrl();
+    let timeoutId = -1;
+    let timedOut = false;
+    try {
+      this.appendCloudLog('PC Server LLM 健康检查：' + url);
+      let requestPromise = httpReq.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 3000,
+        readTimeout: 5000,
+        expectDataType: http.HttpDataType.STRING
+      });
+      let timeoutPromise = new Promise<http.HttpResponse>((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true;
+          try {
+            httpReq.destroy();
+          } catch (e) {
+          }
+          reject(new Error('PC Server LLM 健康检查超时'));
+        }, 8000);
+      });
+      let response = await Promise.race([requestPromise, timeoutPromise]);
+      if (timeoutId !== -1) {
+        clearTimeout(timeoutId);
+        timeoutId = -1;
+      }
+      let body = String(response.result);
+      let bodyPreview = body.substring(0, body.length > 300 ? 300 : body.length);
+      this.appendCloudLog('PC Server LLM 健康检查返回：HTTP ' + response.responseCode.toString() +
+        (bodyPreview.length > 0 ? '，' + bodyPreview : ''));
+      AppLogger.info('CloudModel', 'pc server llm health status=' + response.responseCode.toString() +
+        ' body=' + bodyPreview);
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new Error('HTTP ' + response.responseCode.toString() + ': ' + body);
+      }
+    } catch (e) {
+      let err = e as Error;
+      this.appendCloudLog('PC Server LLM 健康检查失败：' + (err.message || String(e)));
+      throw err;
+    } finally {
+      if (timeoutId !== -1) {
+        clearTimeout(timeoutId);
+      }
+      if (!timedOut) {
+        httpReq.destroy();
+      }
+    }
   }
 
   private isCloudPlannerConfigReady(): boolean {
@@ -4501,6 +4732,7 @@ struct Index {
     let config = this.getCloudConfig();
     this.appendCloudLog(`测试 Planner：${config.plannerBaseUrl}`, true);
     try {
+      await this.ensurePcServerLlmHealthy();
       let response = await this.cloudClient.chatPlanner('请只回复 ok', config);
       this.appendCloudLog(`Planner 测试返回：\n${response}`);
     } catch (e) {
@@ -4565,33 +4797,41 @@ struct Index {
       if (sessionWithUser === null) {
         throw new Error('发起会话已不存在，无法继续云端聊天。');
       }
-      let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
-      let contextMessages = await this.attachCurrentImagesToCloudContext(contextPreparation.messages, userMessage);
-      if (contextPreparation.summaryUpdated) {
-        this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
-          contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
-      }
-      if (contextPreparation.noticeNeeded) {
-        this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
-          CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
-      }
-      if (contextPreparation.usingCompressedContext) {
-        let compressionLogPrefix = 'ReAct 云端聊天复用已有压缩上下文';
-        if (contextPreparation.compressionAction === 'created') {
-          compressionLogPrefix = 'ReAct 云端聊天上下文已自动压缩';
-        } else if (contextPreparation.compressionAction === 'updated') {
-          compressionLogPrefix = 'ReAct 云端聊天上下文已增量压缩';
+      let pcServerChatMode = this.isPcServerCloudEndpointEnabled();
+      let baseContextMessages: CloudChatMessage[] = [];
+      if (pcServerChatMode) {
+        baseContextMessages = this.buildPcServerCloudChatContext(userMessage);
+      } else {
+        let contextPreparation = await this.prepareCloudChatContext(sessionWithUser, userMessage);
+        baseContextMessages = contextPreparation.messages;
+        if (contextPreparation.summaryUpdated) {
+          this.updateChatContextSummaryForSession(chatSessionId, contextPreparation.summary, new Date().getTime(),
+            contextPreparation.summaryUntilMessageId, contextPreparation.summaryMessageCount);
         }
-        this.appendCloudLog(compressionLogPrefix + '，压缩前估算 tokens：' +
-          String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
-          String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
-          String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
-          (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
-          (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
+        if (contextPreparation.noticeNeeded) {
+          this.appendChatMessageToExactSession(chatSessionId, createChatMessage(this.nextChatMessageId('context-notice'), 'system',
+            CHAT_MESSAGE_KIND_CONTEXT_NOTICE, CHAT_CONTEXT_COMPRESSION_NOTICE, new Date().getTime()));
+        }
+        if (contextPreparation.usingCompressedContext) {
+          let compressionLogPrefix = 'ReAct 云端聊天复用已有压缩上下文';
+          if (contextPreparation.compressionAction === 'created') {
+            compressionLogPrefix = 'ReAct 云端聊天上下文已自动压缩';
+          } else if (contextPreparation.compressionAction === 'updated') {
+            compressionLogPrefix = 'ReAct 云端聊天上下文已增量压缩';
+          }
+          this.appendCloudLog(compressionLogPrefix + '，压缩前估算 tokens：' +
+            String(contextPreparation.originalEstimatedTokens) + '，压缩后估算 tokens：' +
+            String(contextPreparation.estimatedTokens) + '，保留历史轮数：' +
+            String(contextPreparation.retainedRounds) + '，当前请求在末尾：' +
+            (contextPreparation.currentRequestAtTail ? '是' : '否') + '，压缩后仍超预算：' +
+            (contextPreparation.overBudgetAfterCompression ? '是' : '否'));
+        }
       }
+      let contextMessages = await this.attachCurrentImagesToCloudContext(baseContextMessages, userMessage);
       if (this.cloudChatCancelRequested) {
         throw new Error('已取消本次回复。');
       }
+      await this.ensurePcServerLlmHealthy();
       this.appendChatMessageToExactSession(chatSessionId, createChatMessage(assistantMessageId, 'assistant', CHAT_MESSAGE_KIND_CHAT, '',
         new Date().getTime()));
       assistantMessageCreated = true;
@@ -4608,6 +4848,7 @@ struct Index {
           return await this.runMobileGuiTaskForChatSession(chatSessionId, request);
         },
         enableThinking: enableThinking,
+        enableTools: !pcServerChatMode,
         onTrace: (line: string) => {
           toolTraceLines.push(line);
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
@@ -4623,6 +4864,9 @@ struct Index {
           this.scheduleCloudStreamMessageUpdate(chatSessionId, assistantMessageId, currentStreamRenderContent(), toolTraceLines);
         }
       };
+      if (pcServerChatMode) {
+        this.appendCloudLog('PC Server 模式：使用精简上下文并保持流式请求。');
+      }
       let result = await reactAgent.run(contextMessages, this.getCloudConfig(), runOptions);
       let response = result.content;
       let responseForMessage = streamedContent.length > 0 ? currentStreamRenderContent() : response;
@@ -5300,7 +5544,8 @@ struct Index {
       },
       async (response: string) => {
         return await this.approveCloudAgentResponse(response);
-      }
+      },
+      this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud'
     );
   }
 
@@ -5741,6 +5986,8 @@ struct Index {
             pendingImageAttachmentUris: this.activePendingChatImageUris(),
             sessionDrawerOpen: this.chatSessionDrawerOpen,
             restoringLocalSession: this.restoringLocalSession,
+            pcServerConnected: this.pcServerConnected,
+            pcServerCloudEnabled: this.pcServerCloudEnabled,
             voiceStatus: this.voiceStatus,
             voicePartialTranscript: this.voicePartialTranscript,
             voiceActiveMessageId: this.voiceActiveMessageId,
@@ -5767,6 +6014,7 @@ struct Index {
             onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
             onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
             onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
+            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
             onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
             onStopVoiceInput: async () => { await this.stopVoiceInput(); },
             onPlayVoiceMessage: async (messageId: string, text: string) => {

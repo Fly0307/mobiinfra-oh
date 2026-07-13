@@ -1181,7 +1181,11 @@ export struct HomePage {
     Stack() {
       Scroll() {
         Column() {
-          AppHeader({ title: '你的智伴', icon: $r('app.media.header_companion') })
+          AppHeader({
+            title: '你的智伴',
+            icon: $r('app.media.header_companion'),
+            pcServerVisible: true
+          })
 
         Column() {
           this.AvatarImage()

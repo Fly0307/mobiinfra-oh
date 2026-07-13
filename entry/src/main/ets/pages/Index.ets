@@ -433,7 +433,7 @@ PersistentStorage.persistProp(WECHAT_AUTO_SUMMARY_DEFAULT_HISTORY_RATIO_SNAPSHOT
 @Entry
 @Component
 struct Index {
-  @State output: string = '请先检查服务器连接';
+  @State output: string = '';
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
@@ -448,14 +448,11 @@ struct Index {
   @State modelDownloadProgressTitle: string = '';
   @State autoConfirm: boolean = true;
   @State debugImagePath: string = '';
-  @State selectedModelVariant: string = '';
   @State downloadedModels: DownloadedModelItem[] = [];
   @StorageLink(SELECTED_MODEL_ID_KEY) selectedModelId: string = 'legacy:model';
   @StorageLink(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY) firstLaunchOnboardingVersion: string = '';
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
-  @State backendTypeInput: string = 'cpu';
-  @State mllmBackendTypeInput: string = 'cpu';
   @State currentTab: number = 0;
   @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
@@ -554,6 +551,7 @@ struct Index {
   private totalBytesAll: number = 0;
   private dataManagerFacade: DataManagerFacade | null = null;
   private modelScopeActiveHttpReq: http.HttpRequest | null = null;
+  private modelScopeActiveStreamCancel: (() => void) | null = null;
   private modelDownloadStartedAt: number = 0;
   private homeRecommendationViewDateKey: string = '';
   private avatarForegroundEnsuring: boolean = false;
@@ -3092,10 +3090,7 @@ struct Index {
     let legacyName = 'model';
     if (this.selectedModelId.startsWith('legacy:')) {
       legacyName = this.selectedModelId.substring('legacy:'.length);
-    } else if (this.selectedModelVariant.length > 0) {
-      legacyName = this.selectedModelVariant;
     }
-    this.selectedModelVariant = legacyName === 'model' ? '' : legacyName;
     this.selectedModelId = this.legacyModelId(legacyName);
     this.modelDir = this.filesDir + '/' + legacyName;
     this.syncProfileModelConfigPath();
@@ -3106,14 +3101,6 @@ struct Index {
       return;
     }
     AppStorage.setOrCreate(PROFILE_MODEL_CONFIG_PATH_KEY, this.modelDir + '/config.json');
-  }
-
-  private switchModelVariant(variant: string): void {
-    let legacyName = variant.length > 0 ? variant : 'model';
-    if (LEGACY_MODEL_DIRS.indexOf(legacyName) < 0) {
-      legacyName = 'model';
-    }
-    this.switchDownloadedModel(this.legacyModelId(legacyName));
   }
 
   private switchDownloadedModel(modelId: string): void {
@@ -3141,7 +3128,6 @@ struct Index {
     }
     this.unloadLocalModelForFileMutation();
     this.selectedModelId = target.id;
-    this.selectedModelVariant = target.id.startsWith('legacy:') && target.id !== this.legacyModelId('model') ? target.label : '';
     this.modelDir = target.path;
     this.syncProfileModelConfigPath();
     this.modelLoaded = false;
@@ -3187,7 +3173,6 @@ struct Index {
     }
     if (!foundSelected) {
       this.selectedModelId = this.legacyModelId('model');
-      this.selectedModelVariant = '';
       this.syncModelDir();
     }
   }
@@ -3520,6 +3505,39 @@ struct Index {
     }
   }
 
+  private deleteDownloadedModel(modelId: string): void {
+    if (this.blockModelFileMutationIfBusy('删除模型文件')) {
+      return;
+    }
+    let target: DownloadedModelItem | null = null;
+    for (let i = 0; i < this.downloadedModels.length; i++) {
+      if (this.downloadedModels[i].id === modelId) {
+        target = this.downloadedModels[i];
+        break;
+      }
+    }
+    if (target === null) {
+      this.output = '模型不存在或尚未扫描到: ' + modelId;
+      return;
+    }
+    try {
+      if (this.selectedModelId === target.id) {
+        this.unloadLocalModelForFileMutation();
+      }
+      if (!fs.accessSync(target.path)) {
+        this.refreshDownloadedModels();
+        this.output = '模型目录不存在，无需删除: ' + target.label;
+        return;
+      }
+      let deletedCount = this.deletePathRecursively(target.path);
+      this.modelLoaded = false;
+      this.refreshDownloadedModels();
+      this.output = '模型删除成功\n已删除 ' + target.label + ' 及其内容（共 ' + deletedCount + ' 项）。';
+    } catch (e) {
+      this.output = '模型删除失败: ' + e;
+    }
+  }
+
   deleteModelConfigJson() {
     if (this.blockModelFileMutationIfBusy('删除 config.json')) {
       return;
@@ -3755,55 +3773,6 @@ struct Index {
       fs.closeSync(fileWrite);
 
       this.output = `更新线程数成功: ${num}\n====== 新配置 ======\n${newStr}`;
-    } catch (e) {
-      this.output = `更新 config.json 失败: ${e}`;
-    }
-  }
-
-  updateConfigBackendType(target: string) {
-    let value = (target === 'mllm') ? this.mllmBackendTypeInput.trim() : this.backendTypeInput.trim();
-    if (value.length === 0) {
-      this.output = '请输入有效的 backend_type';
-      return;
-    }
-
-    let cfgPath = this.modelDir + '/config.json';
-    try {
-      if (!fs.accessSync(cfgPath)) {
-        this.output = `文件不存在: ${cfgPath}`;
-        return;
-      }
-
-      let fileRead = fs.openSync(cfgPath, fs.OpenMode.READ_ONLY);
-      let stat = fs.statSync(cfgPath);
-      let buf = new ArrayBuffer(stat.size);
-      fs.readSync(fileRead.fd, buf);
-      fs.closeSync(fileRead);
-
-      let textDecoder = util.TextDecoder.create('utf-8');
-      let content = textDecoder.decodeWithStream(new Uint8Array(buf));
-      let configObj = ArkJSON.parse(content) as JsonMap;
-
-      if (target === 'mllm') {
-        if (configObj['mllm']) {
-          let mllmObj = configObj['mllm'] as JsonMap;
-          mllmObj['backend_type'] = value;
-        } else {
-          this.output = 'config.json 中不存在 mllm 字段';
-          return;
-        }
-      } else {
-        configObj['backend_type'] = value;
-      }
-
-      let newStr = ArkJSON.stringify(configObj, null, 4);
-      let byteStr = util.TextEncoder.create('utf-8').encodeInto(newStr);
-      let fileWrite = fs.openSync(cfgPath, fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-      fs.writeSync(fileWrite.fd, byteStr.buffer);
-      fs.closeSync(fileWrite);
-
-      let label = (target === 'mllm') ? 'mllm.backend_type' : 'backend_type';
-      this.output = `更新 ${label} 成功: ${value}\n====== 新配置 ======\n${newStr}`;
     } catch (e) {
       this.output = `更新 config.json 失败: ${e}`;
     }
@@ -4323,6 +4292,7 @@ struct Index {
       let fileHandle: fs.File;
       let failed = false;
       let resolved = false;
+      let pauseStream: () => void = () => {};
       try {
         if (startOffset > 0) {
           fileHandle = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND);
@@ -4346,9 +4316,14 @@ struct Index {
         if (self.modelScopeActiveHttpReq === httpReq) {
           self.modelScopeActiveHttpReq = null;
         }
+        if (self.modelScopeActiveStreamCancel === pauseStream) {
+          self.modelScopeActiveStreamCancel = null;
+        }
         httpReq.destroy();
         resolve(size);
       };
+      pauseStream = (): void => { finish(-2); };
+      self.modelScopeActiveStreamCancel = pauseStream;
       httpReq.on('dataReceive', (data: ArrayBuffer) => {
         if (self.modelScopePauseRequested) {
           failed = true;
@@ -4395,6 +4370,12 @@ struct Index {
           httpReq.off('dataReceive');
           httpReq.off('dataReceiveProgress');
           httpReq.off('dataEnd');
+          if (self.modelScopeActiveHttpReq === httpReq) {
+            self.modelScopeActiveHttpReq = null;
+          }
+          if (self.modelScopeActiveStreamCancel === pauseStream) {
+            self.modelScopeActiveStreamCancel = null;
+          }
           httpReq.destroy();
           resolve(fileSize);
         };
@@ -4506,12 +4487,16 @@ struct Index {
   }
 
   pauseModelScopeDownload(): void {
-    if (!this.modelScopeDownloading) {
+    if (!this.modelScopeDownloading && this.modelScopeActiveStreamCancel === null && this.modelScopeActiveHttpReq === null) {
       return;
     }
     this.modelScopePauseRequested = true;
     AppLogger.info('ModelDownload', 'pause requested repo=' + this.modelScopeMnnRepo);
     this.updateModelDownloadMessage('正在暂停 ModelScope 下载...');
+    if (this.modelScopeActiveStreamCancel !== null) {
+      this.modelScopeActiveStreamCancel();
+      return;
+    }
     if (this.modelScopeActiveHttpReq !== null) {
       try {
         this.modelScopeActiveHttpReq.destroy();
@@ -4522,6 +4507,10 @@ struct Index {
   }
 
   async downloadModelScopeModel() {
+    if (this.modelScopeDownloading || this.downloading) {
+      this.updateModelDownloadMessage('已有模型下载任务正在进行，请等待完成或暂停后再试');
+      return;
+    }
     let parts = this.modelScopeRepoParts();
     if (parts.length !== 2) {
       let message = 'ModelScope 仓库格式不正确，应为 owner/repo，例如 doulujiyao/model-name';
@@ -4531,7 +4520,6 @@ struct Index {
     }
     let nextModelId = this.modelScopeModelId(parts[0], parts[1]);
     this.selectedModelId = nextModelId;
-    this.selectedModelVariant = '';
     this.modelDir = this.modelScopeRepoDir(parts[0], parts[1]);
     this.syncProfileModelConfigPath();
     this.updateModelDownloadMessage('准备开始 ModelScope 下载: ' + this.modelScopeMnnRepo);
@@ -4548,6 +4536,10 @@ struct Index {
       this.updateModelDownloadMessage('正在读取 ModelScope 文件清单: ' + parts[0] + '/' + parts[1]);
       AppLogger.info('ModelDownload', 'fetch ModelScope file list repo=' + parts[0] + '/' + parts[1]);
       let files = await this.fetchModelScopeFileList(parts[0], parts[1]);
+      if (this.modelScopePauseRequested) {
+        this.updateModelDownloadMessage('已暂停，再次点击可继续');
+        return;
+      }
       if (files.length === 0) {
         let message = 'ModelScope 文件清单为空: ' + this.modelScopeMnnRepo;
         this.updateModelDownloadMessage(message);
@@ -4588,6 +4580,12 @@ struct Index {
           completedBytes += files[j].size;
         }
       }
+      if (this.modelScopePauseRequested) {
+        this.updateModelDownloadProgress(completedBytes, totalBytes, '已暂停，再次点击可继续');
+        AppLogger.info('ModelDownload', 'paused after file loop repo=' + this.modelScopeMnnRepo + ', saved=' +
+          this.formatSize(completedBytes));
+        return;
+      }
       this.disableModelThinkingByDefault();
       if (failed.length === 0) {
         try {
@@ -4614,6 +4612,7 @@ struct Index {
       AppLogger.error('ModelDownload', message);
     } finally {
       this.modelScopeActiveHttpReq = null;
+      this.modelScopeActiveStreamCancel = null;
       this.refreshDownloadedModels();
       this.modelScopeDownloading = false;
       this.downloading = false;
@@ -5637,6 +5636,9 @@ struct Index {
       showToastSafely('本地推理暂不支持图片附件，请切换云端或清除图片', 1800);
       return;
     }
+    if (!await this.ensureLocalChatModelIsAvailable()) {
+      return;
+    }
     let activeSession = this.ensureActiveChatSession();
     if (activeSession === null) {
       return;
@@ -5711,6 +5713,44 @@ struct Index {
       }
       this.isThinking = false;
     }
+  }
+
+  private async ensureLocalChatModelIsAvailable(): Promise<boolean> {
+    if (this.modelLoaded) {
+      return true;
+    }
+    let modelStatus = this.modelLoadableStatus(this.modelDir);
+    if (modelStatus === '下载完成' || modelStatus === '可加载') {
+      return true;
+    }
+    if (this.downloading) {
+      showToastSafely('本地模型正在下载，请等待完成后再发送', 1800);
+      return false;
+    }
+    let shouldOpenModelSettings = await this.confirmModelScopeDownloadForLocalChat(modelStatus);
+    if (!shouldOpenModelSettings) {
+      return false;
+    }
+    this.settingsSectionId = SettingsSectionId.ModelAgents;
+    this.currentTab = MainTabIndex.Settings;
+    await this.downloadModelScopeModel();
+    return false;
+  }
+
+  private async confirmModelScopeDownloadForLocalChat(modelStatus: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      promptAction.showDialog({
+        title: '本地 Agent 未下载',
+        message: '未检测到可加载的本地 Agent 模型（' + modelStatus + '）。\n\n是否前往设置页，从 ModelScope 仓库“' +
+          this.modelScopeMnnRepo + '”下载？',
+        buttons: [
+          { text: '暂不前往', color: '#666666' },
+          { text: '前往设置', color: '#4F68FF' }
+        ]
+      }).then((data: promptAction.ShowDialogSuccessResponse) => {
+        resolve(data.index === 1);
+      }).catch(() => { resolve(false); });
+    });
   }
 
   private async submitLocalAgentTask(): Promise<void> {
@@ -6036,8 +6076,6 @@ struct Index {
             autoConfirm: $autoConfirm,
             cloudAutoConfirm: $cloudAutoConfirm,
             threadNumInput: $threadNumInput,
-            backendTypeInput: $backendTypeInput,
-            mllmBackendTypeInput: $mllmBackendTypeInput,
             selectedSectionId: $settingsSectionId,
             output: $output,
             cloudOutput: $cloudOutput,
@@ -6045,20 +6083,15 @@ struct Index {
             modelDownloadProgressPercent: $modelDownloadProgressPercent,
             modelDownloadProgressText: $modelDownloadProgressText,
             modelDownloadProgressTitle: $modelDownloadProgressTitle,
-            downloading: this.downloading,
-            connected: this.connected,
-            modelScopeDownloading: this.modelScopeDownloading,
-            modelScopePauseRequested: this.modelScopePauseRequested,
+            downloading: $downloading,
+            modelScopeDownloading: $modelScopeDownloading,
+            modelScopePauseRequested: $modelScopePauseRequested,
             hdcAutoStatus: this.hdcAutoStatus,
             hdcAutoConnected: this.hdcAutoConnected,
             hdcAutoConnecting: this.hdcAutoConnecting,
             hdcManualPairing: this.hdcManualPairing,
-            selectedModelVariant: this.selectedModelVariant,
             downloadedModels: this.downloadedModels,
             selectedModelId: this.selectedModelId,
-            onCheckServer: () => { this.checkServer(); },
-            onDownloadAll: () => { this.downloadAll(); },
-            onDeleteModelFiles: () => { this.deleteModelFiles(); },
             onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
             onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
             onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
@@ -6074,14 +6107,13 @@ struct Index {
             onStartCloudBackend: async () => { await this.startCloudBackend(); },
             onClearScreenshots: () => { this.clearScreenshots(); },
             onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
-            onSwitchModelVariant: (variant: string) => { this.switchModelVariant(variant); },
             onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+            onDeleteDownloadedModel: (modelId: string) => { this.deleteDownloadedModel(modelId); },
             onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
             onListScreenshots: () => { this.listScreenshots(); },
             onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
             onListModelFilesTree: () => { this.listModelFilesTree(); },
-            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
-            onUpdateConfigBackendType: (target: string) => { this.updateConfigBackendType(target); }
+            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Settings), mainTabLabel(MainTabIndex.Settings), MainTabIndex.Settings))
       }

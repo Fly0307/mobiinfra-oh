@@ -4,6 +4,7 @@ import {
   createMobileGuiTaskConfirmationCancelledError,
   createMobileGuiTaskTool,
   isMobileGuiTaskConfirmationCancelledError,
+  mobileGuiTaskTerminalResultMessage,
   mobileGuiTaskToolParameters,
   MobileGuiTaskToolResponse,
   mobileGuiTaskToolResponseFromRunResult,
@@ -198,6 +199,17 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.recoverable).assertTrue();
     });
 
+    it('marksRejectedAndCancelledResponsesAsTerminalForChatAgent', 0, () => {
+      expect(mobileGuiTaskTerminalResultMessage(
+        '{"ok":false,"status":"rejected","error_code":"user_rejected"}'))
+        .assertEqual('已按您的选择拒绝执行手机 GUI 任务。');
+      expect(mobileGuiTaskTerminalResultMessage(
+        '{"ok":false,"status":"cancelled","error_code":"user_cancelled"}'))
+        .assertEqual('已取消手机 GUI 任务，未继续执行任何手机操作。');
+      expect(mobileGuiTaskTerminalResultMessage(
+        '{"ok":false,"status":"failed","error_code":"hdc_unavailable"}') === null).assertTrue();
+    });
+
     it('omitsBusinessResultFromFailedWirePayload', 0, () => {
       let keyValues: Record<string, MobileGuiTaskJsonValue> = {};
       keyValues['stale'] = true;
@@ -344,7 +356,7 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.ok).assertFalse();
       expect(payload.status).assertEqual('rejected');
       expect(payload.error_code).assertEqual('user_rejected');
-      expect(payload.recoverable).assertTrue();
+      expect(payload.recoverable).assertFalse();
     });
 
     it('returnsRunResultWhenConfirmed', 0, async () => {
@@ -446,7 +458,7 @@ export default function mobileGuiTaskToolUnitTest() {
       expect(payload.ok).assertFalse();
       expect(payload.status).assertEqual('cancelled');
       expect(payload.error_code).assertEqual('user_cancelled');
-      expect(payload.recoverable).assertTrue();
+      expect(payload.recoverable).assertFalse();
       expect(payload.error !== undefined && payload.error!.indexOf('用户关闭确认弹窗') >= 0).assertTrue();
     });
 

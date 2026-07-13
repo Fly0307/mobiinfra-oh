@@ -9,6 +9,7 @@ import {
   MobileGuiTaskRequest,
   MobileGuiTaskRunResult
 } from '../main/ets/utils/MobileGuiTaskTypes';
+import { createMobileGuiTaskTool } from '../main/ets/utils/MobileGuiTaskTool';
 import {
   CloudChatCompletionOptions,
   CloudChatCompletionResult,
@@ -429,6 +430,70 @@ export default function chatReactAgentUnitTest() {
       expect((client.callMessages[1][2].content as string).indexOf('chat-sessions/tool-runs/chat-session-1/mobile-gui/run-1') >= 0)
         .assertTrue();
       expect((client.callMessages[1][2].content as string).indexOf('"status":"completed"') >= 0).assertTrue();
+    });
+
+    it('stopsReactLoopWhenUserRejectsMobileGuiTask', 0, async () => {
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-mobile-reject', 'run_mobile_gui_task', '{"task":"打开微信"}')]),
+        completion('此响应不应被请求。')
+      ]);
+      let registry = new ChatToolRegistry();
+      registry.registerTool(createMobileGuiTaskTool());
+      let confirmCalls = 0;
+      let runCalls = 0;
+      let agent = new ChatReactAgent(client, registry);
+
+      let result = await agent.run([userMessage('打开微信')], testConfig(), {
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => {
+          confirmCalls++;
+          return false;
+        },
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          runCalls++;
+          throw new Error('拒绝后不得执行 workflow');
+        }
+      });
+
+      expect(result.content).assertEqual('已按您的选择拒绝执行手机 GUI 任务。');
+      expect(result.finishReason).assertEqual('tool_terminal');
+      expect(result.toolCallCount).assertEqual(1);
+      expect(confirmCalls).assertEqual(1);
+      expect(runCalls).assertEqual(0);
+      expect(client.callMessages.length).assertEqual(1);
+    });
+
+    it('stopsReactLoopWhenConfirmedMobileGuiTaskIsCancelled', 0, async () => {
+      let client = new FakeReactModelClient([
+        completion('', [toolCall('call-mobile-cancel', 'run_mobile_gui_task', '{"task":"打开微信"}')]),
+        completion('此响应不应被请求。')
+      ]);
+      let registry = new ChatToolRegistry();
+      registry.registerTool(createMobileGuiTaskTool());
+      let runCalls = 0;
+      let agent = new ChatReactAgent(client, registry);
+
+      let result = await agent.run([userMessage('打开微信')], testConfig(), {
+        confirmMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<boolean> => true,
+        runMobileGuiTask: async (_request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> => {
+          runCalls++;
+          return {
+            ok: false,
+            status: 'cancelled',
+            errorCode: 'user_cancelled',
+            error: '用户终止任务',
+            recoverable: false,
+            summary: '',
+            runDir: '',
+            returnedToApp: true
+          };
+        }
+      });
+
+      expect(result.content).assertEqual('已取消手机 GUI 任务，未继续执行任何手机操作。');
+      expect(result.finishReason).assertEqual('tool_terminal');
+      expect(result.toolCallCount).assertEqual(1);
+      expect(runCalls).assertEqual(1);
+      expect(client.callMessages.length).assertEqual(1);
     });
 
     it('streamsFinalAnswerDeltasWhenCallbackProvided', 0, async () => {

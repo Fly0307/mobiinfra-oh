@@ -84,6 +84,7 @@ export function createMobileGuiTaskTool(): ChatTool {
     description: '执行需要手机 GUI 操作的高层任务。',
     parameters: mobileGuiTaskToolParameters(),
     strict: false,
+    terminalResultMessage: mobileGuiTaskTerminalResultMessage,
     execute: async (argsText: string, context: ChatToolExecutionContext): Promise<string> => {
       let validation = normalizeMobileGuiTaskArguments(argsText);
       if (!validation.ok) {
@@ -122,7 +123,7 @@ export function createMobileGuiTaskTool(): ChatTool {
               'cancelled',
               MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE,
               err.message,
-              true
+              false
             ))
           );
         }
@@ -143,7 +144,7 @@ export function createMobileGuiTaskTool(): ChatTool {
             'rejected',
             'user_rejected',
             '用户拒绝执行手机 GUI 任务。',
-            true
+            false
           ))
         );
       }
@@ -236,6 +237,25 @@ export function mobileGuiTaskToolResponseFromRunResult(result: MobileGuiTaskRunR
 
 export function stringifyMobileGuiTaskToolResponse(response: MobileGuiTaskToolResponse): string {
   return stringifyJsonCompat(response as Object);
+}
+
+/**
+ * 用户明确拒绝或取消手机操作时，阻止 ReAct 继续请求模型并再次弹出确认框。
+ * 仅处理用户意图型终止状态；HDC、模型连接等技术问题仍允许聊天模型决定是否重试或给出替代建议。
+ */
+export function mobileGuiTaskTerminalResultMessage(content: string): string | null {
+  try {
+    let response = parseJsonCompat<MobileGuiTaskToolResponse>(content);
+    if (response.status === 'rejected' || response.error_code === 'user_rejected') {
+      return '已按您的选择拒绝执行手机 GUI 任务。';
+    }
+    if (response.status === 'cancelled' || response.error_code === MOBILE_GUI_TASK_CONFIRMATION_CANCELLED_CODE) {
+      return '已取消手机 GUI 任务，未继续执行任何手机操作。';
+    }
+  } catch (_e) {
+    // 非 JSON 工具结果不属于本工具的终止协议，按普通结果继续处理。
+  }
+  return null;
 }
 
 function assertAllowedFields(args: Object): void {

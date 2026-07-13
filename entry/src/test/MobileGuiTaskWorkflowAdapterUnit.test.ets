@@ -231,6 +231,7 @@ export default function mobileGuiTaskWorkflowAdapterUnitTest() {
       expect(mapped.ok).assertFalse();
       expect(mapped.status).assertEqual('cancelled');
       expect(mapped.errorCode).assertEqual('user_cancelled');
+      expect(mapped.recoverable).assertFalse();
       expect(mapped.returnedToApp).assertTrue();
     });
 

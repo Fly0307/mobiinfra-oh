@@ -6,6 +6,10 @@ import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
 import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
+import {
+  agentPostActionDelayMs,
+  DEFAULT_AGENT_POST_ACTION_DELAY_MS
+} from './AgentLoopTimingPolicy';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
 import { AgentLoopNativeApi } from 'libentry.so';
@@ -42,6 +46,7 @@ export class AgentLoopRunner {
   private cloudTask: string = '';
   private localActionCallCount: number = 0;
   private cloudPromptMode: AgentPromptMode = 'cloud';
+  private postActionDelayMs: number = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
 
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
@@ -90,12 +95,14 @@ export class AgentLoopRunner {
     this.mode = 'local';
     this.cancellationRequested = false;
     this.localActionCallCount = 0;
+    this.postActionDelayMs = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
     AgentExecutionController.beginExecution('本地 Agent 执行中...');
     try {
       await this.syncAgentConfig();
       await this.hdcBridge.prepareAgentRun();
       await this.resetLocalContext();
       let plannerTarget = await this.runPlanner(task, 'local');
+      this.configureTargetTiming(plannerTarget);
       await this.launchTargetApp(plannerTarget);
       await this.resetLocalContext();
       await this.runAgentSteps(task, 'local');
@@ -118,11 +125,13 @@ export class AgentLoopRunner {
     this.cancellationRequested = false;
     this.cloudActionHistory = [];
     this.cloudTask = '';
+    this.postActionDelayMs = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
     AgentExecutionController.beginExecution('云端 Agent 执行中...');
     try {
       await this.syncAgentConfig();
       await this.hdcBridge.prepareAgentRun();
       let plannerTarget = await this.runPlanner(task, 'cloud', this.promptModeForCloudRequest());
+      this.configureTargetTiming(plannerTarget);
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
       await this.runAgentSteps(task, 'cloud', this.promptModeForCloudRequest());
@@ -223,6 +232,13 @@ export class AgentLoopRunner {
     this.log(this.mode, '>> [Planner] launching target app: ' + target.appName + ' ' + target.packageName);
     await this.hdcBridge.startApp(target.appName, target.packageName, true);
     await this.sleep(300);
+  }
+
+  private configureTargetTiming(target: PlannerTarget): void {
+    this.postActionDelayMs = agentPostActionDelayMs(target.appName, target.packageName);
+    this.log(this.mode, '>> [Agent] post-action screenshot delay=' + String(this.postActionDelayMs) +
+      'ms for target app=' + target.appName + ', package=' +
+      (target.packageName.length > 0 ? target.packageName : '(empty)'));
   }
 
   private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
@@ -333,7 +349,8 @@ export class AgentLoopRunner {
           localHistory.push((i + 1) + ': Action=' + parsed.action);
           this.log(mode, '[Agent] Appended JSON data to history: ' + localHistory[localHistory.length - 1]);
         }
-        await this.sleep(700);
+        // 这段等待位于下一轮截图之前，因此同时覆盖有悬浮窗和无悬浮窗的截图路径。
+        await this.sleep(this.postActionDelayMs);
       }
       if (!completed) {
         this.log(mode, '>> [Agent] reached max steps: ' + MAX_AGENT_STEPS);
@@ -401,7 +418,7 @@ export class AgentLoopRunner {
       }
       await this.executeParsedAction(parsed, width * 4, height * 4);
       history.push((i + 1) + ': Action=' + parsed.action);
-      await this.sleep(700);
+      await this.sleep(this.postActionDelayMs);
     }
   }
 

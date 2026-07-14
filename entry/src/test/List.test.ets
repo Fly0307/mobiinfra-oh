@@ -29,6 +29,7 @@ import mobileGuiTaskToolUnitTest from './MobileGuiTaskToolUnit.test';
 import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapterUnit.test';
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
 import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
+import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -62,4 +63,5 @@ export default function testsuite() {
   mobileGuiTaskWorkflowAdapterUnitTest();
   agentActionParserUnitTest();
   captureOverlayPolicyUnitTest();
+  agentLoopTimingPolicyUnitTest();
 }

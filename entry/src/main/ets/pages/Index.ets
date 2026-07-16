@@ -2586,7 +2586,6 @@ struct Index {
       this.disablePcServerCloudEndpoint(false);
     }
     if (becameConnected) {
-      this.enablePcServerCloudEndpoint(false);
       this.showPcServerConnectedPrompt();
     }
   }
@@ -2599,7 +2598,7 @@ struct Index {
     showToastSafely('已连接 PC Server', 2200);
     promptAction.showDialog({
       title: '已连接 PC Server',
-      message: '手机 App 已连接到 PC Server，事件通道已建立。',
+      message: '手机 App 已连接到 PC Server，事件通道已建立。聊天页 PC Server 模型接口默认保持关闭，可在聊天页手动开启。',
       buttons: [
         { text: '知道了', color: '#5968FF' }
       ]

@@ -2586,7 +2586,6 @@ struct Index {
       this.disablePcServerCloudEndpoint(false);
     }
     if (becameConnected) {
-      this.enablePcServerCloudEndpoint(false);
       this.showPcServerConnectedPrompt();
     }
   }
@@ -2599,7 +2598,7 @@ struct Index {
     showToastSafely('已连接 PC Server', 2200);
     promptAction.showDialog({
       title: '已连接 PC Server',
-      message: '手机 App 已连接到 PC Server，事件通道已建立。',
+      message: '手机 App 已连接到 PC Server，事件通道已建立。聊天页 PC Server 模型接口默认保持关闭，可在聊天页手动开启。',
       buttons: [
         { text: '知道了', color: '#5968FF' }
       ]
@@ -2692,8 +2691,8 @@ struct Index {
     return {
       schemaVersion: 1,
       typeId: PROFILE_KNOCK_SHARE_UTD,
-      appId: 'com.example.mnnllmchat',
-      appName: 'MobiInfer LLM Chat',
+      appId: 'com.clawmate.app',
+      appName: 'ClawMate',
       generatedAt: new Date().toISOString(),
       profileText: this.buildProfileShareText(snapshot),
       profile: snapshot
@@ -2737,7 +2736,7 @@ struct Index {
 
   private buildProfileShareText(snapshot: ProfileShareSnapshot): string {
     let lines: string[] = [];
-    lines.push('应用：MobiInfer LLM Chat');
+    lines.push('应用：ClawMate');
     lines.push('生成时间：' + new Date().toLocaleString());
     lines.push('画像更新时间：' + (snapshot.updatedLabel.length > 0 ? snapshot.updatedLabel : '未知'));
     lines.push('画像完整度：' + String(snapshot.completeness) + '%');

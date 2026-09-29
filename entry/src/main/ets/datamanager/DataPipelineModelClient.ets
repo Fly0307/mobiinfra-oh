@@ -43,7 +43,7 @@ import {
   weekdayLabelFromDate
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
-import { memorySceneLabel } from '../utils/WorkflowSceneConfig';
+import { memorySceneLabel, PERSONAL_INFO_MEMORY_SCENE_ID } from '../utils/WorkflowSceneConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
   ChatMemoryInput, ChatMemoryResult, buildChatMemoryPrompt, parseChatMemoryResults
@@ -253,7 +253,7 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '输入字段说明：\n' +
   'source_ref：输入 entry 的唯一引用标识，只需要在输出 item 中原样返回，用于把 facts 归还给对应 entry。\n' +
   'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨天”“前天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
-  'workflow_scene_label：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
+  'workflow_scene_label：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库、个人信息；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
   'entry_text：原始日志条目正文，是拆分事实的主要依据。\n\n' +
   '返回严格 JSON，格式为：\n' +
   '{\n' +
@@ -278,7 +278,8 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '2. 如果原文只是同一事件的重复表述，不要重复拆分。\n' +
   '3. event_date 如果无法明确判断，就使用空字符串。\n' +
   '4. 如果是订单、账单、交易、消费记录，normalized_fact 必须尽量保留关键细节，例如商家、商品/服务、金额、时间、状态；不要压缩成只有“实付25.8元”这种只剩金额的信息。\n' +
-  '5. 不要输出 markdown，不要解释，只输出 JSON。';
+  '5. 对个人信息场景，normalized_fact 要保留“用户本人的什么信息”及用户明确说出的值；event_date 表示用户陈述这条资料的 source_date，不要把出生日期、生日或证件有效期误当成陈述日期。\n' +
+  '6. 不要输出 markdown，不要解释，只输出 JSON。';
 
 function splitWorkflowSceneLabel(entry: SourceEntry): string {
   if (isNaN(entry.workflow_scene_id) || entry.workflow_scene_id < 0) {
@@ -343,7 +344,7 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\nevent_id：事件唯一标识，只需要在输出中原样返回。' +
   '\nevent_date：事件发生日期，格式为 YYYY-MM-DD。' +
   '\nevent_weekday：event_date 对应的星期，用于把“这周六”“下周一”“周末”等相对日期换算为绝对日期。' +
-  '\nworkflow_scene_labels：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
+  '\nworkflow_scene_labels：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库、个人信息；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
   '\nsummary：事件短摘要，用于快速理解事件。' +
   '\nnormalized_fact：整理后的完整事实描述，通常比 summary 包含更多商户、商品、人物、地点、金额、状态或行动细节；抽取关键词、领域、实体和待办时优先参考它。' +
   '\n\n输出必须是严格 JSON，不要输出 markdown 或解释：' +
@@ -352,7 +353,7 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\n\nkeywords 规则：提取具体、可检索的商品、服务、商户、地点、人物、应用、动作、状态、主题词或金额词；优先保留输入原词；避免“当前页面”“截图”“记录”“信息”“详情”等泛词。' +
   '\n\ndomains 规则：只能从 eat|wear|live|travel|work|other 中多选。eat 表示餐饮、外卖、食品、饮料；wear 表示服装、鞋包、美妆；live 表示住房、家居、酒店；travel 表示交通、通勤、出行、旅行、票务、差旅；work 表示工作、会议、协作、办公事务；other 表示无法归入以上分类的事件。购物、聊天、外卖、娱乐、生活、社交、差旅是 workflow_scene_labels，不要直接当作 domains。请注意 eat/wear/live/travel/work 只能覆盖真实场景中 20% 的事件，如果你没有 90% 以上的把握明确归类，**必须仅输出 other**。如果已经输出 eat/wear/live/travel/work 中任一领域，不要再输出 other。' +
   '\n\nentities 规则：只抽取现实对象。person 只用于真实联系人、聊天对象或明确人物姓名；place 只用于实际地点、地址、场馆、目的地；merchant 只用于商户、店铺、平台、品牌门店或服务商。不要把商品、服务类别、金额、日期、订单号、抽象话题、页面元素、按钮、状态词或泛化类别抽成实体。name 和 aliases 必须来自输入文本，aliases 只放同一现实对象在输入中出现过的其他写法。' +
-  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；对于常规的、不关联任何未来待办事项的事件（如浏览记录、购买记录、账单信息、普通聊天等），必须把 todo 的四个字段都写空。' +
+  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；对于常规的、不关联任何未来待办事项的事件（如浏览记录、购买记录、账单信息、普通聊天、个人信息陈述等），必须把 todo 的四个字段都写空。' +
   'deadline 表示待办事项截止日期，当事件提到明确绝对截止日期时，直接将其作为 deadline；提到相对截止日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算；没有明确截止日期日期但有明确待办动作时 deadline 写空字符串。' +
   'text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。' +
   'agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。';
@@ -1114,7 +1115,7 @@ export class DataPipelineModelClient {
         continue;
       }
       let eventDate = normalizeFreeText(raw['event_date']);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
+      if (entry.workflow_scene_id === PERSONAL_INFO_MEMORY_SCENE_ID || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
         eventDate = entry.source_date;
       }
       let fact: CandidateFact = {

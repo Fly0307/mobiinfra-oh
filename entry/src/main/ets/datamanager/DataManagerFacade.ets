@@ -10,6 +10,7 @@ import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
 import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
 import { ChatMemorySync } from './ChatMemorySync';
+import { shouldOfferSyncReminder, syncSnapshotTimeMs } from './DataManagerSyncReminder';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -313,7 +314,26 @@ export class DataManagerFacade {
   }
 
   hasDataToSync(): boolean {
-    return this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync();
+    if (this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync()) {
+      return true;
+    }
+    let lastSyncMs = syncSnapshotTimeMs(this.loadDailyLogSnapshot().generated_at);
+    return GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir,
+      Number.isFinite(lastSyncMs) ? lastSyncMs : 0);
+  }
+
+  shouldRemindToSync(nowMs: number = Date.now(), firstOpenAt: string = ''): boolean {
+    let previous = this.loadDailyLogSnapshot();
+    let referenceTime = Number.isFinite(syncSnapshotTimeMs(previous.generated_at)) ?
+      previous.generated_at : firstOpenAt;
+    if (!shouldOfferSyncReminder(referenceTime, true, nowMs)) {
+      return false;
+    }
+    let chatSync = new ChatMemorySync(this.paths, this.storage, this.modelClient);
+    let hasNewRecords = chatSync.hasPendingMessages(nowMs) ||
+      this.hasNewDailyLogEntries(previous, this.buildDailyLogSnapshot()) ||
+      GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir, syncSnapshotTimeMs(referenceTime));
+    return shouldOfferSyncReminder(referenceTime, hasNewRecords, nowMs);
   }
 
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
@@ -485,6 +505,13 @@ export class DataManagerFacade {
 
   private writeDailyLogSnapshot(snapshot: DailyLogSnapshot): void {
     this.storage.writeJsonAtomic(this.dailyLogSnapshotPath(), snapshot as Object);
+  }
+
+  private hasNewDailyLogEntries(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+    let previousCounts: Record<string, number> = new Object() as Record<string, number>;
+    previous.files.forEach((file: DailyLogSnapshotFile) => previousCounts[file.path] = file.entry_count);
+    return current.files.some((file: DailyLogSnapshotFile): boolean =>
+      file.entry_count > (previousCounts[file.path] || 0));
   }
 
   private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {

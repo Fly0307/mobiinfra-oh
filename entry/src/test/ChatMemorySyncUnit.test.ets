@@ -17,6 +17,7 @@ import { ChatSessionStorage } from '../main/ets/utils/ChatSessionStorage';
 import {
   CHAT_MODE_CLOUD_AGENT, CHAT_MODE_LOCAL_INFERENCE, ChatSessionRecord, createChatMessage, createEmptyChatSession
 } from '../main/ets/pages/chat/ChatSessionTypes';
+import { PERSONAL_INFO_MEMORY_SCENE_ID } from '../main/ets/utils/WorkflowSceneConfig';
 
 const NOW: number = new Date(2026, 8, 17, 12).getTime();
 const CONFIG: DataManagerModelConfig = { enabled: false, baseUrl: '', apiKey: '' };
@@ -66,7 +67,8 @@ class ChatMemoryTestModel extends DataPipelineModelClient {
       return {
         source_ref: input.source_ref,
         facts: input.user_text === '你好' ? [] : [{
-          scene_id: input.mode === CHAT_MODE_LOCAL_INFERENCE ? 9 : 6,
+          scene_id: input.user_text.indexOf('生日') >= 0 || input.user_text.indexOf('工作单位') >= 0 ?
+            PERSONAL_INFO_MEMORY_SCENE_ID : (input.mode === CHAT_MODE_LOCAL_INFERENCE ? 9 : 6),
           text: input.user_text
         }]
       };
@@ -131,6 +133,7 @@ export default function chatMemorySyncUnitTest() {
       let prompt = buildChatMemoryPrompt(inputs);
       expect(prompt.systemPrompt.indexOf('不得再次提取前文独有的事实') >= 0).assertTrue();
       expect(prompt.systemPrompt.indexOf('AI 的回答') >= 0).assertTrue();
+      expect(prompt.systemPrompt.indexOf('个人信息类别 scene_id=' + String(PERSONAL_INFO_MEMORY_SCENE_ID)) >= 0).assertTrue();
     });
 
     it('splitsLongMessagesWithoutDroppingTailAndResumesRemainingParts', 0, () => {
@@ -155,6 +158,11 @@ export default function chatMemorySyncUnitTest() {
       let invalidItem: JsonMap = { source_ref: inputs[0].source_ref, facts: [invalidFact] };
       let invalid: JsonMap = { items: [invalidItem] };
       expect(responseRejected(invalid, inputs)).assertTrue();
+      let personalFact: JsonMap = { scene_id: PERSONAL_INFO_MEMORY_SCENE_ID, text: '用户的生日是9月17日' };
+      let personalItem: JsonMap = { source_ref: inputs[0].source_ref, facts: [personalFact] };
+      let personalPayload: JsonMap = { items: [personalItem] };
+      expect(parseChatMemoryResults(personalPayload, inputs)[0].facts[0].scene_id)
+        .assertEqual(PERSONAL_INFO_MEMORY_SCENE_ID);
     });
 
     it('persistsNoFactChecksAndOnlyExtractsNewMessagesOnNextSync', 0, async () => {
@@ -166,9 +174,11 @@ export default function chatMemorySyncUnitTest() {
       saveSession(storage, paths.filesDir, record);
       let sync = new ChatMemorySync(paths, storage, model);
       expect(sync.hasDataToSync(NOW)).assertTrue();
+      expect(sync.hasPendingMessages(NOW)).assertTrue();
       let first = await sync.sync(CONFIG, undefined, NOW);
       expect(first.factCount).assertEqual(0);
       expect(sync.hasDataToSync(NOW)).assertFalse();
+      expect(sync.hasPendingMessages(NOW)).assertFalse();
       record.messages.push(createChatMessage('u2', 'user', 'chat', '我买了去北京的车票', NOW));
       saveSession(storage, paths.filesDir, record);
       await new ChatMemorySync(paths, storage, model).sync(CONFIG, undefined, NOW);
@@ -282,6 +292,37 @@ export default function chatMemorySyncUnitTest() {
         let first = facade.queryIndexedEvents(query);
         await facade.refresh(CONFIG);
         expect(facade.queryIndexedEvents(query).events.length).assertEqual(first.events.length);
+      } finally {
+        storage.removeTree(root);
+      }
+    });
+
+    it('indexesPersonalFactsFromBothChatModesForCollectionAndKeywordLookup', 0, async () => {
+      let now = Date.now();
+      let root = '/tmp/personal-memory-pipeline-' + String(now);
+      let storage = new DataManagerStorage();
+      let paths = new DataManagerPaths(root, storage);
+      try {
+        let cloud = session('personal-cloud', CHAT_MODE_CLOUD_AGENT, now);
+        cloud.messages[0].content = '我的生日是9月17日';
+        saveSession(storage, root, cloud);
+        let local = session('personal-local', CHAT_MODE_LOCAL_INFERENCE, now);
+        local.messages[0].content = '我的工作单位是星云公司';
+        saveSession(storage, root, local);
+        await new ChatMemorySync(paths, storage, new ChatMemoryTestModel()).sync(CONFIG, undefined, now);
+        let facade = new DataManagerFacade(root);
+        await facade.refresh(CONFIG);
+        let personalSpec = collectionTabSpecByIndex(PERSONAL_INFO_MEMORY_SCENE_ID);
+        expect(personalSpec.title).assertEqual('个人信息记录');
+        let personalView = facade.loadCollectionViewModel(PERSONAL_INFO_MEMORY_SCENE_ID);
+        expect(personalView.empty).assertFalse();
+        expect(personalView.groups.length).assertEqual(1);
+        expect(personalView.groups[0].title).assertEqual('个人信息记录');
+        expect(facade.queryIndexedEvents(personalSpec.query).events.length).assertEqual(2);
+        let birthdayQuery = collectionTabSpecByIndex(PERSONAL_INFO_MEMORY_SCENE_ID).query;
+        birthdayQuery.keywords = ['生日'];
+        expect(facade.queryIndexedEvents(birthdayQuery).events.length).assertEqual(1);
+        expect(facade.loadProfileMarkdown().indexOf('星云公司') >= 0).assertFalse();
       } finally {
         storage.removeTree(root);
       }

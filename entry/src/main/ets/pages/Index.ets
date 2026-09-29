@@ -140,6 +140,7 @@ import {
   QueryResult
 } from '../datamanager/DataManagerTypes';
 import { createQueryEventsTool } from '../datamanager/DataManagerQueryEventsTool';
+import { nowIsoLocal } from '../datamanager/DataManagerUtils';
 import {
   AvatarGenerateRequest,
   AvatarGenerationMode,
@@ -258,6 +259,8 @@ const HDC_SERVER_CONNECT_TIMEOUT_MS: number = 2500;
 const HDC_SERVER_READ_TIMEOUT_MS: number = 5000;
 const LOCAL_CHAT_COMPLETION_PROBE_INTERVAL_MS: number = 250;
 const HOME_COMFORT_CHAT_SCENE_ID: number = 3;
+const SYNC_REMINDER_SUPPRESSED_KEY: string = 'syncReminderSuppressed';
+const SYNC_REMINDER_FIRST_OPENED_AT_KEY: string = 'syncReminderFirstOpenedAt';
 
 interface ServerFile {
   name: string;
@@ -418,6 +421,8 @@ PersistentStorage.persistProp(PROFILE_MODEL_CONFIG_PATH_KEY, '');
 PersistentStorage.persistProp(SELECTED_MODEL_ID_KEY, 'legacy:model');
 PersistentStorage.persistProp(FIRST_LAUNCH_ONBOARDING_STORAGE_KEY, '');
 PersistentStorage.persistProp(DESKTOP_COMPANION_REMINDER_SUPPRESSED_KEY, false);
+PersistentStorage.persistProp(SYNC_REMINDER_SUPPRESSED_KEY, false);
+PersistentStorage.persistProp(SYNC_REMINDER_FIRST_OPENED_AT_KEY, '');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
 PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
@@ -516,6 +521,10 @@ struct Index {
   desktopCompanionReminderSuppressed: boolean = false;
   @State desktopCompanionReminderVisible: boolean = false;
   @State desktopCompanionDontRemindAgain: boolean = false;
+  @StorageLink(SYNC_REMINDER_SUPPRESSED_KEY) syncReminderSuppressed: boolean = false;
+  @StorageLink(SYNC_REMINDER_FIRST_OPENED_AT_KEY) syncReminderFirstOpenedAt: string = '';
+  @State syncReminderVisible: boolean = false;
+  @State syncReminderDontRemindAgain: boolean = false;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
   @State currentTab: number = 0;
@@ -643,6 +652,7 @@ struct Index {
   private homeRecommendationDateTimerId: number = -1;
   private desktopCompanionReminderResolver: ((confirmed: boolean) => void) | null = null;
   private desktopCompanionReminderPromise: Promise<boolean> | null = null;
+  private syncReminderShownThisSession: boolean = false;
 
   // PC 控制服务端单例。AgentRouterServer 在本地模型和云端模型之间切换同一个 9126 入口。
   private agentRouter: AgentRouterServer = new AgentRouterServer();
@@ -681,6 +691,7 @@ struct Index {
   private completeFirstLaunchOnboarding(): void {
     this.currentTab = MainTabIndex.Home;
     this.firstLaunchOnboardingVersion = FIRST_LAUNCH_ONBOARDING_VERSION;
+    this.maybeShowSyncReminder();
   }
 
   private nextChatMessageId(prefix: string = 'msg'): string {
@@ -2727,6 +2738,39 @@ struct Index {
     }
   }
 
+  private maybeShowSyncReminder(): void {
+    if (this.syncReminderShownThisSession || this.syncReminderSuppressed || this.dataManagerRefreshing ||
+      this.shouldDisplayFirstLaunchOnboarding() || this.dataManagerFacade === null) {
+      return;
+    }
+    if (this.syncReminderFirstOpenedAt.length === 0) {
+      this.syncReminderFirstOpenedAt = nowIsoLocal();
+    }
+    try {
+      if (this.dataManagerFacade.shouldRemindToSync(Date.now(), this.syncReminderFirstOpenedAt)) {
+        this.syncReminderShownThisSession = true;
+        this.syncReminderDontRemindAgain = false;
+        this.syncReminderVisible = true;
+      }
+    } catch (e) {
+      dataManagerWarn('sync reminder check failed: ' + (e as Error).message);
+    }
+  }
+
+  private toggleSyncReminderSuppressed(): void {
+    this.syncReminderDontRemindAgain = !this.syncReminderDontRemindAgain;
+    this.syncReminderSuppressed = this.syncReminderDontRemindAgain;
+  }
+
+  private dismissSyncReminder(startSync: boolean): void {
+    this.syncReminderVisible = false;
+    if (startSync) {
+      this.refreshDataManager().catch((e: Error) => {
+        dataManagerWarn('sync reminder refresh failed: ' + e.message);
+      });
+    }
+  }
+
   private async runWechatAutoSummary(request: WechatAutoSummaryRequest): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
       return;
@@ -2900,6 +2944,7 @@ struct Index {
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
+    this.maybeShowSyncReminder();
   }
 
   onPageHide(): void {
@@ -6890,6 +6935,84 @@ struct Index {
     }
   }
 
+  @Builder SyncReminderOverlay() {
+    if (this.syncReminderVisible) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          Text('有新记录待同步')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#20263A')
+            .width('100%')
+          Text('已有至少 3 天未同步，发现了新保存的记录。现在同步，更新汇总和聊天记忆吗？')
+            .fontSize(14)
+            .lineHeight(22)
+            .fontColor('#555D70')
+            .width('100%')
+            .maxLines(4)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 12 })
+          Row({ space: 10 }) {
+            Button('暂时不用')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(14)
+              .fontColor('#4F68FF')
+              .backgroundColor('#EEF1FF')
+              .borderRadius(13)
+              .onClick(() => { this.dismissSyncReminder(false); })
+            Button('立即同步')
+              .layoutWeight(1)
+              .height(42)
+              .fontSize(14)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+              .backgroundColor('#4F68FF')
+              .borderRadius(13)
+              .onClick(() => { this.dismissSyncReminder(true); })
+          }
+          .width('100%')
+          .margin({ top: 20 })
+          Row() {
+            Blank().layoutWeight(1)
+            Row({ space: 7 }) {
+              Stack({ alignContent: Alignment.Center }) {
+                if (this.syncReminderDontRemindAgain) {
+                  Row()
+                    .width(9)
+                    .height(9)
+                    .backgroundColor('#4F68FF')
+                    .borderRadius(5)
+                }
+              }
+              .width(19)
+              .height(19)
+              .borderRadius(10)
+              .border({ width: 2, color: this.syncReminderDontRemindAgain ? '#4F68FF' : '#A7AEBC' })
+              Text('不再提醒')
+                .fontSize(12)
+                .fontColor('#687083')
+            }
+            .padding({ left: 6, right: 2, top: 6, bottom: 2 })
+            .onClick(() => { this.toggleSyncReminderSuppressed(); })
+          }
+          .width('100%')
+          .margin({ top: 10 })
+        }
+        .width('86%')
+        .padding({ left: 22, right: 22, top: 24, bottom: 18 })
+        .backgroundColor(Color.White)
+        .borderRadius(22)
+        .shadow({ radius: 24, color: '#33000000', offsetX: 0, offsetY: 8 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#73000000')
+      .zIndex(130)
+      .onClick(() => {})
+    }
+  }
+
   build() {
     Stack() {
       if (this.shouldDisplayFirstLaunchOnboarding()) {
@@ -7082,6 +7205,7 @@ struct Index {
 
       this.DataManagerProgressOverlay()
       this.DesktopCompanionReminderOverlay()
+      this.SyncReminderOverlay()
       }
     }
     .width('100%')

@@ -2,7 +2,7 @@ import { JSON as ArkJSON } from '@kit.ArkTS';
 import {
   ChatMessage, ChatSessionRecord, CHAT_MESSAGE_KIND_CHAT, splitAssistantThinkingContent
 } from '../pages/chat/ChatSessionTypes';
-import { memorySceneConfigs, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
+import { memorySceneConfigs, PERSONAL_INFO_MEMORY_SCENE_ID, WorkflowSceneConfig } from '../utils/WorkflowSceneConfig';
 import { JsonMap } from './DataManagerTypes';
 
 export const CHAT_MEMORY_WINDOW_MS: number = 7 * 24 * 60 * 60 * 1000;
@@ -115,6 +115,9 @@ export function buildChatMemoryPrompt(inputs: ChatMemoryInput[]): ChatMemoryProm
       '\n可用类别 scene_id：' + categories + '。餐饮归入外卖，交通/出行归入差旅，工作归入办公。' +
       '\n只提取 user_text 中用户明确陈述或确认的个人经历、偏好、计划、需求、情绪、人际关系等有价值的信息。' +
       '保留具体人物、地点、商品、金额、时间与状态；计划、意愿、疑问不能写成已经发生的事实。' +
+      '\n个人信息类别 scene_id=' + String(PERSONAL_INFO_MEMORY_SCENE_ID) + '：识别用户明确说出的、可长期复用的本人信息，包括但不限于姓名、生日或出生日期、证件信息、联系方式、家庭住址、工作单位、学校、家庭成员关系等。' +
+      '这不是固定字段表；其他明确属于用户个人档案的事实也可归入此类。逐条保留字段含义和原始关键值，并区分本人和他人、当前和过去；不得推测、补全或把问题、示例及代写内容当作用户资料。' +
+      '一次性消费、出行、待办、临时情绪和普通兴趣偏好仍按相应足迹类别提取，不要仅因句中出现“我”就归入个人信息。' +
       '\ncontext 是同一会话的少量前文，仅用于消解指代或理解用户确认的内容，不得再次提取前文独有的事实。' +
       'assistant 是 AI 的回答：建议、示例、推测、代写内容都不是用户事实，除非本条 user_text 明确确认。' +
       '\n忽略纯寒暄、泛知识问答、提示词/代码/虚构或引用中的人物经历、没有用户事实的求助和无关信息。' +

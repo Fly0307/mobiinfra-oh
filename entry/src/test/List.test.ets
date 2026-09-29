@@ -41,6 +41,7 @@ import homeTaskSuggestionUnitTest from './HomeTaskSuggestionUnit.test';
 import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
 import homeComfortChatStoreUnitTest from './HomeComfortChatStoreUnit.test';
 import chatMemorySyncUnitTest from './ChatMemorySyncUnit.test';
+import dataManagerSyncReminderUnitTest from './DataManagerSyncReminderUnit.test';
 
 export default function testsuite() {
   privacyConsentUnitTest();
@@ -86,4 +87,5 @@ export default function testsuite() {
   homeEmotionalSupportUnitTest();
   homeComfortChatStoreUnitTest();
   chatMemorySyncUnitTest();
+  dataManagerSyncReminderUnitTest();
 }

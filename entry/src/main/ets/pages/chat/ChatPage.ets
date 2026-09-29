@@ -424,9 +424,9 @@ export struct ChatPage {
           .lineHeight(22)
 
         Column() {
-          this.WelcomeActionCard('image', '整理今天截图里的关键信息', '从图片和聊天里提取重点', '整理今天截图里的关键信息')
-          this.WelcomeActionCard('flow', '规划一个自动化 workflow', '拆解步骤并生成执行计划', '规划一个收集微信聊天记录的 workflow')
-          this.WelcomeActionCard('search', '淘宝搜索耳机比价', '帮你比较价格和参数', '淘宝搜索耳机比价')
+          this.WelcomeActionCard('flow', '总结上周做过的事', '回顾上周的记录与进展', '帮我总结一下上周我做了哪些事情。')
+          this.WelcomeActionCard('search', '淘宝搜索华为 Mate 80 Pro', '在淘宝查找这款手机', '淘宝上搜索华为Mate 80 Pro手机')
+          this.WelcomeActionCard('image', '手机碰一碰，找到同频爱好', '发现共同兴趣与话题', '手机碰一碰，找到同频爱好')
         }
         .width('100%')
         .margin({ top: 14 })

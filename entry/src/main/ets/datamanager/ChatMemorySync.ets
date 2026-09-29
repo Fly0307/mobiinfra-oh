@@ -100,6 +100,11 @@ export class ChatMemorySync {
       this.pendingInputs(state, now).length > 0;
   }
 
+  hasPendingMessages(now: number = Date.now()): boolean {
+    let state = ChatMemorySync.readState(this.paths.dailyLogRoot, this.storage);
+    return this.pendingInputs(state, now).length > 0;
+  }
+
   private pendingInputs(state: ChatMemoryState, now: number): ChatMemoryInput[] {
     return pendingChatMemoryInputs(this.loadSessions(now),
       state.receipts.map((receipt: ChatMemoryReceipt): string => receipt.source_ref), now);

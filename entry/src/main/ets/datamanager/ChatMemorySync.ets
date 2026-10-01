@@ -5,11 +5,12 @@ import { memorySceneLabel } from '../utils/WorkflowSceneConfig';
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
+import { dataManagerWarn } from './DataManagerLog';
 import {
   DataManagerModelConfig, DataManagerProgressCallback, JsonMap, createDataManagerProgress, createJsonMap
 } from './DataManagerTypes';
 import {
-  ChatMemoryFact, ChatMemoryInput, ChatMemoryResult, CHAT_MEMORY_WINDOW_MS,
+  ChatMemoryFact, ChatMemoryInput, ChatMemoryResult, ChatMemoryResponseError, CHAT_MEMORY_WINDOW_MS,
   chatMemoryBatches, pendingChatMemoryInputs
 } from './ChatMemoryExtraction';
 
@@ -118,25 +119,62 @@ export class ChatMemorySync {
     let pending = this.pendingInputs(state, now);
     let processedParts = 0;
     let factCount = 0;
-    for (let batch of chatMemoryBatches(pending)) {
+    let batches = chatMemoryBatches(pending);
+    let splitBatch = false;
+    while (batches.length > 0) {
+      let batch = batches[0];
+      let percent = 3 + 2 * processedParts / pending.length;
       if (progress) {
-        progress(createDataManagerProgress('聊天同步', `正在提取近 7 天聊天信息 ${processedParts}/${pending.length}`,
-          processedParts, pending.length, 3));
+        let prefix = splitBatch && batch.length === 1 ? '正在逐条提取聊天信息' : '正在提取近 7 天聊天信息';
+        progress(createDataManagerProgress('聊天同步', `${prefix} ${processedParts}/${pending.length}`,
+          processedParts, pending.length, percent));
       }
-      let results: ChatMemoryResult[] = await this.modelClient.extractChatMemory(batch, config);
+      let results: ChatMemoryResult[];
+      try {
+        results = await this.modelClient.extractChatMemory(batch, config, (attempt: number, total: number): void => {
+          if (progress) {
+            progress(createDataManagerProgress('聊天同步',
+              `正在重试聊天信息提取（${attempt}/${total}），已处理 ${processedParts}/${pending.length}`,
+              processedParts, pending.length, percent));
+          }
+        });
+      } catch (e) {
+        let err = e as Error;
+        // Only invalid output can benefit from smaller batches. Never amplify network/access failures.
+        if (!(err instanceof ChatMemoryResponseError) || batch.length === 1) {
+          throw err;
+        }
+        dataManagerWarn(`Chat memory batch invalid after retries: parts=${batch.length}, retrying individually`);
+        batches.shift();
+        for (let input of batch.slice().reverse()) {
+          batches.unshift([input]);
+        }
+        splitBatch = true;
+        continue;
+      }
+      let receipts: ChatMemoryReceipt[] = [];
+      let batchFactCount = 0;
       for (let input of batch) {
         let result = results.find((item: ChatMemoryResult): boolean => item.source_ref === input.source_ref);
         if (!result) {
           throw new Error('聊天信息提取结果遗漏消息');
         }
-        state.receipts.push({
+        receipts.push({
           source_ref: input.source_ref, source_date: input.source_date, mode: input.mode, facts: result.facts
         });
-        factCount += result.facts.length;
+        batchFactCount += result.facts.length;
       }
       // Facts and processing receipts commit together. Empty facts are successful checks too.
-      this.storage.writeJsonAtomic(ChatMemorySync.statePath(this.paths.dailyLogRoot, this.storage), state as Object);
+      let nextState: ChatMemoryState = { version: state.version, receipts: state.receipts.concat(receipts) };
+      this.storage.writeJsonAtomic(ChatMemorySync.statePath(this.paths.dailyLogRoot, this.storage), nextState as Object);
+      state = nextState;
+      factCount += batchFactCount;
       processedParts += batch.length;
+      batches.shift();
+      if (progress) {
+        progress(createDataManagerProgress('聊天同步', `已提取聊天信息 ${processedParts}/${pending.length}`,
+          processedParts, pending.length, 3 + 2 * processedParts / pending.length));
+      }
     }
     this.exportLogs(state);
     return { processedParts: processedParts, factCount: factCount };

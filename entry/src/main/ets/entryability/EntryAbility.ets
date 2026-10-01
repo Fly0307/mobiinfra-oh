@@ -1,5 +1,6 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
 import { AppLogger } from '../utils/AppLogger';
+import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
@@ -139,6 +140,9 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppLogger.info('Ability', 'Ability onForeground');
+    HuaweiAccountSession.refresh(this.context).catch((): void => {
+      AppLogger.warn('HuaweiAccount', 'foreground session restore unavailable');
+    });
     this.destroyFloatWindow();
     try {
       // 当应用回到前台，停止后台长时任务，省电

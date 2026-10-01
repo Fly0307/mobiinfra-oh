@@ -1,6 +1,7 @@
 import localUnitTest from './LocalUnit.test';
 import privacyConsentUnitTest from './PrivacyConsentUnit.test';
 import aiServiceAccessUnitTest from './AiServiceAccessUnit.test';
+import huaweiAccountSessionUnitTest from './HuaweiAccountSessionUnit.test';
 import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
@@ -42,10 +43,13 @@ import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
 import homeComfortChatStoreUnitTest from './HomeComfortChatStoreUnit.test';
 import chatMemorySyncUnitTest from './ChatMemorySyncUnit.test';
 import dataManagerSyncReminderUnitTest from './DataManagerSyncReminderUnit.test';
+import personalMemoryA2aUnitTest from './PersonalMemoryA2aUnit.test';
+import personalMemoryChatAgentUnitTest from './PersonalMemoryChatAgentUnit.test';
 
 export default function testsuite() {
   privacyConsentUnitTest();
   aiServiceAccessUnitTest();
+  huaweiAccountSessionUnitTest();
   localUnitTest();
   dataManagerUnitTest();
   workflowStorageUnitTest();
@@ -88,4 +92,6 @@ export default function testsuite() {
   homeComfortChatStoreUnitTest();
   chatMemorySyncUnitTest();
   dataManagerSyncReminderUnitTest();
+  personalMemoryA2aUnitTest();
+  personalMemoryChatAgentUnitTest();
 }

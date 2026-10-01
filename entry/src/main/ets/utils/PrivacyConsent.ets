@@ -3,7 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { http } from '@kit.NetworkKit';
 
 export const PRIVACY_STATE_KEY: string = 'privacyConsentState';
-export const PRIVACY_VERSION: string = '2026-09-13';
+export const PRIVACY_VERSION: string = '2026-09-30-v2';
 export const PRIVACY_REQUIRED_MESSAGE: string = '请先阅读并同意隐私声明，再执行任务或使用云端分析。';
 
 export function normalizePrivacyChoice(value: string): string {
@@ -16,6 +16,7 @@ export function resolvePrivacyChoice(choice: string, version: string): string {
 
 // Fail closed until the local preference has been loaded. Never infer consent from usage.
 export class PrivacyConsent {
+  private static appContext: common.Context | null = null;
   private static store: preferences.Preferences | null = null;
   private static loading: Promise<void> | null = null;
   private static choice: string = 'unselected';
@@ -25,6 +26,7 @@ export class PrivacyConsent {
   private static revokeHandler: (() => void) | null = null;
 
   static initialize(context: common.Context): Promise<void> {
+    PrivacyConsent.appContext = context;
     if (PrivacyConsent.loading === null) {
       PrivacyConsent.loading = PrivacyConsent.load(context).catch(() => {
         PrivacyConsent.loading = null;
@@ -91,6 +93,19 @@ export class PrivacyConsent {
       await store.put('choice', accepted ? 'accepted' : 'rejected');
       await store.put('version', PRIVACY_VERSION);
       await store.flush();
+      if (!accepted) {
+        let context = PrivacyConsent.appContext;
+        if (context !== null) {
+          try {
+            let externalMemory = await preferences.getPreferences(context, { name: 'personal_memory_a2a' });
+            await externalMemory.put('enabled', false);
+            await externalMemory.flush();
+            AppStorage.setOrCreate('personalMemoryA2aEnabled', false);
+          } catch (e) {
+            // The persisted privacy refusal still blocks all external memory reads.
+          }
+        }
+      }
       PrivacyConsent.choice = accepted ? 'accepted' : 'rejected';
       AppStorage.setOrCreate(PRIVACY_STATE_KEY, PrivacyConsent.choice);
     } finally {

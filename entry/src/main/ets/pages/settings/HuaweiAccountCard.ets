@@ -1,6 +1,7 @@
 import { LoginWithHuaweiIDButton, loginComponentManager } from '@kit.AccountKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { HuaweiAccountSession } from '../../utils/HuaweiAccountSession';
 
 const HUAWEI_LOGIN_CANCELLED: number = 1001502012;
 const HUAWEI_LOGIN_NETWORK_ERROR: number = 1001502005;
@@ -22,15 +23,32 @@ export struct HuaweiAccountCard {
 
   aboutToAppear(): void {
     this.loginController.onClickLoginWithHuaweiIDButton(
-      (error: BusinessError, _credential: loginComponentManager.HuaweiIDCredential): void => {
+      (error: BusinessError, credential: loginComponentManager.HuaweiIDCredential): void => {
         if (error) {
           this.handleLoginError(error);
           return;
         }
-        this.sessionActive = true;
-        showToastSafely('华为账号登录成功');
+        let context = this.getUIContext().getHostContext();
+        if (context === undefined) {
+          showToastSafely('无法保存登录状态，请重试');
+          return;
+        }
+        try {
+          HuaweiAccountSession.recordLogin(context, credential.openID);
+          this.sessionActive = true;
+          showToastSafely('华为账号登录成功');
+        } catch (e) {
+          this.sessionActive = false;
+          showToastSafely('登录状态保存失败，请重试', 2500);
+        }
       }
     );
+    let context = this.getUIContext().getHostContext();
+    if (context !== undefined) {
+      HuaweiAccountSession.refresh(context).catch((): void => {
+        showToastSafely('暂时无法确认账号状态，请检查网络后重试', 2500);
+      });
+    }
   }
 
   private handleLoginError(error: BusinessError): void {
@@ -53,8 +71,18 @@ export struct HuaweiAccountCard {
   }
 
   private clearLocalSession(): void {
-    this.sessionActive = false;
-    showToastSafely('已退出本应用账号状态');
+    let context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      showToastSafely('无法更新登录状态，请重试');
+      return;
+    }
+    try {
+      HuaweiAccountSession.logout(context);
+      this.sessionActive = false;
+      showToastSafely('已退出本应用账号状态');
+    } catch (e) {
+      showToastSafely('退出状态保存失败，请重试', 2500);
+    }
   }
 
   @Builder AccountContent() {

@@ -1,4 +1,5 @@
 import { promptAction, router } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
@@ -101,6 +102,7 @@ import { HuaweiAccountCard } from './HuaweiAccountCard';
 import { HUAWEI_ACCOUNT_SESSION_KEY } from '../../utils/AiServiceAccess';
 import { PRIVACY_STATE_KEY } from '../../utils/PrivacyConsent';
 import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
+import { PERSONAL_MEMORY_A2A_STATE_KEY, PersonalMemoryAccess } from '../../agent/PersonalMemoryAccess';
 
 registerGallerySettingsDefaults();
 
@@ -188,6 +190,7 @@ export struct SettingsCenterPage {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State private wechatAutoSummaryAdvancedOpen: boolean = false;
   @State private activeSensitiveInputId: string = '';
+  @StorageLink(PERSONAL_MEMORY_A2A_STATE_KEY) private personalMemoryA2aEnabled: boolean = false;
   @StorageLink(HUAWEI_ACCOUNT_SESSION_KEY) private huaweiAccountSessionActive: boolean = false;
   private detailScroller: Scroller = new Scroller();
   @State private voiceTtsStylePromptEditorRevision: number = 0;
@@ -214,6 +217,11 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    PersonalMemoryAccess.isEnabled(getContext(this) as common.Context).then((enabled: boolean): void => {
+      this.personalMemoryA2aEnabled = enabled;
+    }).catch((): void => {
+      this.personalMemoryA2aEnabled = false;
+    });
     this.migrateGalleryDefaultValues();
     this.restoreMaskedDefaultSecrets();
     this.upgradeLegacyVoiceTtsBaseUrl();
@@ -910,6 +918,11 @@ export struct SettingsCenterPage {
       this.SectionTitle(SettingsSectionId.PersonalPrivacy)
       this.PrivacyDeclarationEntry()
       SettingsGroupCard({
+        title: '小艺读取个人记忆',
+        subtitle: '需要 API 24 或更新系统；可查询已同步的各类记忆摘要',
+        contentBuilder: () => { this.XiaoyiPersonalMemoryGroup() }
+      })
+      SettingsGroupCard({
         title: 'Agent 确认策略',
         subtitle: '控制本地与云端 Agent 动作是否需要人工确认',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
@@ -931,6 +944,20 @@ export struct SettingsCenterPage {
       (value: boolean) => { this.autoConfirm = value; })
     this.SettingToggle('云端 Agent 自动同意', '关闭后云端模型动作需要手动确认后发给 PC', this.cloudAutoConfirm,
       (value: boolean) => { this.cloudAutoConfirm = value; })
+  }
+
+  @Builder XiaoyiPersonalMemoryGroup() {
+    this.SettingToggle('允许小艺查询个人记忆',
+      '使用已配置的云端 Agent 查询外卖、微信等记忆；需登录及联网；不提供证件号码、详细住址',
+      this.personalMemoryA2aEnabled && this.privacyConsentState === 'accepted',
+      (enabled: boolean): void => {
+        PersonalMemoryAccess.setEnabled(getContext(this) as common.Context, enabled).then((saved: boolean): void => {
+          this.personalMemoryA2aEnabled = saved;
+        }).catch((e: Error): void => {
+          this.personalMemoryA2aEnabled = false;
+          showToastSafely(e.message || '设置保存失败', 1800);
+        });
+      })
   }
 
   @Builder PrivacyDeclarationEntry() {

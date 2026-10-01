@@ -137,6 +137,19 @@
     ],
     "extensionAbilities": [
       {
+        "name": "PersonalMemoryAgentAbility",
+        "srcEntry": "./ets/agent/PersonalMemoryAgentAbility.ets",
+        "description": "按用户授权查询本机个人记忆",
+        "type": "agent",
+        "exported": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.agent",
+            "resource": "$profile:agent_config"
+          }
+        ]
+      },
+      {
         "name": "EntryBackupAbility",
         "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",
         "type": "backup",

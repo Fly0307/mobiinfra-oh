@@ -155,6 +155,7 @@ import { getAppBundleName } from '../utils/AppIdentity';
 import { AppLogger } from '../utils/AppLogger';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
+import { initializeChatCloudConfigStorage, readChatCloudConfig } from '../utils/ChatCloudConfig';
 import { ChatSessionStorage } from '../utils/ChatSessionStorage';
 import { ChatToolRegistry, createDefaultChatToolRegistry } from '../utils/ChatToolRegistry';
 import {
@@ -425,13 +426,7 @@ PersistentStorage.persistProp(SYNC_REMINDER_SUPPRESSED_KEY, false);
 PersistentStorage.persistProp(SYNC_REMINDER_FIRST_OPENED_AT_KEY, '');
 PersistentStorage.persistProp('hdcServerIp', DEFAULT_ENDPOINT_CONFIG.hdcServerUrl);
 PersistentStorage.persistProp('manualHdcServerIp', '');
-PersistentStorage.persistProp('cloudPlannerBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl);
-PersistentStorage.persistProp('cloudPlannerModel', DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel);
-PersistentStorage.persistProp('cloudPlannerApiKey', DEFAULT_ENDPOINT_CONFIG.cloudPlannerApiKey);
-PersistentStorage.persistProp('cloudDeciderBaseUrl', DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl);
-PersistentStorage.persistProp('cloudDeciderApiKey', DEFAULT_ENDPOINT_CONFIG.cloudDeciderApiKey);
-PersistentStorage.persistProp('cloudApiKey', DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
-PersistentStorage.persistProp('cloudDeciderModel', DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel);
+initializeChatCloudConfigStorage();
 PersistentStorage.persistProp('voiceTtsBaseUrl', DEFAULT_ENDPOINT_CONFIG.voiceTtsBaseUrl);
 PersistentStorage.persistProp('voiceTtsApiKey', DEFAULT_ENDPOINT_CONFIG.voiceTtsApiKey);
 PersistentStorage.persistProp('voiceTtsModel', DEFAULT_ENDPOINT_CONFIG.voiceTtsModel);
@@ -621,6 +616,7 @@ struct Index {
   @State pcServerStatusText: string = 'PC Server 未连接';
   @State pcServerCloudEnabled: boolean = false;
   @State dataManagerRefreshing: boolean = false;
+  @State dataManagerSyncFailed: boolean = false;
   @State dataManagerProgressStage: string = '准备';
   @State dataManagerProgressMessage: string = '准备整理数据';
   @State dataManagerProgressPercent: number = 0;
@@ -2678,7 +2674,7 @@ struct Index {
   }
 
   private updateDataManagerProgress(progress: DataManagerProgress): void {
-    this.dataManagerProgressStage = progress.percent < 60 ? '正在整理日志' : '正在构建索引';
+    this.dataManagerProgressStage = progress.stage;
     this.dataManagerProgressMessage = progress.message;
     this.dataManagerProgressPercent = Math.max(0, Math.min(100, progress.percent));
   }
@@ -2700,6 +2696,7 @@ struct Index {
       return;
     }
     this.dataManagerRefreshing = true;
+    this.dataManagerSyncFailed = false;
     this.dataManagerProgressStage = '正在整理日志';
     this.dataManagerProgressMessage = '';
     this.dataManagerProgressPercent = 0;
@@ -2721,16 +2718,14 @@ struct Index {
       this.dataManagerProgressStage = '完成';
       this.dataManagerProgressMessage = summary.message;
       this.dataManagerProgressPercent = 100;
-      if (summary.skipped) {
-        showToastSafely('已是最新数据', 1500);
-      }
+      showToastSafely(summary.skipped ? '已是最新数据' : '同步完成', 1800);
       dataManagerInfo('refreshDataManager success: ' + summary.message);
     } catch (e) {
       let err = e as Error;
       this.appendCloudLog('DataManager refresh failed: ' + err.message);
-      this.dataManagerProgressStage = '失败';
-      this.dataManagerProgressMessage = '整理失败: ' + err.message;
-      this.dataManagerProgressPercent = 100;
+      this.dataManagerProgressStage = '同步失败';
+      this.dataManagerProgressMessage = err.message || '同步遇到异常，请稍后重试';
+      this.dataManagerSyncFailed = true;
       dataManagerError('refreshDataManager failed: ' + err.message);
     } finally {
       this.dataManagerRefreshing = false;
@@ -5195,21 +5190,7 @@ struct Index {
   }
 
   private getConfiguredCloudConfig(): CloudModelConfig {
-    let legacyApiKey = configuredEndpointSecretOrDefault(this.cloudApiKey, DEFAULT_ENDPOINT_CONFIG.cloudApiKey);
-    let plannerApiKey = configuredEndpointSecretOrDefault(this.cloudPlannerApiKey, legacyApiKey);
-    let deciderApiKey = configuredEndpointSecretOrDefault(this.cloudDeciderApiKey, legacyApiKey);
-    let config: CloudModelConfig = {
-      plannerBaseUrl: configuredEndpointValueOrDefault(this.cloudPlannerBaseUrl,
-        DEFAULT_ENDPOINT_CONFIG.cloudPlannerBaseUrl),
-      plannerModel: configuredEndpointValueOrDefault(this.cloudPlannerModel, DEFAULT_ENDPOINT_CONFIG.cloudPlannerModel),
-      plannerApiKey: plannerApiKey,
-      deciderBaseUrl: configuredEndpointValueOrDefault(this.cloudDeciderBaseUrl,
-        DEFAULT_ENDPOINT_CONFIG.cloudDeciderBaseUrl),
-      deciderApiKey: deciderApiKey,
-      apiKey: plannerApiKey,
-      deciderModel: configuredEndpointValueOrDefault(this.cloudDeciderModel, DEFAULT_ENDPOINT_CONFIG.cloudDeciderModel)
-    };
-    return config;
+    return readChatCloudConfig();
   }
 
   private getCloudConfig(): CloudModelConfig {
@@ -6794,7 +6775,7 @@ struct Index {
   }
 
   @Builder DataManagerProgressOverlay() {
-    if (this.dataManagerRefreshing) {
+    if (this.dataManagerRefreshing || this.dataManagerSyncFailed) {
       Stack({ alignContent: Alignment.Center }) {
         Column() {
           Text(this.dataManagerProgressStage)
@@ -6805,7 +6786,7 @@ struct Index {
           Progress({ value: this.dataManagerProgressPercent, total: 100, type: ProgressType.Linear })
             .width('100%')
             .height(8)
-            .color('#4F68FF')
+            .color(this.dataManagerSyncFailed ? '#D94F4F' : '#4F68FF')
             .backgroundColor('#E7EBF5')
             .margin({ top: 18 })
           Row() {
@@ -6816,6 +6797,44 @@ struct Index {
           }
           .width('100%')
           .margin({ top: 10 })
+          if (this.dataManagerProgressMessage.length > 0) {
+            Text(this.dataManagerProgressMessage)
+              .fontSize(14)
+              .fontColor(this.dataManagerSyncFailed ? '#B63E3E' : '#657086')
+              .maxLines(8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+              .margin({ top: 12 })
+          }
+          if (this.dataManagerSyncFailed && !this.dataManagerRefreshing) {
+            Text('已保存的处理结果会保留，可重新同步继续整理。')
+              .fontSize(12)
+              .fontColor('#657086')
+              .width('100%')
+              .margin({ top: 10 })
+            Row() {
+              Button('关闭')
+                .layoutWeight(1)
+                .backgroundColor('#E7EBF5')
+                .fontColor('#414D65')
+                .onClick(() => {
+                  this.dataManagerSyncFailed = false;
+                })
+              Button('重新同步')
+                .layoutWeight(1)
+                .margin({ left: 12 })
+                .backgroundColor('#4F68FF')
+                .fontColor(Color.White)
+                .onClick(() => {
+                  this.dataManagerSyncFailed = false;
+                  this.refreshDataManager().catch((e: Error) => {
+                    dataManagerError('retry refreshDataManager failed: ' + e.message);
+                  });
+                })
+            }
+            .width('100%')
+            .margin({ top: 18 })
+          }
         }
         .width('78%')
         .padding({ left: 22, right: 22, top: 24, bottom: 22 })

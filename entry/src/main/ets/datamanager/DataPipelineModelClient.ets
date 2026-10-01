@@ -46,7 +46,7 @@ import { dataManagerError, dataManagerInfo } from './DataManagerLog';
 import { memorySceneLabel, PERSONAL_INFO_MEMORY_SCENE_ID } from '../utils/WorkflowSceneConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
 import {
-  ChatMemoryInput, ChatMemoryResult, buildChatMemoryPrompt, parseChatMemoryResults
+  ChatMemoryInput, ChatMemoryResult, ChatMemoryResponseError, buildChatMemoryPrompt, parseChatMemoryResults
 } from './ChatMemoryExtraction';
 
 interface BatchSplitEntryPromptPayload {
@@ -518,16 +518,25 @@ const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
 export class DataPipelineModelClient {
-  private cloudClient: CloudModelClient = new CloudModelClient();
+  private cloudClient: CloudModelClient;
   private requestSequence: number = 0;
 
-  async extractChatMemory(inputs: ChatMemoryInput[], config: DataManagerModelConfig): Promise<ChatMemoryResult[]> {
+  constructor(cloudClient: CloudModelClient = new CloudModelClient()) {
+    this.cloudClient = cloudClient;
+  }
+
+  async extractChatMemory(inputs: ChatMemoryInput[], config: DataManagerModelConfig,
+    onRetry?: (attempt: number, total: number) => void): Promise<ChatMemoryResult[]> {
     if (!this.isEnabled(config)) {
       throw new Error('请先配置同步使用的 Planner 服务，再提取聊天信息');
     }
     let prompt = buildChatMemoryPrompt(inputs);
-    let payload = await this.callJson(config, 'chat.memory', prompt.systemPrompt, prompt.userPrompt);
-    return parseChatMemoryResults(payload, inputs);
+    let results: ChatMemoryResult[] = [];
+    await this.callJson(config, 'chat.memory', prompt.systemPrompt, prompt.userPrompt, (payload: JsonMap): void => {
+      // Validate coverage inside the retry loop, including explicit empty facts for irrelevant messages.
+      results = parseChatMemoryResults(payload, inputs);
+    }, onRetry);
+    return results;
   }
 
   async splitEntryIntoFacts(entry: SourceEntry, config: DataManagerModelConfig): Promise<CandidateFact[]> {
@@ -1695,7 +1704,9 @@ export class DataPipelineModelClient {
     return result;
   }
 
-  private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string): Promise<JsonMap> {
+  private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string,
+    validatePayload?: (payload: JsonMap) => void,
+    onRetry?: (attempt: number, total: number) => void): Promise<JsonMap> {
     let messages: CloudChatMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -1719,14 +1730,27 @@ export class DataPipelineModelClient {
         });
         dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
         try {
-          return this.parseJsonObject(content);
+          let payload = this.parseJsonObject(content);
+          if (validatePayload) {
+            validatePayload(payload);
+          }
+          return payload;
         } catch (e) {
           let err = e as Error;
           let canRetry = attempt + 1 < temperatures.length;
           dataManagerError(`Model request parse failed: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, responseChars=${content.length}, retry=${canRetry}, error=${err.message}`);
-          this.logRawModelOutput(requestId, kind, content);
+          // Chat output can contain personal details; diagnostics only need counts and the validation error.
+          if (kind !== 'chat.memory') {
+            this.logRawModelOutput(requestId, kind, content);
+          }
           if (!canRetry) {
+            if (kind === 'chat.memory') {
+              throw new ChatMemoryResponseError(err.message);
+            }
             throw err;
+          }
+          if (onRetry) {
+            onRetry(attempt + 2, temperatures.length);
           }
           dataManagerInfo(`Model request parse retry: id=${requestId}, kind=${kind}, nextTemperature=${temperatures[attempt + 1]}`);
         }

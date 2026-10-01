@@ -1,6 +1,6 @@
 # 华为账号登录与本地调试配置总结
 
-更新时间：2026-09-03
+更新时间：2026-10-01
 
 ## 结论
 
@@ -15,7 +15,7 @@
 
 - DevEco Studio：`6.1.1.280`
 - `compatibleSdkVersion`：`6.0.0(20)`
-- `targetSdkVersion`：`6.0.2(22)`
+- `targetSdkVersion`：`6.1.1(24)`
 - 当前签名：DevEco Studio 自动生成的 debug 签名
 - 当前包名：以 `AppScope/app.json5` 中的 `app.bundleName` 为准
 
@@ -90,14 +90,16 @@
 2. 用户点击后拉起系统华为账号登录页面。
 3. Account Kit 返回登录成功后进入应用主页。
 4. 不申请头像、昵称、手机号等 scope。
-5. 不上传、保存或展示用户信息。
-6. 仅在本地维护当前登录状态。
+5. 仅在应用本地保存登录返回的 OpenID 与会话版本，用于查询华为账号状态；不保存授权码或身份令牌，不向云端模型发送 OpenID。
+6. App 与小艺扩展从应用级沙箱读取同一账号标识，使用 `HuaweiIDProvider.getHuaweiIDState` 确认状态；仅 `AUTHORIZED` 放行。App 退出登录同时清空共享账号标识。
 
-登录凭据本身可能仍包含 OpenID 或 UnionID，但应用可以不保存、不使用这些字段。华为官方允许客户端获得这些字段；如果应用存在账号数据、支付或敏感业务，则建议通过服务端使用 Authorization Code 完成安全验证。
+当前实现使用登录按钮凭据中的 `openID`，并以 `IdType.OPEN_ID` 调用官方状态接口。不将持久化的“已登录”布尔值当作有效登录，也不把手机系统已登录自动当作用户已登录本应用。若官方状态接口失败或超时，说明“暂时无法确认登录状态”，不直接说用户没有登录。
 
 参考资料：[Account Kit 登录接口](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/api/account-api-authentication)
 
-当前应用没有云端账号数据、支付或需要登录保护的敏感业务，因此无服务器方案适合作为最低限度的审核登录流程，但不应将它作为重要业务的安全认证机制。
+状态查询依据：[华为账号登录状态管理](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/account-login-state)。本机 API 24 SDK 的 `@hms.core.authentication.d.ts` 已核对 `getHuaweiIDState(StateRequest): Promise<StateResult>`、`IdType.OPEN_ID` 与三种状态枚举，该接口从 API 12 起提供。
+
+该方案用于本机 App 与小艺扩展共享登录状态。个人记忆读取仍需独立的隐私同意和小艺读取开关；若未来增加服务端账号数据或支付，应通过服务端使用 Authorization Code 验证身份。
 
 ## 推荐实施顺序
 
@@ -116,5 +118,11 @@
 2. 使用 release 包重新测试登录流程。
 3. 从 debug 签名切换到 release 签名时增加 `versionCode`，避免相同版本使用不同证书引发校验问题。
 4. 在隐私政策中说明应用使用华为账号服务完成登录，同时说明不获取头像、昵称和手机号等资料。
+
+## 2026-10-01：修复小艺提示未登录
+
+旧实现只在 `AppStorage` 保存本次运行时的登录标记，登录按钮回调丢弃了返回的账号标识。小艺扩展读不到该标记时，即使 App“我的”页面显示已登录，也会返回登录提示。现由 `HuaweiAccountSession.ets` 保存并核验共享会话；应用回到前台与账号卡片显示时也会恢复状态。校验后再次读取会话版本，防止校验期间退出登录后旧回调恢复授权。
+
+旧版本没有保存 OpenID，更新后需要在 App“我的”中重新登录一次，让新版写入共享会话。之后扩展重建可以通过官方状态接口核验，无需每次重新登录。小艺开放平台、AgentCard、包名、签名及 Client ID 无需为本修复调整。当前仅完成静态检查，未编译或真机验证。
 
 综上，当前确实需要在 AppGallery Connect 中操作，但主要是复用并关联已有应用，而不是申请一个 Account Kit 专用签名。

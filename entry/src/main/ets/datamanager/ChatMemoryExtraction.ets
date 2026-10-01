@@ -32,6 +32,14 @@ export interface ChatMemoryResult {
   facts: ChatMemoryFact[];
 }
 
+// Distinguish invalid model output from network, access and configuration failures.
+export class ChatMemoryResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChatMemoryResponseError';
+  }
+}
+
 export interface ChatMemoryPrompt {
   systemPrompt: string;
   userPrompt: string;

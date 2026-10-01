@@ -127,6 +127,7 @@ export interface CloudChatCompletionOptions {
   model?: string;
   maxTokens?: number;
   readTimeout?: number;
+  logResponseContent?: boolean;
   chatTemplateKwargs?: CloudChatTemplateKwargs;
   top_p?: number;
   top_k?: number;
@@ -703,22 +704,25 @@ export class CloudModelClient {
       let responseText = response.result as string;
       AppLogger.info('CloudModel', 'chat response status=' + response.responseCode.toString() +
         ' elapsedMs=' + elapsedMs.toString() +
-        ' bytes=' + responseText.length.toString() +
-        ' preview=' + CloudModelClient.previewTextForLog(responseText, 512));
+        ' bytes=' + responseText.length.toString() + (options.logResponseContent === false ? '' :
+        ' preview=' + CloudModelClient.previewTextForLog(responseText, 512)));
       if (response.responseCode < 200 || response.responseCode >= 300) {
+        if (options.logResponseContent === false) {
+          throw new Error('Cloud HTTP ' + response.responseCode.toString());
+        }
         throw new Error(`Cloud HTTP ${response.responseCode}: ${response.result}`);
       }
       let parsed = CloudModelClient.parseChatCompletionResponseText(responseText);
       AppLogger.info('CloudModel', 'chat parsed content_chars=' + parsed.content.length.toString() +
-        ' finish_reason=' + parsed.finishReason +
-        ' content_preview=' + CloudModelClient.previewTextForLog(parsed.content, 512));
+        ' finish_reason=' + parsed.finishReason + (options.logResponseContent === false ? '' :
+        ' content_preview=' + CloudModelClient.previewTextForLog(parsed.content, 512)));
       return parsed;
     } catch (e) {
       let err = e as Error;
       AppLogger.error('CloudModel', 'chat request failed url=' + url +
         ' model=' + (options.model === undefined ? '' : options.model) +
         ' elapsedMs=' + (new Date().getTime() - startedAt).toString() +
-        ' error=' + (err.message || String(e)));
+        ' error=' + (options.logResponseContent === false ? err.name : (err.message || String(e))));
       throw err;
     } finally {
       this.unregisterActiveRequest(httpReq);

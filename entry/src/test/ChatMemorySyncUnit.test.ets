@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
+import { JSON as ArkJSON } from '@kit.ArkTS';
 import {
   CHAT_MEMORY_PART_CHARS, CHAT_MEMORY_WINDOW_MS, ChatMemoryInput, ChatMemoryResult,
   buildChatMemoryPrompt, chatMemoryBatches, parseChatMemoryResults, pendingChatMemoryInputs
@@ -9,7 +10,8 @@ import { collectionTabSpecByIndex } from '../main/ets/datamanager/CollectionGrou
 import { DataManagerPaths } from '../main/ets/datamanager/DataManagerPaths';
 import { DataManagerStorage } from '../main/ets/datamanager/DataManagerStorage';
 import { DataPipelineModelClient } from '../main/ets/datamanager/DataPipelineModelClient';
-import { DataManagerModelConfig, JsonMap } from '../main/ets/datamanager/DataManagerTypes';
+import { DataManagerModelConfig, DataManagerProgress, JsonMap } from '../main/ets/datamanager/DataManagerTypes';
+import { CloudChatCompletionOptions, CloudModelClient } from '../main/ets/utils/CloudModelClient';
 import {
   parseDailyLogDocument, parseNumberedEntries, sourceAppDisplayName, sourceDisplayName
 } from '../main/ets/datamanager/DataManagerUtils';
@@ -21,6 +23,42 @@ import { PERSONAL_INFO_MEMORY_SCENE_ID } from '../main/ets/utils/WorkflowSceneCo
 
 const NOW: number = new Date(2026, 8, 17, 12).getTime();
 const CONFIG: DataManagerModelConfig = { enabled: false, baseUrl: '', apiKey: '' };
+const RETRY_CONFIG: DataManagerModelConfig = { enabled: true, baseUrl: 'http://test.invalid', apiKey: '' };
+
+// Exercise the production request/validation retry loop without network or a device.
+class RetryChatMemoryTestClient extends CloudModelClient {
+  calls: ChatMemoryInput[][] = [];
+  missingResponses: number = 0;
+  malformedResponses: number = 0;
+  rejectBatches: boolean = false;
+  rejectedText: string = '';
+  networkFailure: boolean = false;
+
+  async chatCompletionText(options: CloudChatCompletionOptions): Promise<string> {
+    let inputs = ArkJSON.parse(options.messages[1].content as string) as ChatMemoryInput[];
+    this.calls.push(inputs);
+    if (this.networkFailure) {
+      throw new Error('simulated network failure');
+    }
+    if (this.calls.length <= this.malformedResponses) {
+      return 'not valid JSON';
+    }
+    let outputInputs = inputs;
+    if ((this.rejectBatches && inputs.length > 1) ||
+      inputs.some((input: ChatMemoryInput): boolean => input.user_text === this.rejectedText)) {
+      outputInputs = [];
+    } else if (this.calls.length <= this.missingResponses) {
+      outputInputs = inputs.slice(0, inputs.length - 1);
+    }
+    let items = outputInputs.map((input: ChatMemoryInput): ChatMemoryResult => {
+      return {
+        source_ref: input.source_ref,
+        facts: input.user_text === '你好' ? [] : [{ scene_id: 6, text: input.user_text }]
+      };
+    });
+    return ArkJSON.stringify({ items: items });
+  }
+}
 
 class ChatMemoryTestStorage extends DataManagerStorage {
   files: Record<string, string> = {};
@@ -186,6 +224,114 @@ export default function chatMemorySyncUnitTest() {
       expect(model.calls.length).assertEqual(2);
       expect(model.calls[1].length).assertEqual(1);
       expect(model.calls[1][0].user_text).assertEqual('我买了去北京的车票');
+    });
+
+    it('automaticallyRetriesMissingCoverageAndCommitsOnlyCompleteResults', 0, async () => {
+      let storage = new ChatMemoryTestStorage();
+      let paths = new DataManagerPaths('/memory', storage);
+      let record = session('retry-coverage');
+      record.messages.push(createChatMessage('u2', 'user', 'chat', '你好', NOW));
+      saveSession(storage, paths.filesDir, record);
+      let cloud = new RetryChatMemoryTestClient();
+      cloud.missingResponses = 1;
+      let sync = new ChatMemorySync(paths, storage, new DataPipelineModelClient(cloud));
+      let updates: DataManagerProgress[] = [];
+      let result = await sync.sync(RETRY_CONFIG, (progress: DataManagerProgress): void => {
+        updates.push(progress);
+      }, NOW);
+      expect(cloud.calls.length).assertEqual(2);
+      expect(result.processedParts).assertEqual(2);
+      expect(result.factCount).assertEqual(1);
+      expect(sync.hasPendingMessages(NOW)).assertFalse();
+      expect(updates.some((progress: DataManagerProgress): boolean =>
+        progress.message.indexOf('重试') >= 0)).assertTrue();
+    });
+
+    it('retriesMalformedJsonWithoutChangingTheInputBatch', 0, async () => {
+      let inputs = pendingChatMemoryInputs([session('retry-json')], [], NOW);
+      let cloud = new RetryChatMemoryTestClient();
+      cloud.malformedResponses = 1;
+      let results = await new DataPipelineModelClient(cloud).extractChatMemory(inputs, RETRY_CONFIG);
+      expect(cloud.calls.length).assertEqual(2);
+      expect(results.length).assertEqual(1);
+      expect(results[0].source_ref).assertEqual(inputs[0].source_ref);
+    });
+
+    it('fallsBackToSingleMessagesAfterThreeInvalidBatchResponses', 0, async () => {
+      let storage = new ChatMemoryTestStorage();
+      let paths = new DataManagerPaths('/memory', storage);
+      let record = session('split-batch');
+      record.messages.push(createChatMessage('u2', 'user', 'chat', '我昨天去过上海', NOW));
+      saveSession(storage, paths.filesDir, record);
+      let cloud = new RetryChatMemoryTestClient();
+      cloud.rejectBatches = true;
+      let sync = new ChatMemorySync(paths, storage, new DataPipelineModelClient(cloud));
+      let result = await sync.sync(RETRY_CONFIG, undefined, NOW);
+      expect(cloud.calls.length).assertEqual(5);
+      expect(cloud.calls.map((inputs: ChatMemoryInput[]): string => String(inputs.length)).join(','))
+        .assertEqual('2,2,2,1,1');
+      expect(result.processedParts).assertEqual(2);
+      expect(result.factCount).assertEqual(2);
+      expect(sync.hasPendingMessages(NOW)).assertFalse();
+      await sync.sync(RETRY_CONFIG, undefined, NOW);
+      expect(cloud.calls.length).assertEqual(5);
+      let relative = ChatMemorySync.dailyLogRelativePaths(paths.dailyLogRoot, storage)[0];
+      let doc = parseDailyLogDocument(storage.readText(storage.join(paths.dailyLogRoot, relative)));
+      expect(parseNumberedEntries(doc.body).length).assertEqual(2);
+    });
+
+    it('retainsCommittedSingleMessagesWhenAnotherMessageStillFails', 0, async () => {
+      let storage = new ChatMemoryTestStorage();
+      let paths = new DataManagerPaths('/memory', storage);
+      let record = session('split-resume');
+      record.messages.push(createChatMessage('u2', 'user', 'chat', '我昨天去过上海', NOW));
+      saveSession(storage, paths.filesDir, record);
+      let cloud = new RetryChatMemoryTestClient();
+      cloud.rejectBatches = true;
+      cloud.rejectedText = '我昨天去过上海';
+      let sync = new ChatMemorySync(paths, storage, new DataPipelineModelClient(cloud));
+      let failed = false;
+      try {
+        await sync.sync(RETRY_CONFIG, undefined, NOW);
+      } catch (e) {
+        failed = true;
+      }
+      expect(failed).assertTrue();
+      expect(cloud.calls.length).assertEqual(7);
+      expect(sync.hasPendingMessages(NOW)).assertTrue();
+      cloud.rejectedText = '';
+      let resumed = await new ChatMemorySync(paths, storage, new DataPipelineModelClient(cloud))
+        .sync(RETRY_CONFIG, undefined, NOW);
+      expect(resumed.processedParts).assertEqual(1);
+      expect(cloud.calls.length).assertEqual(8);
+      expect(cloud.calls[7][0].user_text).assertEqual('我昨天去过上海');
+      let relative = ChatMemorySync.dailyLogRelativePaths(paths.dailyLogRoot, storage)[0];
+      let doc = parseDailyLogDocument(storage.readText(storage.join(paths.dailyLogRoot, relative)));
+      expect(parseNumberedEntries(doc.body).length).assertEqual(2);
+    });
+
+    it('doesNotRetryOrSplitNetworkFailuresAndLeavesMessagesPending', 0, async () => {
+      let storage = new ChatMemoryTestStorage();
+      let paths = new DataManagerPaths('/memory', storage);
+      let record = session('network-failure');
+      record.messages.push(createChatMessage('u2', 'user', 'chat', '我昨天去过上海', NOW));
+      saveSession(storage, paths.filesDir, record);
+      let cloud = new RetryChatMemoryTestClient();
+      cloud.networkFailure = true;
+      let sync = new ChatMemorySync(paths, storage, new DataPipelineModelClient(cloud));
+      let failed = false;
+      try {
+        await sync.sync(RETRY_CONFIG, undefined, NOW);
+      } catch (e) {
+        failed = true;
+      }
+      expect(failed).assertTrue();
+      expect(cloud.calls.length).assertEqual(1);
+      expect(sync.hasPendingMessages(NOW)).assertTrue();
+      cloud.networkFailure = false;
+      let resumed = await sync.sync(RETRY_CONFIG, undefined, NOW);
+      expect(resumed.processedParts).assertEqual(2);
+      expect(cloud.calls.length).assertEqual(2);
     });
 
     it('retriesFailedBatchesWithoutReextractingCommittedMessages', 0, async () => {

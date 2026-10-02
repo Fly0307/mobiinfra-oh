@@ -414,6 +414,12 @@ export class WorkflowRunner {
     return runRootOverride.length > 0 ? runRootOverride : WorkflowStorage.runsDir(filesDir);
   }
 
+  // Opt-in device injection for task-page phone control. The default PC constructor and execution path are unchanged.
+  useDeviceBridgeForPhone(bridge: HdcWorkflowBridge): void {
+    if (this.runningTask !== null) { throw new Error('Cannot switch device backend during a workflow'); }
+    this.hdcBridge = bridge;
+  }
+
   private workflowJsonForRun(task: WorkflowTask): string {
     return resolveWorkflowJsonForRun(this.filesDir, task, WorkflowStorage.readTaskWorkflowJson,
       (message: string): void => { this.log(message); });

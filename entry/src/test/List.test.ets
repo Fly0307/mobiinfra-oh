@@ -45,6 +45,7 @@ import chatMemorySyncUnitTest from './ChatMemorySyncUnit.test';
 import dataManagerSyncReminderUnitTest from './DataManagerSyncReminderUnit.test';
 import personalMemoryA2aUnitTest from './PersonalMemoryA2aUnit.test';
 import personalMemoryChatAgentUnitTest from './PersonalMemoryChatAgentUnit.test';
+import selfHdcProtocolUnitTest from './SelfHdcProtocolUnit.test';
 
 export default function testsuite() {
   privacyConsentUnitTest();
@@ -94,4 +95,5 @@ export default function testsuite() {
   dataManagerSyncReminderUnitTest();
   personalMemoryA2aUnitTest();
   personalMemoryChatAgentUnitTest();
+  selfHdcProtocolUnitTest();
 }

@@ -122,6 +122,7 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 
 ### 「任务」页面
 * **Workflow 任务卡片**：运行已配置的 GUI 自动化任务。
+* **任务控制方式**：只保留“电脑控制”和“手机自己控制”两个选项，默认“电脑控制”。手机连接地址统一在「我的 → 手机 HDC」设置。选择仅作用于任务页 Workflow，聊天页的 Agent 控制链路保持原有行为。
 * **图形化编辑器**：编辑 `open_app`、`gui_task`、`shot_summary`、`if`、`for_loop`、`until_loop` 等节点。
 * **文件管理**：查看和清理 Workflow 配置、daily-log 与运行文件。
 * **场景切换**：按购物、聊天、外卖、娱乐、生活、社交、差旅等采集场景管理任务。
@@ -133,15 +134,60 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 * **任务与自动化**：配置 Agent 执行、Workflow 和运行日志入口。
 * **存储与关于**：管理模型文件、调试产物、截图缓存、版本和说明。
 
+### 手机 HDC 连接设置与自控测试（实验功能）
+
+在「我的 → 手机 HDC」中设置**当前手机**的无线调试连接地址。Wi-Fi IPv4 默认自动检测，HDC 调试连接端口仍需从系统无线调试页面填写；修改即保存，任务页与测试共用这份设置。App 会直接连接手机的调试守护进程，使用 App 自己生成并保存在私有沙箱的 RSA3072 密钥完成公开 HDC 协议握手，不调用 PC 的 HTTP 服务，也不复用 PC 的授权密钥。不需要先由 PC 执行配置命令；首次系统授权仍需在手机弹窗中手动允许 `MobiInfra-SelfHdc`。
+
+1. 保持手机解锁，在开发者选项中手动开启无线调试，填写当前 HDC 连接端口。App 在每次启动、回到前台、进入手机 HDC 设置页及手机任务/测试连接前检测 Wi-Fi IPv4，只更新 IP，保留端口与控制方式。无可用 Wi-Fi 地址或检测失败时保留上次配置并显示原因，不用蜂窝网络、VPN、回环或链路本地地址覆盖。可点击「立即检测手机 IP」；需要手填 IP 或尝试 `127.0.0.1` 时关闭「自动更新手机 Wi-Fi IP」（守护进程是否接受回环连接由系统决定）。
+2. 点击「仅测试连接」，验证 TCP、系统授权和 HDC Shell；授权等待最长90秒。该按钮不会打开支付宝。
+3. 点击「开始完整测试」，依次通过 HDC Shell 执行：打开 `com.alipay.mobile.client / EntryAbility` → 截图 → 按截图尺寸向上滑动一次 → 再截图 → 返回本 App。测试期间不要手动切换应用。截图以 HDC Shell 的 `base64` 输出传回本 App，不依赖 PC 文件传输。
+4. 返回后查看阶段日志与前后截图，点击「复制完整日志」提供调试信息。页面保留最近160行，完整日志在 `filesDir/self_hdc/runs/<runId>.log`，阶段及结果在同目录的 `.json`，截图为 `_before.jpeg` / `_after.jpeg`。截图命令使用 `snapshot_display` 的默认 JPEG 格式，接收端检查 JPEG 起止标记及大小限制。`latest.json` 用于恢复最近一次结果；若进程被终止，下次打开会标记上次测试中断。Hilog 模块名为 `SelfHdc`。
+
+这是验证“手机能否用 HDC 控制自己”的实验实现。用户已反馈此前手机自控测试通过，但这不能证明所有 HarmonyOS 6/7 版本或完整 GUI Workflow 都兼容。当前支持公开协议的 RSA 公钥授权、RSA-PSS/SHA512 签名和兼容的 PKCS1 原始签名；不支持 TLS-PSK、企业设备连接验证及厂商专有认证。如果系统拒绝 App 访问调试端口、拒绝自授权、校验专有 SDK 版本/哈希，或要求未实现的认证，测试会停止并记录阶段及系统反馈。打开支付宝后依靠系统短时后台运行额度继续测试，额度不足或到期也会停止。失败不会改走 PC 后端；停止不会回滚已经发送的动作。截图可用于对照，但命令成功不自动等同于界面产生了预期变化。
+
+2026-10-02 用户提供的 `OpenHarmony-7.0.0.105 / API26` 最新复测日志已确认：手机直连自身 HDC 端口、RSA 认证、Shell 探测、支付宝启动及首张 JPEG 截图成功；首张截图为 `1080x2444`、`220705` 字节。滑动命令返回 `exit=0` 和 `No Error`，但原来的错误关键字检查误将此成功提示判为失败，因而未执行第二张截图。现已改为逐行判断，只豁免完整的 `No Error` 成功提示；非零退出码与其他错误行仍会停止测试。滑动后截图及完整流程结束仍需复测；命令成功不自动等同于画面变化，需对照前后截图。截图 Base64 不写入日志。
+
+客户端身份文件 `filesDir/self_hdc/identity.json` 含私钥，日志和“复制完整日志”均不会包含该文件；调试时只提供 `runs` 下的日志、结果和必要截图。App 清除数据或重新安装可能生成新的密钥，需要重新允许系统授权。
+
+协议核对来源：[OpenHarmony HDC 会话与报文定义](https://github.com/openharmony/developtools_hdc/blob/master/src/common/session.h)、[设备认证状态机](https://github.com/openharmony/developtools_hdc/blob/master/src/daemon/daemon.cpp)、[主机 RSA 签名](https://github.com/openharmony/developtools_hdc/blob/master/src/common/auth.cpp)。商业 HarmonyOS 的实际行为以运行日志为准。
+
+端口自动发现并非理论上不可行：[OpenHarmony HDC TCP 守护进程源码](https://github.com/openharmony/developtools_hdc/blob/master/src/daemon/daemon_tcp.cpp)包含 UDP 发现服务，会回复实际 TCP 监听端口；回复使用固定发现端口，手机 App 与本机守护进程同时绑定/接收存在需要实测的条件。商业 HarmonyOS 是否保留并开放同机发现能力尚未验证，因此当前实现不自动探测端口，仍使用系统无线调试页面显示的 HDC 连接端口。重新开启无线调试后端口可能变化，需要在「我的 → 手机 HDC」更新。
+
+### 任务页使用手机自己控制
+
+1. 在「我的 → 手机 HDC」填写 **HDC 连接端口**，保留默认的自动 Wi-Fi IP，然后在任务页选择“手机自己控制”。设置保存在 `filesDir/self_hdc/task_connection.json`，不会修改 PC HDC Server 地址或密钥。任务页切换控制方式只修改模式，不覆盖已保存的 IP、端口或自动更新开关。
+2. 首次使用新增输入能力时，进入「手机 HDC → 验证点击 / 聚焦 / 文本输入」。先点测试输入框一次校准物理屏幕坐标，再点开始。诊断使用与任务相同的手机桥接，依次检查实际点击、激活并替换 ASCII 输入、记忆焦点后替换中文与 shell 特殊字符、回车提交及截图。`INPUT_ASSERT ... PASS` 表示控件实际收到预期事件/文字；仅有 HDC 的 `No Error` 不算验证通过。诊断不需要云端模型，也不调用 PC。
+3. 保留已配置的云端 Planner / Decider / Summary，在任务页运行原有 Workflow。编排、循环、分支、总结和 daily-log 仍由 App 原有执行器负责，仅设备操作切换到 `PhoneHdcWorkflowBridge`。手机分支不会探测 PC HTTP 服务，也不会在失败时改用 PC。批量手机任务遇到失败或取消会停止后续任务。
+4. 所有连接、认证、Workflow 步骤、动作序号、HDC 命令退出码、截图尺寸及失败信息汇总到「我的 → 手机 HDC」。`CONNECTION / IP_STATUS` 记录本次地址和自动检测状态，Hilog 的 `IP_REFRESH` 记录更新前后 IP 与检测来源。`ACTION_BEGIN / ACTION_END / ACTION_FAILED` 可定位动作，`DEVICE_OUTPUT` 可对照设备响应，`WORKFLOW_SUMMARY` 指向原有 Workflow 运行目录。新增“清空日志”按钮清除手机测试和任务日志，保留授权密钥、连接配置、截图与 Workflow 产物；运行期间不可清空。截图 Base64 和 HDC 输入命令中的文本不写入桥接日志，Workflow 模型响应仍沿用原有日志内容。
+
+| 原有任务设备能力 | 手机分支实现 |
+| --- | --- |
+| 启动 / 重置 / 停止目标应用 | `bm dump` 查询真实启动 Ability，`aa start` / `aa force-stop`；拒绝停止控制器自身 |
+| 截图、截图总结、Decider 图片输入 | HDC Shell 截图并传回 JPEG；向模型提供半尺寸图片，保持现有执行器的坐标乘二约定，动作使用实际屏幕尺寸 |
+| 点击与激活输入框 | `uitest uiInput click`，检查坐标边界，成功后才记录输入目标 |
+| 输入 / 点击并输入 | 明确坐标或此前输入框点击 → 激活 → Ctrl+A → DEL → 带 shell 引号保护的文本 → ENTER，与 PC 默认驱动输入流程一致；缺少焦点时拒绝盲输 |
+| 四向滑动 / 指定坐标滑动 | `uitest uiInput swipe`，按实际屏幕尺寸计算或使用明确物理坐标 |
+| BACK / HOME / ENTER / 数字键码、等待 | `uitest uiInput keyEvent`、可取消的等待；返回、切换应用和滑动会清理记忆焦点 |
+| 暂停、取消和返回控制器 | 沿用任务控制 UI，手机取消关闭自身 HDC 会话与云端请求，收尾尝试返回本 App |
+
+开始执行前会检查 HDC Shell 身份和设备上 `aa`、`bm`、`snapshot_display`、`base64`、`uitest` 及所需 `uiInput` 子命令。缺失能力时停止并报告具体名称。未知动作同样明确失败，不会冒充执行成功。
+
+部分 API26 设备的 `uitest uiInput help` 会打印 `Missing parameter.` 和完整 `USAGE` 后返回退出码 1。手机分支仅在这个只读帮助探测中兼容该结果，必须确认完整命令声明包含 `click`、`swipe`、`text`、`keyEvent`，且无权限或其他实际错误。日志 `CAPABILITIES uiInput verified=... helpExit=1 acceptedNonzeroUsage=true` 表示通过这项兼容检查；实际启动、点击、输入、滑动、截图等命令仍要求退出码 0。
+
+手机切到其他应用后依赖系统授予的短时后台额度，日志会记录实际 `budgetMs`；不足 30 秒时拒绝开始，额度到期报告 `PHONE_HDC_BACKGROUND_EXPIRED` 并取消后续执行。额度是系统限制，较长的 GUI Workflow 仍可能无法连续完成；本次没有引入持续后台保活能力。本次新增 GUI 集成与输入诊断只完成源码、SDK 类型及 ArkTS 静态核对，未编译、安装或执行真机验证。
+
+输入命令参考：[OpenHarmony UiTest 指南](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)。诊断坐标按 [ClickEvent 文档](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-arkui/arkui-ts/ts-universal-events-click.md)将 `displayX/displayY` 的 vp 单位转换为物理像素。
+
 ---
 
 ## 🔁 四、Workflow / 云端 Agent / MNN Agent 执行链路
 
-当前 App 有三种自动化执行入口，它们共享同一台手机和同一个 PC HDC 服务，但任务下发方式不同：
+当前 App 有三种自动化执行入口，共享同一台手机。Workflow 任务可选择 PC 或手机自控，聊天页入口继续使用 PC HDC 服务：
 
 | 执行方式 | App 侧入口 | PC 侧入口 | 模型推理位置 | 设备控制方式 |
 | --- | --- | --- | --- | --- |
 | Workflow 任务 | 「任务」页任务卡片 | `hdc_server.py` 的 `/api/workflow` | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | PC 侧 `harmony_agent.py` 执行 HDC/hmdriver2 截图与动作 |
+| Workflow 手机自控 | 「任务」页选择“手机自己控制” | 无 | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | App 自身 HDC 客户端直连本机无线调试守护进程 |
 | 云端 Agent | 「聊天」页切换到“云端智能体”后下发任务 | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `CloudModelClient` | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
 | MNN 本地 Agent | 「聊天」页切换到“本地推理”后下发任务 | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `libentry.so`/MNN | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
 
@@ -151,7 +197,7 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 - `9124`：PC HDC HTTP 服务，通常由 `hdc_server.py` 提供。
 - `9126`：App 内 TCP Agent Router。PC 侧通过 `hdc fport tcp:9126 tcp:9126` 映射到手机 App。
 
-Workflow 不依赖 `9126` 轮询。它由 App 内 `WorkflowRunner` 编排，每一步通过 `HdcWorkflowBridge` 调用 PC 的 `/api/workflow`，PC 只负责启动 App、截图和执行 GUI 动作。Planner、Decider 和图片总结请求仍由 App 侧直接调用云端模型配置。
+Workflow 不依赖 `9126` 轮询。它由 App 内 `WorkflowRunner` 编排；电脑模式通过 `HdcWorkflowBridge` 调用 PC 的 `/api/workflow`，手机模式注入独立的 `PhoneHdcWorkflowBridge`。桥接负责启动 App、截图和执行 GUI 动作。Planner、Decider 和图片总结请求仍由 App 侧直接调用云端模型配置。
 
 云端 Agent 和 MNN 本地 Agent 共享 `9126` 轮询链路。在聊天页下发任务前，App 会切换 `AgentRouterServer` 到 cloud 或 local 模式，确保 `9126` 正在监听，并调用 PC 的 `/api/agent_loop/ensure` 让 `hdc_server.py` 确认后台 `harmony_agent.run_agent_loop()` 存活且刷新端口映射。随后 PC 侧轮询 `poll` 拿到任务，再按 Planner -> 截图 -> Decider -> 执行动作的循环运行。
 

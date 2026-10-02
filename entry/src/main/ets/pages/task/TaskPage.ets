@@ -20,6 +20,9 @@ import {
   WorkflowToolInputs
 } from '../../utils/WorkflowTypes';
 import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowSceneConfig';
+import { TaskDeviceControlPanel } from '../../components/TaskDeviceControlPanel';
+import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
 
 interface WorkflowNodeTemplate {
   key: string;
@@ -106,6 +109,11 @@ export struct TaskPage {
   @Link taskScene: number;
   onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
+  onRunPhoneWorkflow: (task: WorkflowTask) => Promise<void> = async (_task: WorkflowTask): Promise<void> => {
+    throw new Error('手机任务执行器未连接');
+  };
+  @State private taskControlMode: string = 'pc';
+  @StorageLink('selfHdcRunning') private phoneControlBusy: boolean = false;
 
   @State tasks: WorkflowTask[] = [];
   @State editorOpen: boolean = false;
@@ -165,6 +173,9 @@ export struct TaskPage {
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
+    try { this.taskControlMode = SelfHdcTaskSettings.load(this.filesDir).mode; } catch (e) {
+      showToastSafely('手机控制配置读取失败，使用电脑控制：' + (e as Error).message, 2200);
+    }
     try {
       WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
     } catch (e) {
@@ -287,7 +298,7 @@ export struct TaskPage {
   }
 
   private isTaskExecutionBusy(): boolean {
-    return this.batchRunning || this.runningTaskId.length > 0;
+    return this.batchRunning || this.runningTaskId.length > 0 || this.phoneControlBusy;
   }
 
   private isWorkflowCancelledStatus(status: string, message: string): boolean {
@@ -685,7 +696,7 @@ export struct TaskPage {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
-    if (!await this.onEnsureDesktopCompanion()) {
+    if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
       return;
     }
     // A second tap must not start another run while consent is being loaded or displayed.
@@ -711,7 +722,7 @@ export struct TaskPage {
     this.runningTaskId = currentTask.id;
     this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
     try {
-      await this.onRunWorkflow(currentTask);
+      await this.runSelectedWorkflow(currentTask);
     } finally {
       this.runningTaskId = '';
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
@@ -745,7 +756,7 @@ export struct TaskPage {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
-    if (!await this.onEnsureDesktopCompanion()) {
+    if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
       return;
     }
     this.batchRunning = true;
@@ -766,7 +777,7 @@ export struct TaskPage {
         this.batchRunStatusText = '正在执行 ' + (i + 1) + '/' + queue.length + '：' + currentTask.title;
         this.tasks = WorkflowStorage.updateTaskRun(this.filesDir, currentTask.id, '运行中', 'Workflow 正在执行');
         try {
-          await this.onRunWorkflow(currentTask);
+          await this.runSelectedWorkflow(currentTask);
           this.tasks = WorkflowStorage.loadTasks(this.filesDir);
           if (this.isTaskCancelled(currentTask.id)) {
             stoppedByCancel = true;
@@ -793,6 +804,18 @@ export struct TaskPage {
       this.tasks = WorkflowStorage.loadTasks(this.filesDir);
       this.refreshStatsText();
     }
+  }
+
+  private async runSelectedWorkflow(task: WorkflowTask): Promise<void> {
+    if (this.taskControlMode === 'phone') {
+      await this.onRunPhoneWorkflow(task);
+      if (this.batchRunning) {
+        let saved = WorkflowStorage.loadTasks(this.filesDir).find((item: WorkflowTask): boolean => item.id === task.id);
+        if (saved && (saved.lastStatus === 'failed' || saved.lastStatus === '失败')) {
+          throw new Error(saved.lastMessage || '手机任务失败，停止后续批量任务');
+        }
+      }
+    } else { await this.onRunWorkflow(task); }
   }
 
   private copyWorkflowTask(task: WorkflowTask): void {
@@ -4256,6 +4279,9 @@ export struct TaskPage {
         } else {
           AppHeader({ title: '自定义任务', icon: $r('app.media.header_task') })
           this.TaskExecutionHeaderPanel()
+          TaskDeviceControlPanel({ mode: this.taskControlMode,
+            busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
+            onModeChanged: (mode: string): void => { this.taskControlMode = mode; } })
           this.TaskExecutionList()
           this.BatchRunPanel()
         }

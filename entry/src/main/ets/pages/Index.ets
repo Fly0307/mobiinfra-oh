@@ -86,6 +86,9 @@ import {
 } from './chat/ChatStreamUpdatePolicy';
 import { ChatSessionController, ChatSessionViewState } from './chat/ChatSessionController';
 import { HomePage } from './home/HomePage';
+import { PhoneHdcWorkflowBridge } from '../utils/selfhdc/PhoneHdcWorkflowBridge';
+import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
 import {
   HomeTaskSuggestion,
   buildHomeTaskSuggestionPrompt,
@@ -655,6 +658,7 @@ struct Index {
   private pcServerMonitor: PcServerMonitor | null = null;
   private pcServerConnectedPromptShown: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
+  private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
@@ -2897,6 +2901,11 @@ struct Index {
     this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.activePhoneWorkflowBridge !== null) {
+        this.activePhoneWorkflowBridge.cancel();
+        this.cloudClient.cancelActiveRequests();
+        return;
+      }
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'local') {
         this.localAgentCleaningUp = true;
         this.reportLocalAgentCleanupStatus('正在终止本地 Agent 并返回 App，推理收尾完成前请勿重复下发任务。');
@@ -2917,6 +2926,11 @@ struct Index {
       }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.activePhoneWorkflowBridge !== null) {
+        this.activePhoneWorkflowBridge.cancel();
+        this.cloudClient.cancelActiveRequests();
+        return;
+      }
       if (this.activeAgentRunner !== null && this.activeAgentRunner.getMode() === 'cloud') {
         await this.activeAgentRunner.requestCancellation();
         this.appendCloudLog('用户已通过悬浮窗终止云端 Agent 任务。');
@@ -6328,6 +6342,73 @@ struct Index {
     }
   }
 
+  private async runPhoneWorkflowTask(task: WorkflowTask): Promise<void> {
+    if (!this.ensureAiServiceLogin() || !await this.ensurePrivacyConsent()) { return; }
+    let hub = SelfHdcTestRunner.shared();
+    let bridge: PhoneHdcWorkflowBridge | null = null;
+    let ownsLog = false;
+    let outcome = 'failed';
+    let message = '';
+    try {
+      if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
+        throw new Error('已有手机测试或 GUI 任务正在执行');
+      }
+      let context = getContext(this) as common.UIAbilityContext;
+      let settings = new SelfHdcTaskSettings();
+      let settingsError = '';
+      try { settings = await SelfHdcTaskSettings.refreshLocalIp(this.filesDir, 'phone-workflow'); }
+      catch (e) { settingsError = (e as Error).message; }
+      if (AgentExecutionController.isExecutionActive() || hub.snapshot().running) {
+        throw new Error('已有手机测试或 GUI 任务正在执行');
+      }
+      hub.beginExternal(this.filesDir, task.title, settings.ip + ':' + settings.port, (): void => {
+        AgentExecutionController.requestCancellation();
+      });
+      ownsLog = true;
+      if (settingsError) { throw new Error('PHONE_HDC_SETTINGS: ' + settingsError); }
+      hub.recordExternal('CONNECTION ipMode=' + (settings.autoIp ? 'auto-wifi' : 'manual') + ' ip=' + settings.ip +
+        ' portSource=manual；连接设置位于 我的 → 手机 HDC');
+      hub.recordExternal('IP_STATUS ' + (AppStorage.get<string>('selfHdcIpStatus') || '未读取检测状态'));
+      if (!this.isCloudConfigReady()) { throw new Error('Planner / Decider 云端模型配置不完整'); }
+      bridge = new PhoneHdcWorkflowBridge(context, settings, (event: string): void => { hub.recordExternal(event); },
+        (): void => { AgentExecutionController.requestCancellation(); });
+      this.activePhoneWorkflowBridge = bridge;
+      AgentExecutionController.beginExecution('手机 GUI 任务连接中：' + task.title);
+      await bridge.open();
+      let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getCloudConfig(), '',
+        (event: string): void => { hub.recordExternal(event); });
+      runner.useDeviceBridgeForPhone(bridge);
+      let result = await runner.runTask(task);
+      outcome = bridge.hasExpired() ? 'failed' : result.status;
+      message = bridge.hasExpired() ? 'PHONE_HDC_BACKGROUND_EXPIRED: 系统后台额度到期' : result.message;
+      if (result.dailyLogPath) { message += '，daily-log 已生成'; }
+      hub.recordExternal('WORKFLOW_SUMMARY runDir=' + result.runDir + ' returnedToApp=' + result.returnedToApp);
+    } catch (e) {
+      outcome = bridge?.hasExpired() ? 'failed' :
+        (bridge !== null && AgentExecutionController.isCancelRequested() ? 'cancelled' : 'failed');
+      message = (e as Error).message;
+      if (ownsLog) { hub.recordExternal('WORKFLOW_FAILED error=' + message); }
+      else { this.appendCloudLog('手机 Workflow 无法启动：' + message); }
+    } finally {
+      if (bridge) {
+        if (outcome !== 'success') { this.cloudClient.cancelActiveRequests(); }
+        try { await bridge.returnHost(); } catch (e) {
+          hub.recordExternal('RETURN_APP_FAILED error=' + (e as Error).message + '；请手动切回 App');
+        }
+        bridge.close();
+      }
+      this.activePhoneWorkflowBridge = null;
+      try {
+        if (message.length > 0) { WorkflowStorage.updateTaskRun(this.filesDir, task.id, outcome, message); }
+      } finally {
+        if (ownsLog) {
+          AgentExecutionController.finishExecution('手机 Workflow ' + outcome);
+          hub.finishExternal(outcome, message);
+        }
+      }
+    }
+  }
+
   private async runWorkflowTask(task: WorkflowTask): Promise<void> {
     if (!this.ensureAiServiceLogin()) {
       return;
@@ -7164,7 +7245,8 @@ struct Index {
             onEnsureDesktopCompanion: async (): Promise<boolean> => {
               return await this.ensureDesktopCompanionReminder();
             },
-            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); }
+            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
+            onRunPhoneWorkflow: async (task: WorkflowTask) => { await this.runPhoneWorkflowTask(task); }
           })
         }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Task), mainTabLabel(MainTabIndex.Task), MainTabIndex.Task))
         TabContent() {

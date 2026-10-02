@@ -843,6 +843,44 @@ export struct SettingsCenterPage {
     .onClick(() => { router.pushUrl({ url: 'pages/settings/DesktopCompanionPage' }); })
   }
 
+  @Builder SelfHdcTestEntry() {
+    Row() {
+      Text('HDC')
+        .fontSize(12)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Color.White)
+        .width(44)
+        .height(44)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#287D75')
+        .borderRadius(14)
+      Column() {
+        Text('手机 HDC')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#11182F')
+          .width('100%')
+        Text('连接设置 · 自控测试 · 手机任务日志')
+          .fontSize(12)
+          .fontColor('#7B8290')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12, right: 10 })
+      Text('›').fontSize(28).fontColor('#8A93A3')
+    }
+    .width('92%')
+    .padding(16)
+    .backgroundColor(Color.White)
+    .borderRadius(18)
+    .margin({ top: 12 })
+    .onClick(() => { router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }); })
+  }
+
   @Builder SettingsSectionList() {
     Column() {
       AppHeader({
@@ -852,6 +890,7 @@ export struct SettingsCenterPage {
       })
       HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
       this.DesktopCompanionEntry()
+      this.SelfHdcTestEntry()
       Text('设置与服务')
         .fontSize(14)
         .fontWeight(FontWeight.Medium)

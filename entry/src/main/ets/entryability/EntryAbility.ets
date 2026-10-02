@@ -4,6 +4,7 @@ import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { AgentExecutionController } from '../utils/AgentExecutionController';
+import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { getAppBundleName } from '../utils/AppIdentity';
 import { ProfileShareLaunchBridge } from '../utils/ProfileKnockShareService';
 import {
@@ -140,6 +141,10 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppLogger.info('Ability', 'Ability onForeground');
+    // Runs for both a cold launch and returning to the App; never blocks the first screen.
+    SelfHdcTaskSettings.refreshLocalIp(this.context.filesDir, 'app-foreground').catch((error: Error): void => {
+      AppLogger.warnCause('SelfHdc', 'Cannot refresh saved phone IP', error);
+    });
     HuaweiAccountSession.refresh(this.context).catch((): void => {
       AppLogger.warn('HuaweiAccount', 'foreground session restore unavailable');
     });

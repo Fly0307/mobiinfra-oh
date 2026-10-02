@@ -122,7 +122,7 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 
 ### 「任务」页面
 * **Workflow 任务卡片**：运行已配置的 GUI 自动化任务。
-* **任务控制方式**：只保留“电脑控制”和“手机自己控制”两个选项，默认“电脑控制”。手机连接地址统一在「我的 → 手机 HDC」设置。选择仅作用于任务页 Workflow，聊天页的 Agent 控制链路保持原有行为。
+* **任务控制方式**：只保留“电脑控制”和“手机自己控制”两个选项，默认“电脑控制”。选择同时作用于任务页 Workflow、聊天云端/本地 Agent 和聊天 `mobile_gui_task` 工具。手机连接地址统一在「我的 → 手机 HDC」设置。
 * **图形化编辑器**：编辑 `open_app`、`gui_task`、`shot_summary`、`if`、`for_loop`、`until_loop` 等节点。
 * **文件管理**：查看和清理 Workflow 配置、daily-log 与运行文件。
 * **场景切换**：按购物、聊天、外卖、娱乐、生活、社交、差旅等采集场景管理任务。
@@ -178,18 +178,29 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 
 输入命令参考：[OpenHarmony UiTest 指南](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)。诊断坐标按 [ClickEvent 文档](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-arkui/arkui-ts/ts-universal-events-click.md)将 `displayX/displayY` 的 vp 单位转换为物理像素。
 
+### 聊天云端 / 本地 Agent 使用手机自控
+
+1. 在「我的 → 手机 HDC」保存连接端口，在「任务」页选择「手机自己控制」，再到聊天页下发云端或本地 Agent 任务。两种 Agent 及聊天 `mobile_gui_task` 都读取同一选择；本次任务开始后固定执行方式，不在失败时切换 PC。
+2. 云端 Agent 使用设置中的 Planner / Decider 云端地址与各自密钥，直接复用 `CloudModelClient` 的 Planner 和 Qwen Decider；手机分支不使用“PC Server 云端接口”的自动覆盖地址。端侧 Agent 先按原流程加载本地 MNN 模型，再复用本地 Planner 快速匹配、`chat`、`agentPrefill`、`agentStep` 和 `agentReset`。模型目录中的提示词及无推理提示词优先规则保持一致。
+3. `AgentLoopRunner` 的模型循环、同屏 JSON 重试、动作解析、历史记录、动作确认及暂停继续复用。云端 Agent 截图比例为 0.5，端侧为 0.25；模型仍收到原有图片路径/`<hw>` 标签，手机动作使用截图中附带的真实物理尺寸，避免缩小图取整后的坐标误差。点击、输入、按键、滑动、启动应用和返回宿主复用任务页手机桥接。聊天 GUI 工具继续复用 Workflow 编排、业务结果提取与会话运行目录。
+4. 在「我的 → 手机 HDC」查看、复制或清空日志。`RUN mode=phone-chat-local / phone-chat-cloud / phone-chat-workflow` 区分入口，`STAGE_BEGIN` 区分模型准备、HDC 连接与执行，`AGENT_SCREEN` 核对模型/物理尺寸，`LOCAL_RESET_BEGIN / LOCAL_RESET_END / LOCAL_RESET_FAILED` 定位本地推理收尾。长提示词日志分段为 `AGENT_LOG_PART`，截图 Base64 不写入日志。
+
+手机会话与任务、诊断互斥。取消会立即关闭 HDC 连接，云端销毁请求；本地推理仍按现有原生接口等待当前推理结束，再重置上下文，期间保留 busy 状态，不接受新的设备任务。模型输出 `done: failed/suspended`、`stop/terminate/abort` 或到达 15 步上限不会报告成功。保持现有系统后台额度限制，到期明确记录 `PHONE_HDC_BACKGROUND_EXPIRED` 并停止后续动作；本地模型加载安排在申请额度之前。本次新增聊天集成只完成静态检查及聚焦用例编写，未构建或执行真机测试。
+
 ---
 
 ## 🔁 四、Workflow / 云端 Agent / MNN Agent 执行链路
 
-当前 App 有三种自动化执行入口，共享同一台手机。Workflow 任务可选择 PC 或手机自控，聊天页入口继续使用 PC HDC 服务：
+Workflow、云端 Agent、本地 Agent 和聊天 GUI 工具共享「任务」页的控制方式选择：
 
 | 执行方式 | App 侧入口 | PC 侧入口 | 模型推理位置 | 设备控制方式 |
 | --- | --- | --- | --- | --- |
 | Workflow 任务 | 「任务」页任务卡片 | `hdc_server.py` 的 `/api/workflow` | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | PC 侧 `harmony_agent.py` 执行 HDC/hmdriver2 截图与动作 |
 | Workflow 手机自控 | 「任务」页选择“手机自己控制” | 无 | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | App 自身 HDC 客户端直连本机无线调试守护进程 |
-| 云端 Agent | 「聊天」页切换到“云端智能体”后下发任务 | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `CloudModelClient` | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
-| MNN 本地 Agent | 「聊天」页切换到“本地推理”后下发任务 | `harmony_agent.py` 后台轮询 App `9126` | App 侧 `AgentRouterServer` 转发到 `libentry.so`/MNN | PC 侧 `harmony_agent.py` 截图、解析动作并执行 |
+| 云端 Agent（电脑控制） | 「聊天」页下发云端 Agent 任务 | `hdc_server.py` 的 `/api/workflow` | App 侧 `AgentLoopRunner` 调用 `CloudModelClient` | PC HDC bridge 提供截图与动作 |
+| MNN 本地 Agent（电脑控制） | 「聊天」页下发本地 Agent 任务 | `hdc_server.py` 的 `/api/workflow` | App 侧 `AgentLoopRunner` 调用 `libentry.so`/MNN | PC HDC bridge 提供截图与动作 |
+| 云端 / MNN Agent（手机自控） | 「聊天」页下发 Agent 任务 | 无 | 复用同一 App Agent 循环和云端 / 端侧模型 | 复用任务页手机 HDC bridge |
+| 聊天 GUI 工具（手机自控） | 聊天 `mobile_gui_task` 确认后执行 | 无 | 临时 Workflow 调用云端 Planner / Decider / Summary | 复用任务页手机 HDC bridge |
 
 关键端口：
 
@@ -199,7 +210,7 @@ App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、*
 
 Workflow 不依赖 `9126` 轮询。它由 App 内 `WorkflowRunner` 编排；电脑模式通过 `HdcWorkflowBridge` 调用 PC 的 `/api/workflow`，手机模式注入独立的 `PhoneHdcWorkflowBridge`。桥接负责启动 App、截图和执行 GUI 动作。Planner、Decider 和图片总结请求仍由 App 侧直接调用云端模型配置。
 
-云端 Agent 和 MNN 本地 Agent 共享 `9126` 轮询链路。在聊天页下发任务前，App 会切换 `AgentRouterServer` 到 cloud 或 local 模式，确保 `9126` 正在监听，并调用 PC 的 `/api/agent_loop/ensure` 让 `hdc_server.py` 确认后台 `harmony_agent.run_agent_loop()` 存活且刷新端口映射。随后 PC 侧轮询 `poll` 拿到任务，再按 Planner -> 截图 -> Decider -> 执行动作的循环运行。
+当前聊天 Agent 按钮的循环在 `AgentLoopRunner` 中执行；电脑模式先检查 PC HDC 服务，手机模式通过 `PhoneHdcRunSession` 管理连接、互斥、后台额度、日志与收尾，随后把手机桥接注入同一循环。原有 `9126`、`AgentRouterServer` 与 Python `harmony_agent.run_agent_loop()` 调试/轮询通路保留，手机分支不启动该通路。
 
 执行方式可以串行切换：一个 workflow 完成后，可以直接启动云端 Agent 或 MNN Agent；一个 Agent 任务完成后，也可以直接切换到 workflow。切换时不需要重启 PC server。仍建议同一时间只运行一个自动化任务，避免多个入口同时控制同一台手机。
 

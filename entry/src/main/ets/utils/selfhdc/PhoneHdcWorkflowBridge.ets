@@ -35,6 +35,7 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
   private quotaExpired: () => void;
   private respectAgentExecution: boolean;
   private closed: boolean = false;
+  private opened: boolean = false;
 
   constructor(context: common.UIAbilityContext, settings: SelfHdcTaskSettings, log: (message: string) => void,
     quotaExpired: () => void = (): void => {}, respectAgentExecution: boolean = true) {
@@ -83,6 +84,7 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
     this.phoneLog('BACKGROUND request=' + delay.requestId + ' budgetMs=' + delay.actualDelayTime);
     if (delay.actualDelayTime < 30000) { throw new Error('PHONE_HDC_BACKGROUND: less than 30 seconds available'); }
     SelfHdcTaskSettings.saveEndpoint(this.context.filesDir, endpoint.ip, String(endpoint.port));
+    this.opened = true;
   }
 
   hasExpired(): boolean { return this.expired || (this.deadline > 0 && Date.now() >= this.deadline); }
@@ -159,6 +161,18 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
 
   async health(): Promise<boolean> { this.check(); return true; }
 
+  async agentConfig(): Promise<HdcBridgeResponse> {
+    this.check();
+    return { status: 'ok', no_reason: false, message: 'phone Agent uses model prompt files or built-in defaults' };
+  }
+
+  async prepareAgentRun(): Promise<void> {
+    this.check();
+    if (!this.opened) { throw new Error('PHONE_HDC_NOT_READY: open phone session before starting Agent'); }
+    this.actions.reset(); this.geometryReady = false;
+    this.phoneLog('AGENT_PREPARE phone HDC ready; PC driver/config/port forwarding not used');
+  }
+
   async startApp(appName: string, packageName: string, resetFirst: boolean = true): Promise<void> {
     let bundle = phoneHdcBundle(appName, packageName);
     if (bundle === getAppBundleName() && (this.cancelled || this.hasExpired() ||
@@ -220,7 +234,8 @@ export class PhoneHdcWorkflowBridge extends HdcWorkflowBridge {
       this.phoneLog('SCREENSHOT saved=' + path + ' size=' + info.size.width + 'x' + info.size.height + ' bytes=' + bytes.length +
         ' modelSize=' + modelWidth + 'x' + modelHeight + ' factor=' + factor + '; image data omitted');
       return { status: 'ok', image_b64: new util.Base64Helper().encodeToStringSync(new Uint8Array(resized)),
-        width: modelWidth, height: modelHeight, message: 'phone JPEG screenshot' };
+        width: modelWidth, height: modelHeight, screen_width: info.size.width, screen_height: info.size.height,
+        message: 'phone JPEG screenshot' };
     } finally {
       try { await this.execute('rm -f ' + selfHdcShellQuote(remote), 'screenshot-cleanup'); } catch (e) {
         this.phoneLog('CLEANUP remaining=' + remote + ' error=' + (e as Error).message);

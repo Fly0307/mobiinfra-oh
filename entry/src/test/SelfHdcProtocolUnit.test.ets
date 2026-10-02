@@ -14,6 +14,8 @@ import { PhoneHdcActions } from '../main/ets/utils/selfhdc/PhoneHdcActions';
 import { phoneHdcBundle, phoneHdcMainAbility } from '../main/ets/utils/selfhdc/PhoneHdcApp';
 import { parsePhoneHdcUiInputHelp } from '../main/ets/utils/selfhdc/PhoneHdcCapabilities';
 import { selfHdcIsUsableWifiIpv4, selectSelfHdcWifiIpv4 } from '../main/ets/utils/selfhdc/SelfHdcNetworkPolicy';
+import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
+import { localVisionPromptHw } from '../main/ets/utils/LocalVisionImageShape';
 import { AgentActionParser } from '../main/ets/utils/AgentActionParser';
 import { WorkflowJsonMap } from '../main/ets/utils/WorkflowTypes';
 
@@ -47,6 +49,37 @@ const REPORTED_UIINPUT_HELP: string = 'Missing parameter. \r\n\r\nUSAGE : \r\n' 
 
 export default function selfHdcProtocolUnitTest(): void {
   describe('selfHdcProtocolUnitTest', () => {
+    it('keepsOriginalPhoneGeometryForQuarterAndHalfSizeAgentImages', 0, () => {
+      let screen = phoneAgentScreenSize({ status: 'ok', image_b64: 'image-test-fixture', width: 270, height: 611,
+        screen_width: 1081, screen_height: 2445 });
+      let parsed = AgentActionParser.parse('{"action":"click","parameters":{"coords":[500,900]}}');
+      let payload = AgentActionParser.buildHdcActionPayload(parsed, screen.width, screen.height);
+      expect(payload['x']).assertEqual(540);
+      expect(payload['y']).assertEqual(2200); // Multiplying the quarter image height by 4 would produce 2199.
+      let actions = new PhoneHdcActions(); actions.setScreen(screen.width, screen.height);
+      expect(actions.plan(payload).commands[0].command).assertEqual('uitest uiInput click 540 2200');
+      expect(localVisionPromptHw(270, 611)).assertEqual('600,270');
+      let landscape = phoneAgentScreenSize({ status: 'ok', image_b64: 'image-test-fixture', width: 1222, height: 540,
+        screen_width: 2445, screen_height: 1081 });
+      expect(landscape.width).assertEqual(2445);
+      expect(landscape.height).assertEqual(1081);
+      expect(localVisionPromptHw(1222, 540)).assertEqual('270,600');
+      expect(rejects((): void => { phoneAgentScreenSize({ status: 'ok', image_b64: 'image-test-fixture', width: 270, height: 611 }); })).assertTrue();
+    });
+    it('doesNotReportFailedSuspendedOrStoppedPhoneAgentTasksAsSuccess', 0, () => {
+      phoneAgentAssertCompleted(AgentActionParser.parse('{"action":"done","parameters":{"status":"success"}}'));
+      phoneAgentAssertCompleted(AgentActionParser.parse('{"action":"done"}'));
+      for (let raw of ['{"action":"done","parameters":{"status":"failed"}}',
+        '{"action":"done","status":"suspended"}', '{"action":"stop"}', '{"action":"terminate"}',
+        '{"action":"done","status":"failed","parameters":{"status":"success"}}']) {
+        expect(rejects((): void => { phoneAgentAssertCompleted(AgentActionParser.parse(raw)); })).assertTrue();
+      }
+    });
+    it('omitsImageDataFromPhoneAgentPromptLogs', 0, () => {
+      expect(phoneAgentLogText('image=data:image/jpeg;base64,/9j/SECRETIMAGE==... chars=12000'))
+        .assertEqual('image=[image data omitted]... chars=12000');
+      expect(phoneAgentLogText('MODEL backend=local-MNN')).assertEqual('MODEL backend=local-MNN');
+    });
     it('refreshesAChangedWifiIpAndAvoidsCellularAndVpnAddresses', 0, () => {
       expect(selectSelfHdcWifiIpv4([
         { ip: '10.0.0.8', isWifi: false, isVpn: false, isDefault: true },

@@ -89,6 +89,7 @@ import { HomePage } from './home/HomePage';
 import { PhoneHdcWorkflowBridge } from '../utils/selfhdc/PhoneHdcWorkflowBridge';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
+import { PhoneHdcRunSession } from '../utils/selfhdc/PhoneHdcRunSession';
 import {
   HomeTaskSuggestion,
   buildHomeTaskSuggestionPrompt,
@@ -659,6 +660,7 @@ struct Index {
   private pcServerConnectedPromptShown: boolean = false;
   private activeAgentRunner: AgentLoopRunner | null = null;
   private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
+  private activePhoneRunSession: PhoneHdcRunSession | null = null;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
@@ -1799,6 +1801,11 @@ struct Index {
     if (!await this.ensurePrivacyConsent()) {
       return mobileGuiTaskRunResultFromFailure('privacy_consent_required', '未同意隐私声明，任务未执行', true);
     }
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') {
+      return mobileGuiTaskRunResultFromFailure('hdc_settings_unavailable', '控制设置读取失败，任务未执行', true);
+    }
+    if (deviceMode === 'phone') { return await this.runPhoneMobileGuiTaskForChatSession(sessionId, request); }
     if (!this.isMobileGuiTaskCloudConfigReady()) {
       this.appendCloudLogToSession(sessionId, this.mobileGuiTaskConfigMissingMessage());
       return mobileGuiTaskRunResultFromFailure('cloud_config_missing', this.mobileGuiTaskConfigMissingMessage(), true);
@@ -1836,6 +1843,41 @@ struct Index {
       let errorCode = classifyMobileGuiWorkflowFailure(message);
       this.appendCloudLogToSession(sessionId, '手机 GUI 任务执行异常：' + errorCode + ' ' + message);
       return mobileGuiTaskRunResultFromFailure(errorCode, message, true);
+    }
+  }
+
+  private async runPhoneMobileGuiTaskForChatSession(sessionId: string,
+    request: MobileGuiTaskRequest): Promise<MobileGuiTaskRunResult> {
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      return mobileGuiTaskRunResultFromFailure('hdc_busy', '已有 Agent 正在执行或收尾', true);
+    }
+    let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-chat-workflow',
+      async (): Promise<void> => { this.cloudClient.cancelActiveRequests(); });
+    this.activePhoneRunSession = session;
+    let runDir = '';
+    try {
+      return await session.run<MobileGuiTaskRunResult>('聊天 GUI 工具：' + request.task,
+        async (bridge: PhoneHdcWorkflowBridge): Promise<MobileGuiTaskRunResult> => {
+          this.currentTab = MainTabIndex.Chat;
+          let runRoot = WorkflowStorage.ensureChatSessionMobileGuiToolRunRoot(this.filesDir, sessionId);
+          let runner = new WorkflowRunner(this.filesDir, this.cloudClient, () => this.getConfiguredCloudConfig(), '',
+            (message: string): void => {
+              this.appendCloudLogToSession(sessionId, message); session.record(message);
+            }, runRoot);
+          runner.useDeviceBridgeForPhone(bridge);
+          let result = await runner.runTask(buildMobileGuiWorkflowTask(request));
+          session.setResult(result.status, result.message);
+          session.record('WORKFLOW_SUMMARY runDir=' + result.runDir + ' returnedToApp=' + result.returnedToApp);
+          let mapped = mobileGuiTaskRunResultFromWorkflowResult(this.filesDir, result);
+          runDir = mapped.runDir;
+          return mapped;
+        }, async (): Promise<void> => { this.requirePhoneCloudAgentConfig(); });
+    } catch (e) {
+      let message = (e as Error).message;
+      this.appendCloudLogToSession(sessionId, '手机自控 GUI 工具失败：' + message);
+      return mobileGuiTaskRunResultFromFailure(classifyMobileGuiWorkflowFailure(message), message, true, runDir);
+    } finally {
+      if (this.activePhoneRunSession === session) { this.activePhoneRunSession = null; }
     }
   }
 
@@ -2901,6 +2943,10 @@ struct Index {
     this.agentRouter.setHdcServerUrlProvider((): string => this.hdcServerIp);
     // 浮窗终止按钮只发取消信号；真正的模型上下文清理由当前路由的 LlmServer 完成。
     AgentExecutionController.registerLocalCancelHandler(async () => {
+      if (this.activePhoneRunSession !== null) {
+        await this.activePhoneRunSession.requestCancellation();
+        return;
+      }
       if (this.activePhoneWorkflowBridge !== null) {
         this.activePhoneWorkflowBridge.cancel();
         this.cloudClient.cancelActiveRequests();
@@ -2926,6 +2972,10 @@ struct Index {
       }
     });
     AgentExecutionController.registerCloudCancelHandler(async () => {
+      if (this.activePhoneRunSession !== null) {
+        await this.activePhoneRunSession.requestCancellation();
+        return;
+      }
       if (this.activePhoneWorkflowBridge !== null) {
         this.activePhoneWorkflowBridge.cancel();
         this.cloudClient.cancelActiveRequests();
@@ -6271,19 +6321,21 @@ struct Index {
     }
   }
 
-  private createAgentLoopRunner(): AgentLoopRunner {
+  private createAgentLoopRunner(phoneSession: PhoneHdcRunSession | null = null): AgentLoopRunner {
     return new AgentLoopRunner(
       this.filesDir,
       this.modelDir,
       this.hdcServerIp,
       mnnllm,
       this.cloudClient,
-      () => this.getCloudConfig(),
+      () => phoneSession !== null ? this.getConfiguredCloudConfig() : this.getCloudConfig(),
       (msg: string) => {
         this.handleLocalAgentLog(msg);
+        phoneSession?.record(msg);
       },
       (msg: string) => {
         this.handleCloudAgentLog(msg);
+        phoneSession?.record(msg);
       },
       async (response: string) => {
         return await this.approveLocalAgentResponse(response);
@@ -6291,8 +6343,58 @@ struct Index {
       async (response: string) => {
         return await this.approveCloudAgentResponse(response);
       },
-      this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud'
+      phoneSession !== null ? 'cloud' : (this.isPcServerCloudEndpointEnabled() ? 'local' : 'cloud')
     );
+  }
+
+  private selectedAgentDeviceMode(): string {
+    try { return SelfHdcTaskSettings.load(this.filesDir).mode; }
+    catch (e) {
+      let error = e as Error;
+      AppLogger.errorCause('SelfHdc', 'Cannot read shared device control selection', error);
+      showToastSafely('手机控制设置读取失败：' + error.message, 2500);
+      return 'unavailable';
+    }
+  }
+
+  private requirePhoneCloudAgentConfig(): void {
+    let config = this.getConfiguredCloudConfig();
+    if (!isMobileGuiTaskCloudConfigReadyValue(config.plannerBaseUrl, config.deciderBaseUrl,
+      cloudPlannerApiKey(config), cloudDeciderApiKey(config))) {
+      throw new Error('PHONE_AGENT_CLOUD_CONFIG: 请在我的中配置云端 Planner / Decider 地址和密钥');
+    }
+  }
+
+  private async runPhoneChatAgent(task: string, mode: string, returnOnSuccess: boolean): Promise<void> {
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      throw new Error('PHONE_HDC_BUSY: 已有 Agent 正在执行或收尾');
+    }
+    let runner: AgentLoopRunner | null = null;
+    let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-chat-' + mode,
+      async (): Promise<void> => { if (runner !== null) { await runner.requestCancellation(); } });
+    runner = this.createAgentLoopRunner(session);
+    let phoneRunner = runner;
+    this.activePhoneRunSession = session;
+    this.activeAgentRunner = phoneRunner;
+    try {
+      await session.run<void>((mode === 'local' ? '本地' : '云端') + ' Agent：' + task,
+        async (bridge: PhoneHdcWorkflowBridge): Promise<void> => {
+          phoneRunner.useDeviceBridgeForPhone(bridge);
+          if (mode === 'local') { await phoneRunner.runLocalTask(task); }
+          else { await phoneRunner.runCloudTask(task, returnOnSuccess); }
+        }, async (): Promise<void> => {
+          if (mode === 'local') {
+            session.record('MODEL backend=local-MNN; existing loadModel/agentPrefill/agentStep/agentReset APIs');
+            if (!await this.ensureLocalModelLoaded()) { throw new Error(this.output || '本地模型加载失败'); }
+          } else {
+            session.record('MODEL backend=configured-cloud; Planner/Decider; PC endpoint override not used');
+            this.requirePhoneCloudAgentConfig();
+          }
+        }, returnOnSuccess);
+    } finally {
+      if (this.activePhoneRunSession === session) { this.activePhoneRunSession = null; }
+      if (this.activeAgentRunner === phoneRunner) { this.activeAgentRunner = null; }
+    }
   }
 
   private setHomeRecommendationCompleted(id: string, completed: boolean): void {
@@ -6306,7 +6408,7 @@ struct Index {
   }
 
   private async submitDirectCloudAgentTask(taskText: string,
-    options: CloudAgentTaskSubmitOptions): Promise<CloudAgentTaskSubmitResult> {
+    options: CloudAgentTaskSubmitOptions, deviceMode: string = ''): Promise<CloudAgentTaskSubmitResult> {
     if (!this.ensureAiServiceLogin()) {
       return { success: false, error: AI_LOGIN_REQUIRED_MESSAGE };
     }
@@ -6316,6 +6418,24 @@ struct Index {
     let task = taskText.trim();
     if (task.length === 0) {
       return { success: false, error: '请先输入云端 Agent 任务。' };
+    }
+    let selectedMode = deviceMode || this.selectedAgentDeviceMode();
+    if (selectedMode === 'unavailable') { return { success: false, error: '控制设置读取失败，任务未执行' }; }
+    if (SelfHdcTestRunner.shared().snapshot().running || this.activePhoneRunSession !== null) {
+      return { success: false, error: '已有手机测试或 GUI 任务正在执行，请先结束当前任务' };
+    }
+    if (selectedMode === 'phone') {
+      if (options.switchToChat) { this.currentTab = MainTabIndex.Chat; }
+      this.resetCloudLog('云端 Agent 开始执行（手机自控）：' + task);
+      try {
+        await this.runPhoneChatAgent(task, 'cloud', options.returnToHostAppOnFinish);
+        this.appendCloudLog('云端 Agent 手机自控任务完成。');
+        return { success: true, error: '' };
+      } catch (e) {
+        let message = (e as Error).message;
+        this.appendCloudLog('云端 Agent 手机自控失败：' + message);
+        return { success: false, error: message };
+      }
     }
     if (!await this.ensureCloudAgentBackend()) {
       return { success: false, error: '' };
@@ -6676,12 +6796,20 @@ struct Index {
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
-    if (!await this.ensureDesktopCompanionReminder()) {
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') { return; }
+    let phoneControl = deviceMode === 'phone';
+    if (!phoneControl && !await this.ensureDesktopCompanionReminder()) {
       return;
     }
     let task = this.userInput.trim();
     if (task.length === 0) {
       this.output = '请在输入框输入任务目标，例如：去淘宝买手机';
+      return;
+    }
+    if (SelfHdcTestRunner.shared().snapshot().running || this.activePhoneRunSession !== null ||
+      (phoneControl && (AgentExecutionController.isExecutionActive() || this.restoringLocalSession))) {
+      this.reportLocalAgentCleanupStatus('已有手机测试、GUI 任务或模型恢复正在执行，请稍后再试。');
       return;
     }
     if (this.localAgentCleaningUp ||
@@ -6705,30 +6833,36 @@ struct Index {
     this.debugImagePath = '';
     this.userInput = chatInputAfterAcceptedSend(this.userInput, true);
     this.isThinking = true;
-    AgentExecutionController.beginExecution('本地 Agent 准备中...');
-    this.reportLocalAgentStartupStatus('任务已下发，正在检查本地模型和 HDC Server。');
+    if (!phoneControl) { AgentExecutionController.beginExecution('本地 Agent 准备中...'); }
+    this.reportLocalAgentStartupStatus(phoneControl ? '任务已下发，使用手机自控，正在检查本地模型。' :
+      '任务已下发，正在检查本地模型和 HDC Server。');
     await this.sleep(50);
     try {
-      if (this.abortLocalAgentStartupIfCancelled()) {
-        return;
+      if (phoneControl) {
+        this.output = '====== 本地 Agent 手机自控 ======\n当前任务: ' + task + '\n推理与 HDC 设备控制均在手机中执行。';
+        await this.runPhoneChatAgent(task, 'local', true);
+      } else {
+        if (this.abortLocalAgentStartupIfCancelled()) {
+          return;
+        }
+        if (!await this.ensureLocalAgentReady()) {
+          let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
+          this.appendChatMessageForSession(this.localTaskSessionId,
+            createChatMessage(this.nextChatMessageId('task-result'), 'task',
+              CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
+          AgentExecutionController.finishExecution('本地 Agent 启动失败');
+          return;
+        }
+        if (this.abortLocalAgentStartupIfCancelled()) {
+          return;
+        }
+        this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
+        await this.sleep(30);
+        let runner = this.createAgentLoopRunner();
+        this.activeAgentRunner = runner;
+        this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
+        await runner.runLocalTask(task);
       }
-      if (!await this.ensureLocalAgentReady()) {
-        let reason = this.output.trim().length > 0 ? this.output : '本地 Agent 准备失败。';
-        this.appendChatMessageForSession(this.localTaskSessionId,
-          createChatMessage(this.nextChatMessageId('task-result'), 'task',
-            CHAT_MESSAGE_KIND_TASK_RESULT, '本地 Agent 启动失败：' + reason, new Date().getTime()));
-        AgentExecutionController.finishExecution('本地 Agent 启动失败');
-        return;
-      }
-      if (this.abortLocalAgentStartupIfCancelled()) {
-        return;
-      }
-      this.reportLocalAgentStartupStatus('本地 Agent 准备完成，开始执行。', true, true);
-      await this.sleep(30);
-      let runner = this.createAgentLoopRunner();
-      this.activeAgentRunner = runner;
-      this.output = `====== 本地 Agent 开始执行 ======\n当前任务: ${task}\nAgent loop 在 App 内执行，PC 仅提供 HDC 截图和动作控制。`;
-      await runner.runLocalTask(task);
       this.appendChatMessageForSession(this.localTaskSessionId,
         createChatMessage(this.nextChatMessageId('task-result'), 'task',
           CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
@@ -6746,7 +6880,7 @@ struct Index {
       if (this.localAgentCleaningUp && this.activeAgentRunner !== null) {
         this.reportLocalAgentStartupStatus('本地 Agent 收尾完成，可以重新下发任务。', true, true);
       }
-      this.activeAgentRunner = null;
+      if (!phoneControl) { this.activeAgentRunner = null; }
       this.localTaskSessionId = '';
       this.isThinking = false;
       this.localAgentCleaningUp = false;
@@ -6760,7 +6894,9 @@ struct Index {
     if (!await this.ensurePrivacyConsent()) {
       return;
     }
-    if (!await this.ensureDesktopCompanionReminder()) {
+    let deviceMode = this.selectedAgentDeviceMode();
+    if (deviceMode === 'unavailable') { return; }
+    if (deviceMode !== 'phone' && !await this.ensureDesktopCompanionReminder()) {
       return;
     }
     let task = this.cloudUserInput.trim();
@@ -6782,7 +6918,7 @@ struct Index {
       let result = await this.submitDirectCloudAgentTask(task, {
         switchToChat: true,
         returnToHostAppOnFinish: true
-      });
+      }, deviceMode);
       if (result.success) {
         this.appendChatMessageForSession(this.cloudTaskSessionId,
           createChatMessage(this.nextChatMessageId('task-result'), 'task',

@@ -165,16 +165,20 @@ export class SelfHdcTestRunner {
     this.client?.close();
   }
 
-  beginExternal(filesDir: string, title: string, endpoint: string, cancel: () => void): void {
+  beginExternal(filesDir: string, title: string, endpoint: string, cancel: () => void,
+    mode: string = 'phone-workflow'): void {
     this.initialize(filesDir);
     if (this.state.running) { throw new Error('SELF_HDC_BUSY: 手机测试或 GUI 任务正在执行'); }
     this.state = new SelfHdcTestState();
     this.state.running = true; this.state.outcome = 'running';
     this.state.runId = String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
     this.state.logPath = this.root + '/runs/' + this.state.runId + '.log';
-    this.state.endpoint = endpoint; this.state.stage = '手机 GUI 任务'; this.state.message = title;
+    this.state.endpoint = endpoint;
+    this.state.stage = mode === 'phone-chat-local' ? '手机本地 Agent' :
+      (mode === 'phone-chat-cloud' ? '手机云端 Agent' : '手机 GUI 任务');
+    this.state.message = title;
     this.startedAt = Date.now(); this.cancelled = false; this.externalCancel = cancel;
-    this.record('RUN mode=phone-workflow title=' + title + ' transport=direct-device-TCP');
+    this.record('RUN mode=' + mode + ' title=' + title + ' transport=direct-device-TCP');
     this.persist();
   }
 
@@ -182,6 +186,12 @@ export class SelfHdcTestRunner {
     if (!this.externalCancel) { return; }
     this.record(message.substring(0, 6000));
     if (message.startsWith('ACTION_BEGIN') || message.indexOf('STAGE_BEGIN') >= 0) { this.persist(); }
+  }
+
+  setExternalEndpoint(endpoint: string): void {
+    if (!this.externalCancel) { return; }
+    this.state.endpoint = endpoint;
+    this.persist(); this.publish();
   }
 
   setExternalImage(path: string, first: boolean): void {

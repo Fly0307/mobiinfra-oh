@@ -16,6 +16,8 @@ import { parsePhoneHdcUiInputHelp } from '../main/ets/utils/selfhdc/PhoneHdcCapa
 import { selfHdcIsUsableWifiIpv4, selectSelfHdcWifiIpv4 } from '../main/ets/utils/selfhdc/SelfHdcNetworkPolicy';
 import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from '../main/ets/utils/selfhdc/PhoneAgentPolicy';
 import { localVisionPromptHw } from '../main/ets/utils/LocalVisionImageShape';
+import { SelfHdcTaskSettings } from '../main/ets/utils/selfhdc/SelfHdcTaskSettings';
+import { selfHdcControlMode, selfHdcSetupProblem } from '../main/ets/utils/selfhdc/SelfHdcSetupPolicy';
 import { AgentActionParser } from '../main/ets/utils/AgentActionParser';
 import { WorkflowJsonMap } from '../main/ets/utils/WorkflowTypes';
 
@@ -49,6 +51,32 @@ const REPORTED_UIINPUT_HELP: string = 'Missing parameter. \r\n\r\nUSAGE : \r\n' 
 
 export default function selfHdcProtocolUnitTest(): void {
   describe('selfHdcProtocolUnitTest', () => {
+    it('defaultsToPhoneAndPreservesAnExplicitDesktopSelection', 0, () => {
+      expect(new SelfHdcTaskSettings().mode).assertEqual('phone');
+      expect(selfHdcControlMode(undefined)).assertEqual('phone');
+      expect(selfHdcControlMode('')).assertEqual('phone');
+      expect(selfHdcControlMode('invalid-mode')).assertEqual('phone');
+      expect(selfHdcControlMode('phone')).assertEqual('phone');
+      expect(selfHdcControlMode('pc')).assertEqual('pc');
+    });
+    it('reportsBothMissingAddressAndMissingWirelessPort', 0, () => {
+      let problem = selfHdcSetupProblem({ ip: '', port: '', autoIp: true }, '');
+      expect(problem.indexOf('Wi-Fi IP') >= 0).assertTrue();
+      expect(problem.indexOf('尚未填写手机 IP') >= 0).assertTrue();
+      expect(problem.indexOf('尚未填写无线调试连接端口') >= 0).assertTrue();
+      expect(selfHdcSetupProblem({ ip: '192.168.1.108', port: '33117', autoIp: true }, '192.168.1.108'))
+        .assertEqual('');
+    });
+    it('doesNotTreatAnOldSavedIpAsAFreshDetection', 0, () => {
+      expect(selfHdcSetupProblem({ ip: '192.168.1.108', port: '33117', autoIp: true }, '').length > 0).assertTrue();
+      expect(selfHdcSetupProblem({ ip: '127.0.0.1', port: '33117', autoIp: false }, '')).assertEqual('');
+    });
+    it('rejectsInvalidAddressAndPortBeforeStartingDeviceControl', 0, () => {
+      expect(selfHdcSetupProblem({ ip: '192.168.1.999', port: '33117', autoIp: false }, '').length > 0).assertTrue();
+      for (let port of ['0', '65536', '12abc']) {
+        expect(selfHdcSetupProblem({ ip: '127.0.0.1', port: port, autoIp: false }, '').length > 0).assertTrue();
+      }
+    });
     it('keepsOriginalPhoneGeometryForQuarterAndHalfSizeAgentImages', 0, () => {
       let screen = phoneAgentScreenSize({ status: 'ok', image_b64: 'image-test-fixture', width: 270, height: 611,
         screen_width: 1081, screen_height: 2445 });

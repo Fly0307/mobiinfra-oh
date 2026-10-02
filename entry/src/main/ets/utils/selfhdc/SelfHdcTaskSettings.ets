@@ -3,9 +3,10 @@ import { selfHdcEnsureDirectory, selfHdcExists, selfHdcReadText, selfHdcWriteAto
 import { AppLogger } from '../AppLogger';
 import { readSelfHdcNetworks } from './SelfHdcNetwork';
 import { selectSelfHdcWifiIpv4 } from './SelfHdcNetworkPolicy';
+import { SelfHdcSetupConnection, selfHdcControlMode } from './SelfHdcSetupPolicy';
 
-export class SelfHdcTaskSettings {
-  mode: string = 'pc';
+export class SelfHdcTaskSettings implements SelfHdcSetupConnection {
+  mode: string = 'phone';
   ip: string = '';
   port: string = '';
   autoIp: boolean = true;
@@ -16,7 +17,7 @@ export class SelfHdcTaskSettings {
     let path = filesDir + '/self_hdc/task_connection.json';
     if (selfHdcExists(path)) {
       let saved = ArkJSON.parse(selfHdcReadText(path, 4096)) as SelfHdcTaskSettings;
-      settings.mode = saved.mode === 'phone' ? 'phone' : 'pc';
+      settings.mode = selfHdcControlMode(saved.mode);
       settings.ip = typeof saved.ip === 'string' ? saved.ip : '';
       settings.port = typeof saved.port === 'string' ? saved.port : '';
       settings.autoIp = typeof saved.autoIp === 'boolean' ? saved.autoIp : settings.ip !== '127.0.0.1';
@@ -51,7 +52,7 @@ export class SelfHdcTaskSettings {
 
   static saveMode(filesDir: string, mode: string): void {
     let settings = SelfHdcTaskSettings.load(filesDir);
-    settings.mode = mode === 'phone' ? 'phone' : 'pc';
+    settings.mode = selfHdcControlMode(mode);
     SelfHdcTaskSettings.save(filesDir, settings);
   }
 
@@ -69,6 +70,7 @@ export class SelfHdcTaskSettings {
       // Read again after asynchronous detection: preserve any newer user port/mode/manual-IP edits.
       let settings = SelfHdcTaskSettings.load(filesDir);
       let detected = selectSelfHdcWifiIpv4(network.candidates, settings.ip);
+      AppStorage.setOrCreate('selfHdcDetectedWifiIp', detected);
       AppStorage.setOrCreate('selfHdcLocalAddresses', network.localIpv4.join('、') || '未读到 IPv4 地址');
       let oldIp = settings.ip;
       if (settings.autoIp && detected) { settings.ip = detected; }
@@ -81,6 +83,7 @@ export class SelfHdcTaskSettings {
       network.warnings.forEach((warning: string): void => { AppLogger.warn('SelfHdc', 'IP_REFRESH ' + warning); });
       return settings;
     } catch (e) {
+      AppStorage.setOrCreate('selfHdcDetectedWifiIp', '');
       AppStorage.setOrCreate('selfHdcIpStatus', '自动检测 IP 失败：' + (e as Error).message + '；保留已保存的连接设置');
       AppLogger.warnCause('SelfHdc', 'IP_REFRESH source=' + reason + ' failed', e as Error);
       return SelfHdcTaskSettings.load(filesDir);

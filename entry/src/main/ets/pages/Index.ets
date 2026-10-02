@@ -90,6 +90,7 @@ import { PhoneHdcWorkflowBridge } from '../utils/selfhdc/PhoneHdcWorkflowBridge'
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../utils/selfhdc/SelfHdcTestRunner';
 import { PhoneHdcRunSession } from '../utils/selfhdc/PhoneHdcRunSession';
+import { SelfHdcSetupGuard } from '../utils/selfhdc/SelfHdcSetupGuard';
 import {
   HomeTaskSuggestion,
   buildHomeTaskSuggestionPrompt,
@@ -661,6 +662,7 @@ struct Index {
   private activeAgentRunner: AgentLoopRunner | null = null;
   private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
   private activePhoneRunSession: PhoneHdcRunSession | null = null;
+  private phoneSetupStartupChecked: boolean = false;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
@@ -1851,6 +1853,13 @@ struct Index {
     if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
       return mobileGuiTaskRunResultFromFailure('hdc_busy', '已有 Agent 正在执行或收尾', true);
     }
+    if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'phone-chat-workflow', false)) {
+      return mobileGuiTaskRunResultFromFailure('hdc_settings_required',
+        '请在“我的 > 手机 HDC”设置 IP 和无线调试连接端口后重新下发任务', true);
+    }
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      return mobileGuiTaskRunResultFromFailure('hdc_busy', '已有 Agent 正在执行或收尾', true);
+    }
     let session = new PhoneHdcRunSession(getContext(this) as common.UIAbilityContext, 'phone-chat-workflow',
       async (): Promise<void> => { this.cloudClient.cancelActiveRequests(); });
     this.activePhoneRunSession = session;
@@ -3004,6 +3013,13 @@ struct Index {
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
     this.maybeShowSyncReminder();
+    if (!this.phoneSetupStartupChecked && this.filesDir.length > 0 &&
+      !AgentExecutionController.isExecutionActive() && !SelfHdcTestRunner.shared().snapshot().running) {
+      this.phoneSetupStartupChecked = true;
+      SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'app-startup').catch((e: Error): void => {
+        AppLogger.warnCause('SelfHdc', 'Startup setup check failed', e);
+      });
+    }
   }
 
   onPageHide(): void {
@@ -3045,6 +3061,9 @@ struct Index {
   }
 
   private async ensureDesktopCompanionReminder(): Promise<boolean> {
+    let mode = this.selectedAgentDeviceMode();
+    if (mode === 'unavailable') { return false; }
+    if (mode !== 'pc') { return true; }
     if (this.desktopCompanionReminderSuppressed) {
       return true;
     }
@@ -3137,6 +3156,7 @@ struct Index {
   }
 
   private showPcServerConnectedPrompt(): void {
+    if (this.selectedAgentDeviceMode() !== 'pc') { return; }
     if (this.pcServerConnectedPromptShown) {
       return;
     }
@@ -6366,6 +6386,12 @@ struct Index {
   }
 
   private async runPhoneChatAgent(task: string, mode: string, returnOnSuccess: boolean): Promise<void> {
+    if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
+      throw new Error('PHONE_HDC_BUSY: 已有 Agent 正在执行或收尾');
+    }
+    if (!await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'phone-chat-' + mode, false)) {
+      throw new Error('PHONE_HDC_SETUP_REQUIRED: 请在“我的 > 手机 HDC”设置 IP 和无线调试连接端口后重新下发任务');
+    }
     if (this.activePhoneRunSession !== null || this.activeAgentRunner !== null) {
       throw new Error('PHONE_HDC_BUSY: 已有 Agent 正在执行或收尾');
     }

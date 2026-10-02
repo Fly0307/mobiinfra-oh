@@ -23,6 +23,7 @@ import { workflowSceneConfigs, WorkflowSceneConfig } from '../../utils/WorkflowS
 import { TaskDeviceControlPanel } from '../../components/TaskDeviceControlPanel';
 import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
+import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
 
 interface WorkflowNodeTemplate {
   key: string;
@@ -112,7 +113,7 @@ export struct TaskPage {
   onRunPhoneWorkflow: (task: WorkflowTask) => Promise<void> = async (_task: WorkflowTask): Promise<void> => {
     throw new Error('手机任务执行器未连接');
   };
-  @State private taskControlMode: string = 'pc';
+  @State private taskControlMode: string = 'phone';
   @StorageLink('selfHdcRunning') private phoneControlBusy: boolean = false;
 
   @State tasks: WorkflowTask[] = [];
@@ -174,7 +175,7 @@ export struct TaskPage {
     let ctx = getContext(this) as common.UIAbilityContext;
     this.filesDir = ctx.filesDir;
     try { this.taskControlMode = SelfHdcTaskSettings.load(this.filesDir).mode; } catch (e) {
-      showToastSafely('手机控制配置读取失败，使用电脑控制：' + (e as Error).message, 2200);
+      showToastSafely('手机控制配置读取失败，请到“我的 > 手机 HDC”检查：' + (e as Error).message, 2200);
     }
     try {
       WorkflowStorage.installDefaultWorkflowResources(this.filesDir, new SystemResourceManagerReader(ctx.resourceManager));
@@ -696,6 +697,8 @@ export struct TaskPage {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
+    if (this.taskControlMode === 'phone' &&
+      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-start')) { return; }
     if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
       return;
     }
@@ -756,9 +759,12 @@ export struct TaskPage {
     if (!AiLoginGuard.ensure(this.getUIContext())) {
       return;
     }
+    if (this.taskControlMode === 'phone' &&
+      !await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'workflow-batch-start')) { return; }
     if (this.taskControlMode !== 'phone' && !await this.onEnsureDesktopCompanion()) {
       return;
     }
+    if (this.isTaskExecutionBusy()) { return; }
     this.batchRunning = true;
     this.batchRunStatusText = '准备执行 ' + queue.length + ' 个任务';
     let stoppedByError = false;

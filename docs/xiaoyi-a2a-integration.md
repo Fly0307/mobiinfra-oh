@@ -71,7 +71,7 @@
 
 ### 你需要在浏览器与手机完成的操作
 
-1. 在华为开发者联盟 / AppGallery Connect 确认应用所属账号与包名。当前工作区 `AppScope/app.json5` 的包名是 `com.coevomind.clawmate`，模块名是 `entry`，扩展服务名是 `PersonalMemoryAgentAbility`。以准备发布的实际签名应用为准，平台关联时务必完全一致。
+1. 在华为开发者联盟 / AppGallery Connect 确认应用所属账号与包名。当前工作区 `AppScope/app.json5` 的包名是 `com.example.mnnllmchat`，模块名是 `entry`，扩展服务名是 `PersonalMemoryAgentAbility`。以准备发布的实际签名应用为准，平台关联时务必完全一致。
 2. 登录[小艺开放平台](https://developer.huawei.com/consumer/cn/doc/service/device-a2a-0000002640106106)，新建**端 A2A 模式** Agent，关联上述应用与模块，填写服务名称 `PersonalMemoryAgentAbility`，导入项目里的 `entry/src/main/resources/base/profile/agent_config.json`。按平台页面提示设置示例问题和发布资料；若导入器不接受本地图标引用 `$media:Icon`，需替换为平台支持的正式图标 URL。华为页面列出的顺序是创建、关联应用、导入 AgentCard、配置输入文件与快捷指令。[端 A2A 创建步骤](https://developer.huawei.com/consumer/cn/doc/service/device-a2a-0000002640106106)。
 3. 在平台打开最新《AgentCard 定义规范》和《端 A2A 协议技术规范》，核对 `tasks/send`、认证握手和返回字段。这些文档的具体报文正文当前公开检索页面未完整提供，**本次协议适配尚未通过小艺真机互通验证**。平台若要求不同字段，需要按真机测试报文调整 `PersonalMemoryA2aProtocol.ets` 和 `PersonalMemoryAgentAbility.ets`；不能仅凭 AgentCard 导入成功认定协议打通。
 4. 在支持端 A2A 的 API 24 或更新系统手机上安装对应签名的应用，先在应用中同步可测试的个人信息、外卖和微信消息摘要，再同意新版隐私声明并开启授权开关。通过小艺开放平台真机测试发送“我之前说过的生日是什么？”、“我上次点了什么外卖？”、“我最近的微信聊天里提到了什么？”，核对回复。再测试旧授权迁移、开关关闭、隐私撤回、身份证号或住址询问均不泄露个人内容。[真机测试说明](https://developer.huawei.com/consumer/cn/doc/doccenter-celia/list-of-user-groups-for-real-machine-testing-0000002471264273)。

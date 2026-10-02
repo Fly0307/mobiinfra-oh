@@ -6,6 +6,7 @@ import { WorkflowJsonMap } from '../../utils/WorkflowTypes';
 import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from '../../utils/selfhdc/SelfHdcTestRunner';
 import { PhoneHdcWorkflowBridge } from '../../utils/selfhdc/PhoneHdcWorkflowBridge';
+import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
 
 interface InputProbePayload {
   action: string;
@@ -56,6 +57,11 @@ struct SelfHdcInputTestPage {
   private async run(): Promise<void> {
     let hub = SelfHdcTestRunner.shared();
     if (this.x < 0 || this.y < 0) { showToastSafely('请先点测试输入框校准坐标', 2000); return; }
+    if (hub.snapshot().running || AgentExecutionController.isExecutionActive()) {
+      showToastSafely('请先结束已有任务或测试', 2000); return;
+    }
+    if (!await SelfHdcSetupGuard.ensure(this.getUIContext(),
+      (getContext(this) as common.UIAbilityContext).filesDir, 'input-diagnostic-start', false)) { return; }
     if (hub.snapshot().running || AgentExecutionController.isExecutionActive()) {
       showToastSafely('请先结束已有任务或测试', 2000); return;
     }

@@ -1,10 +1,11 @@
 import { common } from '@kit.AbilityKit';
 import { showToastSafely } from '../utils/PromptSafe';
 import { SelfHdcTaskSettings } from '../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcSetupGuard } from '../utils/selfhdc/SelfHdcSetupGuard';
 
 @Component
 export struct TaskDeviceControlPanel {
-  @Prop mode: string = 'pc';
+  @Prop mode: string = 'phone';
   @Prop busy: boolean = false;
   onModeChanged: (mode: string) => void = (_mode: string): void => {};
   private filesDir: string = '';
@@ -20,8 +21,10 @@ export struct TaskDeviceControlPanel {
     } catch (e) { showToastSafely('连接配置保存失败：' + (e as Error).message, 2200); return false; }
   }
 
-  private select(mode: string): void {
-    if (!this.busy && this.save(mode)) { this.onModeChanged(mode); }
+  private async select(mode: string): Promise<void> {
+    if (this.busy || !this.save(mode)) { return; }
+    this.onModeChanged(mode);
+    if (mode === 'phone') { await SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'select-phone-control'); }
   }
 
   build() {

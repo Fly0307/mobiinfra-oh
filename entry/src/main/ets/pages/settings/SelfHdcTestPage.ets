@@ -4,6 +4,8 @@ import { router } from '@kit.ArkUI';
 import { showToastSafely } from '../../utils/PromptSafe';
 import { selfHdcReadText } from '../../utils/selfhdc/SelfHdcFiles';
 import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
+import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
+import { PHONE_HDC_SETUP_GUIDE } from '../../utils/selfhdc/SelfHdcSetupPolicy';
 import {
   SelfHdcTestRunner, SelfHdcTestState
 } from '../../utils/selfhdc/SelfHdcTestRunner';
@@ -42,7 +44,8 @@ struct SelfHdcTestPage {
     if (this.refreshingIp || !this.saveConnection()) { return; }
     this.pageError = '';
     try {
-      await this.refreshIp();
+      if (!await SelfHdcSetupGuard.ensure(this.getUIContext(),
+        (getContext(this) as common.UIAbilityContext).filesDir, 'phone-hdc-test', false)) { return; }
       await this.runner.run(getContext(this) as common.UIAbilityContext, {
         ip: this.ip, port: this.port, connectionOnly: connectionOnly
       });
@@ -101,7 +104,8 @@ struct SelfHdcTestPage {
   private async openInputTest(): Promise<void> {
     if (this.refreshingIp || !this.saveConnection()) { return; }
     try {
-      await this.refreshIp();
+      if (!await SelfHdcSetupGuard.ensure(this.getUIContext(),
+        (getContext(this) as common.UIAbilityContext).filesDir, 'phone-hdc-input-page', false)) { return; }
       await router.pushUrl({ url: 'pages/settings/SelfHdcInputTestPage' });
     } catch (e) { this.pageError = (e as Error).message; }
   }
@@ -135,7 +139,7 @@ struct SelfHdcTestPage {
         Column() {
           Column() {
             this.SectionTitle('无线调试地址')
-            Text('在开发者选项中开启无线调试，填写该页面显示的连接端口。IP 默认自动更新；首次连接时，请手动允许系统调试授权弹窗。')
+            Text(PHONE_HDC_SETUP_GUIDE + '\n首次连接时，请手动允许系统调试授权弹窗。')
               .fontSize(13).lineHeight(21).fontColor('#667085').width('100%').margin({ top: 10 })
             Text('本机 IPv4：' + this.localAddresses)
               .fontSize(12).fontColor('#667085').width('100%').margin({ top: 12 })

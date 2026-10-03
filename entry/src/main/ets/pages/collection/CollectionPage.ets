@@ -1,4 +1,5 @@
-import { AppHeader } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { promptAction, router } from '@kit.ArkUI';
 import {
   CollectionGroupViewModel,
@@ -37,6 +38,7 @@ const COLLECTION_SECTION_GAP: number = 18;
 // collectionModule 由 Index.ets 通过 @Link 传入，保证底部 tab 与页面内状态共享。
 @Component
 export struct CollectionPage {
+  private pageScroller: Scroller = new Scroller();
   @Link collectionModule: number;
   @Prop viewModels: CollectionViewModel[] = createEmptyCollectionViewModels();
   @Prop refreshing: boolean = false;
@@ -629,11 +631,13 @@ export struct CollectionPage {
     .margin({ top: 16 })
   }
 
-  build() {
-    Scroll() {
-      Column() {
-        AppHeader({ title: '你的足迹', icon: $r('app.media.header_footprint_generated') })
+  @Builder PageHeader() {
+    AppHeader({ title: '你的足迹' })
+  }
 
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
+      Column() {
         Scroll() {
           Row() {
             ForEach(memorySceneConfigs(), (scene: WorkflowSceneConfig) => {
@@ -694,9 +698,20 @@ export struct CollectionPage {
         Blank().height(110)
       }
       .width('100%')
+      .padding({ top: APP_HEADER_CONTENT_GAP })
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#F7FAFE')
+    .clip(false)
+  }
+
+  build() {
+    FrostedPage({
+      pageBackgroundColor: '#F7FAFE',
+      scrollers: [this.pageScroller],
+      headerBuilder: (): void => { this.PageHeader(); },
+      contentBuilder: (): void => { this.PageContent(); }
+    })
   }
 }

@@ -106,7 +106,9 @@ import {
   parseHomeComfortReply
 } from './home/HomeEmotionalSupport';
 import { HomeComfortChatStore } from './home/HomeComfortChatStore';
-import { mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { mainTabBackgroundColor, mainTabIcon, mainTabLabel, MainTabIndex } from './main/MainTabConfig';
+import { FLOATING_MAIN_TABS_INSET, FloatingMainTabs, supportsFloatingMainTabs } from './main/FloatingMainTabs';
+import { applyPageStatusBar } from '../utils/PageStatusBar';
 import { FirstLaunchOnboarding } from './onboarding/FirstLaunchOnboarding';
 import {
   FIRST_LAUNCH_ONBOARDING_STORAGE_KEY,
@@ -158,6 +160,7 @@ import { dataManagerError, dataManagerInfo, dataManagerWarn } from '../datamanag
 import { AgentExecutionController } from '../utils/AgentExecutionController';
 import { getAppBundleName } from '../utils/AppIdentity';
 import { AppLogger } from '../utils/AppLogger';
+import { DEBUG_ENABLED_STORAGE_KEY, DebugSettings } from '../utils/DebugSettings';
 import { AgentLoopRunner } from '../utils/AgentLoopRunner';
 import { ChatReactAgent, ChatReactAgentRunOptions } from '../utils/ChatReactAgent';
 import { initializeChatCloudConfigStorage, readChatCloudConfig } from '../utils/ChatCloudConfig';
@@ -501,7 +504,7 @@ struct Index {
   @State chatHistory: string = '';
   @State userInput: string = '';
   @State localPendingChatImageUris: string[] = [];
-  @State localChatImagePreparing: boolean = false;
+  @State @Watch('onChatAppearanceChanged') localChatImagePreparing: boolean = false;
   @State localChatInferenceRunning: boolean = false;
   @State downloading: boolean = false;
   @State modelScopeDownloading: boolean = false;
@@ -527,10 +530,15 @@ struct Index {
   @State syncReminderDontRemindAgain: boolean = false;
   @State customOppReady: boolean = false;
   @State threadNumInput: string = '4';
-  @State currentTab: number = 0;
+  @State @Watch('onCurrentTabChanged') currentTab: number = 0;
+  private readonly floatingMainTabsEnabled: boolean = supportsFloatingMainTabs();
+  private pageVisible: boolean = false;
+  private appliedPageBackgroundColor: string = '';
+  private appliedNavigationBarColor: string = '';
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onDebugEnabledChanged') private debugEnabled: boolean = false;
   @StorageProp(HUAWEI_ACCOUNT_SESSION_KEY) @Watch('onAiAccountSessionChanged')
   huaweiAccountSessionActive: boolean = false;
-  @State chatMode: string = CHAT_MODE_CLOUD_AGENT;
+  @State @Watch('onChatAppearanceChanged') chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
@@ -587,8 +595,8 @@ struct Index {
   @StorageLink('wechatAutoSummaryWait') wechatAutoSummaryWait: string = DEFAULT_WECHAT_AUTO_SUMMARY_WAIT;
   @State wechatAutoSummaryRunning: boolean = false;
   @State wechatAutoSummaryStatus: string = '';
-  @State isThinking: boolean = false;
-  @State localAgentCleaningUp: boolean = false;
+  @State @Watch('onChatAppearanceChanged') isThinking: boolean = false;
+  @State @Watch('onChatAppearanceChanged') localAgentCleaningUp: boolean = false;
   @State cloudOutput: string = '请先配置 Planner 和 Decider 云端服务';
   @State cloudUserInput: string = '';
   @State cloudPendingChatImageUris: string[] = [];
@@ -601,14 +609,14 @@ struct Index {
   private localChatNativeRequestSubmitted: boolean = false;
   private localChatCompletionProbeTimerId: number = -1;
   @State cloudAutoConfirm: boolean = true;
-  @State cloudThinking: boolean = false;
+  @State @Watch('onChatAppearanceChanged') cloudThinking: boolean = false;
   @State cloudChatCancelRequested: boolean = false;
   @State voiceStatus: VoiceInteractionStatus = 'idle';
   @State voicePartialTranscript: string = '';
   @State voiceActiveMessageId: string = '';
   @State chatSessions: ChatSessionSummary[] = [];
   @State activeChatSessionId: string = '';
-  @State activeChatMessages: ChatMessage[] = [];
+  @State @Watch('onChatAppearanceChanged') activeChatMessages: ChatMessage[] = [];
   @State chatSessionDrawerOpen: boolean = false;
   @State restoringLocalSession: boolean = false;
   @State hdcConnected: boolean = false;
@@ -1168,6 +1176,7 @@ struct Index {
   }
 
   private appendActiveTaskTraceLine(line: string, messageId: string = ''): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let state = ChatSessionController.appendTaskTraceLine(this.filesDir, this.currentChatSessionViewState(),
       this.chatMode, line, messageId);
     this.applyChatSessionViewState(state);
@@ -1416,18 +1425,28 @@ struct Index {
     return fallbackId.length > 0 ? fallbackId : this.activeChatSessionId;
   }
 
+  private onDebugEnabledChanged(): void {
+    if (!this.debugEnabled) {
+      this.cloudOutput = '';
+      this.output = '';
+    }
+  }
+
   private appendTaskTraceLineForSession(sessionId: string, line: string, messageId: string = ''): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let state = ChatSessionController.appendTaskTraceLineToSession(this.filesDir, this.currentChatSessionViewState(),
       this.taskSessionId(sessionId), line, messageId);
     this.applyChatSessionViewState(state);
   }
 
   private handleLocalAgentLog(message: string): void {
-    this.output = message;
-    let sessionId = this.taskSessionId(this.localTaskSessionId);
-    let traceLine = this.formatAgentTraceLog(message);
-    if (traceLine.length > 0) {
-      this.appendTaskTraceLineForSession(sessionId, traceLine);
+    if (DebugSettings.isEnabled()) {
+      this.output = message;
+      let sessionId = this.taskSessionId(this.localTaskSessionId);
+      let traceLine = this.formatAgentTraceLog(message);
+      if (traceLine.length > 0) {
+        this.appendTaskTraceLineForSession(sessionId, traceLine);
+      }
     }
     let imagePath = this.snapshotImagePathFromLog(message);
     if (imagePath.length > 0) {
@@ -1686,6 +1705,13 @@ struct Index {
 
   // 云端 Agent 日志会同步写入 AppStorage，便于日志页/浮窗读取最近状态。
   private appendCloudLogToSession(sessionId: string, message: string, replaceExisting: boolean = false): void {
+    // Completion is a task result, and must not depend on diagnostic logging.
+    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
+      this.appendChatMessageForSession(sessionId,
+        createChatMessage(this.nextChatMessageId('task-result'), 'task',
+          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
+    }
+    if (!DebugSettings.isEnabled()) { return; }
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     let line = `[${stamp}] ${message}`;
@@ -1696,11 +1722,6 @@ struct Index {
     if (traceLine.length > 0) {
       this.appendTaskTraceLineForSession(sessionId, traceLine);
     }
-    if (sessionId.length > 0 && message.indexOf('Task completed') >= 0) {
-      this.appendChatMessageForSession(sessionId,
-        createChatMessage(this.nextChatMessageId('task-result'), 'task',
-          CHAT_MESSAGE_KIND_TASK_RESULT, '任务执行完成。', new Date().getTime()));
-    }
   }
 
   private appendCloudLog(message: string, replaceExisting: boolean = false): void {
@@ -1708,6 +1729,7 @@ struct Index {
   }
 
   private resetCloudLog(message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     AppLogger.info('CloudAgent', message);
     let stamp = new Date().toLocaleTimeString();
     this.cloudOutput = `[${stamp}] ${message}`;
@@ -2919,9 +2941,9 @@ struct Index {
     this.syncModelDir();
     this.refreshDownloadedModels();
     try {
-      mnnllm.initLogFile(this.filesDir + '/mnn_runtime.log');
+      DebugSettings.initialize(ctx);
     } catch (e) {
-      AppLogger.errorCause('NativeRuntime', 'initLogFile failed', e as Error);
+      AppLogger.errorCause('Debug', 'Cannot initialize Debug settings', e as Error);
     }
     this.prepareCustomOpp();
     this.initDataManager();
@@ -3008,6 +3030,8 @@ struct Index {
   }
 
   onPageShow(): void {
+    this.pageVisible = true;
+    this.onCurrentTabChanged();
     this.initializePrivacyConsent();
     this.reloadHomeViewModelIfDateChanged();
     this.startHomeRecommendationDateTimer();
@@ -3023,7 +3047,36 @@ struct Index {
   }
 
   onPageHide(): void {
+    this.pageVisible = false;
+    this.appliedPageBackgroundColor = '';
+    this.appliedNavigationBarColor = '';
+    applyPageStatusBar(this.getUIContext(), '#FFFFFF', '#FFFFFF');
     this.stopHomeRecommendationDateTimer();
+  }
+
+  private onCurrentTabChanged(): void {
+    if (this.pageVisible) {
+      let backgroundColor = this.currentPageBackgroundColor();
+      let navigationBarColor = this.currentTab === MainTabIndex.Chat ? backgroundColor : '#FFFFFF';
+      if (backgroundColor !== this.appliedPageBackgroundColor ||
+        navigationBarColor !== this.appliedNavigationBarColor) {
+        applyPageStatusBar(this.getUIContext(), backgroundColor, navigationBarColor);
+        this.appliedPageBackgroundColor = backgroundColor;
+        this.appliedNavigationBarColor = navigationBarColor;
+      }
+    }
+  }
+
+  private onChatAppearanceChanged(): void {
+    if (this.currentTab === MainTabIndex.Chat) {
+      this.onCurrentTabChanged();
+    }
+  }
+
+  private currentPageBackgroundColor(): string {
+    let busy = this.chatMode === CHAT_MODE_LOCAL_INFERENCE ?
+      this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing : this.cloudThinking;
+    return mainTabBackgroundColor(this.currentTab, this.activeChatMessages.length > 0 || busy);
   }
 
   aboutToDisappear(): void {
@@ -6993,28 +7046,21 @@ struct Index {
     return $r('app.media.tab_home');
   }
 
-  @Builder TabItem(icon: string, label: string, index: number) {
-    Column() {
-      Stack({ alignContent: Alignment.Center }) {
-        Image(this.tabIconResource(icon))
-          .width(21)
-          .height(21)
-          .objectFit(ImageFit.Contain)
-      }
-        .width(32)
-        .height(32)
-        .backgroundColor(this.currentTab === index ? '#EEF0FF' : '#00FFFFFF')
-        .borderRadius(16)
-      Text(label)
-        .fontSize(13)
-        .fontColor(this.currentTab === index ? '#5B5CE2' : '#747B87')
-        .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Regular)
-        .margin({ top: 2 })
-        .maxLines(1)
-    }.width(72).height(58).justifyContent(FlexAlign.Center)
-    .onClick(() => {
-      this.currentTab = index;
-    })
+  private mainTabBottomInset(): number {
+    return this.floatingMainTabsEnabled ? FLOATING_MAIN_TABS_INSET : 0;
+  }
+
+  private tabBarStyle(index: MainTabIndex): BottomTabBarStyle {
+    return BottomTabBarStyle.of(this.tabIconResource(mainTabIcon(index)), mainTabLabel(index))
+      .layoutMode(LayoutMode.VERTICAL)
+      .labelStyle({
+        font: { size: 12, weight: FontWeight.Medium },
+        selectedColor: '#5B5CE2',
+        unselectedColor: '#747B87',
+        maxLines: 1
+      })
+      .iconStyle({ selectedColor: '#5B5CE2', unselectedColor: '#747B87' })
+      .padding({ left: 2, right: 2, top: 6, bottom: 6 });
   }
 
   @Builder DataManagerProgressOverlay() {
@@ -7275,6 +7321,191 @@ struct Index {
     }
   }
 
+  @Builder MainTabContents() {
+    TabContent() {
+      HomePage({
+        navigationBottomInset: this.mainTabBottomInset(),
+        comfortChatStore: this.homeComfortChatStore,
+        profile: this.homeProfile,
+        taskSuggestions: this.homeTaskSuggestions,
+        taskSuggestionsLoading: this.homeTaskSuggestionsLoading,
+        taskSuggestionError: this.homeTaskSuggestionError,
+        onRefreshTaskSuggestions: async (): Promise<void> => {
+          await this.refreshHomeTaskSuggestions(true);
+        },
+        comfortConcerns: this.homeComfortConcerns,
+        comfortConcernsLoading: this.homeComfortConcernsLoading ||
+          (this.homeTaskSuggestionsLoading && this.homeComfortConcerns.length === 0),
+        comfortConcernError: this.homeComfortConcernError,
+        onRefreshComfortConcerns: async (): Promise<void> => {
+          await this.refreshHomeComfortConcerns(true);
+        },
+        onSendComfortMessage: async (concern: HomeComfortConcern,
+          history: HomeComfortChatMessage[]): Promise<string> => {
+          return await this.sendHomeComfortMessage(concern, history);
+        },
+        onSetRecommendationCompleted: (id: string, completed: boolean) => {
+          this.setHomeRecommendationCompleted(id, completed);
+        },
+        avatarVersions: this.avatarVersions,
+        onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
+          await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
+        },
+        onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
+          await this.generateHomeAvatar(mode, sourceImage);
+        },
+        onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
+          return await this.saveHomeAvatarReferencePhoto(sourceImage);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Home))
+    TabContent() {
+      CollectionPage({
+        collectionModule: $collectionModule,
+        viewModels: this.collectionViews,
+        refreshing: this.dataManagerRefreshing,
+        wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
+        wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
+        onRefresh: () => { this.refreshDataManager(); },
+        onOpenDataCollectionSettings: () => {
+          this.settingsSectionId = SettingsSectionId.DataCollection;
+          this.currentTab = MainTabIndex.Mine;
+        },
+        onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
+          await this.runWechatAutoSummary(request);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Summary))
+    TabContent() {
+      ChatPage({
+        navigationBottomInset: this.mainTabBottomInset(),
+        chatMode: $chatMode,
+        cloudUserInput: $cloudUserInput,
+        userInput: $userInput,
+        chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
+        cloudOutput: this.cloudOutput,
+        cloudDebugImagePath: this.cloudDebugImagePath,
+        cloudThinking: this.cloudThinking,
+        localOutput: this.output,
+        localDebugImagePath: this.debugImagePath,
+        chatHistory: this.chatHistory,
+        localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
+        localChatCancelable: this.localChatInferenceRunning,
+        modelLoaded: this.modelLoaded,
+        sessions: this.chatSessions,
+        activeSessionId: this.activeChatSessionId,
+        messages: this.chatMessagesForDisplay(),
+        avatarForegroundUri: this.homeProfile.avatarForegroundUri,
+        avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
+        pendingImageAttachmentUris: this.activePendingChatImageUris(),
+        sessionDrawerOpen: this.chatSessionDrawerOpen,
+        restoringLocalSession: this.restoringLocalSession,
+        pcServerConnected: this.pcServerConnected,
+        pcServerCloudEnabled: this.pcServerCloudEnabled,
+        voiceStatus: this.voiceStatus,
+        voicePartialTranscript: this.voicePartialTranscript,
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
+        onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
+        onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
+        onCreateSession: (mode: string) => { this.createChatSession(mode); },
+        onSelectSession: async (id: string) => { await this.selectChatSession(id); },
+        onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
+        onRenameSession: async (id: string, title: string) => {
+          return await this.renameChatSession(id, title);
+        },
+        onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
+        onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
+        onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
+        onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
+        onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
+        onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
+        onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
+        onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
+        onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
+        onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
+        onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
+        onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
+        onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
+        onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
+        onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
+        onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
+        onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
+        onStopVoiceInput: async () => { await this.stopVoiceInput(); },
+        onPlayVoiceMessage: async (messageId: string, text: string) => {
+          await this.playAssistantMessageVoice(messageId, text);
+        },
+        onReplayVoiceMessage: async (messageId: string, text: string) => {
+          await this.replayAssistantMessageVoice(messageId, text);
+        }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Chat))
+    TabContent() {
+      TaskPage({
+        taskScene: $taskScene,
+        onEnsureDesktopCompanion: async (): Promise<boolean> => {
+          return await this.ensureDesktopCompanionReminder();
+        },
+        onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
+        onRunPhoneWorkflow: async (task: WorkflowTask) => { await this.runPhoneWorkflowTask(task); }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Task))
+    TabContent() {
+      SettingsCenterPage({
+        autoConfirm: $autoConfirm,
+        cloudAutoConfirm: $cloudAutoConfirm,
+        threadNumInput: $threadNumInput,
+        localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
+        selectedSectionId: $settingsSectionId,
+        output: $output,
+        chunkOmCacheOutput: $chunkOmCacheOutput,
+        cloudOutput: $cloudOutput,
+        modelDownloadProgressVisible: $modelDownloadProgressVisible,
+        modelDownloadProgressPercent: $modelDownloadProgressPercent,
+        modelDownloadProgressText: $modelDownloadProgressText,
+        modelDownloadProgressTitle: $modelDownloadProgressTitle,
+        downloading: $downloading,
+        modelScopeDownloading: $modelScopeDownloading,
+        modelScopePauseRequested: $modelScopePauseRequested,
+        hdcAutoStatus: this.hdcAutoStatus,
+        hdcAutoConnected: this.hdcAutoConnected,
+        hdcAutoConnecting: this.hdcAutoConnecting,
+        hdcManualPairing: this.hdcManualPairing,
+        downloadedModels: this.downloadedModels,
+        selectedModelId: this.selectedModelId,
+        onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
+        onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
+        onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
+        onShowConfigJson: () => { this.showConfigJson(); },
+        onDiscoverHdc: async () => {
+          this.hdcManualPairing = false;
+          await this.discoverHdcServer(true, true);
+        },
+        onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
+        onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
+        onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
+        onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
+        onStartCloudBackend: async () => { await this.startCloudBackend(); },
+        onClearScreenshots: () => { this.clearScreenshots(); },
+        onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
+        onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
+        onDeleteDownloadedModel: (modelId: string) => { this.deleteDownloadedModel(modelId); },
+        onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
+        onListScreenshots: () => { this.listScreenshots(); },
+        onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
+        onListModelFilesTree: () => { this.listModelFilesTree(); },
+        onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
+        onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
+        onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
+      })
+    }.expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .tabBar(this.tabBarStyle(MainTabIndex.Mine))
+  }
+
   build() {
     Stack() {
       if (this.shouldDisplayFirstLaunchOnboarding()) {
@@ -7284,194 +7515,21 @@ struct Index {
           }
         })
       } else {
-      Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-        TabContent() {
-          HomePage({
-            comfortChatStore: this.homeComfortChatStore,
-            profile: this.homeProfile,
-            taskSuggestions: this.homeTaskSuggestions,
-            taskSuggestionsLoading: this.homeTaskSuggestionsLoading,
-            taskSuggestionError: this.homeTaskSuggestionError,
-            onRefreshTaskSuggestions: async (): Promise<void> => {
-              await this.refreshHomeTaskSuggestions(true);
-            },
-            comfortConcerns: this.homeComfortConcerns,
-            comfortConcernsLoading: this.homeComfortConcernsLoading ||
-              (this.homeTaskSuggestionsLoading && this.homeComfortConcerns.length === 0),
-            comfortConcernError: this.homeComfortConcernError,
-            onRefreshComfortConcerns: async (): Promise<void> => {
-              await this.refreshHomeComfortConcerns(true);
-            },
-            onSendComfortMessage: async (concern: HomeComfortConcern,
-              history: HomeComfortChatMessage[]): Promise<string> => {
-              return await this.sendHomeComfortMessage(concern, history);
-            },
-            onSetRecommendationCompleted: (id: string, completed: boolean) => {
-              this.setHomeRecommendationCompleted(id, completed);
-            },
-            avatarVersions: this.avatarVersions,
-            onExecuteAgentTask: async (taskDescription: string, keepTargetAppAfterFinish: boolean) => {
-              await this.runHomeRecommendationAgentTask(taskDescription, keepTargetAppAfterFinish);
-            },
-            onGenerateAvatar: async (mode: AvatarGenerationMode, sourceImage: string) => {
-              await this.generateHomeAvatar(mode, sourceImage);
-            },
-            onSaveAvatarReferencePhoto: async (sourceImage: string): Promise<string> => {
-              return await this.saveHomeAvatarReferencePhoto(sourceImage);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Home), mainTabLabel(MainTabIndex.Home), MainTabIndex.Home))
-        TabContent() {
-          CollectionPage({
-            collectionModule: $collectionModule,
-            viewModels: this.collectionViews,
-            refreshing: this.dataManagerRefreshing,
-            wechatAutoSummaryRunning: this.wechatAutoSummaryRunning,
-            wechatAutoSummaryStatus: this.wechatAutoSummaryStatus,
-            onRefresh: () => { this.refreshDataManager(); },
-            onOpenDataCollectionSettings: () => {
-              this.settingsSectionId = SettingsSectionId.DataCollection;
-              this.currentTab = MainTabIndex.Mine;
-            },
-            onRunWechatAutoSummary: async (request: WechatAutoSummaryRequest) => {
-              await this.runWechatAutoSummary(request);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Summary), mainTabLabel(MainTabIndex.Summary), MainTabIndex.Summary))
-        TabContent() {
-          ChatPage({
-            chatMode: $chatMode,
-            cloudUserInput: $cloudUserInput,
-            userInput: $userInput,
-            chatDeepThinkingEnabled: $chatDeepThinkingEnabled,
-            cloudOutput: this.cloudOutput,
-            cloudDebugImagePath: this.cloudDebugImagePath,
-            cloudThinking: this.cloudThinking,
-            localOutput: this.output,
-            localDebugImagePath: this.debugImagePath,
-            chatHistory: this.chatHistory,
-            localThinking: this.isThinking || this.localAgentCleaningUp || this.localChatImagePreparing,
-            localChatCancelable: this.localChatInferenceRunning,
-            modelLoaded: this.modelLoaded,
-            sessions: this.chatSessions,
-            activeSessionId: this.activeChatSessionId,
-            messages: this.chatMessagesForDisplay(),
-            avatarForegroundUri: this.homeProfile.avatarForegroundUri,
-            avatarMessageForegroundUri: this.homeProfile.avatarMessageForegroundUri,
-            pendingImageAttachmentUris: this.activePendingChatImageUris(),
-            sessionDrawerOpen: this.chatSessionDrawerOpen,
-            restoringLocalSession: this.restoringLocalSession,
-            pcServerConnected: this.pcServerConnected,
-            pcServerCloudEnabled: this.pcServerCloudEnabled,
-            voiceStatus: this.voiceStatus,
-            voicePartialTranscript: this.voicePartialTranscript,
-            voiceActiveMessageId: this.voiceActiveMessageId,
-            onSwitchMode: async (mode: string) => { await this.switchChatMode(mode); },
-            onOpenSessionDrawer: () => { this.chatSessionDrawerOpen = true; },
-            onCloseSessionDrawer: () => { this.chatSessionDrawerOpen = false; },
-            onCreateSession: (mode: string) => { this.createChatSession(mode); },
-            onSelectSession: async (id: string) => { await this.selectChatSession(id); },
-            onDeleteSession: async (id: string) => { await this.deleteChatSession(id); },
-            onRenameSession: async (id: string, title: string) => {
-              return await this.renameChatSession(id, title);
-            },
-            onToggleSessionPinned: async (id: string) => { await this.toggleChatSessionPinned(id); },
-            onToggleTaskTrace: (id: string) => { this.toggleActiveTaskTrace(id); },
-            onToggleThinking: (id: string) => { this.toggleActiveThinking(id); },
-            onRunCloudPlanner: async () => { await this.runCloudPlannerOnce(); },
-            onCancelCloudChat: () => { this.cancelCurrentCloudChat(); },
-            onCancelLocalChat: () => { this.cancelCurrentLocalChatInference(); },
-            onSubmitCloudTask: async () => { await this.submitCurrentCloudTask(); },
-            onSendLocalMessage: async () => { await this.sendLocalChatMessage(); },
-            onSubmitLocalTask: async () => { await this.submitLocalAgentTask(); },
-            onTakePhotoAttachment: async () => { await this.takeChatImageAttachment(); },
-            onPickImageAttachment: async () => { await this.pickChatAlbumImageAttachment(); },
-            onClearImageAttachment: () => { this.clearActivePendingChatImageUris(); },
-            onClearCloudDebugImage: () => { this.clearCloudDebugImage(); },
-            onClearLocalDebugImage: () => { this.clearLocalDebugImage(); },
-            onOpenRuntimeLogs: () => { router.pushUrl({ url: 'pages/LogView' }); },
-            onUsePcServerCloud: () => { this.togglePcServerCloudEndpoint(); },
-            onToggleVoiceInput: async () => { await this.toggleVoiceInput(); },
-            onStopVoiceInput: async () => { await this.stopVoiceInput(); },
-            onPlayVoiceMessage: async (messageId: string, text: string) => {
-              await this.playAssistantMessageVoice(messageId, text);
-            },
-            onReplayVoiceMessage: async (messageId: string, text: string) => {
-              await this.replayAssistantMessageVoice(messageId, text);
-            }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Chat), mainTabLabel(MainTabIndex.Chat), MainTabIndex.Chat))
-        TabContent() {
-          TaskPage({
-            taskScene: $taskScene,
-            onEnsureDesktopCompanion: async (): Promise<boolean> => {
-              return await this.ensureDesktopCompanionReminder();
-            },
-            onRunWorkflow: async (task: WorkflowTask) => { await this.runWorkflowTask(task); },
-            onRunPhoneWorkflow: async (task: WorkflowTask) => { await this.runPhoneWorkflowTask(task); }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Task), mainTabLabel(MainTabIndex.Task), MainTabIndex.Task))
-        TabContent() {
-          SettingsCenterPage({
-            autoConfirm: $autoConfirm,
-            cloudAutoConfirm: $cloudAutoConfirm,
-            threadNumInput: $threadNumInput,
-            localNpuExecutionMode: this.normalizedLocalNpuExecutionMode(),
-            selectedSectionId: $settingsSectionId,
-            output: $output,
-            chunkOmCacheOutput: $chunkOmCacheOutput,
-            cloudOutput: $cloudOutput,
-            modelDownloadProgressVisible: $modelDownloadProgressVisible,
-            modelDownloadProgressPercent: $modelDownloadProgressPercent,
-            modelDownloadProgressText: $modelDownloadProgressText,
-            modelDownloadProgressTitle: $modelDownloadProgressTitle,
-            downloading: $downloading,
-            modelScopeDownloading: $modelScopeDownloading,
-            modelScopePauseRequested: $modelScopePauseRequested,
-            hdcAutoStatus: this.hdcAutoStatus,
-            hdcAutoConnected: this.hdcAutoConnected,
-            hdcAutoConnecting: this.hdcAutoConnecting,
-            hdcManualPairing: this.hdcManualPairing,
-            downloadedModels: this.downloadedModels,
-            selectedModelId: this.selectedModelId,
-            onDownloadModelScopeModel: async () => { await this.downloadModelScopeModel(); },
-            onPauseModelScopeDownload: () => { this.pauseModelScopeDownload(); },
-            onUpdateConfigThreadNum: () => { this.updateConfigThreadNum(); },
-            onShowConfigJson: () => { this.showConfigJson(); },
-            onDiscoverHdc: async () => {
-              this.hdcManualPairing = false;
-              await this.discoverHdcServer(true, true);
-            },
-            onSetHdcManualPairing: () => { this.setHdcManualPairing(); },
-            onMarkHdcManualEditing: () => { this.markHdcManualEditing(); },
-            onTestAndConnectHdc: async () => { await this.testAndConnectHdc(); },
-            onTestCloudPlanner: async () => { await this.testCloudPlanner(); },
-            onStartCloudBackend: async () => { await this.startCloudBackend(); },
-            onClearScreenshots: () => { this.clearScreenshots(); },
-            onDeleteDebugOutputs: () => { this.deleteDebugOutputs(); },
-            onSwitchDownloadedModel: (modelId: string) => { this.switchDownloadedModel(modelId); },
-            onDeleteDownloadedModel: (modelId: string) => { this.deleteDownloadedModel(modelId); },
-            onRefreshDownloadedModels: () => { this.refreshDownloadedModels(); },
-            onListScreenshots: () => { this.listScreenshots(); },
-            onDeleteModelConfigJson: () => { this.deleteModelConfigJson(); },
-            onListModelFilesTree: () => { this.listModelFilesTree(); },
-            onListChunkVisionOmFiles: () => { this.listChunkVisionOmFiles(); },
-            onDeleteChunkVisionOmFiles: () => { this.deleteChunkVisionOmFiles(); },
-            onLocalNpuExecutionModeChange: (mode: string) => { this.switchLocalNpuExecutionMode(mode); }
-          })
-        }.tabBar(this.TabItem(mainTabIcon(MainTabIndex.Mine), mainTabLabel(MainTabIndex.Mine), MainTabIndex.Mine))
-      }
-      .onChange((index: number) => { this.currentTab = index; })
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#F4F8FF')
+        FloatingMainTabs({
+          selectedIndex: $currentTab,
+          floating: this.floatingMainTabsEnabled,
+          pageBackgroundColor: this.currentPageBackgroundColor(),
+          contentBuilder: () => { this.MainTabContents(); }
+        })
 
-      this.DataManagerProgressOverlay()
-      this.DesktopCompanionReminderOverlay()
-      this.SyncReminderOverlay()
+        this.DataManagerProgressOverlay()
+        this.DesktopCompanionReminderOverlay()
+        this.SyncReminderOverlay()
       }
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.currentPageBackgroundColor())
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
   }
 }

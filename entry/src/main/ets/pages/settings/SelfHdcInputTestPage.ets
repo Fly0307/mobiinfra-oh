@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -112,9 +114,13 @@ struct SelfHdcInputTestPage {
     }
   }
 
-  build() {
+  @Builder PageHeader() {
+    AppHeader({ title: '手机 HDC 输入能力诊断', showBackButton: true,
+      onBackClick: (): void => { if (!this.running) { router.back(); } } })
+  }
+
+  @Builder PageContent() {
     Column({ space: 14 }) {
-      Text('手机 HDC 输入能力诊断').fontSize(21).fontWeight(FontWeight.Bold).margin({ top: 24 })
       Text('先点测试输入框一次，再点开始。运行时不要手动操作输入框；测试使用任务的同一桥接，并检查实际收到的点击、文字和回车。')
         .fontSize(13).lineHeight(21).width('90%')
       Text(this.pointText).fontSize(12).fontColor('#667085').height(26)
@@ -132,6 +138,18 @@ struct SelfHdcInputTestPage {
         .onClick(async (): Promise<void> => { if (this.running) { this.stop(); } else { await this.run(); } })
       Text(this.result).width('90%').fontSize(13).lineHeight(20).maxLines(5)
       Button('返回日志页面').height(38).enabled(!this.running).onClick(() => { router.back(); })
-    }.width('100%').height('100%').backgroundColor('#F4F8FF')
+    }.width('100%').height('100%').padding({ top: APP_HEADER_CONTENT_GAP + 14, bottom: 30 })
+  }
+
+  build() {
+    Column() {
+      FrostedPage({
+        pageBackgroundColor: '#F4F8FF',
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
+    }
+    .width('100%')
+    .height('100%')
   }
 }

@@ -30,6 +30,7 @@ export interface LibEntryNative extends AgentLoopNativeApi {
   setCpuMemory: (mode: string) => string;
 
   initLogFile: (path: string) => string;
+  setDebugLogging: (enabled: boolean) => string;
   getLogs: () => string;
   clearLogs: () => string;
 }
@@ -104,5 +105,6 @@ export const setCpuMemory:    (mode: string) => string;
 
 // Runtime log capture (stdout/stderr redirected to file + in-memory ring buffer)
 export const initLogFile: (path: string) => string;
+export const setDebugLogging: (enabled: boolean) => string;
 export const getLogs: () => string;
 export const clearLogs: () => string;

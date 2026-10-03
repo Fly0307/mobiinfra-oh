@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
@@ -10,6 +12,7 @@ import { showToastSafely } from '../../utils/PromptSafe';
 @Entry
 @Component
 struct WorkflowFileViewer {
+  private pageScroller: Scroller = new Scroller();
   @State category: string = 'daily';
   @State title: string = '日志文件';
   @State files: WorkflowManagedFile[] = [];
@@ -376,33 +379,39 @@ struct WorkflowFileViewer {
       .onClick(() => { this.deleteManagedFile(file); })
   }
 
-  build() {
+  @Builder PageHeader() {
+    Row() {
+      Button('返回')
+        .width(70)
+        .height(34)
+        .fontSize(12)
+        .fontColor('#5968FF')
+        .backgroundColor('#EEF4FF')
+        .borderRadius(12)
+        .onClick(() => { router.back(); })
+      Text(this.title)
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#11182F')
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Button('刷新')
+        .width(70)
+        .height(34)
+        .fontSize(12)
+        .backgroundColor('#607D8B')
+        .borderRadius(12)
+        .onClick(() => { this.loadFiles(); })
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
+
+  @Builder PageContent() {
     Column() {
-      Row() {
-        Button('返回')
-          .width(70)
-          .height(34)
-          .fontSize(12)
-          .fontColor('#5968FF')
-          .backgroundColor('#EEF4FF')
-          .borderRadius(12)
-          .onClick(() => { router.back(); })
-        Text(this.title)
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-        Button('刷新')
-          .width(70)
-          .height(34)
-          .fontSize(12)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .onClick(() => { this.loadFiles(); })
-      }
-      .width('100%')
-      .padding({ left: 22, right: 22, top: 26, bottom: 10 })
 
       Row() {
         this.CategoryTab('config', '配置')
@@ -604,7 +613,7 @@ struct WorkflowFileViewer {
             .margin({ top: 8 })
             .width('100%')
         }
-        Scroll() {
+        Scroll(this.pageScroller) {
           if (this.previewMode && this.selectedName.length > 0) {
             MarkdownView({ text: this.fileText, variant: 'file_preview' })
           } else {
@@ -631,6 +640,20 @@ struct WorkflowFileViewer {
     }
     .width('100%')
     .height('100%')
+    .padding({ top: APP_HEADER_CONTENT_GAP })
     .backgroundColor('#F4F8FF')
+  }
+
+  build() {
+    Column() {
+      FrostedPage({
+        pageBackgroundColor: '#F4F8FF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
+    }
+    .width('100%')
+    .height('100%')
   }
 }

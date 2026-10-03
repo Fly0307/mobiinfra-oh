@@ -1,7 +1,8 @@
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { JSON as ArkJSON } from '@kit.ArkTS';
 import { promptAction, router } from '@kit.ArkUI';
-import { AppHeader } from '../../components/AppHeader';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { MarkdownView } from '../../components/MarkdownView';
 import { WorkflowStorage, SystemResourceManagerReader } from '../../utils/WorkflowStorage';
@@ -107,6 +108,7 @@ const CARD_CONTEXT_SAVE_DELAY_MS = 350;
 // 新增的图编辑器只改变前端展示和编辑方式，保存结果仍然是一份可执行的 workflow JSON。
 @Component
 export struct TaskPage {
+  private pageScroller: Scroller = new Scroller();
   @Link taskScene: number;
   onEnsureDesktopCompanion: () => Promise<boolean> = async () => true;
   onRunWorkflow: (task: WorkflowTask) => Promise<void> = async (task: WorkflowTask) => {};
@@ -3627,7 +3629,7 @@ export struct TaskPage {
     .backgroundColor(Color.White)
     .borderRadius(14)
     .border({ width: 1, color: '#E3E8F1' })
-    .margin({ top: 24, bottom: 18 })
+    .margin({ top: 12, bottom: 18 })
   }
 
   @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
@@ -3781,7 +3783,7 @@ export struct TaskPage {
         .onClick(() => { this.reloadTasks(); })
     }
     .width('86%')
-    .margin({ top: 18 })
+    .margin({ top: 8 })
   }
 
   @Builder TaskContextPanel(task: WorkflowTask) {
@@ -4251,15 +4253,14 @@ export struct TaskPage {
     }
   }
 
-  build() {
-    Scroll() {
+  @Builder PageHeader() {
+    AppHeader({ title: this.configViewOpen ? '配置任务' : '自定义任务' })
+  }
+
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
       Column() {
         if (this.configViewOpen) {
-          AppHeader({
-            title: '配置任务',
-            subtitle: 'Workflow 编排与文件管理',
-            icon: $r('app.media.header_task')
-          })
           this.ConfigHeaderPanel()
           this.CreatePanel()
           if (this.editorOpen && this.editingTaskId.length === 0) {
@@ -4283,7 +4284,6 @@ export struct TaskPage {
           this.TaskSceneList()
           this.FileManagerPanel()
         } else {
-          AppHeader({ title: '自定义任务', icon: $r('app.media.header_task') })
           this.TaskExecutionHeaderPanel()
           TaskDeviceControlPanel({ mode: this.taskControlMode,
             busy: this.isTaskExecutionBusy() || SelfHdcTestRunner.shared().snapshot().running,
@@ -4294,9 +4294,20 @@ export struct TaskPage {
         Blank().height(110)
       }
       .width('100%')
+      .padding({ top: APP_HEADER_CONTENT_GAP })
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#F4F7FB')
+    .clip(false)
+  }
+
+  build() {
+    FrostedPage({
+      pageBackgroundColor: '#F4F7FB',
+      scrollers: [this.pageScroller],
+      headerBuilder: (): void => { this.PageHeader(); },
+      contentBuilder: (): void => { this.PageContent(); }
+    })
   }
 }

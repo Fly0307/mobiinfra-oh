@@ -15,9 +15,6 @@
         "name": "ohos.permission.GET_NETWORK_INFO"
       },
       {
-        "name": "ohos.permission.SYSTEM_FLOAT_WINDOW"
-      },
-      {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {

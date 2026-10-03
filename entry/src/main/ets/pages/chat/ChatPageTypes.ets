@@ -6,6 +6,10 @@ export const CHAT_COMPOSER_LINE_HEIGHT: number = 22;
 export const CHAT_COMPOSER_MAX_LINES: number = 4;
 export const CHAT_COMPOSER_CHARS_PER_LINE: number = 10;
 
+export function chatPageBackgroundColor(hasConversationContent: boolean): string {
+  return hasConversationContent ? '#FFFFFF' : '#F4F8FF';
+}
+
 export function isSupportedChatMode(mode: string): boolean {
   return mode === CHAT_MODE_CLOUD_AGENT || mode === CHAT_MODE_LOCAL_INFERENCE;
 }

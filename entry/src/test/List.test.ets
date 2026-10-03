@@ -15,6 +15,7 @@ import chatContextBudgetUnitTest from './ChatContextBudgetUnit.test';
 import chatReactAgentUnitTest from './ChatReactAgentUnit.test';
 import dataManagerQueryEventsToolUnitTest from './DataManagerQueryEventsToolUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
+import debugLoggingUnitTest from './DebugLoggingUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
@@ -65,6 +66,7 @@ export default function testsuite() {
   chatReactAgentUnitTest();
   dataManagerQueryEventsToolUnitTest();
   appLoggerUnitTest();
+  debugLoggingUnitTest();
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
   chatMessageDataSourceUnitTest();

@@ -1,4 +1,7 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
+import { applyPageStatusBar } from '../../utils/PageStatusBar';
 import { PrivacyConsentDialog } from '../../components/PrivacyConsentDialog';
 import { AiLoginGuard } from '../../components/AiLoginGuard';
 import { PrivacyConsent } from '../../utils/PrivacyConsent';
@@ -86,6 +89,15 @@ registerGallerySettingsDefaults();
 @Entry
 @Component
 struct GalleryPage {
+  private pageScroller: Scroller = new Scroller();
+  onPageShow(): void {
+    applyPageStatusBar(this.getUIContext(), '#F6F7FA');
+  }
+
+  onPageHide(): void {
+    applyPageStatusBar(this.getUIContext(), '#FFFFFF');
+  }
+
   @State analyzing: boolean = false;
   @State progress: number = 0;
   @State selectedFilter: number = 0;
@@ -3464,24 +3476,29 @@ struct GalleryPage {
     return String(e);
   }
 
-  build() {
-    Stack() {
-      Scroll() {
-      Column() {
-        Row() {
-          this.HeaderIconButton('<', 0)
-          Column() {
-            Text('图库分析').fontSize(24).fontWeight(FontWeight.Bold).fontColor('#11182F').maxLines(1)
-            Text('相册、截图与文档图片洞察').fontSize(13).fontColor('#717684').margin({ top: 3 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-          .margin({ left: 12 })
-          this.HeaderIconButton('⚙', 1)
-        }
-        .width('90%')
-        .margin({ top: 24 })
+  @Builder PageHeader() {
+    Row() {
+      this.HeaderIconButton('<', 0)
+      Text('图库分析')
+        .fontSize(20)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#172033')
+        .lineHeight(28)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
+        .layoutWeight(1)
+        .margin({ left: 8, right: 8 })
+      this.HeaderIconButton('⚙', 1)
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
 
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
+      Column() {
         this.ActionToolbar()
         if (this.shouldShowProgressStrip()) {
           this.ProgressStrip()
@@ -3491,11 +3508,22 @@ struct GalleryPage {
         this.ResultsPanel(this.resultRevision)
 
         Blank().height(100)
-      }.width('100%')
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#F6F7FA')
+      }.width('100%').padding({ top: APP_HEADER_CONTENT_GAP })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F6F7FA')
+    .clip(false)
+  }
+
+  build() {
+    Stack() {
+      FrostedPage({
+        pageBackgroundColor: '#F6F7FA',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       this.SettingsPanel()
       this.ResultDetailPanel()

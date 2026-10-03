@@ -1,6 +1,7 @@
+import { FrostedPage } from '../../components/FrostedPage';
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { AppHeader } from '../../components/AppHeader';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import { DEFAULT_ENDPOINT_CONFIG } from '../../config/DefaultEndpointConfig';
 import { DEFAULT_MODELSCOPE_MNN_REPO } from '../../config/ModelDownloadConfig';
 import {
@@ -39,6 +40,7 @@ import {
   migrateDefaultSettingValue
 } from '../../utils/DefaultSettingVisibility';
 import { showToastSafely } from '../../utils/PromptSafe';
+import { DEBUG_ENABLED_STORAGE_KEY, DebugSettings } from '../../utils/DebugSettings';
 import {
   MIMO_CHINESE_VOICE_PRESETS,
   VOICE_TTS_ROLE_PRESETS,
@@ -109,6 +111,9 @@ registerGallerySettingsDefaults();
 const LEGACY_MIMO_TTS_BASE_URL = 'https://api.xiaomimimo.com';
 @Component
 export struct SettingsCenterPage {
+  private pageScroller: Scroller = new Scroller();
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onDebugSettingChanged') private debugEnabled: boolean = false;
+  @State private debugSwitchValue: boolean = false;
   @StorageProp(PRIVACY_STATE_KEY) privacyConsentState: string = 'unselected';
   @Link autoConfirm: boolean;
   @Link cloudAutoConfirm: boolean;
@@ -217,6 +222,10 @@ export struct SettingsCenterPage {
   onLocalNpuExecutionModeChange: (mode: string) => void = (mode: string) => {};
 
   aboutToAppear(): void {
+    try { DebugSettings.initialize(getContext(this) as common.Context); } catch (e) {
+      showToastSafely('读取 Debug 设置失败：' + (e as Error).message, 2500);
+    }
+    this.debugSwitchValue = DebugSettings.isEnabled();
     PersonalMemoryAccess.isEnabled(getContext(this) as common.Context).then((enabled: boolean): void => {
       this.personalMemoryA2aEnabled = enabled;
     }).catch((): void => {
@@ -860,7 +869,7 @@ export struct SettingsCenterPage {
           .fontWeight(FontWeight.Bold)
           .fontColor('#11182F')
           .width('100%')
-        Text('连接设置 · 自控测试 · 手机任务日志')
+        Text(this.debugEnabled ? '连接设置 · 自控测试 · 手机任务日志' : '连接设置 · 自控测试')
           .fontSize(12)
           .fontColor('#7B8290')
           .width('100%')
@@ -881,14 +890,36 @@ export struct SettingsCenterPage {
     .onClick(() => { router.pushUrl({ url: 'pages/settings/SelfHdcTestPage' }); })
   }
 
+  private setDebugEnabled(enabled: boolean): void {
+    this.debugSwitchValue = enabled;
+    try { DebugSettings.setEnabled(getContext(this) as common.Context, enabled); } catch (e) {
+      showToastSafely('保存 Debug 设置失败：' + (e as Error).message, 2500);
+    }
+    this.debugSwitchValue = DebugSettings.isEnabled();
+  }
+
+  private onDebugSettingChanged(): void {
+    this.debugSwitchValue = this.debugEnabled;
+  }
+
+  @Builder DebugSwitch() {
+    Row() {
+      Column() {
+        Text('开启 Debug').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#11182F').width('100%')
+        Text('开启后显示并记录聊天和手机 HDC 日志')
+          .fontSize(12).fontColor('#7B8290').width('100%').maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 4 })
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ right: 12 })
+      Toggle({ type: ToggleType.Switch, isOn: this.debugSwitchValue })
+        .selectedColor('#4F68FF')
+        .onChange((enabled: boolean): void => { this.setDebugEnabled(enabled); })
+    }.width('92%').padding(16).backgroundColor(Color.White).borderRadius(18).margin({ top: 12 })
+  }
+
   @Builder SettingsSectionList() {
     Column() {
-      AppHeader({
-        title: '我的',
-        subtitle: '账号与应用设置',
-        icon: $r('app.media.header_mine')
-      })
       HuaweiAccountCard({ sessionActive: $huaweiAccountSessionActive })
+      this.DebugSwitch()
       this.DesktopCompanionEntry()
       this.SelfHdcTestEntry()
       Text('设置与服务')
@@ -902,37 +933,12 @@ export struct SettingsCenterPage {
       }, (item: SettingsSectionItem) => String(item.id))
     }
     .width('100%')
-    .padding({ bottom: 110 })
+    .padding({ top: APP_HEADER_CONTENT_GAP, bottom: 110 })
   }
 
   @Builder SettingsDetailHeader() {
-    Row() {
-      Button('‹')
-        .width(42)
-        .height(42)
-        .fontSize(28)
-        .fontColor('#11182F')
-        .backgroundColor(Color.White)
-        .borderRadius(14)
-        .onClick(() => { this.closeSection(); })
-      Column() {
-        Text('我的')
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .width('100%')
-        Text(this.activeSectionTitle())
-          .fontSize(12)
-          .fontColor('#7B8290')
-          .width('100%')
-          .margin({ top: 2 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 12 })
-    }
-    .width('92%')
-    .margin({ top: 18, bottom: 2 })
+    AppHeader({ title: this.activeSectionTitle(), showBackButton: true,
+      onBackClick: (): void => { this.closeSection(); } })
   }
 
   @Builder SelectedSectionContent() {
@@ -1562,8 +1568,8 @@ export struct SettingsCenterPage {
     Column() {
       this.SectionTitle(SettingsSectionId.TaskAutomation)
       SettingsGroupCard({
-        title: 'Workflow 与日志',
-        subtitle: '查看 Workflow 配置、daily-log 和运行日志',
+        title: this.debugEnabled ? 'Workflow 与日志' : 'Workflow 文件',
+        subtitle: this.debugEnabled ? '查看 Workflow 配置、daily-log 和运行日志' : '查看 Workflow 配置和 daily-log',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.WorkflowLogGroup() }
       })
@@ -1588,11 +1594,13 @@ export struct SettingsCenterPage {
       kind: SettingsActionKind.Success,
       onActionClick: () => { router.pushUrl({ url: 'pages/task/WorkflowFileViewer' }); }
     })
-    SettingsActionButton({
-      label: 'Runtime Logs',
-      kind: SettingsActionKind.Success,
-      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
-    })
+    if (this.debugEnabled) {
+      SettingsActionButton({
+        label: 'Runtime Logs',
+        kind: SettingsActionKind.Success,
+        onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+      })
+    }
   }
 
   @Builder PcBackendGroup() {
@@ -1612,7 +1620,7 @@ export struct SettingsCenterPage {
       this.SectionTitle(SettingsSectionId.StorageAbout)
       SettingsGroupCard({
         title: '文件查看',
-        subtitle: '查看截图、模型文件树和运行日志',
+        subtitle: this.debugEnabled ? '查看截图、模型文件树和运行日志' : '查看截图和模型文件树',
         onHeaderClick: () => { this.closeSensitiveInputs(); },
         contentBuilder: () => { this.FileViewerGroup() }
       })
@@ -1654,11 +1662,13 @@ export struct SettingsCenterPage {
       kind: SettingsActionKind.Success,
       onActionClick: () => { this.onListModelFilesTree(); }
     })
-    SettingsActionButton({
-      label: 'Runtime Logs',
-      kind: SettingsActionKind.Success,
-      onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
-    })
+    if (this.debugEnabled) {
+      SettingsActionButton({
+        label: 'Runtime Logs',
+        kind: SettingsActionKind.Success,
+        onActionClick: () => { router.pushUrl({ url: 'pages/LogView' }); }
+      })
+    }
   }
 
   @Builder CleanupActionGroup() {
@@ -1718,31 +1728,49 @@ export struct SettingsCenterPage {
       .margin({ top: 6, bottom: 4 })
   }
 
+  @Builder SettingsMainHeader() {
+    AppHeader({ title: '我的' })
+  }
+
+  @Builder SettingsMainContent() {
+    Scroll(this.pageScroller) {
+      this.SettingsSectionList()
+    }
+    .width('100%')
+    .height('100%')
+    .clip(false)
+  }
+
+  @Builder SettingsDetailContent() {
+    Scroll(this.detailScroller) {
+      Column() {
+        this.SelectedSectionContent()
+      }
+      .width('100%')
+      .constraintSize({ minHeight: '100%' })
+      .justifyContent(FlexAlign.Start)
+      .padding({ top: APP_HEADER_CONTENT_GAP })
+    }
+    .width('100%')
+    .height('100%')
+    .clip(false)
+  }
+
   build() {
     if (isSettingsSectionSelected(this.selectedSectionId)) {
-      Column() {
-        this.SettingsDetailHeader()
-        Scroll(this.detailScroller) {
-          Column() {
-            this.SelectedSectionContent()
-          }
-          .width('100%')
-          .constraintSize({ minHeight: '100%' })
-          .justifyContent(FlexAlign.Start)
-        }
-        .width('100%')
-        .layoutWeight(1)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+      FrostedPage({
+        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        scrollers: [this.detailScroller],
+        headerBuilder: (): void => { this.SettingsDetailHeader(); },
+        contentBuilder: (): void => { this.SettingsDetailContent(); }
+      })
     } else {
-      Scroll() {
-        this.SettingsSectionList()
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(SETTINGS_PAGE_BACKGROUND_COLOR)
+      FrostedPage({
+        pageBackgroundColor: SETTINGS_PAGE_BACKGROUND_COLOR,
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.SettingsMainHeader(); },
+        contentBuilder: (): void => { this.SettingsMainContent(); }
+      })
     }
   }
 }

@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
 import { DataManagerFacade } from '../../datamanager/DataManagerFacade';
@@ -15,6 +17,7 @@ import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 @Entry
 @Component
 struct CollectionGroupDetailPage {
+  private pageScroller: Scroller = new Scroller();
   @State title: string = '采集详情';
   @State events: CollectionEventViewModel[] = [];
   @State selectedEventId: string = '';
@@ -449,70 +452,85 @@ struct CollectionGroupDetailPage {
     }
   }
 
-  build() {
-    Stack() {
-      Column() {
-        Row() {
-          Text('返回')
-            .fontSize(14)
-            .fontColor('#8066FF')
-            .height(36)
-            .padding({ left: 12, right: 12 })
-            .backgroundColor('#F0ECFF')
-            .borderRadius(18)
-            .onClick(() => {
-              router.back();
-            })
-          Text(this.title)
-            .fontSize(20)
+  @Builder PageHeader() {
+    Row() {
+      Text('返回')
+        .fontSize(14)
+        .fontColor('#8066FF')
+        .height(36)
+        .padding({ left: 12, right: 12 })
+        .backgroundColor('#F0ECFF')
+        .borderRadius(18)
+        .onClick(() => {
+          router.back();
+        })
+      Text(this.title)
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#151A28')
+        .layoutWeight(1)
+        .margin({ left: 12 })
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      AiGeneratedBadge({ compact: true })
+        .margin({ left: 8 })
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
+
+  @Builder PageContent() {
+    Column() {
+      if (this.events.length === 0) {
+        Column() {
+          Text('暂无已整理记录')
+            .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor('#151A28')
-            .layoutWeight(1)
-            .margin({ left: 12 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          AiGeneratedBadge({ compact: true })
-            .margin({ left: 8 })
+          Text('返回采集页后重新同步')
+            .fontSize(12)
+            .fontColor('#7C8494')
+            .margin({ top: 8 })
         }
         .width('86%')
-        .margin({ top: 18, bottom: 14 })
-
-        if (this.events.length === 0) {
-          Column() {
-            Text('暂无已整理记录')
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#151A28')
-            Text('返回采集页后重新同步')
-              .fontSize(12)
-              .fontColor('#7C8494')
-              .margin({ top: 8 })
-          }
-          .width('86%')
-          .height(140)
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(16)
-        } else {
-          List({ space: 0 }) {
-            ForEach(this.events, (event: CollectionEventViewModel) => {
-              ListItem() {
-                this.EventRow(event)
-              }
-              .width('100%')
-            }, (event: CollectionEventViewModel) => event.id)
-          }
-          .width('86%')
-          .layoutWeight(1)
-          .alignListItem(ListItemAlign.Start)
-          .padding({ bottom: 40 })
+        .height(140)
+        .margin({ top: APP_HEADER_CONTENT_GAP })
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#FFFFFF')
+        .borderRadius(16)
+      } else {
+        List({ space: 0, scroller: this.pageScroller }) {
+          ForEach(this.events, (event: CollectionEventViewModel) => {
+            ListItem() {
+              this.EventRow(event)
+            }
+            .width('100%')
+          }, (event: CollectionEventViewModel) => event.id)
         }
+        .width('86%')
+        .layoutWeight(1)
+        .contentStartOffset(APP_HEADER_CONTENT_GAP)
+        .clip(false)
+        .alignListItem(ListItemAlign.Start)
+        .padding({ bottom: 40 })
       }
-      .width('100%')
-      .height('100%')
-      .alignItems(HorizontalAlign.Center)
-      .justifyContent(FlexAlign.Start)
-      .backgroundColor('#F4F8FF')
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center)
+    .justifyContent(FlexAlign.Start)
+    .backgroundColor('#F4F8FF')
+  }
+
+  build() {
+    Stack() {
+      FrostedPage({
+        pageBackgroundColor: '#F4F8FF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       this.EventDetailPanel()
     }

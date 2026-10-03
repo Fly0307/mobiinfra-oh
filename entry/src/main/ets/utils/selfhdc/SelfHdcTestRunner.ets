@@ -6,6 +6,7 @@ import { image } from '@kit.ImageKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { JSON as ArkJSON, util } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
+import { DebugSettings } from '../DebugSettings';
 import { getAppBundleName } from '../AppIdentity';
 import { AgentExecutionController } from '../AgentExecutionController';
 import { HdcClient } from './HdcClient';
@@ -101,10 +102,10 @@ export class SelfHdcTestRunner {
     result.stage = this.state.stage;
     result.message = this.state.message;
     result.endpoint = this.state.endpoint;
-    result.logPath = this.state.logPath;
+    result.logPath = DebugSettings.isEnabled() ? this.state.logPath : '';
     result.beforeImage = this.state.beforeImage;
     result.afterImage = this.state.afterImage;
-    result.logs = this.state.logs.slice();
+    result.logs = DebugSettings.isEnabled() ? this.state.logs.slice() : [];
     return result;
   }
 
@@ -123,6 +124,12 @@ export class SelfHdcTestRunner {
   }
 
   private record(message: string): void {
+    // Progress still reaches observers when Debug is off. No line formatting,
+    // in-memory accumulation or disk log writes occur in that case.
+    if (!DebugSettings.isEnabled()) { this.publish(); return; }
+    if (this.state.logPath.length === 0 && this.state.runId.length > 0) {
+      this.state.logPath = this.root + '/runs/' + this.state.runId + '.log';
+    }
     let line = new Date().toISOString() + ' +' + String(Date.now() - this.startedAt) + 'ms [' +
       this.state.stage + '] ' + message;
     if (this.state.logPath.length > 0) { selfHdcWriteText(this.state.logPath, line + '\n', true); }
@@ -142,7 +149,9 @@ export class SelfHdcTestRunner {
   private persist(): void {
     let summary = ArkJSON.stringify(this.snapshot());
     selfHdcWriteAtomicText(this.root + '/latest.json', summary);
-    if (this.state.runId) { selfHdcWriteAtomicText(this.root + '/runs/' + this.state.runId + '.json', summary); }
+    if (DebugSettings.isEnabled() && this.state.runId) {
+      selfHdcWriteAtomicText(this.root + '/runs/' + this.state.runId + '.json', summary);
+    }
   }
 
   private step(stage: string): void {
@@ -172,7 +181,6 @@ export class SelfHdcTestRunner {
     this.state = new SelfHdcTestState();
     this.state.running = true; this.state.outcome = 'running';
     this.state.runId = String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
-    this.state.logPath = this.root + '/runs/' + this.state.runId + '.log';
     this.state.endpoint = endpoint;
     this.state.stage = mode === 'phone-chat-local' ? '手机本地 Agent' :
       (mode === 'phone-chat-cloud' ? '手机云端 Agent' : '手机 GUI 任务');
@@ -278,7 +286,6 @@ export class SelfHdcTestRunner {
     this.state.running = true;
     this.state.outcome = 'running';
     this.state.runId = String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
-    this.state.logPath = this.root + '/runs/' + this.state.runId + '.log';
     this.startedAt = Date.now();
     this.cancelled = false;
     this.backgroundExpired = false;

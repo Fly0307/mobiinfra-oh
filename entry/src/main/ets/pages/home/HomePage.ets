@@ -1,4 +1,5 @@
-import { AppHeader } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../../components/AppHeader';
 import {
   CollectionImageViewModel,
   HomeDomainViewModel,
@@ -25,6 +26,8 @@ import { HomeComfortChatStore } from './HomeComfortChatStore';
 // ClawMate 首页展示层：展示动态画像、提醒和推荐，不承载推理/Agent 逻辑。
 @Component
 export struct HomePage {
+  private pageScroller: Scroller = new Scroller();
+  @Prop navigationBottomInset: number = 0;
   @ObjectLink comfortChatStore: HomeComfortChatStore;
   @Prop profile: HomeProfileViewModel = createEmptyHomeProfileViewModel();
   @Prop taskSuggestions: HomeTaskSuggestion[] = [];
@@ -806,6 +809,7 @@ export struct HomePage {
     .width('100%')
     .height('100%')
     .zIndex(102)
+    .padding({ bottom: this.navigationBottomInset })
   }
 
   @Builder AvatarHistoryOverlay() {
@@ -864,6 +868,7 @@ export struct HomePage {
     .width('100%')
     .height('100%')
     .zIndex(101)
+    .padding({ bottom: this.navigationBottomInset })
   }
 
   @Builder AvatarGenerationOverlay() {
@@ -1024,6 +1029,7 @@ export struct HomePage {
     .width('100%')
     .height('100%')
     .zIndex(100)
+    .padding({ bottom: this.navigationBottomInset })
   }
 
   @Builder WideLifestyleItem(item: HomeDomainViewModel) {
@@ -1717,6 +1723,7 @@ export struct HomePage {
     .height('100%')
     .backgroundColor('#F4F8FF')
     .zIndex(103)
+    .padding({ bottom: this.navigationBottomInset })
   }
 
   @Builder TaskSuggestionEmptyState() {
@@ -2007,73 +2014,86 @@ export struct HomePage {
     }
     .width('100%')
     .height('100%')
+    .padding({ bottom: this.navigationBottomInset })
+  }
+
+  @Builder PageHeader() {
+    AppHeader({
+      title: '你的智伴',
+      icon: $r('app.media.digital_avatar'),
+      showIcon: true,
+      avatarUri: this.profileAvatarUri(),
+      circularAvatar: true,
+      pcServerVisible: true,
+      onIconClick: (): void => {
+        this.avatarGenerationOpen = true;
+      }
+    })
+  }
+
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
+      Column() {
+        this.ProfileOverview()
+
+        Row() {
+          Text('为你提醒').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
+          AiGeneratedBadge({ compact: true })
+            .margin({ right: 8 })
+          this.RecommendationFilterButton('未完成', false)
+          Blank().width(8)
+          this.RecommendationFilterButton('全部', true)
+        }.width('92%').margin({ top: 22 })
+
+        if (this.visibleRecommendations().length === 0) {
+          this.EmptyRecommendationCard()
+        } else {
+          Column() {
+            ForEach(this.recommendationPageItems(), (item: HomeRecommendationViewModel, index: number) => {
+              this.RecommendCard(item)
+              if (index < this.recommendationPageItems().length - 1) {
+                Divider()
+                  .strokeWidth(1)
+                  .color('#E9ECF3')
+                  .margin({ left: 73 })
+              }
+            }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
+          }
+          .width('92%')
+          .padding({ left: 8, right: 8 })
+          .margin({ top: 8 })
+          this.RecommendationPagination()
+        }
+
+        this.GuessYouLikeSection()
+
+        HomeComfortSection({
+          chatStore: this.comfortChatStore,
+          concerns: this.comfortConcerns,
+          loading: this.comfortConcernsLoading,
+          errorMessage: this.comfortConcernError,
+          onRefresh: async (): Promise<void> => {
+            await this.onRefreshComfortConcerns();
+          },
+          onSendMessage: async (concern: HomeComfortConcern,
+            history: HomeComfortChatMessage[]): Promise<string> => {
+            return await this.onSendComfortMessage(concern, history);
+          }
+        })
+
+        Blank().height(88)
+      }.width('100%').padding({ top: APP_HEADER_CONTENT_GAP })
+    }.width('100%').height('100%').backgroundColor(Color.White).clip(false)
   }
 
   build() {
     Stack() {
-      Scroll() {
-        Column() {
-          AppHeader({
-            title: '你的智伴',
-            icon: $r('app.media.digital_avatar'),
-            avatarUri: this.profileAvatarUri(),
-            circularAvatar: true,
-            pcServerVisible: true,
-            onIconClick: (): void => {
-              this.avatarGenerationOpen = true;
-            }
-          })
-
-          this.ProfileOverview()
-
-          Row() {
-            Text('为你提醒').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#11182F').layoutWeight(1)
-            AiGeneratedBadge({ compact: true })
-              .margin({ right: 8 })
-            this.RecommendationFilterButton('未完成', false)
-            Blank().width(8)
-            this.RecommendationFilterButton('全部', true)
-          }.width('92%').margin({ top: 22 })
-
-          if (this.visibleRecommendations().length === 0) {
-            this.EmptyRecommendationCard()
-          } else {
-            Column() {
-              ForEach(this.recommendationPageItems(), (item: HomeRecommendationViewModel, index: number) => {
-                this.RecommendCard(item)
-                if (index < this.recommendationPageItems().length - 1) {
-                  Divider()
-                    .strokeWidth(1)
-                    .color('#E9ECF3')
-                    .margin({ left: 73 })
-                }
-              }, (item: HomeRecommendationViewModel) => item.id + '-' + item.title + '-' + item.domain + '-' + String(item.completed))
-            }
-            .width('92%')
-            .padding({ left: 8, right: 8 })
-            .margin({ top: 8 })
-            this.RecommendationPagination()
-          }
-
-          this.GuessYouLikeSection()
-
-          HomeComfortSection({
-            chatStore: this.comfortChatStore,
-            concerns: this.comfortConcerns,
-            loading: this.comfortConcernsLoading,
-            errorMessage: this.comfortConcernError,
-            onRefresh: async (): Promise<void> => {
-              await this.onRefreshComfortConcerns();
-            },
-            onSendMessage: async (concern: HomeComfortConcern,
-              history: HomeComfortChatMessage[]): Promise<string> => {
-              return await this.onSendComfortMessage(concern, history);
-            }
-          })
-
-          Blank().height(88)
-        }.width('100%')
-      }.width('100%').height('100%').backgroundColor(Color.White)
+      FrostedPage({
+        pageBackgroundColor: '#FFFFFF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       ForEach(this.selectedRecommendationItems(), (item: HomeRecommendationViewModel) => {
         this.RecommendationDetailOverlay(item)

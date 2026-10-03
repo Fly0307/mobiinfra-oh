@@ -1,3 +1,5 @@
+import { chatPageBackgroundColor } from '../chat/ChatPageTypes';
+
 export enum MainTabIndex {
   Home = 0,
   Summary = 1,
@@ -23,6 +25,22 @@ export const MAIN_TAB_ITEMS: MainTabItem[] = [
 
 export function centerTabIndex(): MainTabIndex {
   return MainTabIndex.Chat;
+}
+
+export function mainTabBackgroundColor(index: number, chatHasConversationContent: boolean = true): string {
+  if (index === MainTabIndex.Chat) {
+    return chatPageBackgroundColor(chatHasConversationContent);
+  }
+  if (index === MainTabIndex.Summary) {
+    return '#F7FAFE';
+  }
+  if (index === MainTabIndex.Task) {
+    return '#F4F7FB';
+  }
+  if (index === MainTabIndex.Mine) {
+    return '#F4F8FF';
+  }
+  return '#FFFFFF';
 }
 
 export function mainTabLabel(index: MainTabIndex): string {

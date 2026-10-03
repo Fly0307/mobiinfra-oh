@@ -4,6 +4,7 @@ import { PhoneHdcWorkflowBridge } from './PhoneHdcWorkflowBridge';
 import { SelfHdcTaskSettings } from './SelfHdcTaskSettings';
 import { SelfHdcTestRunner } from './SelfHdcTestRunner';
 import { phoneAgentLogText } from './PhoneAgentPolicy';
+import { DebugSettings } from '../DebugSettings';
 
 // Shared lifecycle for chat Agent loops and chat GUI tools. The actual device backend is also used by task workflows.
 export class PhoneHdcRunSession {
@@ -23,7 +24,7 @@ export class PhoneHdcRunSession {
   }
 
   record(message: string): void {
-    if (!this.ownsLog) { return; }
+    if (!this.ownsLog || !DebugSettings.isEnabled()) { return; }
     message = phoneAgentLogText(message);
     let hub = SelfHdcTestRunner.shared();
     if (message.length <= 6000) { hub.recordExternal(message); return; }

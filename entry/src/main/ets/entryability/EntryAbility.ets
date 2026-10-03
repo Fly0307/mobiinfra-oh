@@ -1,5 +1,6 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, wantAgent } from '@kit.AbilityKit';
 import { AppLogger } from '../utils/AppLogger';
+import { DebugSettings } from '../utils/DebugSettings';
 import { HuaweiAccountSession } from '../utils/HuaweiAccountSession';
 import { display, window } from '@kit.ArkUI';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
@@ -54,6 +55,10 @@ export default class EntryAbility extends UIAbility {
   private floatPanelRectChangeCallback: ((options: window.RectChangeOptions) => void) | null = null;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    try { DebugSettings.initialize(this.context); } catch (e) {
+      // A settings failure keeps logging off; the settings page can retry.
+      AppLogger.errorCause('Debug', 'Cannot initialize Debug settings', e as Error);
+    }
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {

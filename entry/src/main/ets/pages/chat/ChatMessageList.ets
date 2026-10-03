@@ -28,6 +28,7 @@ import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { isAiGeneratedChatMessage } from '../../utils/AiGeneratedContent';
 import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 import { AppLogger } from '../../utils/AppLogger';
+import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
 import {
   ChatBottomOverlayKind,
   chatBottomOverlayKind,
@@ -942,6 +943,7 @@ struct ChatMessageRow {
 
 @Component
 export struct ChatMessageList {
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) @Watch('onMessagesChanged') private debugEnabled: boolean = false;
   @Prop @Watch('onMessagesChanged') messages: ChatMessage[] = [];
   @Prop thinking: boolean = false;
   @Prop @Watch('onAutoScrollKeyChanged') autoScrollKey: string = '';
@@ -962,7 +964,9 @@ export struct ChatMessageList {
   @Prop voiceActiveMessageId: string = '';
   @Prop voiceStatus: VoiceInteractionStatus = 'idle';
   onScrollContent: (yOffset: number) => void = () => {};
-  private messageScroller: Scroller = new Scroller();
+  // 由页面传入时，导航模糊与自动跟随使用同一个控制器。
+  messageScroller: Scroller = new Scroller();
+  @Prop topOverlayInset: number = 0;
   private lastAutoScrollKey: string = '';
   private lastStreamFollowKey: string = '';
   private structuralScrollTimerId: number = -1;
@@ -1039,7 +1043,9 @@ export struct ChatMessageList {
   }
 
   private syncMessageDataSource(): void {
-    this.messageDataSource.setMessages(this.messages);
+    let visibleMessages = this.debugEnabled ? this.messages :
+      this.messages.filter((message: ChatMessage): boolean => message.kind !== CHAT_MESSAGE_KIND_TASK_TRACE);
+    this.messageDataSource.setMessages(visibleMessages);
   }
 
   private sessionPart(scrollKey: string): string {
@@ -1087,7 +1093,7 @@ export struct ChatMessageList {
       this.autoFollowEnabled = true;
       this.backToBottomVisible = false;
     }
-    if ((force || sessionChanged) && this.messages.length > FIRST_FRAME_FULL_MARKDOWN_COUNT) {
+    if ((force || sessionChanged) && this.messageDataSource.totalCount() > FIRST_FRAME_FULL_MARKDOWN_COUNT) {
       this.startSessionFirstFrame();
     } else if (force || sessionChanged) {
       this.sessionFirstFrameLightweight = false;
@@ -1135,15 +1141,15 @@ export struct ChatMessageList {
   }
 
   private latestContentIndex(): number {
-    return chatLatestContentIndex(this.messages.length);
+    return chatLatestContentIndex(this.messageDataSource.totalCount());
   }
 
   private bottomSpacerIndex(): number {
-    return chatBottomSpacerIndex(this.messages.length);
+    return chatBottomSpacerIndex(this.messageDataSource.totalCount());
   }
 
   private streamFollowTargetIndex(): number {
-    return chatStreamFollowTargetIndex(this.messages.length);
+    return chatStreamFollowTargetIndex(this.messageDataSource.totalCount());
   }
 
   private scrollToLatestContentIndex(reason: string): void {
@@ -1230,7 +1236,7 @@ export struct ChatMessageList {
     if (!this.sessionFirstFrameLightweight) {
       return true;
     }
-    return index >= Math.max(0, this.messages.length - FIRST_FRAME_FULL_MARKDOWN_COUNT);
+    return index >= Math.max(0, this.messageDataSource.totalCount() - FIRST_FRAME_FULL_MARKDOWN_COUNT);
   }
 
   private backToBottomButtonBottomOffset(): number {
@@ -1366,6 +1372,9 @@ export struct ChatMessageList {
       .onReachEnd(() => {
         this.onReachBottom();
       })
+      .contentStartOffset(this.topOverlayInset)
+      // 导航容器已避让标题；滚动时允许消息进入标题与状态栏的毛玻璃背景后方。
+      .clip(false)
       .cachedCount(MESSAGE_LIST_CACHED_COUNT)
       .height('100%')
       .width('100%')

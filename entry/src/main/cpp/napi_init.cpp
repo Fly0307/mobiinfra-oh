@@ -52,8 +52,9 @@
 #undef LOG_TAG
 #endif
 #define LOG_TAG "MobiInfra"
-#define LOGI(fmt, ...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
-#define LOGE(fmt, ...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__)
+static std::atomic<bool> g_debugLoggingEnabled{false};
+#define LOGI(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
+#define LOGE(fmt, ...) do { if (g_debugLoggingEnabled.load()) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); } while (0)
 
 using namespace MNN::Transformer;
 
@@ -530,6 +531,7 @@ struct LogCapture {
 
     void append(const std::string& line) {
         std::lock_guard<std::mutex> g(mu);
+        if (!g_debugLoggingEnabled.load()) return;
         ring.push_back(line);
         if (ring.size() > maxLines) ring.pop_front();
         if (file) {
@@ -548,7 +550,9 @@ static void logReader(int readFd) {
     while (true) {
         ssize_t n = read(readFd, buf, sizeof(buf));
         if (n <= 0) break;
-        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeCapture] %.*s", (int)n, buf);
+        if (g_debugLoggingEnabled.load()) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeCapture] %.*s", (int)n, buf);
+        }
         pending.append(buf, n);
         size_t pos;
         while ((pos = pending.find('\n')) != std::string::npos) {
@@ -559,8 +563,10 @@ static void logReader(int readFd) {
                 std::string status = observeNpuRuntimeLine(line);
                 if (!status.empty()) {
                     gLog.append(status);
-                    OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
-                                 "[MobiInfra][NativeRuntime] %{public}s", status.c_str());
+                    if (g_debugLoggingEnabled.load()) {
+                        OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
+                                     "[MobiInfra][NativeRuntime] %{public}s", status.c_str());
+                    }
                 }
             }
         }
@@ -572,20 +578,6 @@ static void initLogCapture(const std::string& path) {
     bool expected = false;
     if (!gLog.started.compare_exchange_strong(expected, true)) return;
     gLog.filePath = path;
-
-    // 读取上一次会话日志到 ring buffer，App 重启后仍能在 Runtime Logs 中看到尾部日志。
-    FILE* rf = fopen(path.c_str(), "r");
-    if (rf) {
-        char linebuf[2048];
-        while (fgets(linebuf, sizeof(linebuf), rf)) {
-            std::string line(linebuf);
-            if (!line.empty() && line.back() == '\n') line.pop_back();
-            if (!line.empty()) gLog.append(line);
-        }
-        fclose(rf);
-    }
-
-    gLog.file = fopen(path.c_str(), "a");
 
     // 同时重定向 stdout/stderr，捕获 MNN/第三方库里 printf 风格的日志。
     int pipefd[2];
@@ -599,7 +591,65 @@ static void initLogCapture(const std::string& path) {
         setvbuf(stderr, nullptr, _IOLBF, 0);
         std::thread(logReader, pipefd[0]).detach();
     }
-    gLog.append("==== session started ====");
+}
+
+static napi_value SetDebugLogging(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc != 1 || napi_get_value_bool(env, args[0], &enabled) != napi_ok) {
+        napi_throw_type_error(env, nullptr, "setDebugLogging expects a boolean");
+        return nullptr;
+    }
+    {
+        // Serialize disabling with every file/ring write. Leave old disk logs
+        // intact, but release the file and clear the visible runtime buffer.
+        std::lock_guard<std::mutex> g(gLog.mu);
+        if (enabled != g_debugLoggingEnabled.load()) {
+            if (enabled && !gLog.filePath.empty()) {
+                FILE* file = fopen(gLog.filePath.c_str(), "a");
+                if (!file) {
+                    napi_throw_error(env, nullptr, "Cannot open native Debug log file");
+                    return nullptr;
+                }
+                gLog.file = file;
+                // Restore past enabled sessions for LogView without rewriting
+                // them. Nothing is read or accumulated while Debug is off.
+                FILE* previous = fopen(gLog.filePath.c_str(), "r");
+                if (previous) {
+                    // A Debug session can contain large prompts. Bound the
+                    // synchronous history read when the switch is turned on.
+                    constexpr long maxHistoryBytes = 4 * 1024 * 1024;
+                    fseek(previous, 0, SEEK_END);
+                    if (ftell(previous) > maxHistoryBytes) {
+                        fseek(previous, -maxHistoryBytes, SEEK_END);
+                        int ch;
+                        while ((ch = fgetc(previous)) != EOF && ch != '\n') {}
+                    } else {
+                        rewind(previous);
+                    }
+                    char linebuf[2048];
+                    while (fgets(linebuf, sizeof(linebuf), previous)) {
+                        std::string line(linebuf);
+                        if (!line.empty() && line.back() == '\n') line.pop_back();
+                        if (!line.empty()) gLog.ring.push_back(line);
+                        if (gLog.ring.size() > gLog.maxLines) gLog.ring.pop_front();
+                    }
+                    fclose(previous);
+                }
+            } else if (gLog.file) {
+                fclose(gLog.file);
+                gLog.file = nullptr;
+            }
+            g_debugLoggingEnabled.store(enabled);
+            if (!enabled) gLog.ring.clear();
+        }
+    }
+    if (enabled) gLog.append("==== Debug logging enabled ====");
+    napi_value ret;
+    napi_create_string_utf8(env, "ok", 2, &ret);
+    return ret;
 }
 
 static napi_value InitLogFile(napi_env env, napi_callback_info info) {
@@ -645,6 +695,7 @@ static napi_value ClearLogs(napi_env env, napi_callback_info) {
 }
 
 static void appendLargeLogBlock(const std::string& title, const std::string& text) {
+    if (!g_debugLoggingEnabled.load()) return;
     gLog.append("===== " + title + " BEGIN chars=" + std::to_string(text.size()) + " =====");
     size_t offset = 0;
     const size_t chunkSize = 3500;
@@ -681,6 +732,8 @@ static std::string profileSummaryPath() {
 
 static void appendProfileSummaryLine(const std::string& line) {
     std::string path = profileSummaryPath();
+    std::lock_guard<std::mutex> g(gLog.mu);
+    if (!g_debugLoggingEnabled.load()) return;
     if (path.empty()) {
         return;
     }
@@ -710,6 +763,7 @@ static std::string stripHiLogFmt(const char* fmt) {
 }
 
 static void appLog(const char* fmt, ...) {
+    if (!g_debugLoggingEnabled.load()) return;
     std::string cleanFmt = stripHiLogFmt(fmt);
     char buf[1024];
     va_list ap;
@@ -723,10 +777,12 @@ static void appLog(const char* fmt, ...) {
 #undef LOGI
 #undef LOGE
 #define LOGI(fmt, ...) do { \
+    if (!g_debugLoggingEnabled.load()) break; \
     OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog(fmt, ##__VA_ARGS__); \
 } while(0)
 #define LOGE(fmt, ...) do { \
+    if (!g_debugLoggingEnabled.load()) break; \
     OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, "[MobiInfra][NativeRuntime] " fmt, ##__VA_ARGS__); \
     appLog("[ERR] " fmt, ##__VA_ARGS__); \
 } while(0)
@@ -5456,6 +5512,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setCpuPrecision", nullptr, SetCpuPrecision,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCpuMemory",    nullptr, SetCpuMemory,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initLogFile",  nullptr, InitLogFile,        nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDebugLogging", nullptr, SetDebugLogging, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLogs",      nullptr, GetLogs,            nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearLogs",    nullptr, ClearLogs,          nullptr, nullptr, nullptr, napi_default, nullptr},
     };

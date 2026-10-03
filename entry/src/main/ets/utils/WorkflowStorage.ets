@@ -1,5 +1,7 @@
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
+import resourceManager from '@ohos.resourceManager';
+import { AppLogger } from './AppLogger';
 import { parseJsonCompat, stringifyJsonCompat } from './JsonCompat';
 import { decodeUtf8Compat, encodeUtf8Compat } from './TextEncodingCompat';
 import {
@@ -18,9 +20,109 @@ import {
 const WORKFLOW_DIR = 'workflows';
 const CONFIG_DIR = 'configs';
 const RUN_DIR = 'runs';
+const CHAT_SESSION_DIR = 'chat-sessions';
+const TOOL_RUNS_DIR = 'tool-runs';
+const MOBILE_GUI_DIR = 'mobile-gui';
 const DAILY_LOG_DIR = 'daily-log';
 const TASK_INDEX_FILE = 'task-index.json';
 const DELETED_DEFAULT_TASKS_FILE = 'deleted-default-tasks.json';
+const DEFAULT_WORKFLOW_RAW_ROOT = 'workflows/configs';
+
+interface DefaultWorkflowConfig {
+  id: string;
+  sceneId: number;
+  fileName: string;
+  rawFilePath: string;
+}
+
+export interface RawWorkflowResourceReader {
+  getRawFileContentSync(path: string): Uint8Array;
+}
+
+export class SystemResourceManagerReader implements RawWorkflowResourceReader {
+  private delegate: resourceManager.ResourceManager;
+
+  constructor(delegate: resourceManager.ResourceManager) {
+    this.delegate = delegate;
+  }
+
+  getRawFileContentSync(path: string): Uint8Array {
+    return this.delegate.getRawFileContentSync(path);
+  }
+}
+
+type DefaultWorkflowInstallFailureHandler = (rawFilePath: string, cause: Error) => void;
+
+const DEFAULT_WORKFLOW_CONFIGS: DefaultWorkflowConfig[] = [
+  {
+    id: 'default_alipay_bill',
+    sceneId: 0,
+    fileName: 'default_alipay_bill.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_alipay_bill.json'
+  },
+  {
+    id: 'default_ele_order',
+    sceneId: 1,
+    fileName: 'default_ele_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_ele_order.json'
+  },
+  {
+    id: 'default_bilibili_history',
+    sceneId: 2,
+    fileName: 'default_bilibili_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_bilibili_history.json'
+  },
+  {
+    id: 'default_tencent_video_history',
+    sceneId: 2,
+    fileName: 'default_tencent_video_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_tencent_video_history.json'
+  },
+  {
+    id: 'default_weixin_chat',
+    sceneId: 3,
+    fileName: 'default_weixin_chat.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weixin_chat.json'
+  },
+  {
+    id: 'default_weixin_today_chat',
+    sceneId: 3,
+    fileName: 'default_weixin_today_chat.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weixin_today_chat.json'
+  },
+  {
+    id: 'default_dianping_order',
+    sceneId: 4,
+    fileName: 'default_dianping_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_dianping_order.json'
+  },
+  {
+    id: 'default_meituan_order',
+    sceneId: 4,
+    fileName: 'default_meituan_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_meituan_order.json'
+  },
+  {
+    id: 'default_weibo_hot_search',
+    sceneId: 5,
+    fileName: 'default_weibo_hot_search.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_weibo_hot_search.json'
+  },
+  {
+    id: 'default_xiaohongshu_history',
+    sceneId: 5,
+    fileName: 'default_xiaohongshu_history.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_xiaohongshu_history.json'
+  },
+  {
+    id: 'default_ctrip_order',
+    sceneId: 6,
+    fileName: 'default_ctrip_order.json',
+    rawFilePath: DEFAULT_WORKFLOW_RAW_ROOT + '/default_ctrip_order.json'
+  }
+];
+
+const DEFAULT_WORKFLOW_JSON_CACHE: Record<string, string> = {};
 
 interface VlmJsonSchemaField {
   type: string;
@@ -51,6 +153,15 @@ export class WorkflowStorage {
 
   static runsDir(filesDir: string): string {
     return WorkflowStorage.rootDir(filesDir) + '/' + RUN_DIR;
+  }
+
+  static chatSessionToolRunsDir(filesDir: string, sessionId: string): string {
+    return filesDir.replace(/\\/g, '/').replace(/\/+$/g, '') + '/' + CHAT_SESSION_DIR + '/' + TOOL_RUNS_DIR + '/' +
+      WorkflowStorage.sanitizePathSegment(sessionId);
+  }
+
+  static chatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
+    return WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId) + '/' + MOBILE_GUI_DIR;
   }
 
   static dailyLogDir(filesDir: string): string {
@@ -87,6 +198,13 @@ export class WorkflowStorage {
     WorkflowStorage.ensureDirectory(WorkflowStorage.configDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.runsDir(filesDir));
     WorkflowStorage.ensureDirectory(WorkflowStorage.dailyLogDir(filesDir));
+  }
+
+  static ensureChatSessionMobileGuiToolRunRoot(filesDir: string, sessionId: string): string {
+    WorkflowStorage.ensureDirectoryTree(filesDir);
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionToolRunsDir(filesDir, sessionId));
+    WorkflowStorage.ensureDirectoryTree(WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId));
+    return WorkflowStorage.chatSessionMobileGuiToolRunRoot(filesDir, sessionId);
   }
 
   static readText(path: string): string {
@@ -127,6 +245,46 @@ export class WorkflowStorage {
     } catch (e) {
       return false;
     }
+  }
+
+  static installDefaultWorkflowResources(filesDir: string, manager: RawWorkflowResourceReader): void {
+    WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager,
+      (rawFilePath: string, cause: Error) => {
+        AppLogger.warnCause('WorkflowStorage', 'install default workflow rawfile failed path=' + rawFilePath, cause);
+      });
+  }
+
+  static installDefaultWorkflowResourcesForTest(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
+    return WorkflowStorage.installDefaultWorkflowResourcesWithFailureHandler(filesDir, manager, onFailure);
+  }
+
+  private static installDefaultWorkflowResourcesWithFailureHandler(filesDir: string, manager: RawWorkflowResourceReader,
+    onFailure: DefaultWorkflowInstallFailureHandler): number {
+    WorkflowStorage.ensureWorkspace(filesDir);
+    let shouldInstallConfigs = !WorkflowStorage.fileExists(WorkflowStorage.indexPath(filesDir));
+    let failureCount = 0;
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      let config = DEFAULT_WORKFLOW_CONFIGS[i];
+      try {
+        let rawJson = WorkflowStorage.readRawFileText(manager, config.rawFilePath);
+        WorkflowStorage.validateWorkflowJson(rawJson, false);
+        DEFAULT_WORKFLOW_JSON_CACHE[config.id] = rawJson;
+        if (shouldInstallConfigs && !WorkflowStorage.fileExists(WorkflowStorage.configPath(filesDir, config.fileName))) {
+          WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, config.fileName), rawJson);
+        }
+      } catch (e) {
+        let err = e as Error;
+        failureCount++;
+        onFailure(config.rawFilePath, err);
+      }
+    }
+    return failureCount;
+  }
+
+  private static readRawFileText(manager: RawWorkflowResourceReader, path: string): string {
+    let bytes = manager.getRawFileContentSync(path);
+    return decodeUtf8Compat(bytes);
   }
 
   static readBytes(path: string): ArrayBuffer {
@@ -180,9 +338,11 @@ export class WorkflowStorage {
     if (normalized.startsWith('workflows/')) {
       return normalized;
     }
-    let workflowRoot = root + '/' + WORKFLOW_DIR + '/';
-    if (normalized.startsWith(workflowRoot)) {
-      return WORKFLOW_DIR + '/' + normalized.substring(workflowRoot.length);
+    if (normalized.startsWith('chat-sessions/')) {
+      return normalized;
+    }
+    if (normalized.startsWith(root + '/')) {
+      return normalized.substring(root.length + 1);
     }
     let marker = '/' + WORKFLOW_DIR + '/';
     let markerIndex = normalized.indexOf(marker);
@@ -207,7 +367,8 @@ export class WorkflowStorage {
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
-    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('runs/') ||
+    if (normalized.startsWith('/') || normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/') ||
       /\.(jpg|jpeg|png|webp|gif)$/i.test(normalized)) {
       return 'path';
     }
@@ -231,20 +392,88 @@ export class WorkflowStorage {
     return value;
   }
 
+  private static sanitizePathSegment(value: string): string {
+    let text = String(value || '');
+    if (text.length === 0) {
+      return 'unknown';
+    }
+    let sanitized = text.replace(/[^A-Za-z0-9_-]/g, '_').replace(/[.]/g, '_');
+    if (sanitized.replace(/_/g, '').length === 0) {
+      return 'unknown';
+    }
+    return sanitized;
+  }
+
+  static ensureDirectoryTree(path: string): void {
+    let normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
+    if (normalized.length === 0) {
+      return;
+    }
+    let parts = normalized.split('/');
+    let current = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) {
+        if (i === 0) {
+          current = '/';
+        }
+        continue;
+      }
+      if (current === '' || current === '/') {
+        current += parts[i];
+      } else {
+        current += '/' + parts[i];
+      }
+      WorkflowStorage.ensureDirectory(current);
+      WorkflowStorage.assertDirectoryExists(current);
+    }
+    WorkflowStorage.assertDirectoryExists(normalized);
+  }
+
+  private static assertDirectoryExists(path: string): void {
+    try {
+      let stat = fs.statSync(path);
+      if (!stat.isDirectory()) {
+        throw new Error('Path is not a directory: ' + path);
+      }
+    } catch (e) {
+      let err = e as Error;
+      throw new Error('Failed to ensure directory: ' + path + ', ' + (err.message || String(e)));
+    }
+  }
+
+  private static assertSafeWorkflowPath(root: string, normalized: string): void {
+    if (normalized.length === 0) {
+      throw new Error('Path is empty');
+    }
+    let segments = normalized.split('/');
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i] === '.' || segments[i] === '..') {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+    if (normalized.startsWith('/')) {
+      if (normalized !== root && !normalized.startsWith(root + '/')) {
+        throw new Error('Path escapes filesDir: ' + normalized);
+      }
+    }
+  }
+
   private static workflowAbsolutePath(filesDir: string, path: string): string {
     let root = filesDir.replace(/\\/g, '/').replace(/\/+$/g, '');
     let normalized = path.trim().replace(/\\/g, '/');
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }
+    WorkflowStorage.assertSafeWorkflowPath(root, normalized);
     if (normalized.startsWith('/')) {
       return normalized;
     }
-    if (normalized.startsWith('workflows/')) {
+    if (normalized.startsWith('workflows/') || normalized.startsWith('chat-sessions/') ||
+      normalized.startsWith('runs/')) {
+      if (normalized.startsWith('runs/')) {
+        return WorkflowStorage.rootDir(root) + '/' + normalized;
+      }
       return root + '/' + normalized;
-    }
-    if (normalized.startsWith('runs/')) {
-      return WorkflowStorage.rootDir(root) + '/' + normalized;
     }
     return root + '/' + normalized;
   }
@@ -574,6 +803,11 @@ export class WorkflowStorage {
     for (let i = 0; i < tasks.length; i++) {
       WorkflowStorage.writeConfig(filesDir, tasks[i]);
     }
+    WorkflowStorage.writeTaskIndex(filesDir, tasks);
+  }
+
+  private static writeTaskIndex(filesDir: string, tasks: WorkflowTask[]): void {
+    WorkflowStorage.ensureWorkspace(filesDir);
     let index: WorkflowTaskIndex = {
       version: 1,
       tasks: tasks
@@ -582,33 +816,49 @@ export class WorkflowStorage {
   }
 
   static writeConfig(filesDir: string, task: WorkflowTask): void {
+    if (task.configFileName.length === 0) {
+      return;
+    }
     WorkflowStorage.ensureWorkspace(filesDir);
     WorkflowStorage.writeText(WorkflowStorage.configPath(filesDir, task.configFileName), task.workflowJson);
   }
 
-  static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
-    let tasks = WorkflowStorage.loadTasks(filesDir);
+  private static prepareTaskForUpsert(filesDir: string, task: WorkflowTask): WorkflowTask {
     let defaultTask = WorkflowStorage.findDefaultTask(filesDir, task.id);
     if (defaultTask) {
       WorkflowStorage.unmarkDefaultTaskDeleted(filesDir, task.id);
       if (task.isUserModified !== true && task.workflowJson !== defaultTask.workflowJson) {
         task.isUserModified = true;
       }
-      task = WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
+      return WorkflowStorage.mergeStoredStateIntoDefaultTask(defaultTask, task);
     }
+    return task;
+  }
+
+  private static replaceTaskInList(tasks: WorkflowTask[], task: WorkflowTask): WorkflowTask[] {
+    let nextTasks: WorkflowTask[] = [];
     let found = false;
     for (let i = 0; i < tasks.length; i++) {
       if (tasks[i].id === task.id) {
-        tasks[i] = task;
+        nextTasks.push(task);
         found = true;
-        break;
+      } else {
+        nextTasks.push(tasks[i]);
       }
     }
     if (!found) {
-      tasks.push(task);
+      nextTasks.push(task);
     }
-    WorkflowStorage.saveTasks(filesDir, tasks);
-    return WorkflowStorage.loadTasks(filesDir);
+    return nextTasks;
+  }
+
+  static upsertTask(filesDir: string, task: WorkflowTask): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let preparedTask = WorkflowStorage.prepareTaskForUpsert(filesDir, task);
+    let nextTasks = WorkflowStorage.replaceTaskInList(tasks, preparedTask);
+    WorkflowStorage.writeConfig(filesDir, preparedTask);
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
+    return nextTasks;
   }
 
   static deleteTask(filesDir: string, taskId: string): WorkflowTask[] {
@@ -623,27 +873,79 @@ export class WorkflowStorage {
       }
     }
     WorkflowStorage.markDefaultTaskDeleted(filesDir, taskId);
-    WorkflowStorage.saveTasks(filesDir, nextTasks);
     if (configFileName.length > 0) {
       try {
         fs.unlinkSync(WorkflowStorage.configPath(filesDir, configFileName));
       } catch (e) {
       }
     }
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
     return nextTasks;
   }
 
-  static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): void {
+  static updateTaskEnabled(filesDir: string, taskId: string, enabled: boolean): WorkflowTask[] {
     let tasks = WorkflowStorage.loadTasks(filesDir);
+    let changed = false;
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        tasks[i].enabled = enabled;
+        changed = true;
+        break;
+      }
+    }
+    if (changed) {
+      WorkflowStorage.writeTaskIndex(filesDir, tasks);
+    }
+    return tasks;
+  }
+
+  static updateTaskRun(filesDir: string, taskId: string, status: string, message: string): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let changed = false;
     for (let i = 0; i < tasks.length; i++) {
       if (tasks[i].id === taskId) {
         tasks[i].lastStatus = status;
         tasks[i].lastRun = nowText();
         tasks[i].lastMessage = message;
+        changed = true;
         break;
       }
     }
-    WorkflowStorage.saveTasks(filesDir, tasks);
+    if (changed) {
+      WorkflowStorage.writeTaskIndex(filesDir, tasks);
+    }
+    return tasks;
+  }
+
+  static updateTaskContextValue(filesDir: string, taskId: string, key: string, value: WorkflowJsonValue): WorkflowTask[] {
+    let tasks = WorkflowStorage.loadTasks(filesDir);
+    let currentTask: WorkflowTask | null = null;
+    for (let i = 0; i < tasks.length; i++) {
+      if (tasks[i].id === taskId) {
+        currentTask = tasks[i];
+        break;
+      }
+    }
+    if (!currentTask) {
+      throw new Error('Workflow 已不存在');
+    }
+    let workflow = WorkflowStorage.validateWorkflowJson(WorkflowStorage.readTaskWorkflowJson(filesDir, currentTask), false);
+    let context: WorkflowJsonMap = workflow.context ? workflow.context : {};
+    context[key] = value;
+    workflow.context = context;
+    let rawJson = stringifyJsonCompat(workflow as Object, 2);
+    let nextTask = WorkflowStorage.createTaskFromJson(filesDir, currentTask.sceneId, rawJson, currentTask.id);
+    nextTask.enabled = currentTask.enabled;
+    nextTask.lastStatus = currentTask.lastStatus;
+    nextTask.lastRun = currentTask.lastRun;
+    nextTask.lastMessage = currentTask.lastMessage;
+    nextTask.configFileName = currentTask.configFileName;
+    nextTask.isUserModified = currentTask.isUserModified;
+    let preparedTask = WorkflowStorage.prepareTaskForUpsert(filesDir, nextTask);
+    let nextTasks = WorkflowStorage.replaceTaskInList(tasks, preparedTask);
+    WorkflowStorage.writeConfig(filesDir, preparedTask);
+    WorkflowStorage.writeTaskIndex(filesDir, nextTasks);
+    return nextTasks;
   }
 
   private static titleForWorkflow(workflow: WorkflowDefinition): string {
@@ -760,7 +1062,8 @@ export class WorkflowStorage {
     copyTask.lastRun = '尚未执行';
     copyTask.lastMessage = '复制自“' + sourceTask.title + '”';
     tasks.push(copyTask);
-    WorkflowStorage.saveTasks(filesDir, tasks);
+    WorkflowStorage.writeConfig(filesDir, copyTask);
+    WorkflowStorage.writeTaskIndex(filesDir, tasks);
     return copyTask;
   }
 
@@ -832,38 +1135,92 @@ export class WorkflowStorage {
 
   static createDefaultTasks(filesDir: string): WorkflowTask[] {
     WorkflowStorage.ensureWorkspace(filesDir);
-    return [
-      WorkflowStorage.createTaskFromJson(filesDir, 0, WorkflowStorage.defaultAlipayWorkflow(), 'default_alipay_bill'),
-      WorkflowStorage.createTaskFromJson(filesDir, 1, WorkflowStorage.defaultEleWorkflow(), 'default_ele_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 2, WorkflowStorage.defaultBilibiliWorkflow(), 'default_bilibili_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 2, WorkflowStorage.defaultTencentVideoWorkflow(), 'default_tencent_video_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 3, WorkflowStorage.defaultWeixinWorkflow(), 'default_weixin_chat'),
-      WorkflowStorage.createTaskFromJson(filesDir, 3, WorkflowStorage.defaultWeixinTodayWorkflow(), 'default_weixin_today_chat'),
-      WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultDianpingWorkflow(), 'default_dianping_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 4, WorkflowStorage.defaultMeituanWorkflow(), 'default_meituan_order'),
-      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultWeiboWorkflow(), 'default_weibo_hot_search'),
-      WorkflowStorage.createTaskFromJson(filesDir, 5, WorkflowStorage.defaultXiaohongshuWorkflow(), 'default_xiaohongshu_history'),
-      WorkflowStorage.createTaskFromJson(filesDir, 6, WorkflowStorage.defaultCtripWorkflow(), 'default_ctrip_order')
-    ];
+    let tasks: WorkflowTask[] = [];
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      let config = DEFAULT_WORKFLOW_CONFIGS[i];
+      tasks.push(WorkflowStorage.createTaskFromJson(filesDir, config.sceneId,
+        WorkflowStorage.defaultWorkflowJsonForConfig(filesDir, config), config.id));
+    }
+    return tasks;
   }
 
-  static defaultWorkflowForScene(sceneId: number): string {
+  static defaultWorkflowForScene(sceneId: number, filesDir: string = ''): string {
     if (sceneId === 1) {
-      return WorkflowStorage.defaultEleWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_ele_order');
     }
     if (sceneId === 2) {
-      return WorkflowStorage.defaultBilibiliWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_bilibili_history');
     }
     if (sceneId === 3) {
-      return WorkflowStorage.defaultWeixinWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_weixin_chat');
     }
     if (sceneId === 4) {
-      return WorkflowStorage.defaultMeituanWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_meituan_order');
     }
     if (sceneId === 5) {
-      return WorkflowStorage.defaultWeiboWorkflow();
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_weibo_hot_search');
     }
     if (sceneId === 6) {
+      return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_ctrip_order');
+    }
+    return WorkflowStorage.defaultWorkflowJsonForTaskId(filesDir, 'default_alipay_bill');
+  }
+
+  private static defaultWorkflowJsonForTaskId(filesDir: string, taskId: string): string {
+    for (let i = 0; i < DEFAULT_WORKFLOW_CONFIGS.length; i++) {
+      if (DEFAULT_WORKFLOW_CONFIGS[i].id === taskId) {
+        return WorkflowStorage.defaultWorkflowJsonForConfig(filesDir, DEFAULT_WORKFLOW_CONFIGS[i]);
+      }
+    }
+    return WorkflowStorage.defaultAlipayWorkflow();
+  }
+
+  private static defaultWorkflowJsonForConfig(filesDir: string, config: DefaultWorkflowConfig): string {
+    let cached = DEFAULT_WORKFLOW_JSON_CACHE[config.id];
+    if (cached && cached.length > 0) {
+      return cached;
+    }
+    if (filesDir.length > 0) {
+      try {
+        let path = WorkflowStorage.configPath(filesDir, config.fileName);
+        if (WorkflowStorage.fileExists(path)) {
+          return WorkflowStorage.readText(path);
+        }
+      } catch (e) {
+      }
+    }
+    return WorkflowStorage.legacyDefaultWorkflowForTaskId(config.id);
+  }
+
+  private static legacyDefaultWorkflowForTaskId(taskId: string): string {
+    if (taskId === 'default_ele_order') {
+      return WorkflowStorage.defaultEleWorkflow();
+    }
+    if (taskId === 'default_bilibili_history') {
+      return WorkflowStorage.defaultBilibiliWorkflow();
+    }
+    if (taskId === 'default_tencent_video_history') {
+      return WorkflowStorage.defaultTencentVideoWorkflow();
+    }
+    if (taskId === 'default_weixin_chat') {
+      return WorkflowStorage.defaultWeixinWorkflow();
+    }
+    if (taskId === 'default_weixin_today_chat') {
+      return WorkflowStorage.defaultWeixinTodayWorkflow();
+    }
+    if (taskId === 'default_dianping_order') {
+      return WorkflowStorage.defaultDianpingWorkflow();
+    }
+    if (taskId === 'default_meituan_order') {
+      return WorkflowStorage.defaultMeituanWorkflow();
+    }
+    if (taskId === 'default_weibo_hot_search') {
+      return WorkflowStorage.defaultWeiboWorkflow();
+    }
+    if (taskId === 'default_xiaohongshu_history') {
+      return WorkflowStorage.defaultXiaohongshuWorkflow();
+    }
+    if (taskId === 'default_ctrip_order') {
       return WorkflowStorage.defaultCtripWorkflow();
     }
     return WorkflowStorage.defaultAlipayWorkflow();

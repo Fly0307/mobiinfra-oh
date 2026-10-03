@@ -1,13 +1,16 @@
 import { DataManagerPaths } from './DataManagerPaths';
 import { DataManagerStorage } from './DataManagerStorage';
 import { DataPipelineModelClient } from './DataPipelineModelClient';
-import { ConsolidationService } from './ConsolidationService';
+import { ConsolidationService, sourceEntryProcessingHash } from './ConsolidationService';
 import { IndexService } from './IndexService';
 import { CollectionGroupingBuildResult, CollectionGroupingService, collectionTabSpecByIndex, collectionTabSpecs, heuristicCollectionGroups } from './CollectionGroupingService';
 import { HomeRecommendationBuildResult, HomeRecommendationService } from './HomeRecommendationService';
 import { dataManagerInfo } from './DataManagerLog';
 import { DataManagerImageResolver } from './DataManagerImageResolver';
 import { AvatarService } from './avatar/AvatarService';
+import { GalleryMemorySync } from '../utils/gallery/GalleryMemorySync';
+import { ChatMemorySync } from './ChatMemorySync';
+import { shouldOfferSyncReminder, syncSnapshotTimeMs } from './DataManagerSyncReminder';
 import {
   AvatarGenerateRequest,
   AvatarHomeViewModel,
@@ -35,6 +38,8 @@ import {
   ProfileClaim,
   ProfileDomainState,
   ProfileState,
+  QueryOptions,
+  QueryResult,
   RefreshSummary,
   DataManagerProgressCallback,
   NumberMap,
@@ -54,7 +59,8 @@ import {
   sourceRef,
   stableUnique,
   addDays,
-  isIsoDate
+  isIsoDate,
+  workflowSceneIdFromMetadata
 } from './DataManagerUtils';
 
 interface DailyLogSnapshotFile {
@@ -78,6 +84,9 @@ function createHomeProfileAvatarDefaults(): AvatarHomeViewModel {
   let avatar = createEmptyAvatarHomeViewModel();
   return {
     avatarUri: avatar.avatarUri,
+    avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -89,6 +98,9 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
   let avatar = createHomeProfileAvatarDefaults();
   return {
     avatarUri: avatar.avatarUri,
+    avatarForegroundUri: avatar.avatarForegroundUri,
+    avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+    avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
     avatarStatus: avatar.avatarStatus,
     avatarUpdatedLabel: avatar.avatarUpdatedLabel,
     avatarActionLabel: avatar.avatarActionLabel,
@@ -104,6 +116,27 @@ export function createEmptyHomeProfileViewModel(): HomeProfileViewModel {
 
 export function createEmptyCollectionViewModels(): CollectionViewModel[] {
   return collectionTabSpecs().map((spec) => emptyCollectionViewModel(spec.tabIndex));
+}
+
+// 汇总页的 tabIndex 是稳定 sceneId，不保证从 0 连续递增；这里统一把 sceneId 映射到 viewModels 数组位置。
+export function collectionViewModelByTabIndex(viewModels: CollectionViewModel[], tabIndex: number): CollectionViewModel {
+  let specs = collectionTabSpecs();
+  let targetSpec = collectionTabSpecByIndex(tabIndex);
+  let targetIndex = 0;
+  for (let index = 0; index < specs.length; index++) {
+    if (specs[index].tabIndex === targetSpec.tabIndex) {
+      targetIndex = index;
+      break;
+    }
+  }
+  if (targetIndex < viewModels.length) {
+    return viewModels[targetIndex];
+  }
+  let emptyViews = createEmptyCollectionViewModels();
+  if (targetIndex < emptyViews.length) {
+    return emptyViews[targetIndex];
+  }
+  return emptyViews[0];
 }
 
 function defaultHomeDomains(): HomeDomainViewModel[] {
@@ -210,7 +243,7 @@ function emptyCollectionViewModel(index: number): CollectionViewModel {
     groups: [],
     rows: [],
     insights: defaultInsights(),
-    insightSummary: '导入 daily-log 后，这里会展示已整理的中层采集数据。',
+    insightSummary: '同步后，这里会展示采集数据和聊天中提取的相关信息。',
     empty: true
   };
 }
@@ -252,6 +285,21 @@ export class DataManagerFacade {
     dataManagerInfo('DataManagerFacade ensureReady: root=' + this.paths.rootDir);
   }
 
+  hasBuiltIndexes(): boolean {
+    this.ensureReady();
+    return this.storage.exists(this.storage.join(this.paths.indexesRoot, 'manifest.json'));
+  }
+
+  queryIndexedEvents(options: QueryOptions): QueryResult {
+    this.ensureReady();
+    return this.indexService.query(options);
+  }
+
+  loadProfileMarkdown(): string {
+    this.ensureReady();
+    return this.indexService.loadProfileMarkdown();
+  }
+
   hasDailyLogData(): boolean {
     this.ensureReady();
     let files = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
@@ -265,11 +313,38 @@ export class DataManagerFacade {
     return false;
   }
 
+  hasDataToSync(): boolean {
+    if (this.hasDailyLogData() || new ChatMemorySync(this.paths, this.storage, this.modelClient).hasDataToSync()) {
+      return true;
+    }
+    let lastSyncMs = syncSnapshotTimeMs(this.loadDailyLogSnapshot().generated_at);
+    return GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir,
+      Number.isFinite(lastSyncMs) ? lastSyncMs : 0);
+  }
+
+  shouldRemindToSync(nowMs: number = Date.now(), firstOpenAt: string = ''): boolean {
+    let previous = this.loadDailyLogSnapshot();
+    let referenceTime = Number.isFinite(syncSnapshotTimeMs(previous.generated_at)) ?
+      previous.generated_at : firstOpenAt;
+    if (!shouldOfferSyncReminder(referenceTime, true, nowMs)) {
+      return false;
+    }
+    let chatSync = new ChatMemorySync(this.paths, this.storage, this.modelClient);
+    let hasNewRecords = chatSync.hasPendingMessages(nowMs) ||
+      this.hasNewDailyLogEntries(previous, this.buildDailyLogSnapshot()) ||
+      GalleryMemorySync.hasNewValidResultsSince(this.paths.filesDir, syncSnapshotTimeMs(referenceTime));
+    return shouldOfferSyncReminder(referenceTime, hasNewRecords, nowMs);
+  }
+
   async refresh(modelConfig: DataManagerModelConfig, progress?: DataManagerProgressCallback, groupingModelConfig?: DataManagerModelConfig): Promise<RefreshSummary> {
     this.ensureReady();
     let groupingConfig = groupingModelConfig ? groupingModelConfig : modelConfig;
     this.emitProgress(progress, '准备', '正在准备数据目录', 0, 100, 2);
     dataManagerInfo(`DataManagerFacade refresh start: modelEnabled=${modelConfig.enabled}, groupingModelEnabled=${groupingConfig.enabled}, dailyRoot=${this.paths.dailyLogRoot}`);
+    GalleryMemorySync.sync(this.paths.filesDir);
+    let chatSummary = await new ChatMemorySync(this.paths, this.storage, this.modelClient).sync(modelConfig, progress);
+    let chatMessage = chatSummary.processedParts > 0 ?
+      `已检查近 7 天未处理聊天，提取 ${chatSummary.factCount} 条相关信息` : '';
     let currentSnapshot = this.buildDailyLogSnapshot();
     let previousSnapshot = this.loadDailyLogSnapshot();
     if (this.canSkipRefresh(previousSnapshot, currentSnapshot)) {
@@ -278,6 +353,10 @@ export class DataManagerFacade {
       let recommendations = await this.homeRecommendationService.build(groupingConfig, progress, true);
       this.writeDailyLogSnapshot(currentSnapshot);
       let skipped = this.skippedRefreshSummary(currentSnapshot);
+      if (chatMessage.length > 0) {
+        skipped.skipped = false;
+        skipped.message = chatMessage;
+      }
       if (groups.updatedGroupDocs > 0 || !recommendations.reused || recommendations.prunedCount > 0) {
         let actions: string[] = [];
         if (groups.updatedGroupDocs > 0) {
@@ -290,10 +369,10 @@ export class DataManagerFacade {
           actions.push(`清理 ${recommendations.prunedCount} 条过期待办推荐`);
         }
         skipped.skipped = false;
-        skipped.message = `daily-log 无新增，${actions.join('，')}`;
+        skipped.message = [chatMessage, `daily-log 无新增，${actions.join('，')}`].filter((text: string) => text.length > 0).join('；');
       }
       dataManagerInfo(`DataManagerFacade refresh skipped: daily-log unchanged, treeHash=${currentSnapshot.tree_hash}, events=${skipped.eventCount}, collectionGroups=${groups.groupCount}, groupDocsUpdated=${groups.updatedGroupDocs}, recommendations=${recommendations.recommendationCount}, prunedRecommendations=${recommendations.prunedCount}`);
-      this.emitProgress(progress, '完成', 'daily-log 无新增', 100, 100, 100);
+      this.emitProgress(progress, '完成', skipped.message, 100, 100, 100);
       return skipped;
     }
     if (this.canRecoverIndexesFromConsolidatedOutputs(previousSnapshot, currentSnapshot)) {
@@ -314,7 +393,7 @@ export class DataManagerFacade {
         eventCount: index.eventCount,
         profileClaimCount: index.profileClaimCount,
         updatedAt: index.updatedAt,
-        message: `基于已整理日志重建 ${index.eventCount} 条索引事件`,
+        message: (chatMessage.length > 0 ? chatMessage + '；' : '') + `基于已整理日志重建 ${index.eventCount} 条索引事件`,
         skipped: false
       };
     }
@@ -336,7 +415,8 @@ export class DataManagerFacade {
       eventCount: index.eventCount,
       profileClaimCount: index.profileClaimCount,
       updatedAt: index.updatedAt,
-      message: `整理 ${consolidation.sourceEntries} 条 daily-log，生成 ${index.eventCount} 条索引事件`,
+      message: (chatMessage.length > 0 ? chatMessage + '；' : '') +
+        `整理 ${consolidation.sourceEntries} 条日志，生成 ${index.eventCount} 条索引事件`,
       skipped: false
     };
   }
@@ -379,7 +459,14 @@ export class DataManagerFacade {
 
   private buildDailyLogSnapshot(): DailyLogSnapshot {
     let files: DailyLogSnapshotFile[] = [];
-    this.storage.findFiles(this.paths.dailyLogRoot, '.md').forEach((path: string) => {
+    let paths = this.storage.findFiles(this.paths.dailyLogRoot, '.md');
+    GalleryMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot).forEach((relativePath: string) => {
+      paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
+    });
+    ChatMemorySync.dailyLogRelativePaths(this.paths.dailyLogRoot, this.storage).forEach((relativePath: string) => {
+      paths.push(this.storage.join(this.paths.dailyLogRoot, relativePath));
+    });
+    stableUnique(paths).forEach((path: string) => {
       let relative = this.storage.relativePath(this.paths.dailyLogRoot, path).replace(/\\/g, '/');
       let content = this.storage.readText(path, '');
       let document = parseDailyLogDocument(content);
@@ -418,6 +505,13 @@ export class DataManagerFacade {
 
   private writeDailyLogSnapshot(snapshot: DailyLogSnapshot): void {
     this.storage.writeJsonAtomic(this.dailyLogSnapshotPath(), snapshot as Object);
+  }
+
+  private hasNewDailyLogEntries(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
+    let previousCounts: Record<string, number> = new Object() as Record<string, number>;
+    previous.files.forEach((file: DailyLogSnapshotFile) => previousCounts[file.path] = file.entry_count);
+    return current.files.some((file: DailyLogSnapshotFile): boolean =>
+      file.entry_count > (previousCounts[file.path] || 0));
   }
 
   private canSkipRefresh(previous: DailyLogSnapshot, current: DailyLogSnapshot): boolean {
@@ -488,7 +582,16 @@ export class DataManagerFacade {
             continue;
           }
           let ref = sourceRef(day, fileName, index);
-          let currentHash = this.storage.sha256Text(text);
+          let metadata = document.workflow_metadata;
+          let currentHash = sourceEntryProcessingHash(this.storage, {
+            source_date: day,
+            file_name: fileName,
+            entry_index: index,
+            entry_text: text,
+            workflow_metadata: metadata,
+            workflow_scene_id: workflowSceneIdFromMetadata(metadata),
+            source_ref: ref
+          });
           let previousHash = processed[ref] || '';
           let covered = previousHash.length > 0 ? previousHash === currentHash : processedRefs[ref] === true;
           if (!covered) {
@@ -544,7 +647,7 @@ export class DataManagerFacade {
         total_records: 0,
         month: '',
         recent_match_days: 7,
-        recent_match_max_records: 100
+        recent_match_max_records: 0
       },
       records: []
     });
@@ -578,7 +681,7 @@ export class DataManagerFacade {
           total_records: 0,
           month: '',
           recent_match_days: 7,
-          recent_match_max_records: 100
+          recent_match_max_records: 0
         },
         records: []
       });
@@ -591,7 +694,11 @@ export class DataManagerFacade {
     this.homeRecommendationService.pruneInactiveRecommendationsForToday();
     let profile = this.indexService.loadProfileState();
     if (!profile || profile.event_count === 0) {
-      return createEmptyHomeProfileViewModel();
+      let empty = createEmptyHomeProfileViewModel();
+      let avatar = this.avatarService.currentHomeView();
+      empty.avatarReferencePhotoUri = avatar.avatarReferencePhotoUri;
+      empty.avatarMessageForegroundUri = avatar.avatarMessageForegroundUri;
+      return empty;
     }
     let domains = this.homeProfileDomains(profile);
     let recommendations = this.homeRecommendations();
@@ -599,6 +706,9 @@ export class DataManagerFacade {
     let avatar = this.avatarService.homeView(profile, completeness);
     return {
       avatarUri: avatar.avatarUri,
+      avatarForegroundUri: avatar.avatarForegroundUri,
+      avatarMessageForegroundUri: avatar.avatarMessageForegroundUri,
+      avatarReferencePhotoUri: avatar.avatarReferencePhotoUri,
       avatarStatus: avatar.avatarStatus,
       avatarUpdatedLabel: avatar.avatarUpdatedLabel,
       avatarActionLabel: avatar.avatarActionLabel,
@@ -649,6 +759,14 @@ export class DataManagerFacade {
 
   async generateAvatar(config: AvatarProviderConfig, request: AvatarGenerateRequest): Promise<AvatarHomeViewModel> {
     return this.avatarService.generate(config, request);
+  }
+
+  async saveAvatarReferencePhoto(sourceUri: string): Promise<AvatarHomeViewModel> {
+    return await this.avatarService.saveReferencePhoto(sourceUri);
+  }
+
+  async ensureCurrentAvatarForeground(): Promise<AvatarHomeViewModel> {
+    return await this.avatarService.ensureCurrentForeground();
   }
 
   listAvatarVersions(): AvatarVersionViewModel[] {
@@ -751,6 +869,7 @@ export class DataManagerFacade {
       status: '已整理',
       domain: primaryDomain,
       imageRefs: images,
+      galleryDetails: GalleryMemorySync.detailsForSourceRefs(this.paths.filesDir, this.paths.dailyLogRoot, event.source_refs || []),
       thumbnailUri: thumbnailUri
     };
     return row;

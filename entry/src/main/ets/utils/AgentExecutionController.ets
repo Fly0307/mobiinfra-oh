@@ -1,9 +1,13 @@
 import { AppLogger } from './AppLogger';
+import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess } from './AiServiceAccess';
+import { CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY } from './CaptureOverlayPolicy';
 
-type CancelHandler = () => Promise<void> | void;
+type CancelHandler = () => Promise<void>;
 type VoidHandler = () => void;
+type ReturnToAppHandler = () => Promise<void>;
 type FloatPanelLayoutHandler = (expanded: boolean) => void;
-type FloatPanelMoveHandler = (phase: string) => void;
+type FloatPanelMoveHandler = (phase: string, screenX: number, screenY: number) => void;
 type CaptureOverlayHandler = (hidden: boolean) => Promise<boolean>;
 
 const PAUSE_POLL_INTERVAL_MS = 200;
@@ -12,6 +16,8 @@ const MAX_FLOAT_LOG_CHARS = 6000;
 const FLOAT_STREAM_INTERVAL_MS = 18;
 const FLOAT_STREAM_POST_STATUS_DELAY_MS = 500;
 const FLOAT_STREAM_IDLE_STATUS = 'AI Agent running...';
+const CANCEL_RETURN_TEARDOWN_DELAY_MS = 350;
+const CANCEL_RETURN_TEARDOWN_TIMEOUT_MS = 1200;
 
 export class AgentExecutionController {
   private static executionActive: boolean = false;
@@ -23,7 +29,7 @@ export class AgentExecutionController {
   private static floatWindowSyncHandler: VoidHandler | null = null;
   private static floatPanelLayoutHandler: FloatPanelLayoutHandler | null = null;
   private static floatPanelMoveHandler: FloatPanelMoveHandler | null = null;
-  private static returnToAppHandler: VoidHandler | null = null;
+  private static returnToAppHandler: ReturnToAppHandler | null = null;
   private static captureOverlayHandler: CaptureOverlayHandler | null = null;
   private static captureOverlayHideDepth: number = 0;
   private static captureOverlayHidden: boolean = false;
@@ -46,6 +52,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 截图隐藏态必须从 false 启动，避免 Ability 重建后 FloatWindow 长期透明。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
   }
 
   static isExecutionActive(): boolean {
@@ -65,6 +73,8 @@ export class AgentExecutionController {
   }
 
   static beginExecution(text: string = 'AI Agent running...'): void {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     AgentExecutionController.executionActive = true;
     AgentExecutionController.cancelRequested = false;
     AgentExecutionController.pauseRequested = false;
@@ -73,6 +83,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 每次任务开始都恢复小面板内容，清理上一轮异常中断遗留的截图隐藏态。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
     AgentExecutionController.resetStreamDisplay();
     AgentExecutionController.writeFloatText(text, true, false);
     AgentExecutionController.notifyFloatWindowSync();
@@ -107,6 +119,8 @@ export class AgentExecutionController {
     AppStorage.setOrCreate('agentCancelRequested', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
+    // 任务结束后不保留截图隐藏态；后续重新创建浮窗时应显示正常面板。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
     AgentExecutionController.resetStreamDisplay();
     AgentExecutionController.writeFloatText(text, false, false);
     AgentExecutionController.notifyFloatWindowSync();
@@ -114,35 +128,24 @@ export class AgentExecutionController {
 
   static requestCancellation(): void {
     AgentExecutionController.cancelRequested = true;
-    AgentExecutionController.executionActive = false;
     AgentExecutionController.pauseRequested = false;
     AgentExecutionController.floatPanelExpanded = false;
     AgentExecutionController.captureOverlayHideDepth = 0;
     AgentExecutionController.captureOverlayHidden = false;
     AgentExecutionController.resetStreamDisplay();
     AppStorage.setOrCreate('agentCancelRequested', true);
-    AppStorage.setOrCreate('agentExecutionActive', false);
     AppStorage.setOrCreate('agentPauseRequested', false);
     AppStorage.setOrCreate('agentFloatPanelExpanded', false);
-    AgentExecutionController.notifyFloatWindowSync();
+    // 用户取消可能发生在截图 finally 前，主动恢复渲染状态避免悬浮窗残留透明。
+    AppStorage.setOrCreate(CAPTURE_OVERLAY_HIDDEN_STORAGE_KEY, false);
+    AgentExecutionController.writeFloatText('正在终止任务并返回 App...', false, false);
 
-    try {
-      AgentExecutionController.localCancelHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('local cancel handler failed', e as Error);
-    }
+    AgentExecutionController.invokeCancelHandler(AgentExecutionController.localCancelHandler,
+      'local cancel handler failed');
+    AgentExecutionController.invokeCancelHandler(AgentExecutionController.cloudCancelHandler,
+      'cloud cancel handler failed');
 
-    try {
-      AgentExecutionController.cloudCancelHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('cloud cancel handler failed', e as Error);
-    }
-
-    try {
-      AgentExecutionController.returnToAppHandler?.();
-    } catch (e) {
-      AgentExecutionController.warn('return-to-app handler failed', e as Error);
-    }
+    AgentExecutionController.scheduleCancellationTeardown(AgentExecutionController.invokeReturnToAppHandler());
   }
 
   static togglePause(): void {
@@ -197,15 +200,19 @@ export class AgentExecutionController {
     AgentExecutionController.floatPanelMoveHandler = handler;
   }
 
-  static startFloatPanelMove(): void {
-    AgentExecutionController.notifyFloatPanelMove('start');
+  static startFloatPanelMove(screenX: number, screenY: number): void {
+    AgentExecutionController.notifyFloatPanelMove('start', screenX, screenY);
+  }
+
+  static moveFloatPanel(screenX: number, screenY: number): void {
+    AgentExecutionController.notifyFloatPanelMove('move', screenX, screenY);
   }
 
   static endFloatPanelMove(): void {
-    AgentExecutionController.notifyFloatPanelMove('end');
+    AgentExecutionController.notifyFloatPanelMove('end', 0, 0);
   }
 
-  static setReturnToAppHandler(handler: VoidHandler | null): void {
+  static setReturnToAppHandler(handler: ReturnToAppHandler | null): void {
     AgentExecutionController.returnToAppHandler = handler;
   }
 
@@ -257,16 +264,69 @@ export class AgentExecutionController {
   }
 
   static returnToApp(): boolean {
-    if (!AgentExecutionController.returnToAppHandler) {
+    let handler = AgentExecutionController.returnToAppHandler;
+    if (!handler) {
       return false;
     }
     try {
-      AgentExecutionController.returnToAppHandler();
+      handler().catch((e: Error) => {
+        AgentExecutionController.warn('return-to-app handler failed', e);
+      });
       return true;
     } catch (e) {
       AgentExecutionController.warn('return-to-app handler failed', e as Error);
       return false;
     }
+  }
+
+  private static invokeReturnToAppHandler(): Promise<void> {
+    let handler = AgentExecutionController.returnToAppHandler;
+    if (!handler) {
+      return Promise.resolve();
+    }
+    try {
+      return handler();
+    } catch (e) {
+      AgentExecutionController.warn('return-to-app handler failed', e as Error);
+    }
+    return Promise.resolve();
+  }
+
+  private static invokeCancelHandler(handler: CancelHandler | null, warnMessage: string): void {
+    if (!handler) {
+      return;
+    }
+    try {
+      handler().catch((e: Error) => {
+        AgentExecutionController.warn(warnMessage, e);
+      });
+    } catch (e) {
+      AgentExecutionController.warn(warnMessage, e as Error);
+    }
+  }
+
+  private static scheduleCancellationTeardown(returnPromise: Promise<void>): void {
+    let completed = false;
+    let teardown = (): void => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      setTimeout(() => {
+        AgentExecutionController.executionActive = false;
+        AppStorage.setOrCreate('agentExecutionActive', false);
+        AgentExecutionController.notifyFloatWindowSync();
+      }, CANCEL_RETURN_TEARDOWN_DELAY_MS);
+    };
+    returnPromise.then(() => {
+      teardown();
+    }).catch((e: Error) => {
+      AgentExecutionController.warn('return-to-app handler failed', e);
+      teardown();
+    });
+    setTimeout(() => {
+      teardown();
+    }, CANCEL_RETURN_TEARDOWN_TIMEOUT_MS);
   }
 
   private static notifyFloatWindowSync(): void {
@@ -285,9 +345,9 @@ export class AgentExecutionController {
     }
   }
 
-  private static notifyFloatPanelMove(phase: string): void {
+  private static notifyFloatPanelMove(phase: string, screenX: number, screenY: number): void {
     try {
-      AgentExecutionController.floatPanelMoveHandler?.(phase);
+      AgentExecutionController.floatPanelMoveHandler?.(phase, screenX, screenY);
     } catch (e) {
       AgentExecutionController.warn('float panel move handler failed', e as Error);
     }

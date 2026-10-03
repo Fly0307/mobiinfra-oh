@@ -1,3 +1,5 @@
+import { APP_HEADER_CONTENT_GAP, AppHeader } from '../components/AppHeader';
+import { FrostedPage } from '../components/FrostedPage';
 import native from 'libentry.so';
 import { router } from '@kit.ArkUI';
 import pasteboard from '@ohos.pasteboard';
@@ -9,6 +11,7 @@ import { common } from '@kit.AbilityKit';
 @Entry
 @Component
 struct OpTest {
+  private pageScroller: Scroller = new Scroller();
   @State testResult: string = 'Click a button to start testing'
   @State running: boolean = false
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
@@ -111,18 +114,16 @@ struct OpTest {
       .onClick(() => { this.cpuMemory = value })
   }
 
-  build() {
-    Scroll() {
-      Column() {
-      Text('Conv Op Precision Test')
-        .fontSize(22)
-        .fontWeight(FontWeight.Bold)
-        .margin({ top: 15, bottom: 5 })
+  // 顶部返回栏固定提供路由返回入口，避免调试页首屏只能滚到底部返回。
+  @Builder PageHeader() {
+    AppHeader({ title: 'Conv Op Precision Test', showBackButton: true,
+      onBackClick: (): void => { router.back(); } })
+  }
 
-      Text('CPU vs HiAI Delegate (USER_1)')
-        .fontSize(13)
-        .fontColor('#666666')
-        .margin({ bottom: 10 })
+  @Builder PageContent() {
+    Scroll(this.pageScroller) {
+      Column() {
+      Text('CPU vs HiAI Delegate (USER_1)').fontSize(13).fontColor('#666666').width('90%').margin({ top: 14, bottom: 12 })
 
       // HiAI conv path selector (applies to subsequent test runs)
       Text('HiAI path:')
@@ -476,10 +477,25 @@ struct OpTest {
       .margin({ bottom: 15 })
     }
     .width('100%')
+    .padding({ top: APP_HEADER_CONTENT_GAP })
     .backgroundColor('#F7F9FC')
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#F7F9FC')
+    .clip(false)
+  }
+
+  build() {
+    Column() {
+      FrostedPage({
+        pageBackgroundColor: '#F7F9FC',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
+    }
+    .width('100%')
+    .height('100%')
   }
 }

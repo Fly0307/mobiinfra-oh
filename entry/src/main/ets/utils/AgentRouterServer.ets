@@ -1,9 +1,14 @@
 import { socket } from '@kit.NetworkKit';
+import { PrivacyConsent } from './PrivacyConsent';
+import { AiServiceAccess, AI_LOGIN_REQUIRED_MESSAGE } from './AiServiceAccess';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
+import { HdcWorkflowBridge } from './HdcWorkflowBridge';
+import { getAppBundleName } from './AppIdentity';
 import { AppLogger } from './AppLogger';
+import { localVisionPromptHw } from './LocalVisionImageShape';
 
 type RequestValue = Object | string | number | boolean | null;
 type AgentRouteMode = 'local' | 'cloud';
@@ -15,6 +20,7 @@ type AgentStepHandler = (variablePart: string, onToken?: (token: string) => void
 type AgentResetHandler = () => Promise<string>;
 type AgentChatHandler = (userMessage: string) => Promise<string>;
 type NativeResetHandler = () => string;
+type HdcServerUrlProvider = () => string;
 
 type RequestKey =
   'type' | 'preserve_execution' | 'message' | 'hidden' | 'prefix' | 'variable' |
@@ -83,6 +89,7 @@ export class AgentRouterServer {
   private cloudLogHandler: LogHandler | null = null;
   private cloudApprovalHandler: ApprovalHandler | null = null;
   private cloudConfigProvider: CloudConfigProvider | null = null;
+  private hdcServerUrlProvider: HdcServerUrlProvider | null = null;
   public currentTask: string = '';
 
   public running(): boolean {
@@ -117,6 +124,10 @@ export class AgentRouterServer {
     this.cloudApprovalHandler = onRequireApproval ?? null;
   }
 
+  public setHdcServerUrlProvider(provider: HdcServerUrlProvider | null): void {
+    this.hdcServerUrlProvider = provider;
+  }
+
   public useLocal(): void {
     this.routeMode = 'local';
   }
@@ -137,6 +148,8 @@ export class AgentRouterServer {
   }
 
   public submitLocalTask(task: string): void {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'local';
     this.currentTask = task;
     this.cloudTask = '';
@@ -146,6 +159,8 @@ export class AgentRouterServer {
   }
 
   public submitCloudTask(task: string): void {
+    AiServiceAccess.requireAllowed();
+    PrivacyConsent.requireAccepted();
     this.routeMode = 'cloud';
     this.currentTask = task;
     this.cloudTask = '';
@@ -160,6 +175,7 @@ export class AgentRouterServer {
     this.currentTask = '';
     this.cloudActionHistory = [];
     this.cloudTask = '';
+    let returnPromise = this.returnToHostApp(activeMode);
     this.log(activeMode, '>> [Cancel] 用户点击悬浮窗，请求终止当前任务。');
 
     if (activeMode === 'cloud') {
@@ -167,6 +183,7 @@ export class AgentRouterServer {
         this.cloudClientRef?.cancelActiveRequests();
       } catch (e) {
       }
+      await returnPromise;
       return;
     }
 
@@ -183,6 +200,34 @@ export class AgentRouterServer {
       this.localReset();
     } catch (e) {
     }
+    await returnPromise;
+  }
+
+  private async returnToHostApp(mode: AgentRouteMode): Promise<boolean> {
+    let returned = false;
+    if (AgentExecutionController.returnToApp()) {
+      this.log(mode, '>> [Cancel] return-to-app handler invoked before local cleanup.');
+      returned = true;
+    }
+
+    let hdcServerUrl = this.hdcServerUrlProvider ? this.hdcServerUrlProvider().trim() : '';
+    if (hdcServerUrl.length === 0) {
+      return returned;
+    }
+
+    try {
+      let bridge = new HdcWorkflowBridge(hdcServerUrl, (message: string) => {
+        this.log(mode, message);
+      });
+      let bundleName = getAppBundleName();
+      await bridge.startApp(bundleName, bundleName, false);
+      this.log(mode, '>> [Cancel] returned to host app via HDC bridge before local cleanup.');
+      return true;
+    } catch (e) {
+      let err = e as Error;
+      this.log(mode, '>> [Cancel] HDC return to host app failed before cleanup: ' + (err.message || String(e)));
+    }
+    return returned;
   }
 
   public async start(port: number, filesDir: string): Promise<boolean> {
@@ -273,6 +318,22 @@ export class AgentRouterServer {
   private async handleRequest(client: socket.TCPSocketConnection, req: RequestMap): Promise<void> {
     let reqType = this.getString(req, 'type');
 
+    // 登录限制与隐私授权独立；始终保留任务清理和浮窗恢复消息。
+    if (!AiServiceAccess.isAllowed() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
+
+    // Keep cleanup messages available, but do not hand out tasks or model actions without consent.
+    if (!PrivacyConsent.isAccepted() && reqType !== 'clear' && reqType !== 'error' &&
+      reqType !== 'capture_overlay_restore') {
+      this.currentTask = '';
+      this.sendTerminate(client, 'Privacy consent required');
+      return;
+    }
+
     if (reqType === 'poll') {
       if (this.routeMode === 'cloud' && this.currentTask.length > 0) {
         this.log('cloud', '>> [Cloud Poll] PC fetched task: ' + this.currentTask);
@@ -318,6 +379,14 @@ export class AgentRouterServer {
     }
 
     await AgentExecutionController.waitIfPaused();
+    if (!AiServiceAccess.isAllowed()) {
+      this.sendTerminate(client, AI_LOGIN_REQUIRED_MESSAGE);
+      return;
+    }
+    if (!PrivacyConsent.isAccepted()) {
+      this.sendTerminate(client, 'Privacy consent revoked');
+      return;
+    }
     if (this.isCancellationRequested()) {
       this.log(this.routeMode, '>> [Cancel] cancellation intercepted after pause: ' + reqType);
       this.sendTerminate(client, 'Task cancelled by user');
@@ -404,8 +473,10 @@ export class AgentRouterServer {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
         let w = this.getScalarText(req, 'width');
         let h = this.getScalarText(req, 'height');
-        let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
-        this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+        let modelHw = localVisionPromptHw(Number(w), Number(h));
+        let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+        this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + w + 'x' + h +
+          ', model_hw=' + modelHw + ')');
         if (variable.indexOf('<image_placeholder>') !== -1) {
           variable = variable.replace('<image_placeholder>', imgTag);
         } else {
@@ -419,7 +490,7 @@ export class AgentRouterServer {
       try {
         let response = await this.localAgentStep(variable, (token: string) => {
           if (this.isCancellationRequested()) {
-            throw new Error('__agent_cancelled__');
+            return;
           }
           streamedText += token;
           AgentExecutionController.replaceFloatText(streamedText);
@@ -486,8 +557,10 @@ export class AgentRouterServer {
         let imgPath = this.saveSnapshot(this.filesDir, imageBase64);
         let w = this.getScalarText(req, 'width');
         let h = this.getScalarText(req, 'height');
-        let imgTag = '<img>' + imgPath + '<hw>' + h + ',' + w + '</hw></img>';
-        this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h + ')');
+        let modelHw = localVisionPromptHw(Number(w), Number(h));
+        let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+        this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + w + 'x' + h +
+          ', model_hw=' + modelHw + ')');
         if (prompt.indexOf('<image_placeholder>') !== -1) {
           prompt = prompt.replace('<image_placeholder>', imgTag);
         } else {
@@ -698,7 +771,8 @@ export class AgentRouterServer {
   }
 
   private isCancellationRequested(): boolean {
-    return this.cancellationRequested || AgentExecutionController.isCancelRequested();
+    return !AiServiceAccess.isAllowed() || !PrivacyConsent.isAccepted() || this.cancellationRequested ||
+      AgentExecutionController.isCancelRequested();
   }
 
   private clearCancellationState(): void {

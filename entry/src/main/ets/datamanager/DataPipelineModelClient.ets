@@ -4,6 +4,7 @@ import {
   DOMAIN_DESCRIPTIONS,
   AggregatedRecord,
   CandidateFact,
+  CollectionGroupAssignment,
   CollectionGroupState,
   DataManagerModelConfig,
   DedupDecision,
@@ -16,7 +17,8 @@ import {
   ProfileClaim,
   ProfileModelPayload,
   RawProfileClaim,
-  SourceEntry
+  SourceEntry,
+  createStringMap
 } from './DataManagerTypes';
 import {
   atomicizeCandidateFacts,
@@ -32,15 +34,20 @@ import {
   normalizeProfileShortSummary,
   normalizedSimilarityKey,
   normalizedTransactionSignature,
+  runLimitedTasks,
   selectCandidateRecords,
   sourceDisplayName,
   stableUnique,
   summarizeText,
+  dateToTime,
   weekdayLabelFromDate
 } from './DataManagerUtils';
 import { dataManagerError, dataManagerInfo } from './DataManagerLog';
-import { workflowSceneLabel } from '../utils/WorkflowSceneConfig';
+import { memorySceneLabel, PERSONAL_INFO_MEMORY_SCENE_ID } from '../utils/WorkflowSceneConfig';
 import { stringifyJsonCompat } from '../utils/JsonCompat';
+import {
+  ChatMemoryInput, ChatMemoryResult, ChatMemoryResponseError, buildChatMemoryPrompt, parseChatMemoryResults
+} from './ChatMemoryExtraction';
 
 interface BatchSplitEntryPromptPayload {
   source_date: string;
@@ -72,12 +79,6 @@ interface DedupExistingPayload {
 interface DedupPromptPayload {
   candidate: DedupCandidatePayload;
   existing_records: DedupExistingPayload[];
-}
-
-interface SummaryPromptPayload {
-  level: string;
-  event_count: number;
-  items: string[];
 }
 
 interface BatchEventPromptPayload {
@@ -195,6 +196,35 @@ interface CollectionPlannerMergePromptPayload {
   groups: CollectionPlannerMergeGroupPromptPayload[];
 }
 
+interface CollectionGroupAssignmentEventPromptPayload {
+  event_id: string;
+  date: string;
+  summary: string;
+  normalized_fact: string;
+  source: string;
+  domains: string[];
+  entities: string[];
+  keywords: string[];
+  candidate_group_ids: string[];
+}
+
+interface CollectionGroupAssignmentCandidatePromptPayload {
+  group_id: string;
+  title: string;
+  source: string;
+  domain: string;
+  time: string;
+  event_count: number;
+  event_summaries: string[];
+}
+
+interface CollectionGroupAssignmentPromptPayload {
+  tab_id: string;
+  title: string;
+  events: CollectionGroupAssignmentEventPromptPayload[];
+  existing_groups: CollectionGroupAssignmentCandidatePromptPayload[];
+}
+
 interface HomeRecommendationEventPromptPayload {
   event_id: string;
   date: string;
@@ -222,8 +252,8 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '你是一个日志整理助手。你会批量处理 daily-log entries，把每条 entry 拆分成 1 到多个可去重事实。\n\n' +
   '输入字段说明：\n' +
   'source_ref：输入 entry 的唯一引用标识，只需要在输出 item 中原样返回，用于把 facts 归还给对应 entry。\n' +
-  'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
-  'workflow_scene_label：工作流采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
+  'source_date：daily-log 文件日期，格式为 YYYY-MM-DD；当原文出现“今天”“昨天”“前天”“昨日”“本周”等相对日期时，以它作为换算基准。\n' +
+  'workflow_scene_label：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库、个人信息；它只帮助理解 entry 来源语境，不是输出字段，也不要把它当作事实内容。\n' +
   'entry_text：原始日志条目正文，是拆分事实的主要依据。\n\n' +
   '返回严格 JSON，格式为：\n' +
   '{\n' +
@@ -234,7 +264,7 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '        {\n' +
   '          "summary": "一句话摘要",\n' +
   '          "normalized_fact": "适合长期画像沉淀的整理后表述",\n' +
-  '          "event_date": "YYYY-MM-DD 或空字符串",\n' +
+  '          "event_date": "事件发生的时间，YYYY-MM-DD 或空字符串。请注意，不是它关联的未来待办的时间，而是它本身发生的时间，只可能等于或早于source_date。",\n' +
   '          "tags": ["标签1", "标签2"],\n' +
   '          "model_notes": "简短说明这条事实是如何从原文拆出来的"\n' +
   '        }\n' +
@@ -248,13 +278,14 @@ const BATCH_FACT_SPLIT_SYSTEM_PROMPT: string =
   '2. 如果原文只是同一事件的重复表述，不要重复拆分。\n' +
   '3. event_date 如果无法明确判断，就使用空字符串。\n' +
   '4. 如果是订单、账单、交易、消费记录，normalized_fact 必须尽量保留关键细节，例如商家、商品/服务、金额、时间、状态；不要压缩成只有“实付25.8元”这种只剩金额的信息。\n' +
-  '5. 不要输出 markdown，不要解释，只输出 JSON。';
+  '5. 对个人信息场景，normalized_fact 要保留“用户本人的什么信息”及用户明确说出的值；event_date 表示用户陈述这条资料的 source_date，不要把出生日期、生日或证件有效期误当成陈述日期。\n' +
+  '6. 不要输出 markdown，不要解释，只输出 JSON。';
 
 function splitWorkflowSceneLabel(entry: SourceEntry): string {
   if (isNaN(entry.workflow_scene_id) || entry.workflow_scene_id < 0) {
     return '';
   }
-  return workflowSceneLabel(entry.workflow_scene_id);
+  return memorySceneLabel(entry.workflow_scene_id);
 }
 
 function buildBatchSplitPromptPayload(entries: SourceEntry[]): BatchSplitPromptPayload {
@@ -313,7 +344,7 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\nevent_id：事件唯一标识，只需要在输出中原样返回。' +
   '\nevent_date：事件发生日期，格式为 YYYY-MM-DD。' +
   '\nevent_weekday：event_date 对应的星期，用于把“这周六”“下周一”“周末”等相对日期换算为绝对日期。' +
-  '\nworkflow_scene_labels：工作流采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
+  '\nworkflow_scene_labels：采集场景提示，例如聊天、购物、外卖、娱乐、生活、社交、差旅、文档、健康、办公、图库、个人信息；它只帮助判断待办动作类型，不是 domains 的领域标签。' +
   '\nsummary：事件短摘要，用于快速理解事件。' +
   '\nnormalized_fact：整理后的完整事实描述，通常比 summary 包含更多商户、商品、人物、地点、金额、状态或行动细节；抽取关键词、领域、实体和待办时优先参考它。' +
   '\n\n输出必须是严格 JSON，不要输出 markdown 或解释：' +
@@ -322,7 +353,7 @@ const BATCH_ENRICH_SYSTEM_PROMPT: string =
   '\n\nkeywords 规则：提取具体、可检索的商品、服务、商户、地点、人物、应用、动作、状态、主题词或金额词；优先保留输入原词；避免“当前页面”“截图”“记录”“信息”“详情”等泛词。' +
   '\n\ndomains 规则：只能从 eat|wear|live|travel|work|other 中多选。eat 表示餐饮、外卖、食品、饮料；wear 表示服装、鞋包、美妆；live 表示住房、家居、酒店；travel 表示交通、通勤、出行、旅行、票务、差旅；work 表示工作、会议、协作、办公事务；other 表示无法归入以上分类的事件。购物、聊天、外卖、娱乐、生活、社交、差旅是 workflow_scene_labels，不要直接当作 domains。请注意 eat/wear/live/travel/work 只能覆盖真实场景中 20% 的事件，如果你没有 90% 以上的把握明确归类，**必须仅输出 other**。如果已经输出 eat/wear/live/travel/work 中任一领域，不要再输出 other。' +
   '\n\nentities 规则：只抽取现实对象。person 只用于真实联系人、聊天对象或明确人物姓名；place 只用于实际地点、地址、场馆、目的地；merchant 只用于商户、店铺、平台、品牌门店或服务商。不要把商品、服务类别、金额、日期、订单号、抽象话题、页面元素、按钮、状态词或泛化类别抽成实体。name 和 aliases 必须来自输入文本，aliases 只放同一现实对象在输入中出现过的其他写法。' +
-  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；对于常规的、不关联任何未来待办事项的事件（如浏览记录、购买记录、账单信息、普通聊天等），必须把 todo 的四个字段都写空。' +
+  '\n\ntodo 规则：todo 只在事件明确包含用户未来可能需要处理的行动、计划、到期、预约、购买、退款、售后、出行、参与或后续事项时填写；对于常规的、不关联任何未来待办事项的事件（如浏览记录、购买记录、账单信息、普通聊天、个人信息陈述等），必须把 todo 的四个字段都写空。' +
   'deadline 表示待办事项截止日期，当事件提到明确绝对截止日期时，直接将其作为 deadline；提到相对截止日期时，必须以该事件 event_date 和 event_weekday 为基准换算为绝对 deadline；“这周六/本周六”表示 event_date 所在自然周的星期六，不要按模型运行当天换算；没有明确截止日期日期但有明确待办动作时 deadline 写空字符串。' +
   'text 必须只描述触发 todo 的具体行动内容，不要把同一事件里的其他文件分享、技术讨论、页面状态混进去。' +
   'agent_task 只在纯聊天场景且 type=buy 时填写，写成可直接执行的 GUI Agent 任务；其他情况必须为空。';
@@ -331,7 +362,7 @@ function enrichWorkflowSceneLabels(sceneIds: number[]): string[] {
   let labels: string[] = [];
   sceneIds.forEach((sceneId: number) => {
     if (!isNaN(sceneId) && sceneId >= 0) {
-      labels.push(workflowSceneLabel(sceneId));
+      labels.push(memorySceneLabel(sceneId));
     }
   });
   return stableUnique(labels);
@@ -409,13 +440,6 @@ const ENTITY_RESOLUTION_SYSTEM_PROMPT: string =
   '{"entities":[{"name":"规范显示名","aliases":["同一对象的其他候选名称"]}]}。\n\n' +
   '输出名称和别名必须来自输入候选，不要补充输入中不存在的名称，不要输出 markdown 或解释。';
 
-const SUMMARY_SYSTEM_PROMPT: string =
-  '你是个人事件摘要助手。根据输入的一组事件或下级摘要，生成简短、可检索的中文概括。\n\n' +
-  '只返回严格 JSON：\n' +
-  '{"summary":"摘要文本"}。\n\n' +
-  '摘要应陈述事实，不猜测，不遗漏主要活动类型，不输出 markdown。\n' +
-  'summary 最多 160 个汉字，只概括主要活动类型和显著事件，不要逐条复述输入。';
-
 const PROFILE_SYSTEM_PROMPT: string =
   '你是用户画像总结助手。输入是一组同一领域的个人事件，以及上一版该领域画像结论。\n\n' +
   '请归并历史画像并基于当前事件证据生成适合 App 前端展示的凝练用户画像，返回严格 JSON：\n' +
@@ -451,13 +475,17 @@ const PROFILE_SHORT_SUMMARY_REPAIR_SYSTEM_PROMPT: string =
 const PROFILE_MODEL_PROMPT_CHAR_LIMIT: number = 12000;
 const PROFILE_MODEL_MERGE_CHAR_LIMIT: number = 10000;
 const PROFILE_MODEL_MERGE_ROUND_LIMIT: number = 4;
+const SPLIT_BATCH_REQUEST_CONCURRENCY: number = 8;
+const ENRICH_BATCH_REQUEST_CONCURRENCY: number = 8;
+const BATCH_FACT_SPLIT_REQUEST_SIZE: number = 8;
+const BATCH_ENRICH_REQUEST_SIZE: number = 8;
 
 const COLLECTION_GROUPING_SYSTEM_PROMPT: string =
   '你是一个事件语义分组助手。请把输入的事件组织成适合手机列表展示的少量分组。\n' +
   '分组应来自事件本身的语义相近性、上下文连续性、联系人/商户/来源、用户意图或内容主题。\n\n' +
   '返回严格 JSON：\n' +
   '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","event_ids":["输入中的事件id"]}]}。\n\n' +
-  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；分组数量通常 3 到 8 个，最多 12 个。\n\n' +
+  '每个事件 id 只能出现一次；只能使用输入中存在的 event_id；不要逐条复述事件；尽量把同一联系人、商户、主题、通知来源或兴趣内容放在同一组；可以按语义自然生成多个分组，不要为了固定数量合并不相关内容。\n\n' +
   '标题必须有信息量，尽量表达“对象/来源 + 主题/意图/状态”。\n' +
   '聊天 tab 必须按语义接近和上下文连贯性分组，输入事件顺序就是对话线索；不要按日期、单条截图、平台名或泛泛的“聊天记录/工作记录”切组。\n\n' +
   '避免低信息标题：平台名、纯数字、日期时间、单个技术词、单个截图/图片/贴图/表情包等界面元素、或“微信聊天记录”“工作相关聊天记录”“聊天记录”“通知记录”“视频记录”“订单记录”这类泛称。不要输出 markdown。';
@@ -466,7 +494,15 @@ const COLLECTION_GROUP_MERGE_SYSTEM_PROMPT: string =
   '你是一个事件语义分组合并助手。输入是已经分批生成的临时分组，请把相同主题、联系人、商户、来源或兴趣方向的分组合并成更少的列表分组。\n\n' +
   '返回严格 JSON：\n' +
   '{"groups":[{"title":"短标题，14字以内","source":"主要来源","domain":"eat|wear|live|travel|work|other","group_ids":["输入中的临时分组id"]}]}。\n\n' +
-  '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；分组数量最多 12 个。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
+  '每个 group_id 最多出现一次；只能使用输入中存在的 group_id；可以按语义自然生成多个分组，不要为了固定数量合并不相关内容。合并后的标题必须保留具体对象/来源和主题/意图，避免平台名、日期、纯数字、单个技术词或界面元素等低信息标题。不要输出 markdown。';
+
+const COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT: string =
+  '你是一个事件增量归组助手。输入包含少量待归组事件，以及这些事件时间附近可追加的既有分组。\n\n' +
+  '你的任务是为每个待归组事件选择一个目标：如果事件和某个候选既有分组语义相同、上下文连续、联系人/商户/来源一致或主题高度相关，就追加到该既有 group_id；否则创建新分组。\n\n' +
+  '返回严格 JSON：\n' +
+  '{"assignments":[{"event_id":"输入事件id","group_id":"候选既有group_id或new:短标识","title":"新分组短标题，追加既有分组时可为空","source":"主要来源","domain":"eat|wear|live|travel|work|other"}]}。\n\n' +
+  '每个输入 event_id 必须且只能返回一次；只能把事件追加到该事件 candidate_group_ids 中列出的既有 group_id；如果没有合适候选，group_id 必须使用 new: 开头，同一新主题可复用同一个 new: 标识。\n' +
+  '追加既有分组时不要改写旧标题；title 只用于创建新分组。不要编造输入里没有的人名、商户、商品、金额、地点或行动。不要输出 markdown。';
 
 const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '你是用户待办事项推荐助手。\n' +
@@ -482,8 +518,26 @@ const HOME_RECOMMENDATION_SYSTEM_PROMPT: string =
   '按截止日期临近程度和事件时间排序；输入为空时返回空数组，否则不要返回空数组。不要输出 markdown。';
 
 export class DataPipelineModelClient {
-  private cloudClient: CloudModelClient = new CloudModelClient();
+  private cloudClient: CloudModelClient;
   private requestSequence: number = 0;
+
+  constructor(cloudClient: CloudModelClient = new CloudModelClient()) {
+    this.cloudClient = cloudClient;
+  }
+
+  async extractChatMemory(inputs: ChatMemoryInput[], config: DataManagerModelConfig,
+    onRetry?: (attempt: number, total: number) => void): Promise<ChatMemoryResult[]> {
+    if (!this.isEnabled(config)) {
+      throw new Error('请先配置同步使用的 Planner 服务，再提取聊天信息');
+    }
+    let prompt = buildChatMemoryPrompt(inputs);
+    let results: ChatMemoryResult[] = [];
+    await this.callJson(config, 'chat.memory', prompt.systemPrompt, prompt.userPrompt, (payload: JsonMap): void => {
+      // Validate coverage inside the retry loop, including explicit empty facts for irrelevant messages.
+      results = parseChatMemoryResults(payload, inputs);
+    }, onRetry);
+    return results;
+  }
 
   async splitEntryIntoFacts(entry: SourceEntry, config: DataManagerModelConfig): Promise<CandidateFact[]> {
     let batch = await this.splitEntriesIntoFacts([entry], config);
@@ -498,33 +552,14 @@ export class DataPipelineModelClient {
     if (!this.isEnabled(config) || entries.length === 0) {
       return result;
     }
-    let chunks = this.chunkSourceEntries(entries, 24);
-    for (let chunk of chunks) {
-      let entryMap: Record<string, SourceEntry> = {};
-      chunk.forEach((entry: SourceEntry) => {
-        entryMap[entry.source_ref] = entry;
-      });
-      let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
-      try {
-        dataManagerInfo(`Batch split request: entries=${chunk.length}`);
-        let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT,
-          stringifyJsonCompat(promptPayload as Object, 2));
-        let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
-        rawItems.forEach((rawItem: JsonMap) => {
-          let sourceRef = normalizeFreeText(rawItem['source_ref']);
-          let entry = entryMap[sourceRef];
-          if (!entry) {
-            return;
-          }
-          let rawFacts = Array.isArray(rawItem['facts']) ? rawItem['facts'] as JsonMap[] : [];
-          let facts = this.normalizeFactPayloads(rawFacts, entry, 'model_batch_split');
-          result[sourceRef] = facts.length > 0 ? facts : heuristicSplit(entry);
-        });
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError('Batch split fallback: ' + err.message);
-      }
-    }
+    let chunks = this.chunkSourceEntries(entries, BATCH_FACT_SPLIT_REQUEST_SIZE);
+    let tasks = chunks.map((chunk: SourceEntry[], chunkIndex: number): (() => Promise<boolean>) => {
+      return async (): Promise<boolean> => {
+        await this.requestBatchSplitChunk(chunk, result, config, chunkIndex + 1, chunks.length);
+        return true;
+      };
+    });
+    await runLimitedTasks<boolean>(tasks, SPLIT_BATCH_REQUEST_CONCURRENCY);
     return result;
   }
 
@@ -576,55 +611,73 @@ export class DataPipelineModelClient {
 
   async enrichEvents(events: IndexedEvent[], config: DataManagerModelConfig): Promise<IndexedEvent[]> {
     let result: Record<string, IndexedEvent> = {};
-    events.forEach((event: IndexedEvent) => {
-      result[event.event_id] = this.heuristicEnrichEvent(event, this.isEnabled(config) ? 'heuristic_batch_fallback' : 'heuristic');
-    });
     if (!this.isEnabled(config) || events.length === 0) {
-      return events.map((event: IndexedEvent) => result[event.event_id]);
+      return events.map((event: IndexedEvent) => this.heuristicEnrichEvent(event, 'heuristic'));
     }
-    let chunks = this.chunkEventsByTodoGuide(events, 32);
-    for (let chunk of chunks) {
-      let eventMap: Record<string, IndexedEvent> = {};
-      chunk.forEach((event: IndexedEvent) => {
-        eventMap[event.event_id] = event;
-      });
-      let preview = buildEnrichPromptPreview(chunk);
-      try {
-        dataManagerInfo(`Batch enrich request: events=${chunk.length}`);
-        let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
-        let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
-        rawEvents.forEach((rawEvent: JsonMap) => {
-          let eventId = normalizeFreeText(rawEvent['event_id']);
-          let event = eventMap[eventId];
-          if (!event) {
-            return;
-          }
-          result[eventId] = this.enrichEventFromPayload(event, rawEvent, 'model_batch');
-        });
-      } catch (e) {
-        let err = e as Error;
-        dataManagerError('Batch enrich fallback: ' + err.message);
-      }
-    }
-    return events.map((event: IndexedEvent) => result[event.event_id]);
+    let chunks = this.chunkEventsByTodoGuide(events, BATCH_ENRICH_REQUEST_SIZE);
+    let tasks = chunks.map((chunk: IndexedEvent[], chunkIndex: number): (() => Promise<boolean>) => {
+      return async (): Promise<boolean> => {
+        await this.requestBatchEnrichChunk(chunk, result, config, chunkIndex + 1, chunks.length);
+        return true;
+      };
+    });
+    await runLimitedTasks<boolean>(tasks, ENRICH_BATCH_REQUEST_CONCURRENCY);
+    return events.map((event: IndexedEvent): IndexedEvent => {
+      let enriched = result[event.event_id];
+      return enriched ? enriched : this.heuristicEnrichEvent(event, 'heuristic_batch_fallback');
+    });
   }
 
-  async generateSummary(level: string, items: string[], eventCount: number, config: DataManagerModelConfig): Promise<string> {
-    if (!this.isEnabled(config)) {
-      return '';
-    }
-    let promptPayload: SummaryPromptPayload = {
-      level: level,
-      event_count: eventCount,
-      items: items.map((item: string) => summarizeText(item, 280))
-    };
+  private async requestBatchSplitChunk(chunk: SourceEntry[], result: Record<string, CandidateFact[]>,
+    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number): Promise<void> {
+    let entryMap: Record<string, SourceEntry> = new Object() as Record<string, SourceEntry>;
+    chunk.forEach((entry: SourceEntry) => {
+      entryMap[entry.source_ref] = entry;
+    });
+    let promptPayload: BatchSplitPromptPayload = buildBatchSplitPromptPayload(chunk);
     try {
-      let payload = await this.callJson(config, 'summary', SUMMARY_SYSTEM_PROMPT, ArkJSON.stringify(promptPayload));
-      return normalizeFreeText(payload['summary']);
+      dataManagerInfo(`Batch split request: chunk=${chunkIndex}/${chunkCount}, entries=${chunk.length}`);
+      let payload = await this.callJson(config, 'split.batch', BATCH_FACT_SPLIT_SYSTEM_PROMPT,
+        stringifyJsonCompat(promptPayload as Object, 2));
+      let rawItems = Array.isArray(payload['items']) ? payload['items'] as JsonMap[] : [];
+      rawItems.forEach((rawItem: JsonMap) => {
+        let sourceRef = normalizeFreeText(rawItem['source_ref']);
+        let entry = entryMap[sourceRef];
+        if (!entry) {
+          return;
+        }
+        let rawFacts = Array.isArray(rawItem['facts']) ? rawItem['facts'] as JsonMap[] : [];
+        let facts = this.normalizeFactPayloads(rawFacts, entry, 'model_batch_split');
+        result[sourceRef] = facts.length > 0 ? facts : heuristicSplit(entry);
+      });
     } catch (e) {
       let err = e as Error;
-      dataManagerError(`Summary fallback: level=${level}, error=${err.message}`);
-      return '';
+      dataManagerError(`Batch split fallback: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
+    }
+  }
+
+  private async requestBatchEnrichChunk(chunk: IndexedEvent[], result: Record<string, IndexedEvent>,
+    config: DataManagerModelConfig, chunkIndex: number, chunkCount: number): Promise<void> {
+    let eventMap: Record<string, IndexedEvent> = new Object() as Record<string, IndexedEvent>;
+    chunk.forEach((event: IndexedEvent) => {
+      eventMap[event.event_id] = event;
+    });
+    let preview = buildEnrichPromptPreview(chunk);
+    try {
+      dataManagerInfo(`Batch enrich request: chunk=${chunkIndex}/${chunkCount}, events=${chunk.length}`);
+      let payload = await this.callJson(config, 'enrich.batch', preview.systemPrompt, preview.userPrompt);
+      let rawEvents = Array.isArray(payload['events']) ? payload['events'] as JsonMap[] : [];
+      rawEvents.forEach((rawEvent: JsonMap) => {
+        let eventId = normalizeFreeText(rawEvent['event_id']);
+        let event = eventMap[eventId];
+        if (!event) {
+          return;
+        }
+        result[eventId] = this.enrichEventFromPayload(event, rawEvent, 'model_batch');
+      });
+    } catch (e) {
+      let err = e as Error;
+      dataManagerError(`Batch enrich fallback: chunk=${chunkIndex}/${chunkCount}, error=${err.message}`);
     }
   }
 
@@ -637,7 +690,7 @@ export class DataPipelineModelClient {
       mentions: mentions
     };
     try {
-      let payload = await this.callJson(config, 'entity.resolve', ENTITY_RESOLUTION_SYSTEM_PROMPT,
+      let payload = await this.callJson(config, 'entity.resolve.' + entityType, ENTITY_RESOLUTION_SYSTEM_PROMPT,
         stringifyJsonCompat(promptPayload as Object, 2));
       let rawEntities = Array.isArray(payload['entities']) ? payload['entities'] as JsonMap[] : [];
       let resolved: EntityMention[] = [];
@@ -744,6 +797,80 @@ export class DataPipelineModelClient {
     }
   }
 
+  async assignCollectionGroupEvents(tabId: string, title: string, pendingEvents: IndexedEvent[], candidateGroups: CollectionGroupState[],
+    eventMap: Record<string, IndexedEvent>, config: DataManagerModelConfig): Promise<CollectionGroupAssignment[]> {
+    if (!this.isEnabled(config) || pendingEvents.length === 0) {
+      return [];
+    }
+    let planningEvents = this.collectionPlanningEvents(tabId, pendingEvents);
+    let chunks = this.chunkEvents(planningEvents, 80);
+    let assignments: CollectionGroupAssignment[] = [];
+    let chunkIndex = 0;
+    for (let chunk of chunks) {
+      try {
+        dataManagerInfo(`Collection assignment request: tab=${tabId}, chunk=${chunkIndex + 1}/${chunks.length}, events=${chunk.length}, candidates=${candidateGroups.length}`);
+        assignments = assignments.concat(await this.assignCollectionGroupChunk(tabId, title, chunk, candidateGroups, eventMap, config));
+      } catch (e) {
+        let err = e as Error;
+        dataManagerError(`Collection assignment chunk failed: tab=${tabId}, chunk=${chunkIndex}, error=${err.message}`);
+      }
+      chunkIndex++;
+    }
+    return assignments;
+  }
+
+  private async assignCollectionGroupChunk(tabId: string, title: string, events: IndexedEvent[], candidateGroups: CollectionGroupState[],
+    eventMap: Record<string, IndexedEvent>, config: DataManagerModelConfig): Promise<CollectionGroupAssignment[]> {
+    let includedGroups: Record<string, boolean> = new Object() as Record<string, boolean>;
+    let promptEvents: CollectionGroupAssignmentEventPromptPayload[] = events.map((event: IndexedEvent): CollectionGroupAssignmentEventPromptPayload => {
+      let candidateIds: string[] = [];
+      candidateGroups.forEach((group: CollectionGroupState) => {
+        let groupId = normalizeFreeText(group.group_id);
+        if (groupId.length > 0 && this.isCollectionAssignmentCandidate(event, group)) {
+          candidateIds.push(groupId);
+          includedGroups[groupId] = true;
+        }
+      });
+      let item: CollectionGroupAssignmentEventPromptPayload = {
+        event_id: event.event_id,
+        date: event.event_date,
+        summary: summarizeText(event.summary || event.normalized_fact, 120),
+        normalized_fact: summarizeText(event.normalized_fact || event.summary, 180),
+        source: event.sources.length > 0 ? event.sources.join('、') : sourceDisplayName(event.source_state_file),
+        domains: (event.domains || []).slice(0, 4),
+        entities: (event.entities || []).slice(0, 8),
+        keywords: (event.keywords || []).slice(0, 8),
+        candidate_group_ids: candidateIds
+      };
+      return item;
+    });
+    let promptGroups: CollectionGroupAssignmentCandidatePromptPayload[] = [];
+    candidateGroups.forEach((group: CollectionGroupState) => {
+      if (includedGroups[group.group_id] !== true) {
+        return;
+      }
+      let item: CollectionGroupAssignmentCandidatePromptPayload = {
+        group_id: group.group_id,
+        title: group.title,
+        source: group.source,
+        domain: group.domain,
+        time: group.time,
+        event_count: group.event_ids.length,
+        event_summaries: this.collectionGroupEventSummaries(group, eventMap)
+      };
+      promptGroups.push(item);
+    });
+    let promptPayload: CollectionGroupAssignmentPromptPayload = {
+      tab_id: tabId,
+      title: title,
+      events: promptEvents,
+      existing_groups: promptGroups
+    };
+    let payload = await this.callJson(config, 'collection.assign.' + tabId, COLLECTION_GROUP_ASSIGNMENT_SYSTEM_PROMPT,
+      stringifyJsonCompat(promptPayload as Object, 2));
+    return this.normalizeCollectionGroupAssignments(payload);
+  }
+
   private async planCollectionGroupChunk(tabId: string, title: string, events: IndexedEvent[], config: DataManagerModelConfig, idPrefix: string): Promise<CollectionGroupState[]> {
     let promptEvents: CollectionPlannerEventPromptPayload[] = events.map((event: IndexedEvent): CollectionPlannerEventPromptPayload => {
       let item: CollectionPlannerEventPromptPayload = {
@@ -766,6 +893,27 @@ export class DataPipelineModelClient {
     let payload = await this.callJson(config, 'collection.group.' + tabId, COLLECTION_GROUPING_SYSTEM_PROMPT,
       stringifyJsonCompat(promptPayload as Object, 2));
     return this.normalizeCollectionPlannerGroups(payload, tabId, idPrefix);
+  }
+
+  private isCollectionAssignmentCandidate(event: IndexedEvent, group: CollectionGroupState): boolean {
+    let eventTime = dateToTime(event.event_date);
+    let groupTime = dateToTime(group.time);
+    if (eventTime <= 0 || groupTime <= 0) {
+      return false;
+    }
+    return Math.abs(eventTime - groupTime) <= 7 * 86400000;
+  }
+
+  private collectionGroupEventSummaries(group: CollectionGroupState, eventMap: Record<string, IndexedEvent>): string[] {
+    let summaries: string[] = [];
+    for (let id of (group.event_ids || []).slice(0, 3)) {
+      let event = eventMap[id];
+      if (!event) {
+        continue;
+      }
+      summaries.push(summarizeText(event.summary || event.normalized_fact, 80));
+    }
+    return summaries;
   }
 
   private collectionPlanningEvents(tabId: string, events: IndexedEvent[]): IndexedEvent[] {
@@ -864,11 +1012,43 @@ export class DataPipelineModelClient {
         meta: '',
         status: '',
         domain: domain,
-        event_ids: eventIds
+        event_ids: eventIds,
+        source_input_hash: '',
+        event_input_hashes: createStringMap()
       };
       merged.push(group);
     });
     return merged.length > 0 ? merged : groups;
+  }
+
+  private normalizeCollectionGroupAssignments(payload: JsonMap): CollectionGroupAssignment[] {
+    let rawItems = Array.isArray(payload['assignments']) ? payload['assignments'] as JsonMap[] : [];
+    let result: CollectionGroupAssignment[] = [];
+    rawItems.forEach((raw: JsonMap, index: number) => {
+      let eventId = normalizeFreeText(raw['event_id']);
+      if (eventId.length === 0) {
+        return;
+      }
+      let groupId = normalizeFreeText(raw['group_id']);
+      if (groupId.length === 0) {
+        groupId = normalizeFreeText(raw['target_group_id']);
+      }
+      if (groupId.length === 0) {
+        groupId = normalizeFreeText(raw['new_group_key']);
+      }
+      if (groupId.length === 0) {
+        groupId = 'new:' + String(index + 1);
+      }
+      let item: CollectionGroupAssignment = {
+        event_id: eventId,
+        group_id: groupId,
+        title: normalizeFreeText(raw['title']),
+        source: normalizeFreeText(raw['source']),
+        domain: normalizeFreeText(raw['domain'])
+      };
+      result.push(item);
+    });
+    return result;
   }
 
   private normalizeHomeRecommendations(payload: JsonMap): HomeRecommendationState[] {
@@ -927,7 +1107,9 @@ export class DataPipelineModelClient {
         meta: '',
         status: '',
         domain: normalizeFreeText(rawGroup['domain']),
-        event_ids: ids
+        event_ids: ids,
+        source_input_hash: '',
+        event_input_hashes: createStringMap()
       };
       groups.push(group);
     });
@@ -942,7 +1124,7 @@ export class DataPipelineModelClient {
         continue;
       }
       let eventDate = normalizeFreeText(raw['event_date']);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
+      if (entry.workflow_scene_id === PERSONAL_INFO_MEMORY_SCENE_ID || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
         eventDate = entry.source_date;
       }
       let fact: CandidateFact = {
@@ -1522,7 +1704,9 @@ export class DataPipelineModelClient {
     return result;
   }
 
-  private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string): Promise<JsonMap> {
+  private async callJson(config: DataManagerModelConfig, kind: string, systemPrompt: string, userPrompt: string,
+    validatePayload?: (payload: JsonMap) => void,
+    onRetry?: (attempt: number, total: number) => void): Promise<JsonMap> {
     let messages: CloudChatMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -1531,22 +1715,66 @@ export class DataPipelineModelClient {
     this.requestSequence += 1;
     let requestId = this.requestSequence;
     dataManagerInfo(`Model request start: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, systemChars=${systemPrompt.length}, promptChars=${userPrompt.length}`);
+    let temperatures: number[] = [0, 0.5, 1.0];
     try {
-      let content = await this.cloudClient.chatCompletionText({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        messages: messages,
-        temperature: 0,
-        chatTemplateKwargs: {
-          enable_thinking: false
+      for (let attempt = 0; attempt < temperatures.length; attempt++) {
+        let temperature = temperatures[attempt];
+        let content = await this.cloudClient.chatCompletionText({
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+          messages: messages,
+          temperature: temperature,
+          chatTemplateKwargs: {
+            enable_thinking: false
+          }
+        });
+        dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
+        try {
+          let payload = this.parseJsonObject(content);
+          if (validatePayload) {
+            validatePayload(payload);
+          }
+          return payload;
+        } catch (e) {
+          let err = e as Error;
+          let canRetry = attempt + 1 < temperatures.length;
+          dataManagerError(`Model request parse failed: id=${requestId}, kind=${kind}, attempt=${attempt + 1}/${temperatures.length}, temperature=${temperature}, responseChars=${content.length}, retry=${canRetry}, error=${err.message}`);
+          // Chat output can contain personal details; diagnostics only need counts and the validation error.
+          if (kind !== 'chat.memory') {
+            this.logRawModelOutput(requestId, kind, content);
+          }
+          if (!canRetry) {
+            if (kind === 'chat.memory') {
+              throw new ChatMemoryResponseError(err.message);
+            }
+            throw err;
+          }
+          if (onRetry) {
+            onRetry(attempt + 2, temperatures.length);
+          }
+          dataManagerInfo(`Model request parse retry: id=${requestId}, kind=${kind}, nextTemperature=${temperatures[attempt + 1]}`);
         }
-      });
-      dataManagerInfo(`Model request response: id=${requestId}, kind=${kind}, ms=${Date.now() - startedAt}, responseChars=${content.length}`);
-      return this.parseJsonObject(content);
+      }
+      throw new Error('Model JSON parse retry exhausted');
     } catch (e) {
       let err = e as Error;
       dataManagerError(`Model request failed: id=${requestId}, kind=${kind}, baseUrl=${config.baseUrl}, ms=${Date.now() - startedAt}, error=${err.message}`);
       throw err;
+    }
+  }
+
+  private logRawModelOutput(requestId: number, kind: string, content: string): void {
+    let maxChunkLength = 1800;
+    if (content.length === 0) {
+      dataManagerError(`Model request raw output: id=${requestId}, kind=${kind}, chunk=1/1, text=`);
+      return;
+    }
+    let totalChunks = Math.ceil(content.length / maxChunkLength);
+    for (let index = 0; index < totalChunks; index++) {
+      let start = index * maxChunkLength;
+      let end = Math.min(content.length, start + maxChunkLength);
+      let chunk = content.substring(start, end);
+      dataManagerError(`Model request raw output: id=${requestId}, kind=${kind}, chunk=${index + 1}/${totalChunks}, text=${chunk}`);
     }
   }
 

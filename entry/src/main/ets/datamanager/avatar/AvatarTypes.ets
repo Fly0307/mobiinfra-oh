@@ -1,9 +1,13 @@
 export type AvatarStatus = 'empty' | 'current' | 'stale' | 'generating' | 'failed';
 export type AvatarGenerationMode = 'text_to_image' | 'image_to_image';
 export type AvatarStringMap = Record<string, string>;
+export type AvatarErrorValue = Error | Object | string | number | boolean | null | undefined;
 
 export interface AvatarHomeViewModel {
   avatarUri: string;
+  avatarForegroundUri: string;
+  avatarMessageForegroundUri: string;
+  avatarReferencePhotoUri: string;
   avatarStatus: AvatarStatus;
   avatarUpdatedLabel: string;
   avatarActionLabel: string;
@@ -82,6 +86,7 @@ export interface AvatarState {
   last_error_code: string;
   last_error_message: string;
   updated_at: string;
+  reference_photo_path: string;
 }
 
 export interface AvatarProviderConfig {
@@ -124,6 +129,9 @@ export interface AvatarProviderResult {
 export function createEmptyAvatarHomeViewModel(): AvatarHomeViewModel {
   return {
     avatarUri: '',
+    avatarForegroundUri: '',
+    avatarMessageForegroundUri: '',
+    avatarReferencePhotoUri: '',
     avatarStatus: 'empty',
     avatarUpdatedLabel: '',
     avatarActionLabel: '生成数字分身',
@@ -138,7 +146,8 @@ export function createEmptyAvatarState(): AvatarState {
     status: 'empty',
     last_error_code: '',
     last_error_message: '',
-    updated_at: ''
+    updated_at: '',
+    reference_photo_path: ''
   };
 }
 
@@ -156,4 +165,16 @@ export function createDefaultAvatarGenerationParams(size: string, responseFormat
 
 export function createEmptyRawMetadata(): AvatarStringMap {
   return new Object() as AvatarStringMap;
+}
+
+export function avatarErrorMessage(value: AvatarErrorValue, fallback: string): string {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  if (value instanceof Error) {
+    let message = value.message.trim();
+    return message.length > 0 ? message : fallback;
+  }
+  let text = String(value).replace(/\s+/g, ' ').trim();
+  return text.length > 0 ? text : fallback;
 }

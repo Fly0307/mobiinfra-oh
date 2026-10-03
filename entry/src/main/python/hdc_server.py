@@ -18,6 +18,12 @@ except Exception as ex:
     harmony_agent = None
     print(f">> [警告] 无法导入 harmony_agent workflow bridge 能力: {ex}")
 
+try:
+    from wechat_collect import service as wechat_collect_service
+except Exception as ex:
+    wechat_collect_service = None
+    print(f">> [警告] 无法导入微信 UI dump 采集模块: {ex}")
+
 NO_REASON_MODE = False
 LEGACY_LOOP_ENABLED = True
 AUTO_DISCOVERY_ENABLED = False
@@ -32,6 +38,27 @@ HDC_WORKFLOW_USE_DRIVER_ACTIONS = os.environ.get(
 HDC_WORKFLOW_USE_DRIVER_INPUT = os.environ.get(
     "HDC_WORKFLOW_USE_DRIVER_INPUT", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
+WORKFLOW_INPUT_TARGET_KEYWORDS = (
+    "input box",
+    "input field",
+    "search box",
+    "search field",
+    "search bar",
+    "text input",
+    "text field",
+    "textbox",
+    "text box",
+    "edittext",
+    "edit box",
+    "输入框",
+    "输入栏",
+    "搜索框",
+    "搜索栏",
+    "搜索输入",
+    "文本框",
+    "编辑框",
+)
+_workflow_last_input_target = None
 SERVER_PORT = 9124
 APP_AGENT_PORT = 9126
 APP_REVERSE_HDC_PORT = 19124
@@ -50,10 +77,19 @@ AUTO_DISCOVERY_DISCOVER_TIMEOUT = float(os.environ.get("HDC_AUTO_DISCOVER_TIMEOU
 AUTO_DISCOVERY_SCAN_BUDGET = float(os.environ.get("HDC_AUTO_SCAN_BUDGET", "12"))
 AUTO_DISCOVERY_MAX_WORKERS = max(8, int(os.environ.get("HDC_AUTO_MAX_WORKERS", "128")))
 AUTO_DISCOVERY_COOLDOWN = float(os.environ.get("HDC_AUTO_COOLDOWN", "30"))
-AUTO_DISCOVERY_MAX_SUBNETS = max(1, int(os.environ.get("HDC_AUTO_MAX_SUBNETS", "8")))
-AUTO_DISCOVERY_EXTRA_PORTS = os.environ.get("HDC_AUTO_PORTS", "")
 AUTO_DISCOVERY_EXTRA_TARGETS = os.environ.get("HDC_AUTO_TARGETS", "")
-AUTO_DISCOVERY_DEFAULT_PORTS = (8710, 10178, 5555)
+AUTO_DISCOVERY_HISTORY_SCAN_LIMIT = max(1, int(os.environ.get("HDC_AUTO_HISTORY_SCAN_LIMIT", "5")))
+AUTO_DISCOVERY_LOCAL_SUBNET_LIMIT = max(1, int(os.environ.get("HDC_AUTO_LOCAL_SUBNET_LIMIT", "4")))
+
+def hdc_manual_config_message():
+    return (
+        "未检测到 HDC 设备连接。请先手动配置 HDC：USB 连接后执行 `hdc list targets` "
+        "确认设备在线；无线调试请先执行 `hdc tconn <设备IP:端口>`；如果有多个设备或固定无线目标，"
+        "请设置环境变量 `HDC_TARGET=<target>` 后重启服务。"
+    )
+
+def print_hdc_manual_config_hint():
+    print(f">> [HDC] {hdc_manual_config_message()}")
 
 def make_hdc_tunnel_status(status, message, target="", tunnel_ready=False, fport_ready=False,
                            rport_ready=False, rport_listening=None,
@@ -440,15 +476,6 @@ def split_csv_values(raw):
             values.append(value)
     return values
 
-def parse_extra_ports(raw):
-    ports = []
-    for item in split_csv_values(raw):
-        if item.isdigit():
-            port = int(item)
-            if 0 < port <= 65535 and port not in ports:
-                ports.append(port)
-    return ports
-
 def seed_entry_from_target(target, source):
     parsed = parse_wireless_target(target)
     if not parsed:
@@ -478,15 +505,7 @@ def build_auto_discovery_seeds():
     cache = load_auto_discovery_cache()
     last_target = cache.get("last_target", "")
     add_seed(last_target, "cache-last")
-    targets = cache.get("targets", [])
-    if isinstance(targets, list):
-        sorted_targets = sorted(
-            [item for item in targets if isinstance(item, dict)],
-            key=lambda item: float(item.get("last_success_at", 0) or 0),
-            reverse=True
-        )
-        for item in sorted_targets:
-            add_seed(str(item.get("target", "")), "cache")
+    # Keep the cache list for diagnostics, but do not try older successful IPs directly.
 
     if HDC_TARGET_OVERRIDE:
         add_seed(HDC_TARGET_OVERRIDE, "HDC_TARGET")
@@ -496,6 +515,35 @@ def build_auto_discovery_seeds():
 
     for target in read_default_wireless_targets():
         add_seed(target, "default-config")
+    return seeds
+
+def recent_history_scan_seeds(limit=AUTO_DISCOVERY_HISTORY_SCAN_LIMIT):
+    cache = load_auto_discovery_cache()
+    seeds = []
+    seen_targets = set()
+
+    def add_history_seed(target, source):
+        if len(seeds) >= limit:
+            return
+        entry = seed_entry_from_target(target, source)
+        if not entry or entry["target"] in seen_targets:
+            return
+        seen_targets.add(entry["target"])
+        seeds.append(entry)
+
+    add_history_seed(cache.get("last_target", ""), "cache-last")
+    targets = cache.get("targets", [])
+    if not isinstance(targets, list):
+        return seeds
+    for item in targets:
+        if len(seeds) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target", "")).strip()
+        if not target and item.get("host") and item.get("port"):
+            target = f"{item.get('host')}:{item.get('port')}"
+        add_history_seed(target, "cache-history")
     return seeds
 
 def get_local_ipv4_addresses():
@@ -548,45 +596,6 @@ def is_private_lan_ipv4(address):
         return True
     return octets[0] == 172 and 16 <= octets[1] <= 31
 
-def build_port_candidates(seeds):
-    ports = []
-    for seed in seeds:
-        port = int(seed.get("port", 0) or 0)
-        if 0 < port <= 65535 and port not in ports:
-            ports.append(port)
-    for port in parse_extra_ports(AUTO_DISCOVERY_EXTRA_PORTS):
-        if port not in ports:
-            ports.append(port)
-    for port in AUTO_DISCOVERY_DEFAULT_PORTS:
-        if port not in ports:
-            ports.append(port)
-    return ports
-
-def build_prefix2_candidates(seeds, local_addresses=None):
-    prefixes = []
-    for address in local_addresses or []:
-        parsed = parse_wireless_target(f"{address}:1")
-        if parsed:
-            add_unique_value(prefixes, parsed["prefix2"])
-    for seed in seeds:
-        add_unique_value(prefixes, str(seed.get("prefix2", "")))
-    return prefixes
-
-def build_third_octet_order(prefix2, seeds, local_addresses):
-    order = []
-    for address in local_addresses:
-        parsed = parse_wireless_target(f"{address}:1")
-        if parsed and parsed["prefix2"] == prefix2:
-            add_unique_value(order, parsed["third_octet"])
-    for seed in seeds:
-        if seed.get("prefix2") == prefix2:
-            third = int(seed.get("third_octet", -1))
-            if 0 <= third <= 255:
-                add_unique_value(order, third)
-    for third in range(0, 256):
-        add_unique_value(order, third)
-    return order[:AUTO_DISCOVERY_MAX_SUBNETS]
-
 def build_host_octet_order(prefix2, third_octet, seeds):
     order = []
     for seed in seeds:
@@ -597,6 +606,52 @@ def build_host_octet_order(prefix2, third_octet, seeds):
     for host_octet in range(1, 255):
         add_unique_value(order, host_octet)
     return order
+
+def build_auto_discovery_scan_plans(history_seeds):
+    plans = []
+    seen = set()
+
+    def add_plan(prefix2, third_octet, port, source):
+        if not prefix2 or third_octet < 0 or third_octet > 255 or port <= 0 or port > 65535:
+            return
+        key = (prefix2, third_octet, port)
+        if key in seen:
+            return
+        seen.add(key)
+        plan_seeds = [
+            seed for seed in history_seeds
+            if seed.get("prefix2") == prefix2
+            and int(seed.get("third_octet", -1)) == third_octet
+            and int(seed.get("port", 0) or 0) == port
+        ]
+        plans.append({
+            "prefix2": prefix2,
+            "third_octet": third_octet,
+            "prefix3": f"{prefix2}.{third_octet}",
+            "port": port,
+            "source": source,
+            "seeds": plan_seeds,
+        })
+
+    if not history_seeds:
+        return plans
+
+    latest_port = int(history_seeds[0].get("port", 0) or 0)
+    local_addresses = get_local_ipv4_addresses()[:AUTO_DISCOVERY_LOCAL_SUBNET_LIMIT]
+    for address in local_addresses:
+        parsed = parse_wireless_target(f"{address}:{latest_port}")
+        if not parsed:
+            continue
+        add_plan(parsed["prefix2"], int(parsed["third_octet"]), latest_port, f"local-subnet:{address}")
+
+    for seed in history_seeds[:AUTO_DISCOVERY_HISTORY_SCAN_LIMIT]:
+        add_plan(
+            str(seed.get("prefix2", "")),
+            int(seed.get("third_octet", -1)),
+            int(seed.get("port", 0) or 0),
+            str(seed.get("source", "")) or "cache-history",
+        )
+    return plans
 
 def tcp_port_open(host, port, timeout):
     sock = None
@@ -812,7 +867,7 @@ def discover_hdc_candidates():
         trusted = source in ("cache-last", "cache", "HDC_TARGET", "HDC_AUTO_TARGETS")
         candidate = try_hdc_tconn_target(parsed["target"], source, precheck=not trusted)
         if candidate:
-            candidates.append(candidate)
+            return [candidate]
     candidates = unique_candidates(candidates)
     if candidates:
         return candidates
@@ -823,43 +878,54 @@ def discover_hdc_candidates():
         source = str(candidate.get("source", "")) or "hdc-discover"
         connected_candidate = try_hdc_tconn_target(target, source, precheck=False)
         if connected_candidate:
-            candidates.append(connected_candidate)
+            return [connected_candidate]
     candidates = unique_candidates(candidates)
     if candidates:
         return candidates
 
-    local_addresses = get_local_ipv4_addresses()
-    ports = build_port_candidates(seeds)
-    prefixes = build_prefix2_candidates(seeds, local_addresses)
-    if not ports or not prefixes:
-        print(">> [HDC Auto] No LAN prefix or HDC port is available for auto scan.")
+    history_scan_seeds = recent_history_scan_seeds()
+    if not history_scan_seeds:
+        print(">> [HDC Auto] No recent history target is available for bounded LAN scan.")
+        return []
+
+    scan_plans = build_auto_discovery_scan_plans(history_scan_seeds)
+    if not scan_plans:
+        print(">> [HDC Auto] No valid subnet is available for bounded LAN scan.")
         return []
 
     deadline = time.monotonic() + AUTO_DISCOVERY_SCAN_BUDGET
     print(
-        f">> [HDC Auto] LAN scan starts: prefixes={prefixes}, ports={ports}, "
-        f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
+        f">> [HDC Auto] LAN scan will check {len(scan_plans)} subnet plan(s), "
+        f"history_limit={AUTO_DISCOVERY_HISTORY_SCAN_LIMIT}, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
     )
-    for prefix2 in prefixes:
-        third_order = build_third_octet_order(prefix2, seeds, local_addresses)
-        for port in ports:
-            for third in third_order:
-                if time.monotonic() >= deadline:
-                    print(">> [HDC Auto] LAN scan budget exhausted.")
-                    return unique_candidates(candidates)
-                prefix3 = f"{prefix2}.{third}"
-                host_order = build_host_octet_order(prefix2, third, seeds)
-                open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
-                if not open_targets:
-                    continue
-                print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
-                for target in open_targets:
-                    candidate = try_hdc_tconn_target(target, "lan-scan", precheck=False)
-                    if candidate:
-                        candidates.append(candidate)
-                candidates = unique_candidates(candidates)
-                if candidates:
-                    return candidates
+    for index, plan in enumerate(scan_plans, start=1):
+        if time.monotonic() >= deadline:
+            print(">> [HDC Auto] LAN scan budget exhausted.")
+            return unique_candidates(candidates)
+        prefix2 = str(plan.get("prefix2", ""))
+        third = int(plan.get("third_octet", -1))
+        prefix3 = str(plan.get("prefix3", "")) or f"{prefix2}.{third}"
+        port = int(plan.get("port", 0) or 0)
+        source = str(plan.get("source", "")) or "lan-scan"
+        plan_seeds = plan.get("seeds", [])
+        if not isinstance(plan_seeds, list):
+            plan_seeds = []
+        host_order = build_host_octet_order(prefix2, third, plan_seeds)
+        print(
+            f">> [HDC Auto] LAN scan starts: subnet={prefix3}.0/24, port={port}, "
+            f"source={source}, plan={index}/{len(scan_plans)}, "
+            f"timeout={AUTO_DISCOVERY_CONNECT_TIMEOUT}s, budget={AUTO_DISCOVERY_SCAN_BUDGET}s"
+        )
+        open_targets = scan_subnet_for_hdc_port(prefix3, port, host_order, deadline)
+        if time.monotonic() >= deadline:
+            print(">> [HDC Auto] LAN scan budget exhausted.")
+            return unique_candidates(candidates)
+        if open_targets:
+            print(f">> [HDC Auto] {prefix3}.0/24 has {len(open_targets)} open tcp:{port} candidate(s).")
+        for target in open_targets:
+            candidate = try_hdc_tconn_target(target, f"lan-scan:{source}", precheck=False)
+            if candidate:
+                return [candidate]
     return unique_candidates(candidates)
 
 def ensure_auto_hdc_connected(force=False, prompt_user=False, reason=""):
@@ -1381,6 +1447,84 @@ def ensure_workflow_agent_ready():
     if not is_hdc_connected():
         raise RuntimeError('HDC target is not connected')
 
+def ensure_wechat_collect_service_ready():
+    if wechat_collect_service is None:
+        raise RuntimeError("wechat_collect module is unavailable")
+
+def ensure_workflow_hdc_ready():
+    if not is_hdc_connected():
+        raise RuntimeError('HDC target is not connected')
+
+def ensure_wechat_collect_ready(require_agent=False):
+    ensure_wechat_collect_service_ready()
+    ensure_workflow_hdc_ready()
+    if require_agent:
+        if harmony_agent is None:
+            raise RuntimeError('harmony_agent.py is unavailable')
+        if not hasattr(harmony_agent, 'run_gui_task'):
+            raise RuntimeError('harmony_agent.run_gui_task is unavailable')
+
+def wechat_collect_requires_gui_search(payload):
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("mode", "recent_contacts")).strip() == "target_contact"
+
+def run_wechat_gui_search(contact_name):
+    if harmony_agent is None:
+        print(">> [WeChatCollect] harmony_agent 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.py is unavailable"}
+    if not hasattr(harmony_agent, 'run_gui_task'):
+        print(">> [WeChatCollect] harmony_agent.run_gui_task 不可用，跳过 GUI Agent 搜索兜底")
+        return {"status": "error", "message": "harmony_agent.run_gui_task is unavailable"}
+    return harmony_agent.run_gui_task(f"搜索{contact_name}，进入聊天界面")
+
+def wechat_collect_driver_call():
+    if harmony_agent is None or not hasattr(harmony_agent, 'run_driver_call'):
+        return None
+    ensure_driver = getattr(harmony_agent, 'ensure_driver_available', None)
+    if callable(ensure_driver):
+        try:
+            if not ensure_driver():
+                return None
+        except Exception as ex:
+            print(f">> [WeChatCollect] hmdriver2 初始化失败，将回退 HDC: {ex}")
+            return None
+    return harmony_agent.run_driver_call
+
+def bring_llm_app_back_after_wechat_collect():
+    if harmony_agent is None or not hasattr(harmony_agent, 'bring_llm_app_to_foreground'):
+        return
+    try:
+        harmony_agent.bring_llm_app_to_foreground()
+    except Exception as ex:
+        print(f">> [WeChatCollect] 回到 MNN LLM Chat 失败: {ex}")
+
+def workflow_uidump_action(payload):
+    ensure_wechat_collect_ready()
+    return run_with_hdc_control(
+        "workflow_uidump",
+        lambda: wechat_collect_service.uidump_action(payload or {}, hdc_prefix())
+    )
+
+def workflow_wechat_collect_action(payload):
+    request_payload = payload or {}
+    ensure_wechat_collect_ready()
+    def collect_and_return_app():
+        try:
+            return wechat_collect_service.collect_action(
+                request_payload,
+                hdc_prefix(),
+                gui_search=run_wechat_gui_search,
+                driver_call=wechat_collect_driver_call(),
+            )
+        finally:
+            bring_llm_app_back_after_wechat_collect()
+
+    return run_with_hdc_control(
+        "workflow_wechat_collect",
+        collect_and_return_app
+    )
+
 def run_remote_command(cmd):
     def execute():
         try:
@@ -1426,6 +1570,89 @@ def run_hdc_command(cmd, timeout=HDC_ACTION_TIMEOUT):
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'command failed: {cmd}')
     return result.stdout.strip()
 
+
+FOREGROUND_PACKAGE_PATTERNS = (
+    re.compile(r"(?im)\bbundle(?:\s*name|name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bmission\s+name\b[^A-Za-z0-9_#-]*#*\s*([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bmain\s+window\b.*?\bbundle(?:\s*name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+    re.compile(r"(?im)\bability\b.*?\bbundle(?:\s*name)?\b\s*[:=]\s*['\"]?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)"),
+)
+
+
+def extract_foreground_package_name(text):
+    raw = str(text or "")
+    for pattern in FOREGROUND_PACKAGE_PATTERNS:
+        match = pattern.search(raw)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def run_hdc_command_capture(cmd, timeout=None):
+    limit = HDC_ACTION_TIMEOUT if timeout is None else timeout
+    try:
+        return subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=limit
+        )
+    except subprocess.TimeoutExpired as ex:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            ex.stdout or "",
+            ex.stderr or f"command timed out after {limit}s: {cmd}"
+        )
+
+
+def detect_current_foreground_package_name():
+    commands = (
+        f"{hdc_prefix()} shell aa dump --mission-list",
+        f"{hdc_prefix()} shell aa dump -l",
+        f"{hdc_prefix()} shell hidumper -s AbilityManagerService",
+    )
+    for command in commands:
+        result = run_hdc_command_capture(command, timeout=min(HDC_ACTION_TIMEOUT, 5))
+        package_name = extract_foreground_package_name((result.stdout or "") + "\n" + (result.stderr or ""))
+        if package_name:
+            return package_name
+    return ""
+
+
+def build_app_start_result(app_name, package_name, reset_first):
+    target = app_name or package_name
+    if not target:
+        raise RuntimeError('app_start requires app_name or package_name')
+    ok = harmony_agent.launch_app(target, reset_first=reset_first)
+    if not ok and package_name and package_name != target:
+        ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
+    if not ok:
+        return {
+            'status': 'error',
+            'message': f'app_start failed: {target}',
+            'package_name': package_name
+        }
+    current_package_name = ''
+    if package_name:
+        current_package_name = detect_current_foreground_package_name()
+        if current_package_name and current_package_name != package_name:
+            return {
+                'status': 'error',
+                'message': f'app_identity_mismatch: expected {package_name}, current {current_package_name}',
+                'package_name': package_name,
+                'current_package_name': current_package_name
+            }
+    result = {
+        'status': 'ok',
+        'message': f'app_start {target}',
+        'package_name': package_name
+    }
+    if current_package_name:
+        result['current_package_name'] = current_package_name
+    return result
+
 def hdc_prefix():
     target = get_active_hdc_target(force=False)
     if target:
@@ -1433,7 +1660,11 @@ def hdc_prefix():
     return "hdc"
 
 def hdc_input_text_command(text):
-    return f"{hdc_prefix()} shell uitest uiInput inputText {shlex.quote(str(text or ''))}"
+    return f"{hdc_prefix()} shell uitest uiInput text {shlex.quote(str(text.strip() or ''))}"
+
+def driver_shell_text_command(text):
+    escaped_text = "'" + str(text or '').replace("'", "'\\''") + "'"
+    return f"uitest uiInput text {escaped_text}"
 
 def workflow_driver_for_action(action):
     if harmony_agent is None:
@@ -1455,6 +1686,44 @@ def workflow_driver_for_action(action):
     except Exception as ex:
         print(f">> [Workflow输入警告] Driver 初始化失败，回退到 HDC inputText: {ex}")
     return None
+
+def workflow_input_focus_wait():
+    return float(getattr(harmony_agent, 'DEVICE_WAIT_TIME', 0.5))
+
+def workflow_remember_input_target(x, y):
+    global _workflow_last_input_target
+    _workflow_last_input_target = (int(x), int(y))
+
+def workflow_clear_input_target():
+    global _workflow_last_input_target
+    _workflow_last_input_target = None
+
+def workflow_payload_input_point(payload):
+    if payload.get('x') is not None and payload.get('y') is not None:
+        return int(payload.get('x', 0)), int(payload.get('y', 0))
+    return _workflow_last_input_target
+
+def workflow_target_element_looks_input(payload):
+    text = str(payload.get('target_element') or payload.get('targetElement') or '').strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in WORKFLOW_INPUT_TARGET_KEYWORDS)
+
+def workflow_activate_input_target(driver, x, y):
+    if driver:
+        harmony_agent.run_driver_call("Driver.click(input_focus)", lambda d: d.click(int(x), int(y)))
+    else:
+        run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {int(x)} {int(y)}")
+    time.sleep(workflow_input_focus_wait())
+
+def workflow_require_input_target(payload):
+    point = workflow_payload_input_point(payload)
+    if point is None:
+        raise RuntimeError(
+            "input requires x/y or a previous click_input/input-like click; "
+            "refusing to type into unknown focus"
+        )
+    return point
 
 def payload_bool(payload, key, default):
     value = payload.get(key, default)
@@ -1544,37 +1813,43 @@ def _workflow_gui_action_impl(payload):
             harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
         else:
             run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
+        if workflow_target_element_looks_input(payload):
+            workflow_remember_input_target(x, y)
+        else:
+            workflow_clear_input_target()
         return {'status': 'ok', 'message': f'click {x},{y}'}
 
     if action == 'click_input':
         x = int(payload.get('x', 0))
         y = int(payload.get('y', 0))
         text = str(payload.get('text', ''))
+        workflow_activate_input_target(driver, x, y)
+        workflow_remember_input_target(x, y)
         if driver:
-            harmony_agent.run_driver_call("Driver.click", lambda d: d.click(x, y))
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
-            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
+            harmony_agent.run_driver_call("Driver.shell(text)", lambda d: d.shell(driver_shell_text_command(text)))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
-            run_hdc_command(f"{hdc_prefix()} shell uitest uiInput click {x} {y}")
-            time.sleep(harmony_agent.DEVICE_WAIT_TIME)
             run_hdc_command(hdc_input_text_command(text))
         return {'status': 'ok', 'message': f'click_input {x},{y}'}
 
     if action == 'input':
         text = str(payload.get('text', ''))
+        x, y = workflow_require_input_target(payload)
+        workflow_activate_input_target(driver, x, y)
+        workflow_remember_input_target(x, y)
         if driver:
             harmony_agent.run_driver_call("Driver.shell(clear_input)", lambda d: d.shell('uitest uiInput keyEvent 2072 2017'))
             harmony_agent.run_driver_call("Driver.press_key(2071)", lambda d: d.press_key(2071))
-            harmony_agent.run_driver_call("Driver.input_text", lambda d: d.input_text(text))
+            harmony_agent.run_driver_call("Driver.shell(text)", lambda d: d.shell(driver_shell_text_command(text)))
             harmony_agent.press_harmony_key('ENTER', 2054)
         else:
             run_hdc_command(hdc_input_text_command(text))
         return {'status': 'ok', 'message': 'input'}
 
     if action == 'swipe_with_coords':
+        workflow_clear_input_target()
         sx = int(payload.get('start_x', 0))
         sy = int(payload.get('start_y', 0))
         ex = int(payload.get('end_x', 0))
@@ -1586,6 +1861,7 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'swipe {sx},{sy}->{ex},{ey}'}
 
     if action == 'swipe':
+        workflow_clear_input_target()
         direction = str(payload.get('direction', 'up')).lower()
         if driver:
             if direction == 'up':
@@ -1616,6 +1892,8 @@ def _workflow_gui_action_impl(payload):
 
     if action == 'keyevent':
         key = str(payload.get('key', 'BACK')).upper()
+        if key in ('BACK', 'HOME'):
+            workflow_clear_input_target()
         if key == 'BACK':
             if driver:
                 harmony_agent.press_harmony_key('BACK', 2)
@@ -1641,20 +1919,14 @@ def _workflow_gui_action_impl(payload):
         return {'status': 'ok', 'message': f'sleep {seconds}'}
 
     if action == 'app_start':
+        workflow_clear_input_target()
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        target = app_name or package_name
-        if not target:
-            raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target, reset_first=reset_first)
-        if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
-        if not ok:
-            raise RuntimeError(f'app_start failed: {target}')
-        return {'status': 'ok', 'message': f'app_start {target}', 'package_name': package_name}
+        return build_app_start_result(app_name, package_name, reset_first)
 
     if action == 'app_stop':
+        workflow_clear_input_target()
         package_name = str(payload.get('package_name', ''))
         if not package_name:
             raise RuntimeError('app_stop requires package_name')
@@ -1686,6 +1958,7 @@ def handle_workflow_action(action, payload):
 
     if action == 'prepare_agent_run':
         ensure_workflow_agent_ready()
+        workflow_clear_input_target()
         harmony_agent.reset_driver()
         return {
             'status': 'ok',
@@ -1741,17 +2014,7 @@ def handle_workflow_action(action, payload):
         app_name = str(payload.get('app_name', ''))
         package_name = str(payload.get('package_name', ''))
         reset_first = payload_bool(payload, 'reset_first', True)
-        target = app_name or package_name
-        if not target:
-            raise RuntimeError('app_start requires app_name or package_name')
-        ok = harmony_agent.launch_app(target, reset_first=reset_first)
-        if not ok and package_name and package_name != target:
-            ok = harmony_agent.launch_app(package_name, reset_first=reset_first)
-        return {
-            'status': 'ok' if ok else 'error',
-            'message': f'app_start {target}',
-            'package_name': package_name
-        }
+        return build_app_start_result(app_name, package_name, reset_first)
 
     if action == 'execute_decider_action':
         ensure_workflow_agent_ready()
@@ -1768,6 +2031,12 @@ def handle_workflow_action(action, payload):
 
     if action == 'gui_action':
         return workflow_gui_action(payload)
+
+    if action == 'uidump':
+        return workflow_uidump_action(payload)
+
+    if action == 'wechat_collect':
+        return workflow_wechat_collect_action(payload)
 
     raise RuntimeError(f'Unsupported workflow action: {action}')
 
@@ -1824,7 +2093,7 @@ def ensure_agent_loop_ready():
     if not is_hdc_connected(force=True):
         return {
             'status': 'error',
-            'message': 'HDC target is not connected',
+            'message': hdc_manual_config_message(),
             'hdc_connected': False,
             'tunnel_ready': False,
             'fport_ready': False,
@@ -1889,22 +2158,29 @@ if __name__ == '__main__':
         else:
             print(f">> [HDC Auto] 启动自动发现未完成: {auto_start_result.get('message', '')}")
 
+    initial_hdc_connected = is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED)
+
     # 9126 轮询同时服务 App 端“本地/云端智能体执行”按钮；workflow bridge 仍然按请求直接控制设备。
     if LEGACY_LOOP_ENABLED:
-        start_harmony_agent()
-        if not is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
-            print(">> 未检测到 HDC 设备连接；轮询 Agent loop 已启动，将在连接恢复后继续尝试。")
+        if initial_hdc_connected:
+            start_harmony_agent()
+        else:
+            print_hdc_manual_config_hint()
+            print(">> 轮询 Agent loop 暂未启动；完成 HDC 配置后，请在手机 App 重新触发连接或调用 /api/agent_loop/ensure。")
     else:
         print(">> 旧版 harmony_agent 轮询未启用；workflow bridge 将按请求直接控制设备。")
         
     # 监听在独立端口：9123 是模型文件服务，9126 是 App 内 TCP Agent 服务。
     PORT = SERVER_PORT
     server = ThreadingHTTPServer(('0.0.0.0', PORT), HDCServerHandler)
-    if is_hdc_connected(force=not AUTO_DISCOVERY_ENABLED):
+    if initial_hdc_connected:
         tunnel = ensure_hdc_tunnels(force=True, reset_reverse=True)
         print(f">> [HDC] {tunnel.get('message', '')}")
     print(f"HDC 远程控制服务端已启动，监听端口: {PORT}...")
-    print(f"等待手机 App 发送连接指令...")
+    if initial_hdc_connected:
+        print(f"等待手机 App 发送连接指令...")
+    else:
+        print("未检测到 HDC 设备，暂不等待手机 App 派发任务；请完成手动配置后重新触发连接。")
     
     try:
         server.serve_forever()

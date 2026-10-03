@@ -1,16 +1,23 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
 import { DataManagerFacade } from '../../datamanager/DataManagerFacade';
 import {
   CollectionEventViewModel,
+  CollectionGalleryDetailViewModel,
   CollectionGroupViewModel,
   CollectionImageViewModel,
   JsonMap
 } from '../../datamanager/DataManagerTypes';
+import { MarkdownView } from '../../components/MarkdownView';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
+import { markdownTitleText } from '../../utils/markdown/MarkdownParser';
 
 @Entry
 @Component
 struct CollectionGroupDetailPage {
+  private pageScroller: Scroller = new Scroller();
   @State title: string = '采集详情';
   @State events: CollectionEventViewModel[] = [];
   @State selectedEventId: string = '';
@@ -49,8 +56,16 @@ struct CollectionGroupDetailPage {
   }
 
   private applyGroup(group: CollectionGroupViewModel): void {
-    this.title = group.title;
+    this.title = this.readableTitle(group.title, '采集详情');
     this.events = group.events;
+  }
+
+  private readableTitle(text: string, fallback: string): string {
+    let title = markdownTitleText(text);
+    if (title.length > 0) {
+      return title;
+    }
+    return text.length > 0 ? text : fallback;
   }
 
   private showEventDetail(event: CollectionEventViewModel): void {
@@ -96,6 +111,23 @@ struct CollectionGroupDetailPage {
     return count.toString() + ' 张图片';
   }
 
+  private joinedText(values: string[], separator: string): string {
+    let output = '';
+    for (let value of values) {
+      if (value.length > 0) {
+        output = output.length > 0 ? output + separator + value : value;
+      }
+    }
+    return output;
+  }
+
+  private galleryCaptureTime(detail: CollectionGalleryDetailViewModel): string {
+    if (detail.captureTime.length > 0) {
+      return detail.captureTime;
+    }
+    return detail.date;
+  }
+
   @Builder Thumbnail(event: CollectionEventViewModel) {
     if (event.thumbnailUri.length > 0) {
       Image(event.thumbnailUri)
@@ -123,7 +155,7 @@ struct CollectionGroupDetailPage {
     Row() {
       this.Thumbnail(event)
       Column() {
-        Text(event.summary)
+        Text(this.readableTitle(event.summary, '未命名事件'))
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .fontColor('#151A28')
@@ -131,6 +163,8 @@ struct CollectionGroupDetailPage {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
+        AiGeneratedBadge({ compact: true })
+          .margin({ top: 6 })
         Row() {
           Text(event.time)
             .fontSize(12)
@@ -260,6 +294,77 @@ struct CollectionGroupDetailPage {
     }
   }
 
+  @Builder GalleryLongText(label: string, value: string) {
+    Column() {
+      Text(label)
+        .fontSize(12)
+        .fontColor('#7C8494')
+        .maxLines(1)
+      Text(value.length > 0 ? value : '暂无数据')
+        .fontSize(12)
+        .fontColor('#303746')
+        .lineHeight(19)
+        .width('100%')
+        .margin({ top: 4 })
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .margin({ top: 10 })
+  }
+
+  @Builder GalleryDetailCard(detail: CollectionGalleryDetailViewModel) {
+    Column() {
+      Row() {
+        Text(detail.category.length > 0 ? detail.category : '图库')
+          .fontSize(11)
+          .fontColor('#8066FF')
+          .maxLines(1)
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+          .backgroundColor('#F0ECFF')
+          .borderRadius(10)
+        Text(this.readableTitle(detail.title, '图库分析详情'))
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#151A28')
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        AiGeneratedBadge({ compact: true })
+          .margin({ left: 8 })
+      }
+      .width('100%')
+
+      this.GalleryLongText('分类', detail.category)
+      this.GalleryLongText('标签', this.joinedText(detail.tags, '、'))
+      this.GalleryLongText('摘要', detail.summary)
+      this.GalleryLongText('分析明细', this.joinedText(detail.details, '\n'))
+      this.GalleryLongText('OCR 文本', detail.ocrText)
+      this.GalleryLongText('拍摄时间', this.galleryCaptureTime(detail))
+      this.GalleryLongText('设备', detail.captureDevice)
+      this.GalleryLongText('坐标', detail.captureLocation)
+      this.GalleryLongText('地址', detail.address)
+      this.GalleryLongText('附近地点', detail.poiName)
+      this.GalleryLongText('地图链接', detail.mapUrl)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#F7F9FC')
+    .borderRadius(12)
+    .margin({ top: 10 })
+  }
+
+  @Builder GalleryDetails(event: CollectionEventViewModel) {
+    if (event.galleryDetails.length > 0) {
+      this.DetailSectionTitle('图库分析')
+      ForEach(event.galleryDetails, (detail: CollectionGalleryDetailViewModel, index: number) => {
+        this.GalleryDetailCard(detail)
+      }, (detail: CollectionGalleryDetailViewModel, index: number) =>
+        event.id + '_gallery_' + detail.id + '_' + index.toString())
+    }
+  }
+
   @Builder EventDetailPanel() {
     if (this.selectedEventId.length > 0) {
       Stack({ alignContent: Alignment.Center }) {
@@ -275,7 +380,7 @@ struct CollectionGroupDetailPage {
           Column() {
             Row() {
               Column() {
-                Text(event.summary)
+                Text(this.readableTitle(event.summary, '事件详情'))
                   .fontSize(18)
                   .fontWeight(FontWeight.Bold)
                   .fontColor('#11182F')
@@ -291,6 +396,8 @@ struct CollectionGroupDetailPage {
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
               .margin({ right: 12 })
+              AiGeneratedBadge({ compact: true })
+                .margin({ right: 12 })
               Text('关闭')
                 .fontSize(13)
                 .fontColor('#5B68FF')
@@ -302,14 +409,14 @@ struct CollectionGroupDetailPage {
 
             Scroll() {
               Column() {
-                this.DetailSectionTitle('来源图片')
+                this.DetailSectionTitle(event.galleryDetails.length > 0 ? '图库图片' : '来源图片')
                 this.DetailImages(event)
+                this.GalleryDetails(event)
 
                 this.DetailSectionTitle('详情')
-                Text(this.detailText(event))
-                  .fontSize(13)
-                  .fontColor('#4D5566')
-                  .lineHeight(20)
+                Column() {
+                  MarkdownView({ text: this.detailText(event), variant: 'collection_detail' })
+                }
                   .width('100%')
                   .padding(10)
                   .backgroundColor('#F7F9FC')
@@ -345,68 +452,85 @@ struct CollectionGroupDetailPage {
     }
   }
 
-  build() {
-    Stack() {
-      Column() {
-        Row() {
-          Text('返回')
-            .fontSize(14)
-            .fontColor('#8066FF')
-            .height(36)
-            .padding({ left: 12, right: 12 })
-            .backgroundColor('#F0ECFF')
-            .borderRadius(18)
-            .onClick(() => {
-              router.back();
-            })
-          Text(this.title)
-            .fontSize(20)
+  @Builder PageHeader() {
+    Row() {
+      Text('返回')
+        .fontSize(14)
+        .fontColor('#8066FF')
+        .height(36)
+        .padding({ left: 12, right: 12 })
+        .backgroundColor('#F0ECFF')
+        .borderRadius(18)
+        .onClick(() => {
+          router.back();
+        })
+      Text(this.title)
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#151A28')
+        .layoutWeight(1)
+        .margin({ left: 12 })
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      AiGeneratedBadge({ compact: true })
+        .margin({ left: 8 })
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
+
+  @Builder PageContent() {
+    Column() {
+      if (this.events.length === 0) {
+        Column() {
+          Text('暂无已整理记录')
+            .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor('#151A28')
-            .layoutWeight(1)
-            .margin({ left: 12 })
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text('返回采集页后重新同步')
+            .fontSize(12)
+            .fontColor('#7C8494')
+            .margin({ top: 8 })
         }
         .width('86%')
-        .margin({ top: 18, bottom: 14 })
-
-        if (this.events.length === 0) {
-          Column() {
-            Text('暂无已整理记录')
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#151A28')
-            Text('返回采集页后重新同步')
-              .fontSize(12)
-              .fontColor('#7C8494')
-              .margin({ top: 8 })
-          }
-          .width('86%')
-          .height(140)
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(16)
-        } else {
-          List({ space: 0 }) {
-            ForEach(this.events, (event: CollectionEventViewModel) => {
-              ListItem() {
-                this.EventRow(event)
-              }
-              .width('100%')
-            }, (event: CollectionEventViewModel) => event.id)
-          }
-          .width('86%')
-          .layoutWeight(1)
-          .alignListItem(ListItemAlign.Start)
-          .padding({ bottom: 40 })
+        .height(140)
+        .margin({ top: APP_HEADER_CONTENT_GAP })
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#FFFFFF')
+        .borderRadius(16)
+      } else {
+        List({ space: 0, scroller: this.pageScroller }) {
+          ForEach(this.events, (event: CollectionEventViewModel) => {
+            ListItem() {
+              this.EventRow(event)
+            }
+            .width('100%')
+          }, (event: CollectionEventViewModel) => event.id)
         }
+        .width('86%')
+        .layoutWeight(1)
+        .contentStartOffset(APP_HEADER_CONTENT_GAP)
+        .clip(false)
+        .alignListItem(ListItemAlign.Start)
+        .padding({ bottom: 40 })
       }
-      .width('100%')
-      .height('100%')
-      .alignItems(HorizontalAlign.Center)
-      .justifyContent(FlexAlign.Start)
-      .backgroundColor('#F4F8FF')
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center)
+    .justifyContent(FlexAlign.Start)
+    .backgroundColor('#F4F8FF')
+  }
+
+  build() {
+    Stack() {
+      FrostedPage({
+        pageBackgroundColor: '#F4F8FF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       this.EventDetailPanel()
     }

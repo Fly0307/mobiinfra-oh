@@ -1,0 +1,87 @@
+{
+  "attributes": {
+    "type": "WindowScene",
+    "origBounds": "[0,0][1256,2760]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "type": "Text",
+        "origBounds": "[585,128][671,184]",
+        "text": "小赵"
+      },
+      "children": []
+    },
+    {
+      "attributes": {
+        "type": "List",
+        "origBounds": "[0,360][1256,2760]",
+        "scrollable": "true"
+      },
+      "children": [
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,520][1256,600]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[500,536][756,576]",
+                "text": "星期一 下午 02:00"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,700][1256,850]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[98,724][178,804]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[230,736][820,794]",
+                "text": "更早的一条消息"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,2440][1256,2590]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[1078,2464][1158,2544]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[610,2476][1010,2534]",
+                "text": "边界重复消息"
+              },
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

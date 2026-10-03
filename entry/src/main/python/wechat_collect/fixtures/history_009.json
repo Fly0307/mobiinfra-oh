@@ -1,0 +1,110 @@
+{
+  "attributes": {
+    "type": "WindowScene",
+    "origBounds": "[0,0][1256,2760]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "type": "Text",
+        "origBounds": "[585,128][671,184]",
+        "text": "小赵"
+      },
+      "children": []
+    },
+    {
+      "attributes": {
+        "type": "List",
+        "origBounds": "[0,360][1256,2760]",
+        "scrollable": "true"
+      },
+      "children": [
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,382][1256,532]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[1078,406][1158,486]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[610,418][1010,476]",
+                "text": "边界重复消息"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,620][1256,700]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[500,636][756,676]",
+                "text": "星期一 下午 03:47"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,740][1256,890]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[1078,764][1158,844]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[610,776][1010,834]",
+                "text": "我想要买一个iPhone 17Pro"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,920][1256,1070]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Image",
+                "origBounds": "[98,944][178,1024]"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[230,956][820,1014]",
+                "text": "需要给妹妹买一些少儿读物"
+              },
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

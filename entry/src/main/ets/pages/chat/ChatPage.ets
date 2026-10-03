@@ -1,49 +1,109 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { inputMethod } from '@kit.IMEKit';
 import {
+  CHAT_COMPOSER_MAX_LINES,
   CHAT_MODE_CLOUD_AGENT,
   CHAT_MODE_LOCAL_INFERENCE,
-  chatModeSwitcherVisibleAfterScroll,
+  chatComposerBarHeight,
+  chatComposerTextAreaHeight,
+  chatComposerPrimaryActionRole,
+  chatComposerVoiceReleaseShouldStop,
+  chatPageBackgroundColor,
+  chatDeepThinkingToggleVisible,
   chatModeLabel,
-  chatModePlaceholder
+  chatModePlaceholder,
+  chatVoiceStatusBarVisible,
+  chatVoiceStatusIsCapturing,
+  chatVoiceStatusDetailText,
+  chatTimeGreeting
 } from './ChatPageTypes';
-import { ChatMessage, ChatSessionSummary } from './ChatSessionTypes';
+import {
+  CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM,
+  CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA,
+  chatAttachmentComposerExtraHeightWithImages,
+  chatAttachmentPreviewHeight,
+  chatCanSendMessageWithImages,
+  chatCanSubmitTaskWithImages,
+  chatImageAttachmentSourceLabel,
+  hasChatImageAttachments,
+  normalizeChatImageAttachments
+} from './ChatAttachmentPolicy';
+import {
+  ChatMessage,
+  ChatSessionSummary,
+  chatMessagesAutoScrollKey,
+  chatMessagesStreamFollowKey
+} from './ChatSessionTypes';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatSessionDrawer } from './ChatSessionDrawer';
+import { DigitalAvatarView } from './DigitalAvatarView';
+import { digitalAvatarContainerHeight, digitalAvatarVisualStateForVoiceStatus } from './DigitalAvatarTypes';
+import { VoiceInteractionStatus, voiceStatusLabel } from './VoiceInteractionTypes';
+import { showToastSafely } from '../../utils/PromptSafe';
+import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
 
 @Component
 export struct ChatPage {
+  private pageScroller: Scroller = new Scroller();
+  @StorageProp(DEBUG_ENABLED_STORAGE_KEY) private debugEnabled: boolean = false;
   @Link chatMode: string;
   @Link cloudUserInput: string;
   @Link userInput: string;
+  @Link chatDeepThinkingEnabled: boolean;
   @State previewImagePath: string = '';
-  @State modeSwitcherVisible: boolean = true;
+  @State attachmentSourceMenuVisible: boolean = false;
   @Prop cloudOutput: string = '';
+  @Prop navigationBottomInset: number = 0;
   @Prop cloudDebugImagePath: string = '';
   @Prop cloudThinking: boolean = false;
   @Prop localOutput: string = '';
   @Prop localDebugImagePath: string = '';
   @Prop chatHistory: string = '';
   @Prop localThinking: boolean = false;
+  @Prop localChatCancelable: boolean = false;
   @Prop modelLoaded: boolean = false;
   @Prop sessions: ChatSessionSummary[] = [];
   @Prop activeSessionId: string = '';
   @Prop messages: ChatMessage[] = [];
+  // 数字分身透明前景图入口：前景图来自数据层 PNG 缓存，未传入时回退到原有 H 徽标。
+  @Prop avatarForegroundUri: string = '';
+  @Prop avatarMessageForegroundUri: string = '';
+  @Prop pendingImageAttachmentUris: string[] = [];
   @Prop sessionDrawerOpen: boolean = false;
   @Prop restoringLocalSession: boolean = false;
+  @Prop pcServerConnected: boolean = false;
+  @Prop pcServerCloudEnabled: boolean = false;
+  @Prop voiceStatus: VoiceInteractionStatus = 'idle';
+  @Prop voicePartialTranscript: string = '';
+  @Prop voiceActiveMessageId: string = '';
   onSwitchMode: (mode: string) => Promise<void> = async () => {};
   onOpenSessionDrawer: () => void = () => {};
   onCloseSessionDrawer: () => void = () => {};
   onCreateSession: (mode: string) => void = () => {};
   onSelectSession: (id: string) => Promise<void> = async () => {};
   onDeleteSession: (id: string) => Promise<void> = async () => {};
+  onRenameSession: (id: string, title: string) => Promise<boolean> = async () => false;
+  onToggleSessionPinned: (id: string) => Promise<void> = async () => {};
   onToggleTaskTrace: (id: string) => void = () => {};
+  onToggleThinking: (id: string) => void = () => {};
   onRunCloudPlanner: () => Promise<void> = async () => {};
+  onCancelCloudChat: () => void = () => {};
+  onCancelLocalChat: () => void = () => {};
   onSubmitCloudTask: () => Promise<void> = async () => {};
   onSendLocalMessage: () => Promise<void> = async () => {};
   onSubmitLocalTask: () => Promise<void> = async () => {};
+  onTakePhotoAttachment: () => Promise<void> = async () => {};
+  onPickImageAttachment: () => Promise<void> = async () => {};
+  onClearImageAttachment: () => void = () => {};
   onClearCloudDebugImage: () => void = () => {};
   onClearLocalDebugImage: () => void = () => {};
   onOpenRuntimeLogs: () => void = () => {};
+  onUsePcServerCloud: () => void = () => {};
+  onToggleVoiceInput: () => Promise<void> = async () => {};
+  onStopVoiceInput: () => Promise<void> = async () => {};
+  onPlayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
+  onReplayVoiceMessage: (messageId: string, text: string) => Promise<void> = async () => {};
 
   private isCloudMode(): boolean {
     return this.chatMode !== CHAT_MODE_LOCAL_INFERENCE;
@@ -51,6 +111,31 @@ export struct ChatPage {
 
   private activeInput(): string {
     return this.isCloudMode() ? this.cloudUserInput : this.userInput;
+  }
+
+  private composerBarHeight(): number {
+    return chatComposerBarHeight(this.activeInput());
+  }
+
+  private composerTextAreaHeight(): number {
+    return chatComposerTextAreaHeight(this.activeInput());
+  }
+
+  private attachmentComposerExtraHeight(): number {
+    return chatAttachmentComposerExtraHeightWithImages(this.composerTextAreaHeight(), this.pendingImageAttachmentList());
+  }
+
+  private attachmentPreviewHeight(): number {
+    return chatAttachmentPreviewHeight(this.composerTextAreaHeight());
+  }
+
+  private bottomOverlayInset(): number {
+    return this.composerBarHeight() + this.attachmentComposerExtraHeight() + this.voiceStatusExtraHeight() + 52 +
+      this.navigationBottomInset;
+  }
+
+  private welcomeGreeting(): string {
+    return chatTimeGreeting(new Date().getHours());
   }
 
   private setActiveInput(value: string): void {
@@ -65,8 +150,105 @@ export struct ChatPage {
     return this.isCloudMode() ? this.cloudThinking : this.localThinking;
   }
 
+  private isVoiceCapturing(): boolean {
+    return chatVoiceStatusIsCapturing(this.voiceStatus);
+  }
+
+  private voiceStatusVisible(): boolean {
+    return chatVoiceStatusBarVisible(this.voiceStatus, this.voicePartialTranscript);
+  }
+
+  private voiceStatusExtraHeight(): number {
+    return this.voiceStatusVisible() ? 34 : 0;
+  }
+
+  private voiceStatusText(): string {
+    return chatVoiceStatusDetailText(this.voiceStatus, this.voicePartialTranscript);
+  }
+
+  private showConversationThinkingRow(): boolean {
+    // 本地流式会先插入 assistant 占位消息，已有消息时不再额外显示底部处理中行。
+    if (this.isCloudMode()) {
+      return this.cloudThinking;
+    }
+    return this.localThinking && this.messages.length === 0;
+  }
+
+  private showPcServerCloudButton(): boolean {
+    return this.isCloudMode() && this.pcServerConnected;
+  }
+
+  private primaryButtonText(): string {
+    if (this.isCloudMode() && this.cloudThinking) {
+      return '停止';
+    }
+    if (!this.isCloudMode() && this.localChatCancelable) {
+      return '终止';
+    }
+    return this.isBusy() ? '...' : '发送';
+  }
+
+  private canCancelPrimaryInference(): boolean {
+    return (this.isCloudMode() && this.cloudThinking) ||
+      (!this.isCloudMode() && this.localChatCancelable);
+  }
+
+  private primaryActionRole(): string {
+    return chatComposerPrimaryActionRole(this.isBusy(), this.isVoiceCapturing());
+  }
+
+  private primaryButtonBackgroundColor(): string {
+    if (this.primaryActionRole() === 'voice_capture') {
+      return '#5968FF';
+    }
+    if (this.canCancelPrimaryInference()) {
+      return '#D14343';
+    }
+    return this.isBusy() ? '#AEB7C8' : '#111827';
+  }
+
+  private startPrimaryButtonVoiceInput(): void {
+    if (this.isBusy()) {
+      return;
+    }
+    this.onToggleVoiceInput().catch((e: Error) => {
+      let err = e as Error;
+      showToastSafely(err.message, 1600);
+    });
+  }
+
+  private stopPrimaryButtonVoiceInput(): void {
+    if (!chatComposerVoiceReleaseShouldStop(this.voiceStatus)) {
+      return;
+    }
+    this.onStopVoiceInput().catch((e: Error) => {
+      let err = e as Error;
+      showToastSafely(err.message, 1600);
+    });
+  }
+
+  private toggleDeepThinking(): void {
+    // Think 开关只影响下一次默认云端模型聊天请求；处理中保持当前请求参数不变。
+    if (this.isBusy()) {
+      return;
+    }
+    this.chatDeepThinkingEnabled = !this.chatDeepThinkingEnabled;
+  }
+
   private hasConversationContent(): boolean {
     return this.messages.length > 0 || this.isBusy();
+  }
+
+  private hasPendingImageAttachment(): boolean {
+    return hasChatImageAttachments(this.pendingImageAttachmentList());
+  }
+
+  private pendingImageAttachmentList(): string[] {
+    return normalizeChatImageAttachments(this.pendingImageAttachmentUris);
+  }
+
+  private pendingImageAttachmentCount(): number {
+    return this.pendingImageAttachmentList().length;
   }
 
   private openDebugImagePreview(path: string): void {
@@ -79,6 +261,27 @@ export struct ChatPage {
     this.previewImagePath = '';
   }
 
+  private openAttachmentSourceMenu(): void {
+    this.dismissChatInput();
+    this.attachmentSourceMenuVisible = true;
+  }
+
+  private closeAttachmentSourceMenu(): void {
+    this.attachmentSourceMenuVisible = false;
+  }
+
+  // 来源菜单只负责分发用户选择，真正的相机/相册调用仍在页面宿主中完成，避免 UI 组件持有系统能力细节。
+  private async selectImageAttachmentSource(source: string): Promise<void> {
+    this.closeAttachmentSourceMenu();
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA) {
+      await this.onTakePhotoAttachment();
+      return;
+    }
+    if (source === CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM) {
+      await this.onPickImageAttachment();
+    }
+  }
+
   private activeConversationText(): string {
     if (this.isCloudMode()) {
       return this.cloudThinking ? '云端智能体正在处理...' : '';
@@ -89,110 +292,191 @@ export struct ChatPage {
     return this.localThinking ? '本地模型正在生成...' : '';
   }
 
-  private isModeSwitcherShown(): boolean {
-    return this.messages.length === 0 || this.modeSwitcherVisible;
-  }
-
-  private updateModeSwitcherVisibility(yOffset: number): void {
-    if (this.messages.length === 0) {
-      this.modeSwitcherVisible = true;
-      return;
+  private compactModeLabel(mode: string): string {
+    if (mode === CHAT_MODE_LOCAL_INFERENCE) {
+      return '本地';
     }
-    this.modeSwitcherVisible = chatModeSwitcherVisibleAfterScroll(this.modeSwitcherVisible, yOffset);
+    return '云端';
   }
 
-  @Builder ModeChip(mode: string) {
-    Text(chatModeLabel(mode))
-      .fontSize(13)
+  @Builder ModeTopTab(mode: string) {
+    Text(this.compactModeLabel(mode))
+      .fontSize(12)
       .fontWeight(this.chatMode === mode ? FontWeight.Bold : FontWeight.Regular)
       .fontColor(this.chatMode === mode ? Color.White : '#5D6472')
-      .height(34)
-      .padding({ left: 14, right: 14 })
+      .width(46)
+      .height(28)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.chatMode === mode ? '#111827' : '#F4F6FA')
-      .borderRadius(17)
+      .borderRadius(14)
       .onClick(async () => {
         await this.onSwitchMode(mode);
       })
   }
 
-  @Builder PromptChip(text: string) {
-    Text(text)
-      .fontSize(14)
-      .fontColor('#232936')
-      .height(42)
-      .padding({ left: 16, right: 16 })
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .backgroundColor(Color.White)
-      .borderRadius(21)
-      .border({ width: 1, color: '#E7EAF0' })
-      .margin({ right: 10, bottom: 10 })
-      .onClick(() => {
-        this.setActiveInput(text);
-      })
+  @Builder ModeTopTabs() {
+    Row() {
+      this.ModeTopTab(CHAT_MODE_CLOUD_AGENT)
+      Blank()
+        .width(4)
+      this.ModeTopTab(CHAT_MODE_LOCAL_INFERENCE)
+    }
+    .height(32)
+    .padding({ left: 2, right: 2 })
+    .backgroundColor('#F4F6FA')
+    .borderRadius(16)
   }
 
-  @Builder EmptyWelcome() {
-    Column() {
-      Row() {
-        Text('H')
-          .fontSize(20)
+  @Builder WelcomeActionIcon(kind: string) {
+    // 欢迎态功能卡使用 ASCII 命名资源，避免在 ArkTS 中直接引用中文资源名。
+    Stack({ alignContent: Alignment.Center }) {
+      if (kind === 'image') {
+        Image($r('app.media.chat_card_image'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      } else if (kind === 'flow') {
+        Image($r('app.media.chat_card_flow'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      } else {
+        Image($r('app.media.chat_card_search'))
+          .width(22)
+          .height(22)
+          .objectFit(ImageFit.Contain)
+      }
+    }
+    .width(38)
+    .height(38)
+    .backgroundColor('#F2F5FF')
+    .borderRadius(14)
+  }
+
+  @Builder WelcomeActionCard(kind: string, title: string, desc: string, task: string) {
+    Row() {
+      this.WelcomeActionIcon(kind)
+      Column() {
+        Text(title)
+          .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor(Color.White)
-          .width(54)
-          .height(54)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#5968FF')
-          .borderRadius(18)
-        Text('我是 MobiAgent')
-          .fontSize(34)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#D8D5EA')
-          .margin({ left: 18 })
+          .fontColor('#111827')
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(desc)
+          .fontSize(11)
+          .fontColor('#7B8392')
+          .width('100%')
+          .margin({ top: 2 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      .margin({ top: 64 })
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+    }
+    .width('100%')
+    .height(58)
+    .padding({ left: 14, right: 14 })
+    .backgroundColor(Color.White)
+    .borderRadius(16)
+    .shadow({ radius: 8, color: '#10000000', offsetX: 0, offsetY: 3 })
+    .margin({ bottom: 8 })
+    .onClick(() => {
+      this.setActiveInput(task);
+    })
+  }
 
-      Text('随时为你答疑、规划，也可以下发自动化任务')
-        .fontSize(18)
-        .fontWeight(FontWeight.Medium)
-        .fontColor('#9AA3B2')
+  @Builder WelcomeAvatarHero() {
+    Row() {
+      DigitalAvatarView({
+        avatarForegroundUri: this.avatarForegroundUri,
+        fallbackText: 'H',
+        fallbackColor: '#5968FF',
+        visualState: digitalAvatarVisualStateForVoiceStatus(this.voiceStatus),
+        avatarSize: 'hero',
+        debugSource: 'welcome-hero mode=' + this.chatMode
+      })
+      .margin({ left: 8 })
+      Blank()
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .height(this.avatarForegroundUri.length > 0 ? digitalAvatarContainerHeight('hero', true) + 8 : 118)
+    .alignItems(VerticalAlign.Bottom)
+    .margin({ top: 0 })
+  }
+
+  @Builder EmptyWelcome() {
+    Scroll(this.pageScroller) {
+      Column() {
+        this.WelcomeAvatarHero()
+
+        Text(this.welcomeGreeting())
+          .fontSize(28)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#111827')
+          .width('100%')
+          .margin({ top: 8 })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        Text('我可以帮你整理信息、执行任务')
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#6F7787')
+          .width('100%')
+          .margin({ top: 8 })
+          .maxLines(2)
+          .lineHeight(22)
+
+        Column() {
+          this.WelcomeActionCard('flow', '总结上周做过的事', '回顾上周的记录与进展', '帮我总结一下上周我做了哪些事情。')
+          this.WelcomeActionCard('search', '淘宝搜索华为 Mate 80 Pro', '在淘宝查找这款手机', '淘宝上搜索华为Mate 80 Pro手机')
+          this.WelcomeActionCard('image', '手机碰一碰，找到同频爱好', '发现共同兴趣与话题', '手机碰一碰，找到同频爱好')
+        }
         .width('100%')
-        .margin({ top: 22 })
-        .maxLines(2)
+        .margin({ top: 14 })
 
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.PromptChip('整理今天截图里的关键信息')
-        this.PromptChip('规划一个收集微信聊天记录的 workflow')
-        this.PromptChip('淘宝搜索耳机比价')
+        Blank()
+          .height(this.bottomOverlayInset())
       }
       .width('100%')
-      .margin({ top: 28 })
-
-      Blank()
-        .height(190)
+      .alignItems(HorizontalAlign.Start)
+      .padding({ top: APP_HEADER_CONTENT_GAP })
     }
     .width('100%')
     .layoutWeight(1)
+    .scrollBar(BarState.Off)
+    .clip(false)
   }
 
   @Builder ConversationPanel() {
     if (this.messages.length > 0) {
       ChatMessageList({
+        messageScroller: this.pageScroller,
+        topOverlayInset: APP_HEADER_CONTENT_GAP,
         messages: this.messages,
-        thinking: this.isBusy(),
+        thinking: this.showConversationThinkingRow(),
+        autoScrollKey: chatMessagesAutoScrollKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
+        streamFollowKey: chatMessagesStreamFollowKey(this.activeSessionId, this.messages, this.showConversationThinkingRow()),
         modeLabel: chatModeLabel(this.chatMode),
         modeMark: this.isCloudMode() ? '云' : '本',
+        avatarForegroundUri: this.avatarForegroundUri,
+        avatarMessageForegroundUri: this.avatarMessageForegroundUri,
+        bottomOverlayInset: this.bottomOverlayInset(),
         onToggleTaskTrace: (id: string) => { this.onToggleTaskTrace(id); },
+        onToggleThinking: (id: string) => { this.onToggleThinking(id); },
         onPreviewDebugImage: (path: string) => { this.openDebugImagePreview(path); },
-        onScrollContent: (yOffset: number) => { this.updateModeSwitcherVisibility(yOffset); }
+        onPlayVoiceMessage: async (id: string, text: string) => { await this.onPlayVoiceMessage(id, text); },
+        onReplayVoiceMessage: async (id: string, text: string) => { await this.onReplayVoiceMessage(id, text); },
+        voiceActiveMessageId: this.voiceActiveMessageId,
+        voiceStatus: this.voiceStatus,
+        onScrollContent: (_yOffset: number) => {}
       })
     } else {
-      Scroll() {
+      Scroll(this.pageScroller) {
         Column() {
           Row() {
             Text(this.isCloudMode() ? '云' : '本')
@@ -234,17 +518,30 @@ export struct ChatPage {
           }
 
           Blank()
-            .height(150)
+            .height(this.bottomOverlayInset())
         }
         .width('100%')
+        .padding({ top: APP_HEADER_CONTENT_GAP })
       }
       .layoutWeight(1)
       .width('100%')
+      .clip(false)
     }
   }
 
   private async runPrimaryAction(): Promise<void> {
-    if (this.activeInput().trim().length > 0 && !this.isBusy()) {
+    if (this.isBusy()) {
+      if (this.isCloudMode()) {
+        this.onCancelCloudChat();
+      } else if (this.localChatCancelable) {
+        this.onCancelLocalChat();
+      }
+      return;
+    }
+    if (!chatCanSendMessageWithImages(this.activeInput(), this.pendingImageAttachmentList())) {
+      return;
+    }
+    if (!this.isBusy()) {
       this.dismissChatInput();
     }
     if (this.isCloudMode()) {
@@ -255,6 +552,10 @@ export struct ChatPage {
   }
 
   private async runTaskAction(): Promise<void> {
+    if (!chatCanSubmitTaskWithImages(this.pendingImageAttachmentList())) {
+      showToastSafely('图片附件仅支持普通聊天发送，请先发送或清除附件', 1800);
+      return;
+    }
     if (this.activeInput().trim().length > 0 && !this.isBusy()) {
       this.dismissChatInput();
     }
@@ -274,6 +575,174 @@ export struct ChatPage {
     try {
       this.getUIContext().getFocusController().clearFocus();
     } catch (e) {
+    }
+  }
+
+  @Builder PendingImageAttachmentPreview() {
+    if (this.hasPendingImageAttachment()) {
+      Row() {
+        Scroll() {
+          Row() {
+            ForEach(this.pendingImageAttachmentList(), (uri: string, index?: number) => {
+              Image(uri)
+                .width(this.attachmentPreviewHeight() * 0.78)
+                .height(this.attachmentPreviewHeight() * 0.86)
+                .objectFit(ImageFit.Cover)
+                .borderRadius(9)
+                .backgroundColor('#F3F4F6')
+                .margin({ right: 6 })
+            }, (uri: string, index?: number) => uri + ':' + String(index === undefined ? 0 : index))
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .layoutWeight(1)
+        .height(this.attachmentPreviewHeight())
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        Column() {
+          Text('图片附件 x' + String(this.pendingImageAttachmentCount()))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#111827')
+            .maxLines(1)
+          Text('将随下一条消息发送')
+            .fontSize(10)
+            .fontColor('#7B8392')
+            .margin({ top: 2 })
+            .maxLines(1)
+        }
+        .margin({ left: 10 })
+        .alignItems(HorizontalAlign.Start)
+        Text('×')
+          .fontSize(18)
+          .fontColor('#6B7280')
+          .width(this.attachmentPreviewHeight() * 0.72)
+          .height(this.attachmentPreviewHeight() * 0.72)
+          .textAlign(TextAlign.Center)
+          .backgroundColor('#F3F4F6')
+          .borderRadius(this.attachmentPreviewHeight() * 0.36)
+          .onClick(() => {
+            this.onClearImageAttachment();
+          })
+      }
+      .width('100%')
+      .height(this.attachmentPreviewHeight())
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 8, right: 8 })
+      .margin({ left: 22, right: 22, bottom: Math.round(this.composerTextAreaHeight() * 0.18) })
+      .backgroundColor(Color.White)
+      .borderRadius(18)
+      .shadow({ radius: 10, color: '#12000000', offsetX: 0, offsetY: 3 })
+    }
+  }
+
+  @Builder AttachmentSourceAction(source: string) {
+    Column() {
+      Text(chatImageAttachmentSourceLabel(source))
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#111827')
+        .maxLines(1)
+      Text(source === CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA ? '调用相机' : '选择图片')
+        .fontSize(11)
+        .fontColor('#7B8392')
+        .margin({ top: 4 })
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .height(64)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor('#F8FAFD')
+    .borderRadius(18)
+    .border({ width: 1, color: '#E8ECF3' })
+    .onClick(async () => {
+      await this.selectImageAttachmentSource(source);
+    })
+  }
+
+  @Builder AttachmentSourceMenuOverlay() {
+    if (this.attachmentSourceMenuVisible) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column() {
+        }
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#33000000')
+          .onClick(() => {
+            this.closeAttachmentSourceMenu();
+          })
+
+        Column() {
+          Row() {
+            Text('添加附件')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#111827')
+            Blank()
+              .layoutWeight(1)
+            Text('取消')
+              .fontSize(14)
+              .fontColor('#6B7280')
+              .height(32)
+              .padding({ left: 12, right: 12 })
+              .onClick(() => {
+                this.closeAttachmentSourceMenu();
+              })
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          Row() {
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_CAMERA)
+            Blank()
+              .width(12)
+            this.AttachmentSourceAction(CHAT_IMAGE_ATTACHMENT_SOURCE_ALBUM)
+          }
+          .width('100%')
+          .margin({ top: 12 })
+        }
+        .width('100%')
+        .padding({
+          left: 20,
+          right: 20,
+          top: 16,
+          bottom: Math.max(22, Math.round((this.bottomOverlayInset() - this.navigationBottomInset) * 0.18)) +
+            this.navigationBottomInset
+        })
+        .backgroundColor(Color.White)
+        .borderRadius(24)
+      }
+      .width('100%')
+      .height('100%')
+      .zIndex(70)
+    }
+  }
+
+  @Builder VoiceStatusBar() {
+    if (this.voiceStatusVisible()) {
+      Row() {
+        Text(voiceStatusLabel(this.voiceStatus))
+          .fontSize(11)
+          .fontColor('#5968FF')
+          .maxLines(1)
+        if (this.voiceStatusText().length > 0) {
+          Text(this.voiceStatusText())
+            .fontSize(12)
+            .fontColor('#4B5563')
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ left: 8 })
+        } else {
+          Blank()
+            .layoutWeight(1)
+        }
+      }
+      .width('100%')
+      .height(26)
+      .padding({ left: 24, right: 24 })
+      .margin({ bottom: 6 })
     }
   }
 
@@ -306,7 +775,7 @@ export struct ChatPage {
             .margin({ top: 24 })
             .backgroundColor(Color.Black)
 
-          Text('调试截图')
+          Text('图片预览')
             .fontSize(13)
             .fontColor('#E5E7EB')
             .margin({ top: 12 })
@@ -323,133 +792,203 @@ export struct ChatPage {
     }
   }
 
-  build() {
-    Stack({ alignContent: Alignment.Bottom }) {
-      Column() {
-        Row() {
-          Text('☰')
-            .fontSize(28)
-            .fontColor('#111827')
-            .width(44)
-            .height(44)
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
-              this.onOpenSessionDrawer();
-            })
-          Row() {
-            Text('MobiAgent')
-              .fontSize(24)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#111827')
-              .maxLines(1)
-            Text(chatModeLabel(this.chatMode))
-              .fontSize(12)
-              .fontColor('#6B7280')
-              .margin({ left: 8, top: 4 })
-              .maxLines(1)
-          }
-          .justifyContent(FlexAlign.Center)
+  @Builder PageHeader() {
+    Row() {
+      Text('☰')
+        .fontSize(28)
+        .fontColor('#111827')
+        .width(44)
+        .height(40)
+        .textAlign(TextAlign.Center)
+        .onClick(() => {
+          this.onOpenSessionDrawer();
+        })
+      Row() {
+        Text('MobiAgent')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#111827')
+          .lineHeight(28)
+          .maxLines(1)
           .layoutWeight(1)
-          Text('日志')
-            .fontSize(14)
-            .fontColor('#111827')
-            .width(52)
-            .height(36)
-            .textAlign(TextAlign.Center)
-            .onClick(() => { this.onOpenRuntimeLogs(); })
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row() {
+          this.ModeTopTabs()
         }
-        .width('100%')
-        .padding({ left: 18, right: 18, top: 22 })
+        .margin({ left: 6 })
+      }
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .layoutWeight(1)
+      if (this.debugEnabled) {
+        Text('日志')
+          .fontSize(14)
+          .fontColor('#111827')
+          .width(52)
+          .height(36)
+          .textAlign(TextAlign.Center)
+          .onClick(() => { this.onOpenRuntimeLogs(); })
+      }
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .alignItems(VerticalAlign.Center)
+    .padding({ left: 18, right: 18, top: 8, bottom: 8 })
+  }
 
-        Column() {
-          Column() {
-            Row() {
-              this.ModeChip(CHAT_MODE_CLOUD_AGENT)
-              this.ModeChip(CHAT_MODE_LOCAL_INFERENCE)
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.Center)
-            .margin({ top: 24 })
-          }
-          .width('100%')
-          .height(this.isModeSwitcherShown() ? 58 : 0)
-          .opacity(this.isModeSwitcherShown() ? 1 : 0)
-          .clip(true)
-
-          if (this.hasConversationContent()) {
-            this.ConversationPanel()
-          } else {
-            this.EmptyWelcome()
-          }
+  @Builder PageContent() {
+    Column() {
+      Column() {
+        if (this.hasConversationContent()) {
+          this.ConversationPanel()
+        } else {
+          this.EmptyWelcome()
         }
-        .width('100%')
-        .padding({ left: 28, right: 28 })
-        .layoutWeight(1)
       }
       .width('100%')
-      .height('100%')
-      .backgroundColor(Color.White)
+      .padding({ left: 28, right: 28 })
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      FrostedPage({
+        pageBackgroundColor: chatPageBackgroundColor(this.hasConversationContent()),
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
 
       Column() {
+        this.PendingImageAttachmentPreview()
+
         Row() {
-          Text('深度思考')
-            .fontSize(13)
-            .fontColor('#222222')
-            .height(38)
-            .padding({ left: 14, right: 14 })
-            .backgroundColor(Color.White)
-            .borderRadius(19)
-            .border({ width: 1, color: '#E2E5EA' })
-            .onClick(async () => { await this.runPrimaryAction(); })
+          if (chatDeepThinkingToggleVisible(this.chatMode)) {
+            Text(this.chatDeepThinkingEnabled ? '深度思考 开' : '深度思考 关')
+              .fontSize(12)
+              .fontColor(this.chatDeepThinkingEnabled ? '#FFFFFF' : '#222222')
+              .height(34)
+              .padding({ left: 13, right: 13 })
+              .backgroundColor(this.chatDeepThinkingEnabled ? '#111827' : Color.White)
+              .borderRadius(17)
+              .border({ width: 1, color: this.chatDeepThinkingEnabled ? '#111827' : '#E2E5EA' })
+              .opacity(this.isBusy() ? 0.6 : 1)
+              .onClick(() => { this.toggleDeepThinking(); })
+          }
+          if (this.showPcServerCloudButton()) {
+            Text('PC Server')
+              .fontSize(12)
+              .fontColor(this.pcServerCloudEnabled ? '#FFFFFF' : '#222222')
+              .height(34)
+              .padding({ left: 13, right: 13 })
+              .backgroundColor(this.pcServerCloudEnabled ? '#167456' : Color.White)
+              .borderRadius(17)
+              .border({ width: 1, color: this.pcServerCloudEnabled ? '#167456' : '#E2E5EA' })
+              .margin({ left: chatDeepThinkingToggleVisible(this.chatMode) ? 10 : 0 })
+              .onClick(() => { this.onUsePcServerCloud(); })
+          }
           Text('下发任务')
-            .fontSize(13)
+            .fontSize(12)
             .fontColor('#222222')
-            .height(38)
-            .padding({ left: 14, right: 14 })
+            .height(34)
+            .padding({ left: 13, right: 13 })
             .backgroundColor(Color.White)
-            .borderRadius(19)
+            .borderRadius(17)
             .border({ width: 1, color: '#E2E5EA' })
-            .margin({ left: 10 })
+            .margin({ left: (chatDeepThinkingToggleVisible(this.chatMode) || this.showPcServerCloudButton()) ? 10 : 0 })
             .onClick(async () => { await this.runTaskAction(); })
         }
         .width('100%')
         .padding({ left: 24, right: 24 })
-        .margin({ bottom: 12 })
+        .margin({ bottom: 8 })
+
+        this.VoiceStatusBar()
 
         Row() {
-          // Text('语')
-          //   .fontSize(18)
-          //   .fontWeight(FontWeight.Bold)
-          //   .fontColor('#111827')
-          //   .width(44)
-          //   .height(44)
-          //   .textAlign(TextAlign.Center)
-          //   .borderRadius(22)
-          //   .border({ width: 2, color: '#111827' })
-          TextInput({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
+          Text('+')
+            .fontSize(30)
+            .fontColor('#111827')
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(Color.White)
+            .borderRadius(20)
+            .shadow({ radius: 6, color: '#12000000', offsetX: 0, offsetY: 2 })
+            .onClick(() => { this.openAttachmentSourceMenu(); })
+          TextArea({ placeholder: chatModePlaceholder(this.chatMode), text: this.activeInput() })
             .layoutWeight(1)
-            .height(52)
-            .fontSize(16)
+            .height(this.composerTextAreaHeight())
+            .maxLines(CHAT_COMPOSER_MAX_LINES)
+            .fontSize(15)
+            .lineHeight(20)
+            .fontColor('#4B5563')
             .backgroundColor('#00FFFFFF')
-            .padding({ left: 12, right: 12 })
+            .padding({ left: 14, right: 12, top: 8, bottom: 8 })
+            .margin({ left: 8 })
             .onChange((value: string) => { this.setActiveInput(value); })
-          Button(this.isBusy() ? '...' : '发送')
-            .width(72)
-            .height(44)
-            .fontSize(14)
-            .backgroundColor(this.isBusy() ? '#AEB7C8' : '#111827')
-            .borderRadius(22)
-            .onClick(async () => { await this.runPrimaryAction(); })
+          Button() {
+            Row() {
+              if (this.primaryActionRole() === 'voice_capture') {
+                Image($r('app.media.voice_microphone_light'))
+                  .width(20)
+                  .height(20)
+              } else if (this.primaryActionRole() === 'busy') {
+                Text(this.primaryButtonText())
+                  .fontSize(14)
+                  .fontColor(Color.White)
+                  .fontWeight(FontWeight.Bold)
+              } else {
+                Image($r('app.media.voice_microphone_light'))
+                  .width(15)
+                  .height(15)
+                  .margin({ right: 5 })
+                Text(this.primaryButtonText())
+                  .fontSize(14)
+                  .fontColor(Color.White)
+                  .fontWeight(FontWeight.Bold)
+              }
+            }
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+            .alignItems(VerticalAlign.Center)
+          }
+            .width(82)
+            .height(40)
+            .backgroundColor(this.primaryButtonBackgroundColor())
+            .borderRadius(20)
+            .gesture(
+              GestureGroup(GestureMode.Exclusive,
+                LongPressGesture({ duration: 450, repeat: false })
+                  .onAction(() => { this.startPrimaryButtonVoiceInput(); })
+                  .onActionEnd(() => { this.stopPrimaryButtonVoiceInput(); }),
+                TapGesture()
+                  .onAction(() => {
+                    this.runPrimaryAction().catch((e: Error) => {
+                      let err = e as Error;
+                      showToastSafely(err.message, 1600);
+                    });
+                  })
+              )
+                .onCancel(() => { this.stopPrimaryButtonVoiceInput(); })
+            )
         }
         .width('100%')
-        .height(68)
-        .padding({ left: 14, right: 14 })
+        .height(this.composerBarHeight())
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 12, right: 12 })
         .backgroundColor(Color.White)
-        .borderRadius(28)
-        .shadow({ radius: 18, color: '#22000000', offsetX: 0, offsetY: 6 })
-        .margin({ left: 20, right: 20, bottom: 28 })
+        .borderRadius(26)
+        .shadow({ radius: 14, color: '#20000000', offsetX: 0, offsetY: 5 })
+        .margin({ left: 20, right: 20, bottom: 10 })
       }
       .width('100%')
+      .padding({ bottom: this.navigationBottomInset })
+
+      this.AttachmentSourceMenuOverlay()
 
       if (this.sessionDrawerOpen) {
         Row() {
@@ -460,7 +999,11 @@ export struct ChatPage {
             onClose: () => { this.onCloseSessionDrawer(); },
             onCreateSession: (mode: string) => { this.onCreateSession(mode); },
             onSelectSession: async (id: string) => { await this.onSelectSession(id); },
-            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); }
+            onDeleteSession: async (id: string) => { await this.onDeleteSession(id); },
+            onRenameSession: async (id: string, title: string) => {
+              return await this.onRenameSession(id, title);
+            },
+            onToggleSessionPinned: async (id: string) => { await this.onToggleSessionPinned(id); }
           })
           Blank()
             .layoutWeight(1)
@@ -473,11 +1016,13 @@ export struct ChatPage {
         .width('100%')
         .height('100%')
         .alignItems(VerticalAlign.Top)
+        .padding({ bottom: this.navigationBottomInset })
       }
 
       this.ImagePreviewOverlay()
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(chatPageBackgroundColor(this.hasConversationContent()))
   }
 }

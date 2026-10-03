@@ -8,6 +8,7 @@ export interface GalleryAnalyzerConfig {
   ocrConcurrency: number;
   modelConcurrency: number;
   embeddingConcurrency: number;
+  parallelFieldRequests: boolean;
   embeddingMode: string;
   embeddingBaseUrl: string;
   embeddingApiKey: string;
@@ -109,7 +110,7 @@ export interface GalleryAnalysisResult {
   latitude?: number;
   longitude?: number;
   exif?: GalleryExifMetadata;
-  // 拍摄坐标解析后的实际地址。写入结果文件后，详情页和 daily-log 都可以复用，避免重复请求地图服务。
+  // 拍摄坐标解析后的实际地址。写入结果文件后，详情页可以复用，避免重复请求地图服务。
   location?: GalleryLocationCacheRecord;
   createdAt: number;
 }

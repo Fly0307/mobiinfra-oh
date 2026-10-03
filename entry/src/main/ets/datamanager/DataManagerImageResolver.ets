@@ -9,6 +9,7 @@ import { normalizeFreeText } from './DataManagerUtils';
 export class DataManagerImageResolver {
   private paths: DataManagerPaths;
   private storage: DataManagerStorage;
+  private uriCache: Record<string, string> = new Object() as Record<string, string>;
 
   constructor(paths: DataManagerPaths, storage: DataManagerStorage) {
     this.paths = paths;
@@ -39,16 +40,36 @@ export class DataManagerImageResolver {
   }
 
   private displayUri(ref: string): string {
+    let cached = this.uriCache[ref];
+    if (cached !== undefined) {
+      return cached;
+    }
+    let uri = this.displayUriUncached(ref);
+    if (uri.length > 0) {
+      this.uriCache[ref] = uri;
+    }
+    return uri;
+  }
+
+  private displayUriUncached(ref: string): string {
     if (ref.startsWith('data:image/')) {
+      return ref;
+    }
+    if (this.isDisplayableGalleryUri(ref)) {
       return ref;
     }
     let hashIndex = ref.indexOf('#');
     if (hashIndex >= 0) {
       return this.displayUriFromJsonPointer(ref.substring(0, hashIndex), ref.substring(hashIndex + 1));
     }
+    if (this.isGalleryItemJsonRef(ref)) {
+      let uri = this.displayUriFromJsonPointer(ref, 'thumbnailUri');
+      return uri.length > 0 ? uri : this.displayUriFromJsonPointer(ref, 'uri');
+    }
     let imageText = normalizeFreeText(ref);
-    if (this.looksLikeBase64Image(imageText)) {
-      return this.base64DataUri(imageText);
+    let dataUri = this.base64DataUri(imageText);
+    if (dataUri.length > 0) {
+      return dataUri;
     }
     let absolutePath = this.absoluteImagePath(imageText);
     return absolutePath.length > 0 ? 'file://' + absolutePath : '';
@@ -64,11 +85,15 @@ export class DataManagerImageResolver {
     if (value.length === 0) {
       return '';
     }
+    if (this.isDisplayableGalleryUri(value)) {
+      return value;
+    }
     if (value.startsWith('data:image/')) {
       return value;
     }
-    if (this.looksLikeBase64Image(value)) {
-      return this.base64DataUri(value);
+    let dataUri = this.base64DataUri(value);
+    if (dataUri.length > 0) {
+      return dataUri;
     }
     let absolutePath = this.absoluteImagePath(value);
     return absolutePath.length > 0 ? 'file://' + absolutePath : '';
@@ -99,6 +124,10 @@ export class DataManagerImageResolver {
       let absolute = this.storage.join(this.paths.filesDir, filePath);
       return this.storage.exists(absolute) ? absolute : '';
     }
+    if (filePath.startsWith('gallery-log/')) {
+      let absolute = this.storage.join(this.paths.filesDir, filePath);
+      return this.storage.exists(absolute) ? absolute : '';
+    }
     let relative = this.paths.fromDataManagerRelative(filePath);
     return this.storage.exists(relative) ? relative : '';
   }
@@ -123,14 +152,19 @@ export class DataManagerImageResolver {
     return pathText.startsWith('/') || /^[A-Za-z]:\//.test(pathText);
   }
 
-  private looksLikeBase64Image(value: string): boolean {
-    let text = value.replace(/\s+/g, '');
-    return text.startsWith('/9j/') || text.startsWith('iVBORw0KGgo') ||
-      text.startsWith('R0lGOD') || text.startsWith('UklGR');
+  private isGalleryItemJsonRef(ref: string): boolean {
+    let normalized = normalizeFreeText(ref).replace(/\\/g, '/');
+    return normalized.startsWith('gallery-log/items/') && normalized.endsWith('.json');
+  }
+
+  private isDisplayableGalleryUri(value: string): boolean {
+    let text = normalizeFreeText(value);
+    return text.startsWith('datashare://') || text.startsWith('content://') ||
+      text.startsWith('photo://') || text.startsWith('file://');
   }
 
   private base64DataUri(value: string): string {
-    let text = value.replace(/\s+/g, '');
+    let text = this.compactBase64(value);
     if (text.startsWith('iVBORw0KGgo')) {
       return 'data:image/png;base64,' + text;
     }
@@ -140,6 +174,19 @@ export class DataManagerImageResolver {
     if (text.startsWith('UklGR')) {
       return 'data:image/webp;base64,' + text;
     }
-    return 'data:image/jpeg;base64,' + text;
+    if (text.startsWith('/9j/')) {
+      return 'data:image/jpeg;base64,' + text;
+    }
+    return '';
+  }
+
+  private compactBase64(value: string): string {
+    for (let index = 0; index < value.length; index++) {
+      let code = value.charCodeAt(index);
+      if (code === 9 || code === 10 || code === 13 || code === 32) {
+        return value.replace(/\s+/g, '');
+      }
+    }
+    return value;
   }
 }

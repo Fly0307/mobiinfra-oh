@@ -1,15 +1,25 @@
 import {
+  CHAT_MESSAGE_KIND_CHAT,
   CHAT_MESSAGE_KIND_TASK_RESULT,
   CHAT_MESSAGE_KIND_TASK_TRACE,
   CHAT_MODE_CLOUD_AGENT,
+  ChatAssistantThinkingParts,
   ChatMessage,
   ChatSessionRecord,
   ChatSessionSummary,
   chatMessageImagePath,
+  chatMessageImagePaths,
+  chatMessageThinkingCollapsed,
+  chatMessageThinkingContent,
+  chatMessageVoiceMetadataForStorage,
+  splitAssistantThinkingContent,
   normalizeChatMode,
+  toggleChatMessageThinkingCollapsed,
   toggleChatMessageCollapsed
 } from './ChatSessionTypes';
+import { ChatVoiceMetadata, optionalChatVoiceMetadata } from './VoiceInteractionTypes';
 import { ChatSessionStorage } from '../../utils/ChatSessionStorage';
+import { DebugSettings } from '../../utils/DebugSettings';
 
 export interface ChatSessionViewState {
   sessions: ChatSessionSummary[];
@@ -64,6 +74,7 @@ export class ChatSessionController {
 
   static appendMessage(filesDir: string, state: ChatSessionViewState, mode: string,
     message: ChatMessage): ChatSessionViewState {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE && !DebugSettings.isEnabled()) { return state; }
     let active = ChatSessionController.ensureActive(filesDir, state, mode);
     if (active.activeSession === null) {
       return active;
@@ -77,6 +88,7 @@ export class ChatSessionController {
 
   static appendMessageToSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
     message: ChatMessage): ChatSessionViewState {
+    if (message.kind === CHAT_MESSAGE_KIND_TASK_TRACE && !DebugSettings.isEnabled()) { return state; }
     if (filesDir.length === 0 || sessionId.length === 0) {
       return state;
     }
@@ -97,6 +109,7 @@ export class ChatSessionController {
 
   static appendTaskTraceLineToSession(filesDir: string, state: ChatSessionViewState, sessionId: string, line: string,
     messageId: string): ChatSessionViewState {
+    if (!DebugSettings.isEnabled()) { return state; }
     if (filesDir.length === 0) {
       return state;
     }
@@ -116,16 +129,24 @@ export class ChatSessionController {
     let lastMessage = messages[traceIndex];
     let trace = lastMessage.trace.slice();
     trace.push(line);
-    messages[traceIndex] = {
+    let updatedTraceMessage: ChatMessage = {
       id: lastMessage.id,
       role: lastMessage.role,
       kind: lastMessage.kind,
       content: lastMessage.content,
+      thinkingContent: chatMessageThinkingContent(lastMessage),
+      thinkingCollapsed: chatMessageThinkingCollapsed(lastMessage),
       trace: trace,
       collapsed: lastMessage.collapsed,
       createdAt: lastMessage.createdAt,
-      imagePath: chatMessageImagePath(lastMessage)
+      imagePath: chatMessageImagePath(lastMessage),
+      imagePaths: chatMessageImagePaths(lastMessage)
     };
+    let traceVoiceMetadata = chatMessageVoiceMetadataForStorage(lastMessage);
+    if (traceVoiceMetadata !== undefined) {
+      updatedTraceMessage.voice = traceVoiceMetadata;
+    }
+    messages[traceIndex] = updatedTraceMessage;
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
@@ -151,16 +172,24 @@ export class ChatSessionController {
     }
     let sessionImagePath = ChatSessionStorage.adoptImageForSession(filesDir, sessionId, imagePath);
     let resultMessage = messages[resultIndex];
-    messages[resultIndex] = {
+    let updatedResultMessage: ChatMessage = {
       id: resultMessage.id,
       role: resultMessage.role,
       kind: resultMessage.kind,
       content: resultMessage.content,
+      thinkingContent: chatMessageThinkingContent(resultMessage),
+      thinkingCollapsed: chatMessageThinkingCollapsed(resultMessage),
       trace: resultMessage.trace.slice(),
       collapsed: resultMessage.collapsed,
       createdAt: resultMessage.createdAt,
-      imagePath: sessionImagePath
+      imagePath: sessionImagePath,
+      imagePaths: [sessionImagePath]
     };
+    let resultVoiceMetadata = chatMessageVoiceMetadataForStorage(resultMessage);
+    if (resultVoiceMetadata !== undefined) {
+      updatedResultMessage.voice = resultVoiceMetadata;
+    }
+    messages[resultIndex] = updatedResultMessage;
     session.messages = messages;
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
@@ -235,6 +264,40 @@ export class ChatSessionController {
     return ChatSessionController.stateFromSession(filesDir, nextSession);
   }
 
+  static renameSession(filesDir: string, state: ChatSessionViewState, id: string,
+    title: string): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.renameSession(filesDir, id, title);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
+  static toggleSessionPinned(filesDir: string, state: ChatSessionViewState, id: string,
+    now: number = new Date().getTime()): ChatSessionViewState {
+    if (filesDir.length === 0 || id.length === 0) {
+      return state;
+    }
+    let current = ChatSessionStorage.loadSession(filesDir, id);
+    if (current === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let session = ChatSessionStorage.setSessionPinned(filesDir, id, current.pinned !== true, now);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    if (state.activeSessionId === id) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+  }
+
   static toggleTaskTrace(filesDir: string, state: ChatSessionViewState, messageId: string): ChatSessionViewState {
     if (filesDir.length === 0 || state.activeSessionId.length === 0) {
       return state;
@@ -246,6 +309,168 @@ export class ChatSessionController {
     session.messages = toggleChatMessageCollapsed(session.messages, messageId);
     session.updatedAt = new Date().getTime();
     ChatSessionStorage.saveSession(filesDir, session);
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static toggleThinking(filesDir: string, state: ChatSessionViewState, messageId: string): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, state.activeSessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    session.messages = toggleChatMessageThinkingCollapsed(session.messages, messageId);
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateMessageContent(filesDir: string, state: ChatSessionViewState, messageId: string, content: string,
+    trace?: string[]): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    return ChatSessionController.updateMessageContentInSession(filesDir, state, state.activeSessionId, messageId,
+      content, trace);
+  }
+
+  static updateMessageContentInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    messageId: string, content: string, trace?: string[]): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let messages = session.messages.slice();
+    let changed = false;
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      if (message.id !== messageId) {
+        continue;
+      }
+      let visibleContent = content;
+      let thinkingContent = chatMessageThinkingContent(message);
+      let thinkingCollapsed = chatMessageThinkingCollapsed(message);
+      if (message.role === 'assistant' && message.kind === CHAT_MESSAGE_KIND_CHAT) {
+        let previousThinkingContent = chatMessageThinkingContent(message);
+        let parts: ChatAssistantThinkingParts = splitAssistantThinkingContent(content);
+        visibleContent = parts.content;
+        thinkingContent = parts.thinkingContent;
+        if (previousThinkingContent.length === 0 && thinkingContent.length > 0) {
+          thinkingCollapsed = false;
+        }
+      }
+      let updatedMessage: ChatMessage = {
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: visibleContent,
+        thinkingContent: thinkingContent,
+        thinkingCollapsed: thinkingCollapsed,
+        trace: trace === undefined ? message.trace.slice() : trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
+      };
+      let voiceMetadata = chatMessageVoiceMetadataForStorage(message);
+      if (voiceMetadata !== undefined) {
+        updatedMessage.voice = voiceMetadata;
+      }
+      messages[i] = updatedMessage;
+      changed = true;
+      break;
+    }
+    if (!changed) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    session.messages = messages;
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateMessageVoiceMetadataInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    messageId: string, voice?: ChatVoiceMetadata): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0 || messageId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    let messages = session.messages.slice();
+    let changed = false;
+    for (let i = 0; i < messages.length; i++) {
+      let message = messages[i];
+      if (message.id !== messageId) {
+        continue;
+      }
+      let updatedMessage: ChatMessage = {
+        id: message.id,
+        role: message.role,
+        kind: message.kind,
+        content: message.content,
+        thinkingContent: chatMessageThinkingContent(message),
+        thinkingCollapsed: chatMessageThinkingCollapsed(message),
+        trace: message.trace.slice(),
+        collapsed: message.collapsed,
+        createdAt: message.createdAt,
+        imagePath: chatMessageImagePath(message),
+        imagePaths: chatMessageImagePaths(message)
+      };
+      let voiceMetadata = optionalChatVoiceMetadata(voice);
+      if (voiceMetadata !== undefined) {
+        updatedMessage.voice = voiceMetadata;
+      }
+      messages[i] = updatedMessage;
+      changed = true;
+      break;
+    }
+    if (!changed) {
+      return ChatSessionController.stateFromSession(filesDir, session);
+    }
+    session.messages = messages;
+    session.updatedAt = new Date().getTime();
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
+    return ChatSessionController.stateFromSession(filesDir, session);
+  }
+
+  static updateContextSummary(filesDir: string, state: ChatSessionViewState, summary: string, updatedAt: number,
+    untilMessageId: string, messageCount: number): ChatSessionViewState {
+    if (filesDir.length === 0 || state.activeSessionId.length === 0) {
+      return state;
+    }
+    return ChatSessionController.updateContextSummaryInSession(filesDir, state, state.activeSessionId, summary,
+      updatedAt, untilMessageId, messageCount);
+  }
+
+  static updateContextSummaryInSession(filesDir: string, state: ChatSessionViewState, sessionId: string,
+    summary: string, updatedAt: number, untilMessageId: string, messageCount: number): ChatSessionViewState {
+    if (filesDir.length === 0 || sessionId.length === 0) {
+      return state;
+    }
+    let session = ChatSessionStorage.loadSession(filesDir, sessionId);
+    if (session === null) {
+      return ChatSessionController.refreshCurrent(filesDir, state);
+    }
+    session.contextSummary = summary;
+    session.contextSummaryUpdatedAt = updatedAt;
+    session.contextSummaryUntilMessageId = untilMessageId;
+    session.contextSummaryMessageCount = messageCount;
+    ChatSessionStorage.saveSession(filesDir, session);
+    if (state.activeSessionId !== sessionId) {
+      return ChatSessionController.stateAfterBackgroundSessionUpdate(filesDir, state);
+    }
     return ChatSessionController.stateFromSession(filesDir, session);
   }
 

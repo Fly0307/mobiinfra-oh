@@ -25,18 +25,18 @@
         }
       },
       {
-        "name": "ohos.permission.SYSTEM_FLOAT_WINDOW",
+        "name": "ohos.permission.MEDIA_LOCATION",
         "reason": "$string:EntryAbility_desc",
         "usedScene": {
           "abilities": [
             "EntryAbility"
           ],
-          "when": "always"
+          "when": "inuse"
         }
       },
       {
-        "name": "ohos.permission.MEDIA_LOCATION",
-        "reason": "$string:EntryAbility_desc",
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:reason_for_microphone",
         "usedScene": {
           "abilities": [
             "EntryAbility"
@@ -48,6 +48,16 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "shareType",
+        "value": "sharekitModel"
+      },
+      {
+        "name": "client_id",
+        "value": "6917613102135452205"
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",
@@ -69,11 +79,76 @@
             "actions": [
               "ohos.want.action.home"
             ]
+          },
+          {
+            "actions": [
+              "ohos.want.action.viewData",
+              "ohos.want.action.sendData",
+              "ohos.want.action.sendMultipleData"
+            ],
+            "domainVerify": true,
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "com.mobiinfra.profile-json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/vnd.mobiinfra.profile+json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/octet-stream",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "application/json",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "text/plain",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "type": "*/*",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "pathRegex": ".*\\.mobi-profile(\\.json)?$",
+                "maxFileSupported": 1,
+                "linkFeature": "FileOpen"
+              }
+            ]
           }
         ]
       }
     ],
     "extensionAbilities": [
+      {
+        "name": "PersonalMemoryAgentAbility",
+        "srcEntry": "./ets/agent/PersonalMemoryAgentAbility.ets",
+        "description": "按用户授权查询本机个人记忆",
+        "type": "agent",
+        "exported": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.agent",
+            "resource": "$profile:agent_config"
+          }
+        ]
+      },
       {
         "name": "EntryBackupAbility",
         "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",

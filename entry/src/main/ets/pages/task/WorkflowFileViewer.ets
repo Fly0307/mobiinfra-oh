@@ -1,6 +1,10 @@
+import { APP_HEADER_CONTENT_GAP, APP_HEADER_HEIGHT } from '../../components/AppHeader';
+import { FrostedPage } from '../../components/FrostedPage';
 import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { JsonMap } from '../../datamanager/DataManagerTypes';
+import { MarkdownView } from '../../components/MarkdownView';
+import { AiGeneratedBadge } from '../../components/AiGeneratedBadge';
 import { WorkflowStorage } from '../../utils/WorkflowStorage';
 import { WorkflowManagedFile } from '../../utils/WorkflowTypes';
 import { showToastSafely } from '../../utils/PromptSafe';
@@ -8,16 +12,19 @@ import { showToastSafely } from '../../utils/PromptSafe';
 @Entry
 @Component
 struct WorkflowFileViewer {
+  private pageScroller: Scroller = new Scroller();
   @State category: string = 'daily';
   @State title: string = '日志文件';
   @State files: WorkflowManagedFile[] = [];
   @State selectedPath: string = '';
   @State selectedName: string = '';
   @State fileText: string = '正在加载...';
-  @State fileListExpanded: boolean = true;
+  // 文件列表默认收起，避免大量历史文件占满首屏并挤压当前文件详情。
+  @State fileListExpanded: boolean = false;
   @State currentInfoExpanded: boolean = true;
   @State manageMode: boolean = false;
   @State selectedDeletePaths: string[] = [];
+  @State previewMode: boolean = true;
 
   private filesDir: string = '';
 
@@ -63,6 +70,7 @@ struct WorkflowFileViewer {
     this.selectedPath = '';
     this.selectedName = '';
     this.manageMode = false;
+    this.fileListExpanded = false;
     this.selectedDeletePaths = [];
     this.loadFiles();
   }
@@ -84,12 +92,14 @@ struct WorkflowFileViewer {
       this.selectedPath = '';
       this.selectedName = '';
       this.fileText = this.emptyText(this.category);
+      this.previewMode = false;
     }
   }
 
   private openManagedFile(file: WorkflowManagedFile): void {
     this.selectedPath = file.path;
     this.selectedName = file.name;
+    this.previewMode = this.defaultPreviewMode(file);
     try {
       this.fileText = WorkflowStorage.readText(file.path);
     } catch (e) {
@@ -108,6 +118,10 @@ struct WorkflowFileViewer {
     return '日志文件';
   }
 
+  private containsAiGeneratedContent(): boolean {
+    return this.category === 'daily' || this.category === 'run';
+  }
+
   private emptyText(category: string): string {
     if (category === 'config') {
       return '暂无 workflow 配置文件';
@@ -118,12 +132,36 @@ struct WorkflowFileViewer {
     return '暂无 daily-log 文件';
   }
 
+  private defaultPreviewMode(file: WorkflowManagedFile): boolean {
+    // daily-log 与 Markdown 文件优先给用户可读预览；配置 JSON 和运行输出保持原文优先，避免隐藏结构化字段。
+    let lowerName = file.name.toLowerCase();
+    if (this.category === 'daily') {
+      return true;
+    }
+    return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  }
+
+  private setPreviewMode(enabled: boolean): void {
+    this.previewMode = enabled;
+  }
+
   private fileDisplayTitle(file: WorkflowManagedFile): string {
     let index = file.name.lastIndexOf('/');
     if (index >= 0 && index < file.name.length - 1) {
       return file.name.substring(index + 1);
     }
     return file.name;
+  }
+
+  private selectedDisplayTitle(): string {
+    if (this.selectedName.length === 0) {
+      return this.emptyText(this.category);
+    }
+    let index = this.selectedName.lastIndexOf('/');
+    if (index >= 0 && index < this.selectedName.length - 1) {
+      return this.selectedName.substring(index + 1);
+    }
+    return this.selectedName;
   }
 
   private fileDisplayMeta(file: WorkflowManagedFile): string {
@@ -288,14 +326,14 @@ struct WorkflowFileViewer {
           .fontWeight(FontWeight.Bold)
           .fontColor(this.selectedPath === file.path ? '#4F46E5' : '#202637')
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(this.fileDisplayMeta(file))
           .fontSize(11)
           .fontColor('#7B8290')
           .margin({ top: 6 })
           .width('100%')
-          .maxLines(1)
+          .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       if (!this.manageMode) {
@@ -341,33 +379,39 @@ struct WorkflowFileViewer {
       .onClick(() => { this.deleteManagedFile(file); })
   }
 
-  build() {
+  @Builder PageHeader() {
+    Row() {
+      Button('返回')
+        .width(70)
+        .height(34)
+        .fontSize(12)
+        .fontColor('#5968FF')
+        .backgroundColor('#EEF4FF')
+        .borderRadius(12)
+        .onClick(() => { router.back(); })
+      Text(this.title)
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#11182F')
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Button('刷新')
+        .width(70)
+        .height(34)
+        .fontSize(12)
+        .backgroundColor('#607D8B')
+        .borderRadius(12)
+        .onClick(() => { this.loadFiles(); })
+    }
+    .width('100%')
+    .height(APP_HEADER_HEIGHT)
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+  }
+
+  @Builder PageContent() {
     Column() {
-      Row() {
-        Button('返回')
-          .width(70)
-          .height(34)
-          .fontSize(12)
-          .fontColor('#5968FF')
-          .backgroundColor('#EEF4FF')
-          .borderRadius(12)
-          .onClick(() => { router.back(); })
-        Text(this.title)
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#11182F')
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-        Button('刷新')
-          .width(70)
-          .height(34)
-          .fontSize(12)
-          .backgroundColor('#607D8B')
-          .borderRadius(12)
-          .onClick(() => { this.loadFiles(); })
-      }
-      .width('100%')
-      .padding({ left: 22, right: 22, top: 26, bottom: 10 })
 
       Row() {
         this.CategoryTab('config', '配置')
@@ -481,7 +525,7 @@ struct WorkflowFileViewer {
             .fontColor('#7B8290')
             .margin({ top: 12 })
             .width('100%')
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
       }
@@ -498,6 +542,30 @@ struct WorkflowFileViewer {
             .fontWeight(FontWeight.Bold)
             .fontColor('#11182F')
             .layoutWeight(1)
+          if (this.containsAiGeneratedContent()) {
+            AiGeneratedBadge({ compact: true })
+              .margin({ right: 8 })
+          }
+          if (this.selectedName.length > 0) {
+            Button('预览')
+              .width(62)
+              .height(30)
+              .fontSize(12)
+              .fontColor(this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(true); })
+            Button('原文')
+              .width(62)
+              .height(30)
+              .fontSize(12)
+              .fontColor(!this.previewMode ? Color.White : '#5968FF')
+              .backgroundColor(!this.previewMode ? '#5968FF' : '#F3F5FA')
+              .borderRadius(10)
+              .margin({ right: 8 })
+              .onClick(() => { this.setPreviewMode(false); })
+          }
           Button(this.currentInfoExpanded ? '收起' : '展开')
             .width(58)
             .height(30)
@@ -510,20 +578,51 @@ struct WorkflowFileViewer {
         .width('100%')
         .alignItems(VerticalAlign.Center)
         if (this.currentInfoExpanded) {
-          Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
-            .fontSize(12)
-            .fontColor('#6F7584')
+          Column({ space: 6 }) {
+            Row() {
+              Text('文件')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedDisplayTitle())
+                .fontSize(12)
+                .fontColor('#3C4354')
+                .fontWeight(FontWeight.Medium)
+                .layoutWeight(1)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+
+            Row() {
+              Text('路径')
+                .fontSize(11)
+                .fontColor('#8A91A0')
+                .width(34)
+              Text(this.selectedName.length > 0 ? this.selectedName : this.emptyText(this.category))
+                .fontSize(12)
+                .fontColor('#6F7584')
+                .layoutWeight(1)
+                .maxLines(4)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+          }
             .margin({ top: 8 })
             .width('100%')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        Scroll() {
-          Text(this.fileText)
-            .fontSize(11)
-            .fontFamily('monospace')
-            .fontColor('#2F3645')
-            .width('100%')
+        Scroll(this.pageScroller) {
+          if (this.previewMode && this.selectedName.length > 0) {
+            MarkdownView({ text: this.fileText, variant: 'file_preview' })
+          } else {
+            Text(this.fileText)
+              .fontSize(11)
+              .fontFamily('monospace')
+              .fontColor('#2F3645')
+              .width('100%')
+          }
         }
         .width('100%')
         .layoutWeight(1)
@@ -541,6 +640,20 @@ struct WorkflowFileViewer {
     }
     .width('100%')
     .height('100%')
+    .padding({ top: APP_HEADER_CONTENT_GAP })
     .backgroundColor('#F4F8FF')
+  }
+
+  build() {
+    Column() {
+      FrostedPage({
+        pageBackgroundColor: '#F4F8FF',
+        scrollers: [this.pageScroller],
+        headerBuilder: (): void => { this.PageHeader(); },
+        contentBuilder: (): void => { this.PageContent(); }
+      })
+    }
+    .width('100%')
+    .height('100%')
   }
 }

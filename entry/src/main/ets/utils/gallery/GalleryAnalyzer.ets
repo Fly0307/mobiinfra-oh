@@ -2,9 +2,9 @@ import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { util, JSON as ArkJSON } from '@kit.ArkTS';
 import { AppLogger } from '../AppLogger';
+import { DebugSettings } from '../DebugSettings';
 import { CloudModelClient, GalleryCloudModelConfig } from '../CloudModelClient';
 import { GalleryOcrService } from './GalleryOcrService';
-import { GalleryEmbeddingService } from './GalleryEmbeddingService';
 import { GalleryStorage } from './GalleryStorage';
 import { GalleryKeywordFilter } from './GalleryKeywordFilter';
 import { GalleryExifUtils } from './GalleryExifUtils';
@@ -14,7 +14,6 @@ import {
   GalleryAnalyzeOptions,
   GalleryAnalyzeOutcome,
   GalleryAnalyzerConfig,
-  GalleryEmbeddingRecord,
   GalleryExifMetadata,
   GalleryLocationCacheRecord,
   GalleryModelJson,
@@ -57,7 +56,6 @@ class GallerySemaphore {
 interface GalleryStageGates {
   ocr: GallerySemaphore;
   model: GallerySemaphore;
-  embedding: GallerySemaphore;
 }
 
 interface GalleryModelParseResult {
@@ -74,7 +72,6 @@ export class GalleryAnalyzer {
   private filesDir: string;
   private cloudClient: CloudModelClient;
   private ocrService: GalleryOcrService = new GalleryOcrService();
-  private embeddingService: GalleryEmbeddingService;
   private reverseGeocoder: GalleryReverseGeocoder = new GalleryReverseGeocoder();
   private locationRequests: Record<string, Promise<GalleryLocationCacheRecord | undefined>> = {};
   private locationFailedKeys: Record<string, boolean> = {};
@@ -82,7 +79,6 @@ export class GalleryAnalyzer {
   constructor(filesDir: string, cloudClient: CloudModelClient) {
     this.filesDir = filesDir;
     this.cloudClient = cloudClient;
-    this.embeddingService = new GalleryEmbeddingService(cloudClient);
   }
 
   async analyzeUris(uris: string[], config: GalleryAnalyzerConfig, onProgress: GalleryProgressHandler,
@@ -101,6 +97,7 @@ export class GalleryAnalyzer {
       ' keywordFilter=' + config.useOcrKeywordFilter +
       ' ocrConcurrency=' + config.ocrConcurrency +
       ' modelConcurrency=' + config.modelConcurrency +
+      ' parallelFieldRequests=' + config.parallelFieldRequests +
       ' embeddingConcurrency=' + config.embeddingConcurrency +
       ' embeddingMode=' + config.embeddingMode);
     let batchStartedAt = new Date().getTime();
@@ -117,13 +114,11 @@ export class GalleryAnalyzer {
     };
     onProgress(progress);
     let results: GalleryAnalysisResult[] = [];
-    let dirtyDates: string[] = [];
     let gates: GalleryStageGates = {
       ocr: new GallerySemaphore(config.ocrConcurrency),
-      model: new GallerySemaphore(config.modelConcurrency),
-      embedding: new GallerySemaphore(config.embeddingConcurrency)
+      model: new GallerySemaphore(config.modelConcurrency)
     };
-    let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency, config.embeddingConcurrency);
+    let limit = Math.max(1, config.ocrConcurrency, config.modelConcurrency);
     await this.runWithLimit(inputs, limit, async (input: GalleryPhotoInput, index: number): Promise<boolean> => {
       // 暂停只阻止新任务进入流水线，已经进入 OCR/模型/Embedding 阶段的图片会继续完成并回调落盘。
       if (options && options.shouldPause && options.shouldPause()) {
@@ -153,7 +148,6 @@ export class GalleryAnalyzer {
       this.logInfo('cache result start id=' + result.id);
       let cacheStartedAt = new Date().getTime();
       let normalized = GalleryStorage.writeResult(this.filesDir, result);
-      this.pushUnique(dirtyDates, normalized.date);
       this.logInfo('cache result done id=' + result.id + ' elapsedMs=' + this.elapsed(cacheStartedAt));
       progress.processed += 1;
       progress.pending = Math.max(0, progress.selected - progress.processed);
@@ -169,9 +163,6 @@ export class GalleryAnalyzer {
       }
       return true;
     });
-    let dailyStartedAt = new Date().getTime();
-    GalleryStorage.rebuildDailyForDates(this.filesDir, dirtyDates);
-    this.logInfo('daily rebuild done dates=' + dirtyDates.length + ' elapsedMs=' + this.elapsed(dailyStartedAt));
     await this.ocrService.release();
     this.logInfo('batch done selected=' + inputs.length +
       ' results=' + results.length +
@@ -364,13 +355,40 @@ export class GalleryAnalyzer {
       this.logInfo('pack image done id=' + id + ' base64Chars=' + imageBase64.length + ' elapsedMs=' + this.elapsed(packStartedAt));
       await gates.model.acquire();
       let rawModelText = '';
+      let modelJson: GalleryModelJson = {};
+      let exifText = this.exifPromptText(exifMetadata, resultLatitude, resultLongitude, locationRecord);
       try {
         let modelStartedAt = new Date().getTime();
         this.logInfo('model start id=' + id + ' baseUrl=' + config.apiBaseUrl + ' model=' + config.model);
         progress.current = '模型分析 ' + id;
         onProgress(progress);
-        rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText,
-          this.exifPromptText(exifMetadata, resultLatitude, resultLongitude, locationRecord), this.toCloudConfig(config));
+        if (config.parallelFieldRequests) {
+          let fieldResult = await this.cloudClient.analyzeGalleryImageByFields(imageBase64, ocrText, exifText,
+            this.toCloudConfig(config));
+          rawModelText = fieldResult.rawText;
+          modelJson = this.normalizeMergedModelJson(fieldResult.json);
+          let fieldCount = this.modelFieldCount(modelJson);
+          this.logInfo('model fields merged id=' + id + ' fields=' + fieldCount.toString());
+          this.logInfo('model fields raw id=' + id + ' preview=' + this.previewForLog(rawModelText, 512));
+          if (fieldCount === 0) {
+            this.logInfo('model fields empty fallback full-json id=' + id);
+            rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, exifText, this.toCloudConfig(config));
+            this.logInfo('model full-json fallback raw id=' + id + ' chars=' + rawModelText.length.toString() +
+              ' preview=' + this.previewForLog(rawModelText, 512));
+            this.throwIfModelErrorResponse(rawModelText);
+            let modelParse = this.parseModelJson(rawModelText, id);
+            modelJson = modelParse.json;
+            rawModelText = modelParse.text;
+          }
+        } else {
+          rawModelText = await this.cloudClient.analyzeGalleryImage(imageBase64, ocrText, exifText, this.toCloudConfig(config));
+          this.logInfo('model full-json raw id=' + id + ' chars=' + rawModelText.length.toString() +
+            ' preview=' + this.previewForLog(rawModelText, 512));
+          this.throwIfModelErrorResponse(rawModelText);
+          let modelParse = this.parseModelJson(rawModelText, id);
+          modelJson = modelParse.json;
+          rawModelText = modelParse.text;
+        }
         this.logInfo('model done id=' + id + ' chars=' + rawModelText.length + ' elapsedMs=' + this.elapsed(modelStartedAt));
       } finally {
         gates.model.release();
@@ -378,58 +396,16 @@ export class GalleryAnalyzer {
       progress.modelDone += 1;
       onProgress(progress);
 
-      let modelParse = this.parseModelJson(rawModelText, id);
-      let modelJson = modelParse.json;
-      rawModelText = modelParse.text;
       let category = this.nonEmpty(modelJson.category, '其他');
       let details = this.detailListFrom(modelJson.details);
-      let tags = modelJson.tags ? modelJson.tags : [];
+      let tags = this.tagListFrom(modelJson.tags);
       let keywords = this.keywordsFrom(tags, ocrText);
-      let resultText = this.resultText(modelJson, ocrText);
       let embeddingStatus = 'skipped';
       let embeddingDimension = 0;
       let embeddingRef = '';
-      if (resultText.length > 0) {
-        await gates.embedding.acquire();
-        try {
-          let embeddingStartedAt = new Date().getTime();
-          this.logInfo('embedding start id=' + id + ' mode=' + config.embeddingMode + ' model=' +
-            (config.embeddingMode === 'huawei_local' ? 'huawei_local_basic' : config.embeddingModel));
-          progress.current = '生成 Embedding ' + id;
-          onProgress(progress);
-          let embeddingResult = await this.embeddingService.embedText(resultText, config, this.filesDir,
-            (level: string, message: string) => {
-              this.logEmbeddingMessage(level, id, message);
-            });
-          let vector = embeddingResult.vector;
-          embeddingDimension = vector.length;
-          embeddingStatus = 'ok';
-          this.logInfo('embedding done id=' + id + ' mode=' + embeddingResult.mode + ' model=' + embeddingResult.model +
-            ' dimension=' + embeddingDimension + ' elapsedMs=' + this.elapsed(embeddingStartedAt));
-          let embedding: GalleryEmbeddingRecord = {
-            id: id,
-            uri: uri,
-            date: date,
-            category: category,
-            text: resultText,
-            vector: vector,
-            model: embeddingResult.model,
-            mode: embeddingResult.mode,
-            createdAt: new Date().getTime()
-          };
-          GalleryStorage.upsertEmbedding(this.filesDir, embedding);
-          embeddingRef = GalleryStorage.embeddingRef(embedding);
-        } catch (e) {
-          embeddingStatus = 'failed: ' + this.errorMessage(e);
-          this.logError('embedding failed id=' + id + ' error=' + this.errorMessage(e));
-        } finally {
-          gates.embedding.release();
-        }
-      } else {
-        this.logInfo('embedding skipped id=' + id + ' emptyText=true');
-        progress.current = '跳过 Embedding ' + id;
-        onProgress(progress);
-      }
+      this.logInfo('embedding disabled id=' + id);
+      progress.current = '跳过 Embedding ' + id;
+      onProgress(progress);
       progress.embeddingDone += 1;
       onProgress(progress);
 
@@ -520,6 +496,48 @@ export class GalleryAnalyzer {
       apiKey: config.apiKey,
       model: config.model
     };
+  }
+
+  private normalizeMergedModelJson(modelJson: GalleryModelJson): GalleryModelJson {
+    let normalized: GalleryModelJson = {};
+    if (modelJson.title && modelJson.title.trim().length > 0) {
+      normalized.title = modelJson.title.trim();
+    }
+    if (modelJson.category && modelJson.category.trim().length > 0) {
+      normalized.category = modelJson.category.trim();
+    }
+    if (modelJson.summary && modelJson.summary.trim().length > 0) {
+      normalized.summary = modelJson.summary.trim();
+    }
+    normalized.details = this.detailListFrom(modelJson.details);
+    normalized.tags = this.tagListFrom(modelJson.tags);
+    if (modelJson.importance !== undefined && !isNaN(modelJson.importance)) {
+      normalized.importance = modelJson.importance;
+    }
+    return normalized;
+  }
+
+  private modelFieldCount(modelJson: GalleryModelJson): number {
+    let count = 0;
+    if (modelJson.title && modelJson.title.trim().length > 0) {
+      count += 1;
+    }
+    if (modelJson.category && modelJson.category.trim().length > 0) {
+      count += 1;
+    }
+    if (modelJson.summary && modelJson.summary.trim().length > 0) {
+      count += 1;
+    }
+    if (modelJson.details && modelJson.details.length > 0) {
+      count += 1;
+    }
+    if (modelJson.tags && modelJson.tags.length > 0) {
+      count += 1;
+    }
+    if (modelJson.importance !== undefined && !isNaN(modelJson.importance)) {
+      count += 1;
+    }
+    return count;
   }
 
   private async ensureResultLocation(result: GalleryAnalysisResult, config: GalleryAnalyzerConfig,
@@ -700,9 +718,20 @@ export class GalleryAnalyzer {
   }
 
   private parseModelJson(raw: string, id: string): GalleryModelParseResult {
-    let text = this.cleanModelJsonText(raw);
-    let parsed = this.tryParseModelJson(text);
+    let rawText = raw.trim();
+    let parsed = this.tryParseModelJson(rawText);
     if (parsed) {
+      return {
+        json: parsed,
+        text: rawText
+      };
+    }
+    let text = this.cleanModelJsonText(raw);
+    parsed = this.tryParseModelJson(text);
+    if (parsed) {
+      this.logInfo('model json normalized id=' + id +
+        ' rawChars=' + rawText.length.toString() +
+        ' normalizedChars=' + text.length.toString());
       return {
         json: parsed,
         text: text
@@ -771,14 +800,64 @@ export class GalleryAnalyzer {
     }
   }
 
+  private throwIfModelErrorResponse(raw: string): void {
+    let text = this.cleanModelJsonText(raw);
+    let payload = this.tryParseModelJson(text);
+    if (!payload) {
+      return;
+    }
+    let map = payload as Record<string, Object | string | number | boolean | null>;
+    let action = map['action'];
+    if (typeof action !== 'string' || action.toLowerCase() !== 'error') {
+      return;
+    }
+    let reason = '';
+    let rawReason = map['reason'];
+    if (typeof rawReason === 'string') {
+      reason = rawReason.trim();
+    }
+    if (reason.length === 0) {
+      let rawMessage = map['message'];
+      if (typeof rawMessage === 'string') {
+        reason = rawMessage.trim();
+      }
+    }
+    throw new Error('调用 AI 分析失败' + (reason.length > 0 ? '：' + reason : ''));
+  }
+
   private modelJsonRepairCandidates(text: string): string[] {
     let candidates: string[] = [];
     let trimmed = text.trim();
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(trimmed));
     let withoutComma = this.removeTrailingJsonComma(trimmed);
+    let withoutJsonCommas = this.removeJsonTrailingCommas(trimmed);
+    let normalizedKeys = this.normalizeModelJsonKeys(trimmed);
+    let cjkPunctuation = this.normalizeCjkJsonPunctuation(trimmed);
+    let withoutParentheses = this.removeJsonParentheses(trimmed);
+    let cjkPunctuationWithoutParentheses = this.removeJsonParentheses(cjkPunctuation);
+    let quotedKnownKeys = this.quoteKnownModelJsonKeys(trimmed);
+    let singleQuoted = this.repairSingleQuotedModelJson(trimmed);
+    let quotedArrayItems = this.quoteBareModelJsonArrayItems(trimmed);
     this.pushModelJsonCandidate(candidates, withoutComma + ']}');
     this.pushModelJsonCandidate(candidates, withoutComma + '"]}');
     this.pushModelJsonCandidate(candidates, withoutComma + '}');
+    this.pushModelJsonCandidate(candidates, withoutJsonCommas);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutJsonCommas));
+    this.pushModelJsonCandidate(candidates, normalizedKeys);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(normalizedKeys));
+    this.pushModelJsonCandidate(candidates, cjkPunctuation);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(cjkPunctuation));
+    this.pushModelJsonCandidate(candidates, this.normalizeModelJsonKeys(cjkPunctuation));
+    this.pushModelJsonCandidate(candidates, withoutParentheses);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutParentheses));
+    this.pushModelJsonCandidate(candidates, cjkPunctuationWithoutParentheses);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(cjkPunctuationWithoutParentheses));
+    this.pushModelJsonCandidate(candidates, quotedKnownKeys);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(quotedKnownKeys));
+    this.pushModelJsonCandidate(candidates, singleQuoted);
+    this.pushModelJsonCandidate(candidates, this.repairModelJsonText(singleQuoted));
+    this.pushModelJsonCandidate(candidates, quotedArrayItems);
+    this.pushModelJsonCandidate(candidates, this.quoteBareModelJsonArrayItems(cjkPunctuation));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + ']}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '"]}'));
     this.pushModelJsonCandidate(candidates, this.repairModelJsonText(withoutComma + '}'));
@@ -900,6 +979,97 @@ export class GalleryAnalyzer {
     return text;
   }
 
+  private removeJsonTrailingCommas(text: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      let ch = text.charAt(i);
+      if (inString) {
+        result += ch;
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        result += ch;
+        continue;
+      }
+      if (ch === ',') {
+        let next = i + 1;
+        while (next < text.length) {
+          let nextChar = text.charAt(next);
+          if (nextChar !== ' ' && nextChar !== '\n' && nextChar !== '\r' && nextChar !== '\t') {
+            break;
+          }
+          next++;
+        }
+        if (next < text.length && (text.charAt(next) === '}' || text.charAt(next) === ']')) {
+          continue;
+        }
+      }
+      result += ch;
+    }
+    return result;
+  }
+
+  private normalizeModelJsonKeys(text: string): string {
+    return text
+      .replace(/"importance\s*:\s*([0-9.]+)/g, '"importance":$1')
+      .replace(/"title\s*:/g, '"title":')
+      .replace(/"category\s*:/g, '"category":')
+      .replace(/"summary\s*:/g, '"summary":')
+      .replace(/"details\s*:/g, '"details":')
+      .replace(/"tags\s*:/g, '"tags":');
+  }
+
+  private normalizeCjkJsonPunctuation(text: string): string {
+    return text.replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/，/g, ',')
+      .replace(/：/g, ':');
+  }
+
+  private removeJsonParentheses(text: string): string {
+    return text.replace(/[()（）]/g, '');
+  }
+
+  private quoteKnownModelJsonKeys(text: string): string {
+    return text.replace(/([{,]\s*)(title|category|summary|details|tags|importance)\s*:/g, '$1"$2":');
+  }
+
+  private repairSingleQuotedModelJson(text: string): string {
+    return text.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+  }
+
+  private quoteBareModelJsonArrayItems(text: string): string {
+    return text.replace(/\[([^\[\]{}"]*)\]/g, (match: string, body: string): string => {
+      if (body.indexOf(':') >= 0) {
+        return match;
+      }
+      let parts = body.split(/[,，、;；]/);
+      let quoted: string[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        let value = parts[i].trim();
+        if (value.length === 0) {
+          continue;
+        }
+        if (value === 'true' || value === 'false' || value === 'null' || !isNaN(Number(value))) {
+          quoted.push(value);
+        } else {
+          quoted.push('"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
+        }
+      }
+      return '[' + quoted.join(',') + ']';
+    });
+  }
+
   private debugTail(text: string): string {
     let normalized = text.replace(/[\r\n\t]+/g, ' ');
     if (normalized.length <= 240) {
@@ -941,13 +1111,9 @@ export class GalleryAnalyzer {
     for (let i = 0; i < tags.length; i++) {
       this.pushUnique(result, tags[i]);
     }
-    let normalized = ocrText.replace(/[，。！？、；：,.!?;:\n\r\t]+/g, ' ');
-    let pieces = normalized.split(' ');
-    for (let j = 0; j < pieces.length && result.length < 12; j++) {
-      let value = pieces[j].trim();
-      if (value.length >= 2 && value.length <= 16) {
-        this.pushUnique(result, value);
-      }
+    let keywordMatch = GalleryKeywordFilter.matchUsefulKeywords(ocrText);
+    for (let k = 0; k < keywordMatch.keywords.length && result.length < 12; k++) {
+      this.pushUnique(result, keywordMatch.keywords[k]);
     }
     return result;
   }
@@ -995,6 +1161,20 @@ export class GalleryAnalyzer {
     return result;
   }
 
+  private tagListFrom(tags: string[] | undefined): string[] {
+    let result: string[] = [];
+    if (!tags) {
+      return result;
+    }
+    for (let i = 0; i < tags.length && result.length < 8; i++) {
+      let value = String(tags[i]).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (value.length > 0) {
+        this.pushUnique(result, value);
+      }
+    }
+    return result;
+  }
+
   private isSuccessfulCachedResult(result: GalleryAnalysisResult): boolean {
     return !result.error || result.error.trim().length === 0;
   }
@@ -1035,6 +1215,14 @@ export class GalleryAnalyzer {
     return new Date().getTime() - startedAt;
   }
 
+  private previewForLog(text: string, maxLength: number): string {
+    let normalized = text.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return normalized.substring(0, maxLength) + '...';
+  }
+
   private logInfo(message: string): void {
     AppLogger.info('Gallery.Analyzer', message);
     this.captureLog('INFO', message);
@@ -1055,6 +1243,7 @@ export class GalleryAnalyzer {
   }
 
   private captureLog(level: string, message: string): void {
+    if (!DebugSettings.isEnabled()) { return; }
     let previous = AppStorage.get(GALLERY_LOG_STORAGE_KEY) as string;
     let current = previous && previous.length > 0 ? previous : '';
     let line = '[' + new Date().toLocaleTimeString() + '] [' + level + '] ' + message;

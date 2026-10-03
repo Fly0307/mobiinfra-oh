@@ -1,0 +1,113 @@
+{
+  "attributes": {
+    "type": "WindowScene",
+    "origBounds": "[0,0][1256,2760]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "type": "List",
+        "origBounds": "[0,420][1256,980]",
+        "scrollable": "false"
+      },
+      "children": [
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,500][1256,678]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,526][420,576]",
+                "text": "小赵"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[982,526][1160,576]",
+                "text": "上午 10:45"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,592][1000,642]",
+                "text": "需要给妹妹买一些少儿读物"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,678][1256,856]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,704][420,754]",
+                "text": "项目群"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[982,704][1160,754]",
+                "text": "昨天"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,770][1000,820]",
+                "text": "边界重复消息"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "attributes": {
+            "type": "ListItem",
+            "origBounds": "[0,856][1256,1034]"
+          },
+          "children": [
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,882][420,932]",
+                "text": "文件传输助手"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[982,882][1160,932]",
+                "text": "星期一"
+              },
+              "children": []
+            },
+            {
+              "attributes": {
+                "type": "Text",
+                "origBounds": "[140,948][1000,998]",
+                "text": "收到文件"
+              },
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

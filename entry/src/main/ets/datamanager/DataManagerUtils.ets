@@ -15,11 +15,12 @@ import {
   createStringArrayMap
 } from './DataManagerTypes';
 import { parseJsonCompat } from '../utils/JsonCompat';
+import { weekdayLabelFromDate as dateUtilsWeekdayLabelFromDate } from '../utils/DateUtils';
 
 export const DAILY_LOG_METADATA_PATTERN: RegExp = /^<!-- DAILY_LOG_METADATA\n([\s\S]*?)\n-->\n*/;
 export const STATE_FILE_SUFFIX: string = '.state.json';
 export const RECENT_MATCH_DAYS: number = 7;
-export const RECENT_MATCH_MAX_RECORDS: number = 100;
+export const RECENT_MATCH_MAX_RECORDS: number = 0;
 
 type RegExpMap = Record<string, RegExp>;
 
@@ -213,24 +214,8 @@ export function dateToTime(value: string): number {
   return new Date(value + 'T00:00:00').getTime();
 }
 
-const WEEKDAY_LABELS: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-
 export function weekdayLabelFromDate(value: string): string {
-  if (!isIsoDate(value)) {
-    return '';
-  }
-  let year = Number(value.substring(0, 4));
-  let month = Number(value.substring(5, 7));
-  let day = Number(value.substring(8, 10));
-  let date = new Date(year, month - 1, day);
-  if (isNaN(date.getTime()) || date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
-    return '';
-  }
-  let weekday = date.getDay();
-  if (weekday < 0 || weekday >= WEEKDAY_LABELS.length) {
-    return '';
-  }
-  return WEEKDAY_LABELS[weekday];
+  return dateUtilsWeekdayLabelFromDate(value);
 }
 
 export function addDays(value: string, days: number): string {
@@ -295,6 +280,9 @@ export function sourceRef(sourceDate: string, fileName: string, entryIndex: numb
 
 export function sourceDisplayName(value: string): string {
   let parts = sourceFileNameParts(value);
+  if (parts[0] === 'app-chat') {
+    return parts[1] === 'local' ? '端侧聊天' : '云端聊天';
+  }
   let name = parts.length > 0 ? parts[parts.length - 1] : '';
   let legacyName = appKeyFromTaskName(name);
   return appDisplayNameFromKey(legacyName) || normalizeFreeText(legacyName) || '未知来源';
@@ -302,6 +290,9 @@ export function sourceDisplayName(value: string): string {
 
 export function sourceAppDisplayName(value: string): string {
   let parts = sourceFileNameParts(value);
+  if (parts[0] === 'app-chat') {
+    return sourceDisplayName(value);
+  }
   let packageName = parts.length > 0 ? parts[0] : '';
   let fromPackage = appDisplayNameFromPackage(packageName);
   if (fromPackage.length > 0) {
@@ -320,7 +311,13 @@ export function sourceAppDisplayName(value: string): string {
 
 function sourceContextDisplayNames(value: string): string[] {
   let parts = sourceFileNameParts(value);
-  if (parts.length <= 2) {
+  if (parts.length <= 2 || parts[0] === 'app-chat') {
+    return [];
+  }
+  let workflowName = normalizeLookupText(parts[1]);
+  // 微信自动采集第三段是 run_id，图库导出第三段是图库分类；二者都不是联系人/业务对象。
+  if (workflowName === 'wechat_auto_summary' || workflowName === 'wechatautosummary' ||
+    workflowName === 'gallery_analysis' || workflowName === 'galleryanalysis') {
     return [];
   }
   return stableUnique(parts.slice(2).map((part: string) => normalizeFreeText(part))).filter((part: string) => part.length > 0);
@@ -344,11 +341,21 @@ function appDisplayNameFromPackage(packageName: string): string {
   let mappings: Record<string, string> = {};
   mappings['comtencentmm'] = '微信';
   mappings['comtencentwechat'] = '微信';
+  mappings['comhuaweiphotos'] = '图库';
+  mappings['comjdharmony'] = '京东';
+  mappings['comctripharmony'] = '携程';
   mappings['comalipaymobileclient'] = '支付宝';
+  mappings['comsankuaimeituan'] = '美团';
+  mappings['commeituanwaimai'] = '美团外卖';
+  mappings['commeituantakeoutnew'] = '美团外卖';
   mappings['comsankuaidianping'] = '大众点评';
+  mappings['comtaobaotaobao'] = '淘宝';
   mappings['comtencentvideohm'] = '腾讯视频';
+  mappings['tvdanmakubili'] = '哔哩哔哩';
   mappings['comxinginxhshos'] = '小红书';
   mappings['comxinginxhs_hos'] = '小红书';
+  mappings['comautonaviminimap'] = '高德地图';
+  mappings['comhuaweihealth'] = '华为运动健康';
   mappings['meeleeleme'] = '饿了么';
   return mappings[normalized] || '';
 }
@@ -587,22 +594,20 @@ export function atomicizeCandidateFacts(entry: SourceEntry, facts: CandidateFact
 }
 
 export function selectRecentScopeRecords(records: AggregatedRecord[], fact: CandidateFact): AggregatedRecord[] {
-  let factDate = fact.source_date;
-  let lower = addDays(factDate, -(RECENT_MATCH_DAYS - 1));
-  let recentByDate = records.filter((record: AggregatedRecord) => record.last_seen_date >= lower && record.last_seen_date <= factDate);
-  let recentByCount = records.slice().sort((left: AggregatedRecord, right: AggregatedRecord) => {
-    if (left.last_seen_date !== right.last_seen_date) {
-      return right.last_seen_date.localeCompare(left.last_seen_date);
-    }
-    return right.record_id - left.record_id;
-  }).slice(0, RECENT_MATCH_MAX_RECORDS).reverse();
-  if (recentByDate.length === 0) {
-    return recentByCount;
+  let factDate = isIsoDate(fact.event_date) ? fact.event_date : fact.source_date;
+  if (!isIsoDate(factDate)) {
+    return [];
   }
-  if (recentByCount.length === 0) {
-    return recentByDate;
+  let factTime = dateToTime(factDate);
+  if (factTime <= 0) {
+    return [];
   }
-  return recentByDate.length <= recentByCount.length ? recentByDate : recentByCount;
+  let lowerTime = factTime - (RECENT_MATCH_DAYS - 1) * 86400000;
+  return records.filter((record: AggregatedRecord) => {
+    let firstSeenDate = normalizeFreeText(record.first_seen_date);
+    let firstSeenTime = dateToTime(firstSeenDate);
+    return firstSeenTime >= lowerTime && firstSeenTime <= factTime;
+  });
 }
 
 export function findExactExistingMatch(records: AggregatedRecord[], fact: CandidateFact): AggregatedRecord | null {

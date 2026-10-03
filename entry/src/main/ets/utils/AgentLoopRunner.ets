@@ -4,12 +4,23 @@ import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
+import { LocalPlannerFastPath, LocalPlannerFastPathMatch } from './LocalPlannerFastPath';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
+import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
+import {
+  agentPostActionDelayMs,
+  DEFAULT_AGENT_POST_ACTION_DELAY_MS
+} from './AgentLoopTimingPolicy';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
+import { getAppBundleName } from './AppIdentity';
 import { AgentLoopNativeApi } from 'libentry.so';
+import { localVisionPromptHw } from './LocalVisionImageShape';
+import { PhoneHdcWorkflowBridge } from './selfhdc/PhoneHdcWorkflowBridge';
+import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from './selfhdc/PhoneAgentPolicy';
 
 type AgentLoopMode = 'local' | 'cloud';
+export type AgentPromptMode = 'local' | 'cloud';
 type LogHandler = (message: string) => void;
 type ApprovalHandler = (response: string) => Promise<boolean>;
 type CloudConfigProvider = () => CloudModelConfig;
@@ -20,10 +31,10 @@ interface PlannerTarget {
 }
 
 const MAX_AGENT_STEPS: number = 15;
-const HOST_APP_BUNDLE_NAME: string = 'com.example.mnnllmchat';
 
 export class AgentLoopRunner {
   private filesDir: string;
+  private modelDirPath: string;
   private localApi: AgentLoopNativeApi;
   private cloudClient: CloudModelClient;
   private cloudConfigProvider: CloudConfigProvider;
@@ -37,10 +48,15 @@ export class AgentLoopRunner {
   private cancellationRequested: boolean = false;
   private cloudActionHistory: string[] = [];
   private cloudTask: string = '';
+  private localActionCallCount: number = 0;
+  private cloudPromptMode: AgentPromptMode = 'cloud';
+  private postActionDelayMs: number = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
+  private phoneBridge: PhoneHdcWorkflowBridge | null = null;
 
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
     filesDir: string,
+    modelDir: string,
     hdcServerIp: string,
     localApi: AgentLoopNativeApi,
     cloudClient: CloudModelClient,
@@ -48,9 +64,11 @@ export class AgentLoopRunner {
     localLogHandler: LogHandler,
     cloudLogHandler: LogHandler,
     localApprovalHandler: ApprovalHandler,
-    cloudApprovalHandler: ApprovalHandler
+    cloudApprovalHandler: ApprovalHandler,
+    cloudPromptMode: AgentPromptMode = 'cloud'
   ) {
     this.filesDir = filesDir;
+    this.modelDirPath = modelDir;
     this.localApi = localApi;
     this.cloudClient = cloudClient;
     this.cloudConfigProvider = cloudConfigProvider;
@@ -59,30 +77,45 @@ export class AgentLoopRunner {
     this.cloudLogHandler = cloudLogHandler;
     this.localApprovalHandler = localApprovalHandler;
     this.cloudApprovalHandler = cloudApprovalHandler;
+    this.cloudPromptMode = cloudPromptMode;
   }
 
   getMode(): AgentLoopMode {
     return this.mode;
   }
 
+  // Opt-in only. PC callers keep their constructor, model protocol, prompt mode and device transport.
+  useDeviceBridgeForPhone(bridge: PhoneHdcWorkflowBridge): void {
+    this.phoneBridge = bridge;
+    this.hdcBridge = bridge;
+    this.cloudPromptMode = 'cloud';
+  }
+
   async requestCancellation(): Promise<void> {
+    let activeMode = this.mode;
     this.cancellationRequested = true;
-    if (this.mode === 'cloud') {
+    this.phoneBridge?.cancel();
+    if (activeMode === 'cloud') {
       this.cloudClient.cancelActiveRequests();
-      return;
     }
-    await this.resetLocalContext();
+    await this.returnToHostApp(activeMode);
+    if (activeMode === 'local') {
+      await this.resetLocalContext();
+    }
   }
 
   async runLocalTask(task: string): Promise<void> {
     this.mode = 'local';
     this.cancellationRequested = false;
+    this.localActionCallCount = 0;
+    this.postActionDelayMs = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
     AgentExecutionController.beginExecution('本地 Agent 执行中...');
     try {
       await this.syncAgentConfig();
       await this.hdcBridge.prepareAgentRun();
       await this.resetLocalContext();
       let plannerTarget = await this.runPlanner(task, 'local');
+      this.configureTargetTiming(plannerTarget);
       await this.launchTargetApp(plannerTarget);
       await this.resetLocalContext();
       await this.runAgentSteps(task, 'local');
@@ -90,7 +123,9 @@ export class AgentLoopRunner {
       AgentExecutionController.finishExecution('本地 Agent 已完成');
     } catch (e) {
       let err = e as Error;
-      await this.returnToHostApp('local');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('local');
+      }
       AgentExecutionController.finishExecution('本地 Agent 结束');
       throw err;
     } finally {
@@ -98,25 +133,33 @@ export class AgentLoopRunner {
     }
   }
 
-  async runCloudTask(task: string): Promise<void> {
+  async runCloudTask(task: string, returnToHostAppOnFinish: boolean): Promise<void> {
     this.mode = 'cloud';
     this.cancellationRequested = false;
     this.cloudActionHistory = [];
     this.cloudTask = '';
+    this.postActionDelayMs = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
     AgentExecutionController.beginExecution('云端 Agent 执行中...');
     try {
       await this.syncAgentConfig();
       await this.hdcBridge.prepareAgentRun();
-      let plannerTarget = await this.runPlanner(task, 'cloud');
+      let plannerTarget = await this.runPlanner(task, 'cloud', this.promptModeForCloudRequest());
+      this.configureTargetTiming(plannerTarget);
       await this.launchTargetApp(plannerTarget);
       this.cloudActionHistory = [];
-      await this.runAgentSteps(task, 'cloud');
-      await this.returnToHostApp('cloud');
+      await this.runAgentSteps(task, 'cloud', this.promptModeForCloudRequest());
+      if (returnToHostAppOnFinish) {
+        await this.returnToHostApp('cloud');
+      } else {
+        this.log('cloud', '>> [Agent] stay in target app after task completion.');
+      }
       AgentExecutionController.finishExecution('云端 Agent 已完成');
     } catch (e) {
       let err = e as Error;
       this.cloudClient.cancelActiveRequests();
-      await this.returnToHostApp('cloud');
+      if (!this.isCancellationRequested()) {
+        await this.returnToHostApp('cloud');
+      }
       AgentExecutionController.finishExecution('云端 Agent 结束');
       throw err;
     } finally {
@@ -136,7 +179,11 @@ export class AgentLoopRunner {
     }
   }
 
-  private async runPlanner(task: string, mode: AgentLoopMode): Promise<PlannerTarget> {
+  private promptModeForCloudRequest(): AgentPromptMode {
+    return this.cloudPromptMode === 'local' ? 'local' : 'cloud';
+  }
+
+  private async runPlanner(task: string, mode: AgentLoopMode, promptMode: AgentPromptMode = mode): Promise<PlannerTarget> {
     this.checkCancellation();
     let template = AgentPromptTemplates.load('planner_oneshot_harmony.md');
     if (template.trim().length === 0) {
@@ -146,14 +193,30 @@ export class AgentLoopRunner {
       throw new Error('Planner prompt template is missing');
     }
 
+    if (mode === 'local') {
+      let fastPathMatch: LocalPlannerFastPathMatch | null = LocalPlannerFastPath.match(task, template);
+      if (fastPathMatch !== null) {
+        this.log(mode, '>> [Planner Fast Path] matched ' + fastPathMatch.matchedBy + '="' +
+          fastPathMatch.matchedText + '": app=' + fastPathMatch.appName + ', package=' + fastPathMatch.packageName +
+          '; skip local model Planner.');
+        let fastPathTarget: PlannerTarget = {
+          appName: fastPathMatch.appName,
+          packageName: fastPathMatch.packageName
+        };
+        return fastPathTarget;
+      }
+      this.log(mode, '>> [Planner Fast Path] no App name or package match; use local model Planner.');
+    }
+
     let prompt = template.replace('{task_description}', task).replace('<task_description>', task);
     if (prompt.indexOf(task) < 0) {
       prompt += '\n\n用户任务: ' + task;
     }
 
-    this.log(mode, '>> [Stage 1 - Planner] prompt chars=' + prompt.length + '\n' + prompt);
-    let response = mode === 'local' ? await this.runLocalAction(prompt) : await this.runCloudPlanner(prompt);
-    this.log(mode, '>> [Planner] model response:\n' + response);
+    let stageTitle = mode === 'cloud' && promptMode === 'local' ? 'PCAgent Stage 1' : 'Stage 1 - Planner';
+    this.log(mode, '>> [' + stageTitle + '] prompt mode=' + promptMode + ', chars=' + prompt.length + '\n' + prompt);
+    let response = mode === 'local' ? await this.runLocalAction(prompt, undefined, undefined, undefined, 'planner') :
+      (promptMode === 'local' ? await this.runPcAgentPrompt(prompt, '', 'Stage 1') : await this.runCloudPlanner(prompt));
     let data = AgentActionParser.extractJsonMap(response, true);
     let action = AgentActionParser.getMapString(data, 'action').toLowerCase();
     if (action === 'error') {
@@ -183,6 +246,8 @@ export class AgentLoopRunner {
     if (appName.length === 0) {
       throw new Error('Planner output missing app_name/package_name');
     }
+    this.log(mode, '>> [Planner] parsed target: app=' + appName + ', package=' +
+      (packageName.length > 0 ? packageName : '(empty)'));
     let target: PlannerTarget = {
       appName: appName,
       packageName: packageName
@@ -197,9 +262,17 @@ export class AgentLoopRunner {
     await this.sleep(300);
   }
 
+  private configureTargetTiming(target: PlannerTarget): void {
+    this.postActionDelayMs = agentPostActionDelayMs(target.appName, target.packageName);
+    this.log(this.mode, '>> [Agent] post-action screenshot delay=' + String(this.postActionDelayMs) +
+      'ms for target app=' + target.appName + ', package=' +
+      (target.packageName.length > 0 ? target.packageName : '(empty)'));
+  }
+
   private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await this.hdcBridge.startApp(bundleName, bundleName, false);
       this.log(mode, '>> [Agent] returned to host app via HDC bridge.');
       return true;
     } catch (e) {
@@ -215,28 +288,37 @@ export class AgentLoopRunner {
     return false;
   }
 
-  private async runAgentSteps(task: string, mode: AgentLoopMode): Promise<void> {
+  private async runAgentSteps(task: string, mode: AgentLoopMode, promptMode: AgentPromptMode = mode): Promise<void> {
     this.checkCancellation();
-    let prefixFile = this.noReasonMode ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
-    let prefixTemplate = AgentPromptTemplates.load(prefixFile);
+    let useNoReasonPrompt = this.resolveAgentNoReasonMode();
+    let prefixFile = useNoReasonPrompt ? 'e2e_v2_agent_prefix_noreason.md' : 'e2e_v2_agent_prefix.md';
+    this.log(mode, '>> [Agent] prompt mode=' + promptMode + '/' + (useNoReasonPrompt ? 'no_reason' : 'reason'));
+    this.log(mode, '>> [Agent] prefix source=' + AgentPromptTemplates.promptSource(this.modelDirPath, prefixFile));
+    let prefixTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, prefixFile);
     if (prefixTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] prefix template missing, fallback to full prompt mode.');
       await this.runFullPromptMode(task, mode);
       return;
     }
     let prefix = prefixTemplate.replace('{task}', task);
+    let useCloudWithLocalPrompt = mode === 'cloud' && promptMode === 'local';
     if (mode === 'local') {
       await this.localAgentPrefill(prefix);
+    } else if (useCloudWithLocalPrompt) {
+      this.cloudActionHistory = [];
+      this.cloudTask = task;
+      this.log('cloud', '>> [PCAgent Prefill] local prompt mode, prefix chars=' + prefix.length);
     } else {
       this.cloudActionHistory = [];
       this.cloudTask = this.extractCloudTask(prefix, task);
       this.log('cloud', '>> [Cloud Agent Prefill] Qwen prompt mode, task=' + this.cloudTask);
     }
 
-    let screenshotFactor = mode === 'cloud' ? 0.5 : 0.25;
+    let screenshotFactor = mode === 'cloud' && promptMode !== 'local' ? 0.5 : 0.25;
     let inverseScreenshotFactor = Math.round(1 / screenshotFactor);
-    let variableFile = this.noReasonMode ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
-    let variableTemplate = AgentPromptTemplates.load(variableFile);
+    let variableFile = useNoReasonPrompt ? 'e2e_v2_agent_variable_noreason.md' : 'e2e_v2_agent_variable.md';
+    this.log(mode, '>> [Agent] variable source=' + AgentPromptTemplates.promptSource(this.modelDirPath, variableFile));
+    let variableTemplate = AgentPromptTemplates.loadFromModelDir(this.modelDirPath, variableFile);
     if (variableTemplate.trim().length === 0) {
       this.log(mode, '>> [Agent] variable template missing, fallback to full prompt mode.');
       if (mode === 'local') {
@@ -251,44 +333,63 @@ export class AgentLoopRunner {
     try {
       for (let i = 0; i < MAX_AGENT_STEPS; i++) {
         await this.waitForRunnableState();
-        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': 截图');
+        let agentLabel = useCloudWithLocalPrompt ? 'PCAgent' : ((mode === 'cloud' ? 'Cloud' : 'MNN') + ' Agent');
+        AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': 截图');
         let shot = await this.hdcBridge.screenshotWithFactor(screenshotFactor);
         let imageBase64 = shot.image_b64 || '';
         let width = shot.width || 0;
         let height = shot.height || 0;
         let historyText = localHistory.length > 0 ? localHistory.join('  ') : '(No history)';
         let variable = variableTemplate.replace('{history}', historyText);
-        let response = mode === 'local' ?
-          await this.localAgentStep(variable, imageBase64, width, height) :
-          await this.cloudAgentStep(imageBase64);
-        this.log(mode, '>> [Agent] response:\n' + response);
-        await this.sleep(300);
-
-        let parsed = AgentActionParser.parse(response, true);
+        let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+          let candidate = mode === 'local' ?
+            await this.localAgentStep(variable, imageBase64, width, height) :
+            (useCloudWithLocalPrompt ?
+              await this.pcAgentStep(prefix, variable, imageBase64) :
+              await this.cloudAgentStep(imageBase64));
+          await this.sleep(300);
+          return candidate;
+        }, (info: AgentActionParseRetryInfo): void => {
+          this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+            String(info.maxRetries) + ': ' + info.errorMessage);
+          AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS +
+            ': JSON解析失败，同屏重试 ' +
+            String(info.retryNumber) + '/' + String(info.maxRetries));
+        });
+        let response = parsed.raw;
         if (parsed.action === 'error') {
           throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
         }
-        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
-          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' + parsed.action);
+        AgentExecutionController.updateFloatText(agentLabel + ' ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': ' +
+          parsed.action);
+        this.log(mode, '>> [Agent] parsed step ' + (i + 1) + ': action=' + parsed.action);
         if (AgentActionParser.isTerminal(parsed.action)) {
+          if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }
           completed = true;
           break;
         }
         let fullWidth = width * inverseScreenshotFactor;
         let fullHeight = height * inverseScreenshotFactor;
+        if (this.phoneBridge !== null) {
+          let screen = phoneAgentScreenSize(shot);
+          fullWidth = screen.width; fullHeight = screen.height;
+          this.log(mode, 'AGENT_SCREEN model=' + width + 'x' + height + ' physical=' + fullWidth + 'x' + fullHeight);
+        }
         await this.executeParsedAction(parsed, fullWidth, fullHeight);
-        if (mode === 'cloud') {
+        if (mode === 'cloud' && !useCloudWithLocalPrompt) {
           this.cloudActionHistory.push(AgentActionParser.normalizeCloudHistoryItem(response));
           this.log('cloud', '>> [Cloud History] appended after HDC execution, history=' + this.cloudActionHistory.length);
-        } else {
-          localHistory.push((i + 1) + ': Action=' + parsed.action);
-          this.log('local', '[Agent] Appended JSON data to history: ' + localHistory[localHistory.length - 1]);
         }
-        await this.sleep(700);
+        if (mode === 'local' || useCloudWithLocalPrompt) {
+          localHistory.push((i + 1) + ': Action=' + parsed.action);
+          this.log(mode, '[Agent] Appended JSON data to history: ' + localHistory[localHistory.length - 1]);
+        }
+        // 这段等待位于下一轮截图之前，因此同时覆盖有悬浮窗和无悬浮窗的截图路径。
+        await this.sleep(this.postActionDelayMs);
       }
       if (!completed) {
         this.log(mode, '>> [Agent] reached max steps: ' + MAX_AGENT_STEPS);
+        if (this.phoneBridge !== null) { throw new Error('PHONE_AGENT_MAX_STEPS: 未在 ' + MAX_AGENT_STEPS + ' 步内完成任务'); }
       }
     } finally {
       if (mode === 'local') {
@@ -297,12 +398,31 @@ export class AgentLoopRunner {
     }
   }
 
+  private resolveAgentNoReasonMode(): boolean {
+    let hasNoReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix_noreason.md',
+      'e2e_v2_agent_variable_noreason.md');
+    if (hasNoReasonPrompts) {
+      return true;
+    }
+    let hasReasonPrompts = this.hasAgentPromptPair('e2e_v2_agent_prefix.md', 'e2e_v2_agent_variable.md');
+    if (hasReasonPrompts) {
+      return false;
+    }
+    return this.noReasonMode;
+  }
+
+  private hasAgentPromptPair(prefixFile: string, variableFile: string): boolean {
+    return AgentPromptTemplates.hasModelPrompt(this.modelDirPath, prefixFile) &&
+      AgentPromptTemplates.hasModelPrompt(this.modelDirPath, variableFile);
+  }
+
   private async runFullPromptMode(task: string, mode: AgentLoopMode): Promise<void> {
     let template = AgentPromptTemplates.load('e2e_v2.md');
     if (template.trim().length === 0) {
       template = '任务目标: {task}\n历史记录: {history}\n请分析当前屏幕截图，按照要求严格输出JSON，包含reasoning, action (click/swipe/input/done), parameters。';
     }
     let history: string[] = [];
+    let completed = false;
     for (let i = 0; i < MAX_AGENT_STEPS; i++) {
       await this.waitForRunnableState();
       let shot = await this.hdcBridge.screenshotWithFactor(0.25);
@@ -313,41 +433,72 @@ export class AgentLoopRunner {
       let prompt = template.replace('{task}', task).replace('<task>', task)
         .replace('{history}', historyText).replace('<history>', historyText)
         .replace('{history_str}', historyText);
-      let response = mode === 'local' ?
-        await this.runLocalAction(prompt, imageBase64, width, height) :
-        await this.runCloudDeciderPrompt(prompt, imageBase64);
-      await this.sleep(300);
-      let parsed = AgentActionParser.parse(response, true);
+      let parsed = await AgentActionParseRetry.request(async (): Promise<string> => {
+        let candidate = mode === 'local' ?
+          await this.runLocalAction(prompt, imageBase64, width, height, 'full-step-' + (i + 1)) :
+          await this.runCloudDeciderPrompt(prompt, imageBase64);
+        await this.sleep(300);
+        return candidate;
+      }, (info: AgentActionParseRetryInfo): void => {
+        this.log(mode, '>> [Agent] JSON parse failed; same-screen retry ' + String(info.retryNumber) + '/' +
+          String(info.maxRetries) + ': ' + info.errorMessage);
+        AgentExecutionController.updateFloatText((mode === 'cloud' ? 'Cloud' : 'MNN') +
+          ' Agent ' + (i + 1) + '/' + MAX_AGENT_STEPS + ': JSON解析失败，同屏重试 ' +
+          String(info.retryNumber) + '/' + String(info.maxRetries));
+      });
+      let response = parsed.raw;
       if (AgentActionParser.isTerminal(parsed.action)) {
+        if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }
+        completed = true;
         break;
       }
       if (parsed.action === 'error') {
         throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
       }
-      await this.executeParsedAction(parsed, width * 4, height * 4);
+      let fullWidth = width * 4; let fullHeight = height * 4;
+      if (this.phoneBridge !== null) {
+        let screen = phoneAgentScreenSize(shot);
+        fullWidth = screen.width; fullHeight = screen.height;
+        this.log(mode, 'AGENT_SCREEN model=' + width + 'x' + height + ' physical=' + fullWidth + 'x' + fullHeight);
+      }
+      await this.executeParsedAction(parsed, fullWidth, fullHeight);
       history.push((i + 1) + ': Action=' + parsed.action);
-      await this.sleep(700);
+      await this.sleep(this.postActionDelayMs);
+    }
+    if (this.phoneBridge !== null && !completed) {
+      throw new Error('PHONE_AGENT_MAX_STEPS: 未在 ' + MAX_AGENT_STEPS + ' 步内完成任务');
     }
   }
 
   private async executeParsedAction(parsed: ParsedAgentAction, width: number, height: number): Promise<HdcBridgeResponse> {
     this.checkCancellation();
+    let swipeFallbackDiagnostic = AgentActionParser.getSwipeFallbackDiagnostic(parsed, width, height);
+    if (swipeFallbackDiagnostic.length > 0) {
+      this.log(this.mode, '>> [Agent] Swipe fallback: ' + swipeFallbackDiagnostic);
+    }
     let payload = AgentActionParser.buildHdcActionPayload(parsed, width, height);
     this.log(this.mode, '>> [Agent] HDC action payload:\n' + ArkJSON.stringify(payload));
     return await this.hdcBridge.guiAction(payload as Object as WorkflowJsonMap);
   }
 
-  private async runLocalAction(prompt: string, imageBase64?: string, width?: number, height?: number): Promise<string> {
+  private async runLocalAction(prompt: string, imageBase64?: string, width?: number, height?: number,
+    stage: string = 'action'): Promise<string> {
     let finalPrompt = prompt;
     if (imageBase64 !== undefined && imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + String(height || 0) + ',' + String(width || 0) + '</hw></img>';
-      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(width || 0) + 'x' + String(height || 0) + ')');
+      let sourceWidth = width || 0;
+      let sourceHeight = height || 0;
+      let modelHw = localVisionPromptHw(sourceWidth, sourceHeight);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(sourceWidth) + 'x' +
+        String(sourceHeight) + ', model_hw=' + modelHw + ')');
       finalPrompt = finalPrompt.indexOf('<image_placeholder>') >= 0 ?
         finalPrompt.replace('<image_placeholder>', imgTag) :
         imgTag + '\n' + finalPrompt;
     }
-    this.log('local', '>> [Action] full prompt:\n' + finalPrompt);
+    this.localActionCallCount += 1;
+    this.log('local', '>> [Action][' + stage + '] infer call #' + this.localActionCallCount +
+      ' full prompt:\n' + finalPrompt);
     AgentExecutionController.updateFloatText('Inferencing...');
     let chat = this.localApi['chat'];
     if (typeof chat !== 'function') {
@@ -356,7 +507,8 @@ export class AgentLoopRunner {
     let response = await chat(finalPrompt) as string;
     this.checkCancellation();
     AgentExecutionController.updateFloatText('AI Agent running...');
-    this.log('local', '>> [Action] model response:\n' + response);
+    this.log('local', '>> [Action][' + stage + '] infer call #' + this.localActionCallCount +
+      ' model response:\n' + response);
     if (!await this.localApprovalHandler(response)) {
       throw new Error('User rejected');
     }
@@ -380,8 +532,10 @@ export class AgentLoopRunner {
     let finalVariable = variable;
     if (imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + height + ',' + width + '</hw></img>';
-      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height + ')');
+      let modelHw = localVisionPromptHw(width, height);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height +
+        ', model_hw=' + modelHw + ')');
       finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
         finalVariable.replace('<image_placeholder>', imgTag) :
         imgTag + finalVariable;
@@ -395,7 +549,7 @@ export class AgentLoopRunner {
     let streamedText = '';
     let response = await agentStep(finalVariable, (token: string) => {
       if (this.isCancellationRequested()) {
-        throw new Error('__agent_cancelled__');
+        return;
       }
       streamedText += token;
       AgentExecutionController.replaceFloatText(streamedText);
@@ -442,6 +596,17 @@ export class AgentLoopRunner {
     return response;
   }
 
+  private async pcAgentStep(prefix: string, variable: string, imageBase64: string): Promise<string> {
+    let finalVariable = variable;
+    if (imageBase64.length > 0) {
+      finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
+        finalVariable.replace('<image_placeholder>', '') :
+        finalVariable;
+    }
+    let prompt = prefix + '\n\n' + finalVariable;
+    return await this.runPcAgentPrompt(prompt, imageBase64, 'Agent Step');
+  }
+
   private async runCloudDeciderPrompt(prompt: string, imageBase64: string): Promise<string> {
     AgentExecutionController.updateFloatText('Cloud thinking...');
     let response = await this.cloudClient.chatDecider(prompt, imageBase64, this.cloudConfigProvider());
@@ -454,10 +619,29 @@ export class AgentLoopRunner {
     return response;
   }
 
+  private async runPcAgentPrompt(prompt: string, imageBase64: string, stage: string): Promise<string> {
+    AgentExecutionController.updateFloatText('PC Agent thinking...');
+    this.log('cloud', '>> [PCAgent Prompt][' + stage + ']\n' + prompt);
+    let response = await this.cloudClient.chatPcAgentPrompt(prompt, imageBase64, this.cloudConfigProvider());
+    this.checkCancellation();
+    AgentExecutionController.updateFloatText('AI Agent running...');
+    this.log('cloud', '>> [PCAgent Prompt][' + stage + '] model response:\n' + response);
+    if (!await this.cloudApprovalHandler(response)) {
+      throw new Error('User rejected');
+    }
+    return response;
+  }
+
   private async resetLocalContext(): Promise<void> {
     try {
+      if (this.phoneBridge !== null) { this.log('local', 'LOCAL_RESET_BEGIN waiting for native inference mutex'); }
       await this.localApi.agentReset();
+      if (this.phoneBridge !== null) { this.log('local', 'LOCAL_RESET_END context released'); }
     } catch (e) {
+      if (this.phoneBridge !== null) {
+        this.log('local', 'LOCAL_RESET_FAILED ' + (e as Error).message);
+        throw new Error('PHONE_AGENT_RESET: ' + (e as Error).message);
+      }
     }
   }
 
@@ -466,6 +650,10 @@ export class AgentLoopRunner {
       await this.localApi.agentReset();
       this.log('local', '>> [Agent Reset] Local Agent context reset.');
     } catch (e) {
+      if (this.phoneBridge !== null) {
+        this.log('local', 'LOCAL_RESET_FAILED ' + (e as Error).message);
+        throw new Error('PHONE_AGENT_RESET: ' + (e as Error).message);
+      }
     }
   }
 
@@ -517,6 +705,9 @@ export class AgentLoopRunner {
   }
 
   private checkCancellation(): void {
+    if (this.phoneBridge?.hasExpired()) {
+      throw new Error('PHONE_HDC_BACKGROUND_EXPIRED: 后台额度已到期，停止推理后的设备操作');
+    }
     if (this.isCancellationRequested()) {
       throw new Error('Task cancelled by user');
     }
@@ -527,6 +718,7 @@ export class AgentLoopRunner {
   }
 
   private log(mode: AgentLoopMode, message: string): void {
+    if (this.phoneBridge !== null) { message = phoneAgentLogText(message); }
     AppLogger.info('AgentLoop.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler(message);

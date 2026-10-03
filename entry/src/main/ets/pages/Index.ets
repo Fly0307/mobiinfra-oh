@@ -116,6 +116,7 @@ import {
   shouldShowFirstLaunchOnboarding
 } from './onboarding/OnboardingTypes';
 import { SettingsCenterPage } from './settings/SettingsCenterPage';
+import { SettingsBackupController } from './settings/SettingsBackupController';
 import { SETTINGS_SECTION_NONE, SettingsSectionId } from './settings/SettingsCenterTypes';
 import { TaskPage } from './task/TaskPage';
 import { PrivacyConsent } from '../utils/PrivacyConsent';

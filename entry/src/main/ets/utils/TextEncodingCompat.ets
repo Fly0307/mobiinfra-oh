@@ -103,21 +103,20 @@ function exactUint8Array(bytes: Uint8Array): Uint8Array {
   return output;
 }
 
-function appendUtf8CodePoint(bytes: number[], codePoint: number): void {
-  if (codePoint <= 0x7F) {
-    bytes.push(codePoint);
-  } else if (codePoint <= 0x7FF) {
-    bytes.push(0xC0 | (codePoint >> 6));
-    bytes.push(0x80 | (codePoint & 0x3F));
-  } else if (codePoint <= 0xFFFF) {
-    bytes.push(0xE0 | (codePoint >> 12));
-    bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
-    bytes.push(0x80 | (codePoint & 0x3F));
-  } else {
-    bytes.push(0xF0 | (codePoint >> 18));
-    bytes.push(0x80 | ((codePoint >> 12) & 0x3F));
-    bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
-    bytes.push(0x80 | (codePoint & 0x3F));
+// 预先计算字符串的 UTF-8 字节数，供 encodeUtf8Manually 一次性分配数组，避免编码过程中扩容。
+// 代理对（surrogate pair）在此处合并为完整码点，保证长度与 writeUtf8CodePoint 写入的字节数一致。
+function utf8ByteLength(value: string): number {
+  let length = 0;
+  for (let index = 0; index < value.length; index++) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xD800 && codePoint <= 0xDBFF && index + 1 < value.length) {
+      let next = value.charCodeAt(index + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        codePoint = 0x10000 + ((codePoint - 0xD800) * 0x400) + (next - 0xDC00);
+        index++;
+      }
+    }
+    length += utf8CodePointLength(codePoint);
   }
   return length;
 }

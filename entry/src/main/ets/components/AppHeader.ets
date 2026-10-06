@@ -13,8 +13,10 @@ export struct AppHeader {
   @StorageLink('pcServerConnected') pcServerConnected: boolean = false;
   @Prop pcServerVisible: boolean = false;
   @Prop showBackButton: boolean = false;
+  @Prop actionLabel: string = '';
   onIconClick: () => void = () => {};
   onBackClick: () => void = () => {};
+  onActionClick: () => void = () => {};
 
   private pcServerLabel(): string {
     return this.pcServerConnected ? 'PC 已连接' : 'PC 未连接';
@@ -31,8 +33,10 @@ export struct AppHeader {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textAlign(TextAlign.Center)
         .width('100%')
-        .padding({ left: this.showIcon || this.pcServerVisible ? 88 : (this.showBackButton ? 56 : 0),
-          right: this.showIcon || this.pcServerVisible ? 88 : (this.showBackButton ? 56 : 0) })
+        .padding({ left: this.showIcon || this.pcServerVisible ? 88 :
+          (this.showBackButton || this.actionLabel.length > 0 ? 56 : 0),
+          right: this.showIcon || this.pcServerVisible ? 88 :
+          (this.showBackButton || this.actionLabel.length > 0 ? 56 : 0) })
 
       Row() {
         if (this.showBackButton) {
@@ -99,6 +103,18 @@ export struct AppHeader {
           .alignItems(VerticalAlign.Center)
           .width(80)
           .justifyContent(FlexAlign.End)
+        } else if (this.actionLabel.length > 0) {
+          Button(this.actionLabel)
+            .width(56)
+            .height(40)
+            .fontSize(12)
+            .padding({ left: 8, right: 8 })
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#276EF1')
+            .backgroundColor('#EEF4FF')
+            .borderRadius(14)
+            .accessibilityText(this.actionLabel)
+            .onClick(() => { this.onActionClick(); })
         }
       }
       .alignItems(VerticalAlign.Center)

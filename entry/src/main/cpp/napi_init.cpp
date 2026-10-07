@@ -47,6 +47,7 @@
 // NNRT header for OMC test (HarmonyOS SDK)
 #include "HIAIModelManager.h"
 #include "OfflineNpuChunkExecutor.h"
+#include "OfflineNpuProbe.h"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -4684,77 +4685,17 @@ static bool runOmChunkOnce(const std::string& omPath,
     using Clock = std::chrono::high_resolution_clock;
     using Ms = std::chrono::duration<double, std::milli>;
 
-    // Read OM file into buffer
-    std::ifstream file(omPath, std::ios::binary | std::ios::ate);
-    if (!file) {
-        error = "cannot open om file: " + omPath;
+    // Reuse chat's descriptor-driven input mapping and FP16/FP32 conversion.
+    OfflineNpuChunkExecutor executor;
+    if (!executor.loadChunk(0, omPath)) {
+        error = "offline model load failed: " + omPath;
         return false;
     }
-    size_t modelSize = file.tellg();
-    file.seekg(0);
-    std::vector<uint8_t> modelBuf(modelSize);
-    file.read(reinterpret_cast<char*>(modelBuf.data()), modelSize);
-    file.close();
-
-    OH_NN_ReturnCode ret = HIAIModelManager::GetInstance().LoadModelFromBuffer(modelBuf.data(), modelSize);
-    if (ret != OH_NN_SUCCESS) {
-        error = "LoadModelFromBuffer failed, ret=" + std::to_string((int)ret);
-        return false;
-    }
-
-    ret = HIAIModelManager::GetInstance().InitIOTensors();
-    if (ret != OH_NN_SUCCESS) {
-        error = "InitIOTensors failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    int nIn = HIAIModelManager::GetInstance().GetInputCount();
-    if (nIn < 3) {
-        error = "OM model expects >=3 inputs, got " + std::to_string(nIn);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    // Feed real visual_pre outputs into OM model
-    ret = HIAIModelManager::GetInstance().SetInputData(1, hiddenData.data(), hiddenData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[0] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-    ret = HIAIModelManager::GetInstance().SetInputData(0, rotaryData.data(), rotaryData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[1] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-    ret = HIAIModelManager::GetInstance().SetInputData(2, maskData.data(), maskData.size());
-    if (ret != OH_NN_SUCCESS) {
-        error = "SetInputData[2] failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
     auto t0 = Clock::now();
-    ret = HIAIModelManager::GetInstance().RunModel();
+    bool ok = executor.runChunk(0, hiddenData, rotaryData, maskData, outputs);
     latencyMs = Ms(Clock::now() - t0).count();
-
-    if (ret != OH_NN_SUCCESS) {
-        error = "RunModel failed, ret=" + std::to_string((int)ret);
-        HIAIModelManager::GetInstance().UnloadModel();
-        return false;
-    }
-
-    int nOut = HIAIModelManager::GetInstance().GetOutputCount();
-    outputs.clear();
-    outputs.resize(nOut);
-    for (int oi = 0; oi < nOut; oi++) {
-        outputs[oi] = HIAIModelManager::GetInstance().GetOutputData(oi);
-    }
-
-    HIAIModelManager::GetInstance().UnloadModel();
-    return true;
+    if (!ok) error = "offline RunSync/output conversion failed; inspect OFFLINE_NPU logs";
+    return ok;
 }
 
 static std::string findOmChunkFile(const std::string& modelDir, int chunkIndex) {
@@ -5104,6 +5045,41 @@ static std::string runOmVsMnnChunkTest(const std::string& modelRoot,
     return log.str();
 }
 
+static std::string runW8a8Probe(const std::string& directory) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_llm) {
+        return "ERROR: unload the local model before running the W8A8 probe.\n";
+    }
+    // Retain one model at a time; every sample starts from its saved CPU input.
+    std::unique_ptr<OfflineNpuChunkExecutor> executor;
+    std::string loadedPath;
+    const auto runner = [&](const std::string& path, const std::vector<float>& hidden,
+                            const std::vector<float>& rotary, const std::vector<float>& mask,
+                            std::vector<float>& output, std::string& error) {
+        if (!executor || path != loadedPath) {
+            executor.reset();
+            executor.reset(new OfflineNpuChunkExecutor());
+            loadedPath.clear();
+            if (!executor->loadChunk(0, path)) {
+                error = "offline load failed; inspect OFFLINE_NPU logs: " + path;
+                executor.reset();
+                return false;
+            }
+            loadedPath = path;
+        }
+        std::vector<std::vector<float>> outputs;
+        if (!executor->runChunk(0, hidden, rotary, mask, outputs) || outputs.empty()) {
+            error = "offline RunSync/output conversion failed; inspect OFFLINE_NPU logs";
+            return false;
+        }
+        output = std::move(outputs[0]);
+        return true;
+    };
+    const std::string report = OfflineNpuProbe::run(directory, runner);
+    appLog("[W8A8_PROBE] %s", report.c_str());
+    return report;
+}
+
 } // namespace
 
 static void OpTestExecute(napi_env env, void* data) {
@@ -5285,6 +5261,8 @@ static void OpTestExecute(napi_env env, void* data) {
             }
         }
         result << runQwen3VlChunkModelTest(modelDir, seqLen, 1, 2);
+    } else if (cfg.rfind("w8a8_probe|", 0) == 0) {
+        result << runW8a8Probe(cfg.substr(std::string("w8a8_probe|").size()));
     } else if (cfg.rfind("om_vs_mnn_chunks|", 0) == 0) {
         std::string payload = cfg.substr(std::string("om_vs_mnn_chunks|").size());
         std::string modelDir = payload;

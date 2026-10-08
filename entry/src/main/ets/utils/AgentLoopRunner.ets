@@ -4,6 +4,7 @@ import { CloudModelClient, CloudModelConfig } from './CloudModelClient';
 import { AgentExecutionController } from './AgentExecutionController';
 import { HdcWorkflowBridge } from './HdcWorkflowBridge';
 import { AgentPromptTemplates } from './AgentPromptTemplates';
+import { LocalPlannerFastPath, LocalPlannerFastPathMatch } from './LocalPlannerFastPath';
 import { AgentActionParser, ParsedAgentAction } from './AgentActionParser';
 import { AgentActionParseRetry, AgentActionParseRetryInfo } from './AgentActionParseRetry';
 import {
@@ -12,7 +13,11 @@ import {
 } from './AgentLoopTimingPolicy';
 import { HdcBridgeResponse, WorkflowJsonMap } from './WorkflowTypes';
 import { AppLogger } from './AppLogger';
+import { getAppBundleName } from './AppIdentity';
 import { AgentLoopNativeApi } from 'libentry.so';
+import { localVisionPromptHw } from './LocalVisionImageShape';
+import { PhoneHdcWorkflowBridge } from './selfhdc/PhoneHdcWorkflowBridge';
+import { phoneAgentAssertCompleted, phoneAgentLogText, phoneAgentScreenSize } from './selfhdc/PhoneAgentPolicy';
 
 type AgentLoopMode = 'local' | 'cloud';
 export type AgentPromptMode = 'local' | 'cloud';
@@ -26,7 +31,6 @@ interface PlannerTarget {
 }
 
 const MAX_AGENT_STEPS: number = 15;
-const HOST_APP_BUNDLE_NAME: string = 'com.clawmate.app';
 
 export class AgentLoopRunner {
   private filesDir: string;
@@ -47,6 +51,7 @@ export class AgentLoopRunner {
   private localActionCallCount: number = 0;
   private cloudPromptMode: AgentPromptMode = 'cloud';
   private postActionDelayMs: number = DEFAULT_AGENT_POST_ACTION_DELAY_MS;
+  private phoneBridge: PhoneHdcWorkflowBridge | null = null;
 
   // 使用显式构造参数，避免 ArkTS 对跨文件 options 对象字面量的限制。
   constructor(
@@ -79,9 +84,17 @@ export class AgentLoopRunner {
     return this.mode;
   }
 
+  // Opt-in only. PC callers keep their constructor, model protocol, prompt mode and device transport.
+  useDeviceBridgeForPhone(bridge: PhoneHdcWorkflowBridge): void {
+    this.phoneBridge = bridge;
+    this.hdcBridge = bridge;
+    this.cloudPromptMode = 'cloud';
+  }
+
   async requestCancellation(): Promise<void> {
     let activeMode = this.mode;
     this.cancellationRequested = true;
+    this.phoneBridge?.cancel();
     if (activeMode === 'cloud') {
       this.cloudClient.cancelActiveRequests();
     }
@@ -180,6 +193,21 @@ export class AgentLoopRunner {
       throw new Error('Planner prompt template is missing');
     }
 
+    if (mode === 'local') {
+      let fastPathMatch: LocalPlannerFastPathMatch | null = LocalPlannerFastPath.match(task, template);
+      if (fastPathMatch !== null) {
+        this.log(mode, '>> [Planner Fast Path] matched ' + fastPathMatch.matchedBy + '="' +
+          fastPathMatch.matchedText + '": app=' + fastPathMatch.appName + ', package=' + fastPathMatch.packageName +
+          '; skip local model Planner.');
+        let fastPathTarget: PlannerTarget = {
+          appName: fastPathMatch.appName,
+          packageName: fastPathMatch.packageName
+        };
+        return fastPathTarget;
+      }
+      this.log(mode, '>> [Planner Fast Path] no App name or package match; use local model Planner.');
+    }
+
     let prompt = template.replace('{task_description}', task).replace('<task_description>', task);
     if (prompt.indexOf(task) < 0) {
       prompt += '\n\n用户任务: ' + task;
@@ -243,7 +271,8 @@ export class AgentLoopRunner {
 
   private async returnToHostApp(mode: AgentLoopMode): Promise<boolean> {
     try {
-      await this.hdcBridge.startApp(HOST_APP_BUNDLE_NAME, HOST_APP_BUNDLE_NAME, false);
+      let bundleName = getAppBundleName();
+      await this.hdcBridge.startApp(bundleName, bundleName, false);
       this.log(mode, '>> [Agent] returned to host app via HDC bridge.');
       return true;
     } catch (e) {
@@ -335,11 +364,17 @@ export class AgentLoopRunner {
           parsed.action);
         this.log(mode, '>> [Agent] parsed step ' + (i + 1) + ': action=' + parsed.action);
         if (AgentActionParser.isTerminal(parsed.action)) {
+          if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }
           completed = true;
           break;
         }
         let fullWidth = width * inverseScreenshotFactor;
         let fullHeight = height * inverseScreenshotFactor;
+        if (this.phoneBridge !== null) {
+          let screen = phoneAgentScreenSize(shot);
+          fullWidth = screen.width; fullHeight = screen.height;
+          this.log(mode, 'AGENT_SCREEN model=' + width + 'x' + height + ' physical=' + fullWidth + 'x' + fullHeight);
+        }
         await this.executeParsedAction(parsed, fullWidth, fullHeight);
         if (mode === 'cloud' && !useCloudWithLocalPrompt) {
           this.cloudActionHistory.push(AgentActionParser.normalizeCloudHistoryItem(response));
@@ -354,6 +389,7 @@ export class AgentLoopRunner {
       }
       if (!completed) {
         this.log(mode, '>> [Agent] reached max steps: ' + MAX_AGENT_STEPS);
+        if (this.phoneBridge !== null) { throw new Error('PHONE_AGENT_MAX_STEPS: 未在 ' + MAX_AGENT_STEPS + ' 步内完成任务'); }
       }
     } finally {
       if (mode === 'local') {
@@ -386,6 +422,7 @@ export class AgentLoopRunner {
       template = '任务目标: {task}\n历史记录: {history}\n请分析当前屏幕截图，按照要求严格输出JSON，包含reasoning, action (click/swipe/input/done), parameters。';
     }
     let history: string[] = [];
+    let completed = false;
     for (let i = 0; i < MAX_AGENT_STEPS; i++) {
       await this.waitForRunnableState();
       let shot = await this.hdcBridge.screenshotWithFactor(0.25);
@@ -411,14 +448,25 @@ export class AgentLoopRunner {
       });
       let response = parsed.raw;
       if (AgentActionParser.isTerminal(parsed.action)) {
+        if (this.phoneBridge !== null) { phoneAgentAssertCompleted(parsed); }
+        completed = true;
         break;
       }
       if (parsed.action === 'error') {
         throw new Error(AgentActionParser.getMapString(parsed.parameters, 'reason', response));
       }
-      await this.executeParsedAction(parsed, width * 4, height * 4);
+      let fullWidth = width * 4; let fullHeight = height * 4;
+      if (this.phoneBridge !== null) {
+        let screen = phoneAgentScreenSize(shot);
+        fullWidth = screen.width; fullHeight = screen.height;
+        this.log(mode, 'AGENT_SCREEN model=' + width + 'x' + height + ' physical=' + fullWidth + 'x' + fullHeight);
+      }
+      await this.executeParsedAction(parsed, fullWidth, fullHeight);
       history.push((i + 1) + ': Action=' + parsed.action);
       await this.sleep(this.postActionDelayMs);
+    }
+    if (this.phoneBridge !== null && !completed) {
+      throw new Error('PHONE_AGENT_MAX_STEPS: 未在 ' + MAX_AGENT_STEPS + ' 步内完成任务');
     }
   }
 
@@ -438,8 +486,12 @@ export class AgentLoopRunner {
     let finalPrompt = prompt;
     if (imageBase64 !== undefined && imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + String(height || 0) + ',' + String(width || 0) + '</hw></img>';
-      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(width || 0) + 'x' + String(height || 0) + ')');
+      let sourceWidth = width || 0;
+      let sourceHeight = height || 0;
+      let modelHw = localVisionPromptHw(sourceWidth, sourceHeight);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Action] image saved: ' + imgPath + ' (' + String(sourceWidth) + 'x' +
+        String(sourceHeight) + ', model_hw=' + modelHw + ')');
       finalPrompt = finalPrompt.indexOf('<image_placeholder>') >= 0 ?
         finalPrompt.replace('<image_placeholder>', imgTag) :
         imgTag + '\n' + finalPrompt;
@@ -480,8 +532,10 @@ export class AgentLoopRunner {
     let finalVariable = variable;
     if (imageBase64.length > 0) {
       let imgPath = this.saveSnapshot(imageBase64);
-      let imgTag = '<img>' + imgPath + '<hw>' + height + ',' + width + '</hw></img>';
-      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height + ')');
+      let modelHw = localVisionPromptHw(width, height);
+      let imgTag = '<img>' + imgPath + '<hw>' + modelHw + '</hw></img>';
+      this.log('local', '>> [Agent Step] image saved: ' + imgPath + ' (' + width + 'x' + height +
+        ', model_hw=' + modelHw + ')');
       finalVariable = finalVariable.indexOf('<image_placeholder>') >= 0 ?
         finalVariable.replace('<image_placeholder>', imgTag) :
         imgTag + finalVariable;
@@ -580,8 +634,14 @@ export class AgentLoopRunner {
 
   private async resetLocalContext(): Promise<void> {
     try {
+      if (this.phoneBridge !== null) { this.log('local', 'LOCAL_RESET_BEGIN waiting for native inference mutex'); }
       await this.localApi.agentReset();
+      if (this.phoneBridge !== null) { this.log('local', 'LOCAL_RESET_END context released'); }
     } catch (e) {
+      if (this.phoneBridge !== null) {
+        this.log('local', 'LOCAL_RESET_FAILED ' + (e as Error).message);
+        throw new Error('PHONE_AGENT_RESET: ' + (e as Error).message);
+      }
     }
   }
 
@@ -590,6 +650,10 @@ export class AgentLoopRunner {
       await this.localApi.agentReset();
       this.log('local', '>> [Agent Reset] Local Agent context reset.');
     } catch (e) {
+      if (this.phoneBridge !== null) {
+        this.log('local', 'LOCAL_RESET_FAILED ' + (e as Error).message);
+        throw new Error('PHONE_AGENT_RESET: ' + (e as Error).message);
+      }
     }
   }
 
@@ -641,6 +705,9 @@ export class AgentLoopRunner {
   }
 
   private checkCancellation(): void {
+    if (this.phoneBridge?.hasExpired()) {
+      throw new Error('PHONE_HDC_BACKGROUND_EXPIRED: 后台额度已到期，停止推理后的设备操作');
+    }
     if (this.isCancellationRequested()) {
       throw new Error('Task cancelled by user');
     }
@@ -651,6 +718,7 @@ export class AgentLoopRunner {
   }
 
   private log(mode: AgentLoopMode, message: string): void {
+    if (this.phoneBridge !== null) { message = phoneAgentLogText(message); }
     AppLogger.info('AgentLoop.' + mode, message);
     if (mode === 'cloud') {
       this.cloudLogHandler(message);

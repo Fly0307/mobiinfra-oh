@@ -1,4 +1,7 @@
 import localUnitTest from './LocalUnit.test';
+import privacyConsentUnitTest from './PrivacyConsentUnit.test';
+import aiServiceAccessUnitTest from './AiServiceAccessUnit.test';
+import huaweiAccountSessionUnitTest from './HuaweiAccountSessionUnit.test';
 import dataManagerUnitTest from './DataManagerUnit.test';
 import workflowStorageUnitTest from './WorkflowStorageUnit.test';
 import workflowDateContextUnitTest from './WorkflowDateContextUnit.test';
@@ -12,12 +15,16 @@ import chatContextBudgetUnitTest from './ChatContextBudgetUnit.test';
 import chatReactAgentUnitTest from './ChatReactAgentUnit.test';
 import dataManagerQueryEventsToolUnitTest from './DataManagerQueryEventsToolUnit.test';
 import appLoggerUnitTest from './AppLoggerUnit.test';
+import debugLoggingUnitTest from './DebugLoggingUnit.test';
 import wechatAutoSummaryUnitTest from './WechatAutoSummaryUnit.test';
 import avatarForegroundCropUnitTest from './AvatarForegroundCropUnit.test';
 import chatMessageDataSourceUnitTest from './ChatMessageDataSourceUnit.test';
 import chatMessageScrollPolicyUnitTest from './ChatMessageScrollPolicyUnit.test';
 import chatStreamDisplayPacerUnitTest from './ChatStreamDisplayPacerUnit.test';
 import chatAttachmentPolicyUnitTest from './ChatAttachmentPolicyUnit.test';
+import localChatImagePromptUnitTest from './LocalChatImagePromptUnit.test';
+import localChatHistoryUnitTest from './LocalChatHistoryUnit.test';
+import localVisionImageShapeUnitTest from './LocalVisionImageShapeUnit.test';
 import markdownParserUnitTest from './MarkdownParserUnit.test';
 import dateUtilsUnitTest from './DateUtilsUnit.test';
 import voiceInteractionUnitTest from './VoiceInteractionUnit.test';
@@ -30,8 +37,21 @@ import mobileGuiTaskWorkflowAdapterUnitTest from './MobileGuiTaskWorkflowAdapter
 import agentActionParserUnitTest from './AgentActionParserUnit.test';
 import captureOverlayPolicyUnitTest from './CaptureOverlayPolicyUnit.test';
 import agentLoopTimingPolicyUnitTest from './AgentLoopTimingPolicyUnit.test';
+import localPlannerFastPathUnitTest from './LocalPlannerFastPathUnit.test';
+import aiGeneratedBadgeUnitTest from './AiGeneratedBadgeUnit.test';
+import homeTaskSuggestionUnitTest from './HomeTaskSuggestionUnit.test';
+import homeEmotionalSupportUnitTest from './HomeEmotionalSupportUnit.test';
+import homeComfortChatStoreUnitTest from './HomeComfortChatStoreUnit.test';
+import chatMemorySyncUnitTest from './ChatMemorySyncUnit.test';
+import dataManagerSyncReminderUnitTest from './DataManagerSyncReminderUnit.test';
+import personalMemoryA2aUnitTest from './PersonalMemoryA2aUnit.test';
+import personalMemoryChatAgentUnitTest from './PersonalMemoryChatAgentUnit.test';
+import selfHdcProtocolUnitTest from './SelfHdcProtocolUnit.test';
 
 export default function testsuite() {
+  privacyConsentUnitTest();
+  aiServiceAccessUnitTest();
+  huaweiAccountSessionUnitTest();
   localUnitTest();
   dataManagerUnitTest();
   workflowStorageUnitTest();
@@ -46,12 +66,16 @@ export default function testsuite() {
   chatReactAgentUnitTest();
   dataManagerQueryEventsToolUnitTest();
   appLoggerUnitTest();
+  debugLoggingUnitTest();
   wechatAutoSummaryUnitTest();
   avatarForegroundCropUnitTest();
   chatMessageDataSourceUnitTest();
   chatMessageScrollPolicyUnitTest();
   chatStreamDisplayPacerUnitTest();
   chatAttachmentPolicyUnitTest();
+  localChatImagePromptUnitTest();
+  localChatHistoryUnitTest();
+  localVisionImageShapeUnitTest();
   markdownParserUnitTest();
   dateUtilsUnitTest();
   voiceInteractionUnitTest();
@@ -64,4 +88,14 @@ export default function testsuite() {
   agentActionParserUnitTest();
   captureOverlayPolicyUnitTest();
   agentLoopTimingPolicyUnitTest();
+  localPlannerFastPathUnitTest();
+  aiGeneratedBadgeUnitTest();
+  homeTaskSuggestionUnitTest();
+  homeEmotionalSupportUnitTest();
+  homeComfortChatStoreUnitTest();
+  chatMemorySyncUnitTest();
+  dataManagerSyncReminderUnitTest();
+  personalMemoryA2aUnitTest();
+  personalMemoryChatAgentUnitTest();
+  selfHdcProtocolUnitTest();
 }

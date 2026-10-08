@@ -30,7 +30,6 @@ build-profile.json5*
 /hvigor-workspace-review-fix-*/
 /.codex
 /docs/superpowers/
-/docs/media/*.mp4
 /.superpowers/brainstorm/
 /mobile_file_example/
 /.agents/
@@ -38,3 +37,4 @@ build-profile.json5*
 /**/__pycache__/
 /**/.DS_Store
 /screenshot-Harmony.jpg
+mobiinfer

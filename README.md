@@ -1,239 +1,186 @@
-# MobiInfer LLM Chat (MNN 大模型端侧智能体应用)
+# ClawMate
 
-本项目是一个在鸿蒙 (HarmonyOS NEXT) 设备上运行端侧大语言模型（基于 MNN 推理引擎），并结合 PC 辅助端实现“多模态智能体操作 (视觉 UI 自动化 Agent)”的完整解决方案。
+**基于鸿蒙系统的端侧共生智能应用。**
 
----
+ClawMate 将手机 GUI 操控、个人记忆与端侧模型推理结合起来：在你的授权下完成手机任务，把分散的生活记录整理成个人记忆，并据此提供主动提醒和个性化推荐。
 
-## 🏗 架构简介
+应用采用 HarmonyOS NEXT、ArkTS / ArkUI 与 MNN / HiAI，支持云端和端侧 Agent。手机可以通过 HDC 直接控制自身，无需电脑参与设备操控。
 
-系统由两个主要部分组成：
-1. **鸿蒙 App 端 (MobiInfer LLM Chat)**
-   - 运行端侧模型（MobiInfer LLM），提供离线聊天和指令推理。
-   - 负责任务的下发与用户授权交互。
-2. **PC 服务器端 (Python)**
-   - **模型静态服务**：提供大模型权重文件的局域网下载 (`serve_model.py`)。
-   - **HDC 服务端**：提供局域网内的 HDC 代理和前置状态检测 (`hdc_server.py`)。
-   - **Agent 引擎**：负责获取手机截图、运行大模型规划、通过 `hmdriver2` 模拟点击滑动等自动化操作 (`harmony_agent.py`)。
+[获取与编译](#获取与编译) · [功能与使用](#功能与使用) · [调试与常见问题](#调试与常见问题) · [项目结构](#项目结构)
 
-   > **注意**： 每次需要更新mobiinfra-oh/entry/src/main/cpp/include 下面两个头文件，以及mobiinfra-oh/entry/libs/arm64-v8a/libMNN.so 动态链接库
+## 获取与编译
 
----
+### 应用商店下载
 
-## 🛠 一、准备与安装
+在鸿蒙手机的**应用商店中搜索 `ClawMate`**，即可下载安装。安装后在「我的」登录华为账号，并按要使用的功能完成配置。
 
-### 1. 环境依赖
-- **PC 端**：
-  - Windows / macOS / Linux。
-  - Python 3.8+。
-  - 配置好鸿蒙系统 `hdc` 环境变量（确保在命令行可以直接执行 `hdc list targets`）。
-  - 安装 Python 依赖：
-    ```bash
-    pip install Pillow hmdriver2
-    ```
-- **手机端**：
-  - 升级到支持的 HarmonyOS 操作系统。
-  - 在开发者选项中开启并获取 **“无线调试”** 的 IP 与端口（例如：`192.168.1.100:35729`）。
+### 使用 DevEco Studio 编译
 
-### 2. PC 服务器端启动
-你需要启动两个服务端脚本（推荐开启两个终端环境）：
-
-1. **大模型下载服务**（如果没有模型文件需要先下载）：
-   ```bash
-   # 进入模型所在目录，启动 HTTP 文件服务（默认 9123 端口）
-   python serve_model.py
-   ```
-2. **HDC 代理服与执行后端**：
-   ```bash
-   # 在 PC 端运行 HDC 服务（默认 9124 端口），它负责拉起并守护 harmony_agent.py 进程
-   python entry/src/main/python/hdc_server.py
-   ```
-
-### 3. App 编译与安装
-1. 使用 **DevEco Studio** 打开本项目 (MnnLlmChat)。
-2. 配置好自动签名。
-3. 点击 **Run** 或 **Debug** 编译打包，将 App 安装至手机。
-
-### 4. 修改应用包名
-
-应用包名只需在 `AppScope/app.json5` 的 `app.bundleName` 中修改。App 运行时的自启动/回跳、画像碰一碰分享标识、PC 侧 Agent 以及设备导入脚本都会自动读取该值；`entry/src/main/module.json5` 的 `shareBundleName` 由 Hvigor 在构建时自动注入，无需手工维护。
-
-包名改变后，HarmonyOS 会把它识别为一个新应用，因此旧包名的沙箱数据不会自动迁移；Account Kit、Map Kit 等已在 AppGallery Connect 开通的服务也需要登记新的包名并匹配相应签名。
-
----
-
-## 📱 二、App 使用指南
-
-App 当前采用五个底部标签页：**首页**、**汇总**、**聊天**、**任务**、**设置**。`聊天` 是中心入口，负责云端智能体、本地推理和历史会话；`任务` 负责 Workflow 配置和运行；`设置` 通过模块列表进入具体配置页。
-
-### 📌 第一次使用的配置流程（设置页）
-如果你是初次打开该 App，请切换到 **“设置”** 页，按模块完成以下配置：
-
-1. **模型与智能体**
-   - **模型下载服务**：PC 模型拉取服务器，如 `http://192.168.1.50:9123`。
-   - **HDC Server**：PC HDC 服务，如 `http://192.168.1.50:9124`。
-   - **云端 Planner / Decider 配置**：填写 OpenAI-compatible 的 base URL、API Key 和模型名。
-   - 本地 MNN 模型仍使用沙箱中的 `model` 或版本化模型目录。
-   - **NPU 图运行方式**：可选“在线编译”或“离线 OM”。在线模式按 chunk 和输入 shape 复用 App 沙箱缓存；离线模式严格加载模型目录 `om/` 中与 NPU chunk 同名的 Kirin 预编译图，缺失、shape 不匹配或芯片不兼容时直接报错，不回退在线编译。
-2. **任务与自动化**
-   - 配置 Agent 执行确认策略、Workflow 运行相关选项和运行日志入口。
-   - 点击 HDC/Agent 后端相关按钮前，请确认 PC 端已启动 `hdc_server.py`。
-3. **数据采集**
-   - 配置图库、OCR、Embedding 和地图服务，用于图库分析、数据归家和推荐生成。
-4. **存储与关于**
-   - 管理模型文件、调试产物、截图缓存和应用说明。
-
-本地模型文件请使用 `mobiinfer llmexport` 导出。需要通过局域网下载时，将 `entry/src/main/python/serve_model.py` 放在导出后的模型目录下并启动服务，再回到 App 内执行模型下载。
-
-离线 NPU 模型仍需保留完整的 MNN 权重、视觉 pre/post、CPU chunk、tokenizer 与配置文件；`.om` 只替代配置为 `npu` 的视觉 chunk。当前 Kirin 9030 离线图固定为 `seq_len=608`，App 会把相册图片和本地 Agent 截图统一映射到 `600×270`（横屏交换）的视觉提示尺寸。其他视觉 token shape 需要重新生成并编译对应 OM。
-
-### 🎙 聊天、会话与 Agent 控制（聊天页）
-切换到 **“聊天”** 页后，可以使用顶部模式切换：
-
-1. **云端智能体**
-   - 发送普通消息时，App 会按当前会话历史构造上下文并调用云端模型。
-   - 输入可执行任务后点击 **下发任务**，App 会通过 PC 侧 `hdc_server.py` 和 `harmony_agent.py` 控制手机完成 GUI 操作。
-   - 执行过程会以折叠卡片展示关键步骤；最终结果和调试截图会保存到当前会话。
-2. **本地推理**
-   - 加载 MNN 模型后，可进行端侧本地对话。
-   - 本地 Agent 任务会通过 App 内 `AgentRouterServer` 转发到 `libentry.so`/MNN 推理，再由 PC 侧执行动作。
-3. **历史会话**
-   - 点击左上角菜单可展开会话列表。
-   - 云端智能体和本地推理分别保存上下文，切换会话时会恢复对应聊天记录。
-   - 删除会话会同时删除该会话对应的记录文件和截图资产。
-
-### 🧭 首页、汇总、任务和设置
-
-- **首页**：展示数据归家后的个人画像、推荐事项和数字分身；推荐事项可直接下发为云端 Agent 任务。
-- **汇总**：按场景展示已整理记录，支持查看分组详情和来源信息。“个人信息”栏目收录用户在云端或端侧聊天中明确说出的生日、住址、工作单位等可长期复用的本人资料，不需要预先填写固定字段；普通云端聊天可通过现有事件查询工具按关键词检索。打开 App 时，若距上次同步（或首次使用）已满 3 天且检测到新保存的记录，会询问是否同步，可选择“暂时不用”或勾选“不再提醒”。手动点击“同步”时，按消息发送时间仅处理最近 7 × 24 小时内尚未处理的内容，已检查但没有相关信息的消息也不会重复处理。聊天提取使用现有 Planner 整理服务，以用户明确表达或确认的信息为依据，AI 回答只作为上下文。处理失败的批次可在下次同步时重试。
-- **任务**：管理 Workflow 配置、图形化编辑节点、运行任务，并查看配置文件、daily-log 和运行产物。
-- **设置**：按模块进入个人与隐私、数据采集、模型与智能体、任务与自动化、存储与关于等配置。
-
----
-
-## 🖱 三、主要功能说明
-
-### 「聊天」页面
-* **模式切换**：在云端智能体和本地推理之间切换；聊天记录和上下文按模式与会话隔离。
-* **会话管理**：左上角展开历史会话列表，可新建、切换和删除会话。
-* **发送**：发送普通消息；发送后输入框会清空并收起输入法。
-* **深度思考 / 下发任务**：作为快捷操作入口，支持让云端或本地 Agent 处理复杂任务。
-* **执行过程折叠**：中间步骤默认折叠展示，展开后查看格式化 reasoning、动作和目标。
-* **截图预览**：任务结果截图按会话保存，点击后可放大查看。
-
-### 「任务」页面
-* **Workflow 任务卡片**：运行已配置的 GUI 自动化任务。
-* **任务控制方式**：只保留“电脑控制”和“手机自己控制”两个选项，新用户默认“手机自己控制”，已有用户保留已保存的选择。选择同时作用于任务页 Workflow、聊天云端/本地 Agent 和聊天 `mobile_gui_task` 工具。手机连接地址统一在「我的 → 手机 HDC」设置；只有选择电脑控制时才弹出桌面端下载提醒。
-* **图形化编辑器**：编辑 `open_app`、`gui_task`、`shot_summary`、`if`、`for_loop`、`until_loop` 等节点。
-* **文件管理**：查看和清理 Workflow 配置、daily-log 与运行文件。
-* **场景切换**：按购物、聊天、外卖、娱乐、生活、社交、差旅等采集场景管理任务。
-
-### 「设置」页面
-* **个人与隐私**：配置确认策略、隐私守护和数字分身相关选项。
-* **数据采集**：配置图库、OCR、Embedding 与地图服务。
-* **模型与智能体**：配置云端 Planner/Decider、本地模型下载、HDC Server 和模型调试工具。
-* **任务与自动化**：配置 Agent 执行、Workflow 和运行日志入口。
-* **存储与关于**：管理模型文件、调试产物、截图缓存、版本和说明。
-
-### 手机 HDC 连接设置与自控测试（实验功能）
-
-在「我的 → 手机 HDC」中设置**当前手机**的无线调试连接地址。Wi-Fi IPv4 默认自动检测，HDC 调试连接端口仍需从系统无线调试页面填写；修改即保存，任务页与测试共用这份设置。App 会直接连接手机的调试守护进程，使用 App 自己生成并保存在私有沙箱的 RSA3072 密钥完成公开 HDC 协议握手，不调用 PC 的 HTTP 服务，也不复用 PC 的授权密钥。不需要先由 PC 执行配置命令；首次系统授权仍需在手机弹窗中手动允许 `MobiInfra-SelfHdc`。
-
-1. 保持手机解锁，在开发者选项中手动开启无线调试，填写当前 HDC 连接端口。App 在每次启动、回到前台、进入手机 HDC 设置页及手机任务/测试连接前检测 Wi-Fi IPv4，只更新 IP，保留端口与控制方式。无可用 Wi-Fi 地址或检测失败时保留上次配置并显示原因，不用蜂窝网络、VPN、回环或链路本地地址覆盖。可点击「立即检测手机 IP」；需要手填 IP 或尝试 `127.0.0.1` 时关闭「自动更新手机 Wi-Fi IP」（守护进程是否接受回环连接由系统决定）。
-2. 点击「仅测试连接」，验证 TCP、系统授权和 HDC Shell；授权等待最长90秒。该按钮不会打开支付宝。
-3. 点击「开始完整测试」，依次通过 HDC Shell 执行：打开 `com.alipay.mobile.client / EntryAbility` → 截图 → 按截图尺寸向上滑动一次 → 再截图 → 返回本 App。测试期间不要手动切换应用。截图以 HDC Shell 的 `base64` 输出传回本 App，不依赖 PC 文件传输。
-4. 返回后查看阶段日志与前后截图，点击「复制完整日志」提供调试信息。页面保留最近160行，完整日志在 `filesDir/self_hdc/runs/<runId>.log`，阶段及结果在同目录的 `.json`，截图为 `_before.jpeg` / `_after.jpeg`。截图命令使用 `snapshot_display` 的默认 JPEG 格式，接收端检查 JPEG 起止标记及大小限制。`latest.json` 用于恢复最近一次结果；若进程被终止，下次打开会标记上次测试中断。Hilog 模块名为 `SelfHdc`。
-
-这是验证“手机能否用 HDC 控制自己”的实验实现。用户已反馈此前手机自控测试通过，但这不能证明所有 HarmonyOS 6/7 版本或完整 GUI Workflow 都兼容。当前支持公开协议的 RSA 公钥授权、RSA-PSS/SHA512 签名和兼容的 PKCS1 原始签名；不支持 TLS-PSK、企业设备连接验证及厂商专有认证。如果系统拒绝 App 访问调试端口、拒绝自授权、校验专有 SDK 版本/哈希，或要求未实现的认证，测试会停止并记录阶段及系统反馈。打开支付宝后依靠系统短时后台运行额度继续测试，额度不足或到期也会停止。失败不会改走 PC 后端；停止不会回滚已经发送的动作。截图可用于对照，但命令成功不自动等同于界面产生了预期变化。
-
-2026-10-02 用户提供的 `OpenHarmony-7.0.0.105 / API26` 最新复测日志已确认：手机直连自身 HDC 端口、RSA 认证、Shell 探测、支付宝启动及首张 JPEG 截图成功；首张截图为 `1080x2444`、`220705` 字节。滑动命令返回 `exit=0` 和 `No Error`，但原来的错误关键字检查误将此成功提示判为失败，因而未执行第二张截图。现已改为逐行判断，只豁免完整的 `No Error` 成功提示；非零退出码与其他错误行仍会停止测试。滑动后截图及完整流程结束仍需复测；命令成功不自动等同于画面变化，需对照前后截图。截图 Base64 不写入日志。
-
-客户端身份文件 `filesDir/self_hdc/identity.json` 含私钥，日志和“复制完整日志”均不会包含该文件；调试时只提供 `runs` 下的日志、结果和必要截图。App 清除数据或重新安装可能生成新的密钥，需要重新允许系统授权。
-
-协议核对来源：[OpenHarmony HDC 会话与报文定义](https://github.com/openharmony/developtools_hdc/blob/master/src/common/session.h)、[设备认证状态机](https://github.com/openharmony/developtools_hdc/blob/master/src/daemon/daemon.cpp)、[主机 RSA 签名](https://github.com/openharmony/developtools_hdc/blob/master/src/common/auth.cpp)。商业 HarmonyOS 的实际行为以运行日志为准。
-
-端口自动发现并非理论上不可行：[OpenHarmony HDC TCP 守护进程源码](https://github.com/openharmony/developtools_hdc/blob/master/src/daemon/daemon_tcp.cpp)包含 UDP 发现服务，会回复实际 TCP 监听端口；回复使用固定发现端口，手机 App 与本机守护进程同时绑定/接收存在需要实测的条件。商业 HarmonyOS 是否保留并开放同机发现能力尚未验证，因此当前实现不自动探测端口，仍使用系统无线调试页面显示的 HDC 连接端口。重新开启无线调试后端口可能变化，需要在「我的 → 手机 HDC」更新。
-
-### 任务页使用手机自己控制
-
-1. 默认使用“手机自己控制”，在「我的 → 手机 HDC」填写 **HDC 连接端口**，保留默认的自动 Wi-Fi IP。启动时检查一次；选择手机控制或执行任务前若未检测到 Wi-Fi IP、未填写端口或地址格式不正确，会弹窗提示并提供直达设置页的按钮。进入开发者模式：打开“设置 > 关于手机”，连续快速点击“软件版本号”7次，再在设置中搜索并开启“无线调试”，记录 IP 和连接端口。IP 探测只读取网络地址，不能确认开发者模式或无线调试已开启。设置保存在 `filesDir/self_hdc/task_connection.json`，不会修改 PC HDC Server 地址或密钥。任务页切换控制方式只修改模式，不覆盖已保存的 IP、端口或自动更新开关。
-2. 首次使用新增输入能力时，进入「手机 HDC → 验证点击 / 聚焦 / 文本输入」。先点测试输入框一次校准物理屏幕坐标，再点开始。诊断使用与任务相同的手机桥接，依次检查实际点击、激活并替换 ASCII 输入、记忆焦点后替换中文与 shell 特殊字符、回车提交及截图。`INPUT_ASSERT ... PASS` 表示控件实际收到预期事件/文字；仅有 HDC 的 `No Error` 不算验证通过。诊断不需要云端模型，也不调用 PC。
-3. 保留已配置的云端 Planner / Decider / Summary，在任务页运行原有 Workflow。编排、循环、分支、总结和 daily-log 仍由 App 原有执行器负责，仅设备操作切换到 `PhoneHdcWorkflowBridge`。手机分支不会探测 PC HTTP 服务，也不会在失败时改用 PC。批量手机任务遇到失败或取消会停止后续任务。
-4. 所有连接、认证、Workflow 步骤、动作序号、HDC 命令退出码、截图尺寸及失败信息汇总到「我的 → 手机 HDC」。`CONNECTION / IP_STATUS` 记录本次地址和自动检测状态，Hilog 的 `IP_REFRESH` 记录更新前后 IP 与检测来源。`ACTION_BEGIN / ACTION_END / ACTION_FAILED` 可定位动作，`DEVICE_OUTPUT` 可对照设备响应，`WORKFLOW_SUMMARY` 指向原有 Workflow 运行目录。新增“清空日志”按钮清除手机测试和任务日志，保留授权密钥、连接配置、截图与 Workflow 产物；运行期间不可清空。截图 Base64 和 HDC 输入命令中的文本不写入桥接日志，Workflow 模型响应仍沿用原有日志内容。
-
-| 原有任务设备能力 | 手机分支实现 |
-| --- | --- |
-| 启动 / 重置 / 停止目标应用 | `bm dump` 查询真实启动 Ability，`aa start` / `aa force-stop`；拒绝停止控制器自身 |
-| 截图、截图总结、Decider 图片输入 | HDC Shell 截图并传回 JPEG；向模型提供半尺寸图片，保持现有执行器的坐标乘二约定，动作使用实际屏幕尺寸 |
-| 点击与激活输入框 | `uitest uiInput click`，检查坐标边界，成功后才记录输入目标 |
-| 输入 / 点击并输入 | 明确坐标或此前输入框点击 → 激活 → Ctrl+A → DEL → 带 shell 引号保护的文本 → ENTER，与 PC 默认驱动输入流程一致；缺少焦点时拒绝盲输 |
-| 四向滑动 / 指定坐标滑动 | `uitest uiInput swipe`，按实际屏幕尺寸计算或使用明确物理坐标 |
-| BACK / HOME / ENTER / 数字键码、等待 | `uitest uiInput keyEvent`、可取消的等待；返回、切换应用和滑动会清理记忆焦点 |
-| 暂停、取消和返回控制器 | 沿用任务控制 UI，手机取消关闭自身 HDC 会话与云端请求，收尾尝试返回本 App |
-
-开始执行前会检查 HDC Shell 身份和设备上 `aa`、`bm`、`snapshot_display`、`base64`、`uitest` 及所需 `uiInput` 子命令。缺失能力时停止并报告具体名称。未知动作同样明确失败，不会冒充执行成功。
-
-部分 API26 设备的 `uitest uiInput help` 会打印 `Missing parameter.` 和完整 `USAGE` 后返回退出码 1。手机分支仅在这个只读帮助探测中兼容该结果，必须确认完整命令声明包含 `click`、`swipe`、`text`、`keyEvent`，且无权限或其他实际错误。日志 `CAPABILITIES uiInput verified=... helpExit=1 acceptedNonzeroUsage=true` 表示通过这项兼容检查；实际启动、点击、输入、滑动、截图等命令仍要求退出码 0。
-
-手机切到其他应用后依赖系统授予的短时后台额度，日志会记录实际 `budgetMs`；不足 30 秒时拒绝开始，额度到期报告 `PHONE_HDC_BACKGROUND_EXPIRED` 并取消后续执行。额度是系统限制，较长的 GUI Workflow 仍可能无法连续完成；本次没有引入持续后台保活能力。本次新增 GUI 集成与输入诊断只完成源码、SDK 类型及 ArkTS 静态核对，未编译、安装或执行真机验证。
-
-输入命令参考：[OpenHarmony UiTest 指南](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)。诊断坐标按 [ClickEvent 文档](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-arkui/arkui-ts/ts-universal-events-click.md)将 `displayX/displayY` 的 vp 单位转换为物理像素。
-
-### 聊天云端 / 本地 Agent 使用手机自控
-
-1. 在「我的 → 手机 HDC」保存连接端口，在「任务」页选择「手机自己控制」，再到聊天页下发云端或本地 Agent 任务。两种 Agent 及聊天 `mobile_gui_task` 都读取同一选择；本次任务开始后固定执行方式，不在失败时切换 PC。
-2. 云端 Agent 使用设置中的 Planner / Decider 云端地址与各自密钥，直接复用 `CloudModelClient` 的 Planner 和 Qwen Decider；手机分支不使用“PC Server 云端接口”的自动覆盖地址。端侧 Agent 先按原流程加载本地 MNN 模型，再复用本地 Planner 快速匹配、`chat`、`agentPrefill`、`agentStep` 和 `agentReset`。模型目录中的提示词及无推理提示词优先规则保持一致。
-3. `AgentLoopRunner` 的模型循环、同屏 JSON 重试、动作解析、历史记录、动作确认及暂停继续复用。云端 Agent 截图比例为 0.5，端侧为 0.25；模型仍收到原有图片路径/`<hw>` 标签，手机动作使用截图中附带的真实物理尺寸，避免缩小图取整后的坐标误差。点击、输入、按键、滑动、启动应用和返回宿主复用任务页手机桥接。聊天 GUI 工具继续复用 Workflow 编排、业务结果提取与会话运行目录。
-4. 在「我的 → 手机 HDC」查看、复制或清空日志。`RUN mode=phone-chat-local / phone-chat-cloud / phone-chat-workflow` 区分入口，`STAGE_BEGIN` 区分模型准备、HDC 连接与执行，`AGENT_SCREEN` 核对模型/物理尺寸，`LOCAL_RESET_BEGIN / LOCAL_RESET_END / LOCAL_RESET_FAILED` 定位本地推理收尾。长提示词日志分段为 `AGENT_LOG_PART`，截图 Base64 不写入日志。
-
-手机会话与任务、诊断互斥。取消会立即关闭 HDC 连接，云端销毁请求；本地推理仍按现有原生接口等待当前推理结束，再重置上下文，期间保留 busy 状态，不接受新的设备任务。模型输出 `done: failed/suspended`、`stop/terminate/abort` 或到达 15 步上限不会报告成功。保持现有系统后台额度限制，到期明确记录 `PHONE_HDC_BACKGROUND_EXPIRED` 并停止后续动作；本地模型加载安排在申请额度之前。本次新增聊天集成只完成静态检查及聚焦用例编写，未构建或执行真机测试。
-
----
-
-## 🔁 四、Workflow / 云端 Agent / MNN Agent 执行链路
-
-Workflow、云端 Agent、本地 Agent 和聊天 GUI 工具共享「任务」页的控制方式选择：
-
-| 执行方式 | App 侧入口 | PC 侧入口 | 模型推理位置 | 设备控制方式 |
-| --- | --- | --- | --- | --- |
-| Workflow 任务 | 「任务」页任务卡片 | `hdc_server.py` 的 `/api/workflow` | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | PC 侧 `harmony_agent.py` 执行 HDC/hmdriver2 截图与动作 |
-| Workflow 手机自控 | 「任务」页选择“手机自己控制” | 无 | App 侧 `CloudModelClient` 调云端 Planner/Decider/Summary | App 自身 HDC 客户端直连本机无线调试守护进程 |
-| 云端 Agent（电脑控制） | 「聊天」页下发云端 Agent 任务 | `hdc_server.py` 的 `/api/workflow` | App 侧 `AgentLoopRunner` 调用 `CloudModelClient` | PC HDC bridge 提供截图与动作 |
-| MNN 本地 Agent（电脑控制） | 「聊天」页下发本地 Agent 任务 | `hdc_server.py` 的 `/api/workflow` | App 侧 `AgentLoopRunner` 调用 `libentry.so`/MNN | PC HDC bridge 提供截图与动作 |
-| 云端 / MNN Agent（手机自控） | 「聊天」页下发 Agent 任务 | 无 | 复用同一 App Agent 循环和云端 / 端侧模型 | 复用任务页手机 HDC bridge |
-| 聊天 GUI 工具（手机自控） | 聊天 `mobile_gui_task` 确认后执行 | 无 | 临时 Workflow 调用云端 Planner / Decider / Summary | 复用任务页手机 HDC bridge |
-
-关键端口：
-
-- `9123`：PC 模型文件下载服务，通常由 `serve_model.py` 提供。
-- `9124`：PC HDC HTTP 服务，通常由 `hdc_server.py` 提供。
-- `9126`：App 内 TCP Agent Router。PC 侧通过 `hdc fport tcp:9126 tcp:9126` 映射到手机 App。
-
-Workflow 不依赖 `9126` 轮询。它由 App 内 `WorkflowRunner` 编排；电脑模式通过 `HdcWorkflowBridge` 调用 PC 的 `/api/workflow`，手机模式注入独立的 `PhoneHdcWorkflowBridge`。桥接负责启动 App、截图和执行 GUI 动作。Planner、Decider 和图片总结请求仍由 App 侧直接调用云端模型配置。
-
-当前聊天 Agent 按钮的循环在 `AgentLoopRunner` 中执行；电脑模式先检查 PC HDC 服务，手机模式通过 `PhoneHdcRunSession` 管理连接、互斥、后台额度、日志与收尾，随后把手机桥接注入同一循环。原有 `9126`、`AgentRouterServer` 与 Python `harmony_agent.run_agent_loop()` 调试/轮询通路保留，手机分支不启动该通路。
-
-执行方式可以串行切换：一个 workflow 完成后，可以直接启动云端 Agent 或 MNN Agent；一个 Agent 任务完成后，也可以直接切换到 workflow。切换时不需要重启 PC server。仍建议同一时间只运行一个自动化任务，避免多个入口同时控制同一台手机。
-
-`hdc_server.py` 默认会启动 `9126` 轮询 loop。如果只需要运行 workflow bridge，可以使用：
+准备 [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/resources/)、HarmonyOS SDK 与 Native / CMake 工具链。本地模型推理需要 ARM64 真机；x86_64 模拟器使用原生接口桩，适合查看 UI。
 
 ```bash
-python entry/src/main/python/hdc_server.py --workflow_only
+git clone https://github.com/doulujiyao12/mobiinfra-oh.git
+cd mobiinfra-oh
 ```
 
-注意：使用 `--workflow_only` 时，云端 Agent 和 MNN 本地 Agent 不会收到 PC 轮询任务。
+1. **打开工程**：在 DevEco Studio 中选择 **Open**，打开仓库根目录，等待依赖同步完成。
+2. **准备构建配置**：根目录的 `build-profile.json5` 为本机配置，不随仓库提交。首次克隆时可使用下方示例创建，再按本机安装的 SDK 调整版本。
+3. **配置签名**：连接已开启开发者模式的鸿蒙手机，在 **File → Project Structure → Project → Signing Configs** 中配置自动签名，登录自己的华为开发者账号，完成设备授权。
+4. **编译应用**：选择 `entry` 模块、`default` 产品和 `debug` 构建模式，通过 **Build → Build Hap(s)/APP(s) → Build Hap(s)** 生成 HAP。
+5. **安装调试**：选择连接的手机，点击 **Run** 或 **Debug**。构建产物位于 `entry/build/outputs/` 下。
 
-## ❓ 五、常见问题与排错 (FAQ)
+签名与真机运行说明可参考 [华为 HarmonyOS 开发入门](https://developer.huawei.com/consumer/cn/develop-novice-guide/)。
 
-**如果... 端口冲突导致 `TCP Port listen failed at 9126` 怎么办？**
-答：最新的代码已经自带防呆机制。聊天页或设置页触发 Agent/HDC 后端检测时，PC 侧会刷新端口映射并清理残留的 `hdc fport tcp:9126 tcp:9126`。如果仍然复现，请重启 `hdc_server.py` 并重新连接无线调试。
+<details>
+<summary>首次克隆：build-profile.json5 示例</summary>
 
-**如果... HDC 连接检测一直无响应？**
-答：检查你的 PC 防火墙是否放行了 `9123` 与 `9124` 端口，验证手机端是否和 PC 端处于同一公共局域网。
+以下配置不含证书或密码。签名信息由 DevEco Studio 写入本机文件；SDK 版本需与所用开发环境一致。
 
-**如果... 模型输出是一堆乱码或崩溃退出？**
-答：可能是线程数设置过大或者本地沙箱内的 `.weight` 权重文件在下载中断层或不全。请尝试：
-1. 于“设置 > 模型与智能体”中将线程数（如 8）调小至 4。
-2. 在模型文件管理区域删除模型后重新下载。
+```json5
+{
+  "app": {
+    "signingConfigs": [],
+    "products": [{
+      "name": "default",
+      "signingConfig": "default",
+      "targetSdkVersion": "6.1.1(24)",
+      "compatibleSdkVersion": "6.0.0(20)",
+      "runtimeOS": "HarmonyOS",
+      "buildOption": {
+        "nativeCompiler": "BiSheng",
+        "strictMode": {
+          "caseSensitiveCheck": true,
+          "useNormalizedOHMUrl": true
+        }
+      }
+    }],
+    "buildModeSet": [{ "name": "debug" }, { "name": "release" }]
+  },
+  "modules": [{
+    "name": "entry",
+    "srcPath": "./entry",
+    "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+  }]
+}
+```
 
-**如果... 智能体开始执行了，但是 PC 端拉取截图失败报错？**
-答：确保手机并未锁屏，息屏状态下无法通过 HDC 获取图层。若反复报 "Fail"，请插拔尝试 USB 连接模式重新赋权一次调试信任。
+</details>
+
+华为账号、地图等服务需要在 AppGallery Connect 中关联自己的应用、签名与服务配置，参见 [华为账号登录调试指南](docs/huawei-account-login-debug-guide.md)。包名的唯一配置源是 `AppScope/app.json5`；预置原生库位于 `entry/libs/arm64-v8a/`，更新时需与对应头文件及模型版本匹配。
+
+## 功能与使用
+
+| 能力 | 主要入口 | 用途 |
+| --- | --- | --- |
+| 手机 GUI 操控 | 聊天、任务、我的 → 手机 HDC | 启动应用、点击、输入、滑动与截图 |
+| 定制 GUI 任务 | 任务 → 配置任务 | 用图形节点或 JSON 定义可重复执行的任务 |
+| 个人记忆库 | 汇总 → 同步 / 图库分析 | 整理任务记录、图片与聊天中的个人信息 |
+| 碰一碰分享画像 | 两台手机上的 ClawMate | 分享个人画像，并分析共同点 |
+| 端侧模型推理 | 我的 → 模型与智能体 | 下载模型，选择 CPU / NPU，进行本地推理 |
+| 主动服务 | 首页 → 为你提醒 / 猜你喜欢 | 根据个人记忆生成待办与个性化建议 |
+
+### 1. 手机 GUI 操控：手机自己控制自己
+
+App 内的 HDC 客户端通过 TCP 连接**本机无线调试端口**，完成密钥认证后，通过 HDC Shell 执行启动应用、截图、点击、文本输入和滑动等操作。截图交给 Agent 决策，再执行下一步动作。整个设备控制链路在手机上完成，无需 PC 代理或提前用 PC 配置。
+
+**首次配置：**
+
+1. 打开手机「设置 → 关于手机」，连续快速点击**软件版本 7 次**，开启开发者模式。
+2. 连接 **Wi-Fi**，在系统设置中搜索并开启**无线调试**，记录页面上的 **IP 地址和连接端口**。
+3. 进入「ClawMate → 我的 → 手机 HDC」，填写该手机的 IP 和端口，修改即保存。IP 自动更新不可用时，关闭「自动更新手机 Wi-Fi IP」后手动填写。
+4. 点击「**仅测试连接**」，首次连接时手动允许手机系统弹出的调试授权请求。
+5. 在「任务」页选择「**手机自己控制**」，随后即可运行 GUI 任务；「聊天」页的云端和本地 Agent 共用这一选择。
+
+<p>
+  <img src="entry/src/main/resources/base/media/phone_hdc_developer_guide.png" alt="开启开发者模式：连续点击软件版本七次" width="350" />
+  <img src="entry/src/main/resources/base/media/phone_hdc_wireless_guide.png" alt="无线调试：查看手机 IP 地址和连接端口" width="350" />
+</p>
+
+*图片中的地址仅为示例，请填写自己手机显示的地址。端口需要手动填写；重新开启无线调试后可能变化。*
+
+「手机 HDC」还提供支付宝启动、截图、滑动测试，以及点击 / 聚焦 / 文本输入验证，适合在执行实际任务前检查设备能力。
+
+**设备控制方式与模型推理位置独立。** 手机自控可使用云端或端侧 Agent；任务页 Workflow 的规划、决策和截图总结使用配置的云端服务。云端服务在「我的 → 模型与智能体 → 云端 Planner/Decider」配置，支持 OpenAI-compatible 接口。
+
+### 2. 定制化 GUI 任务
+
+把经常要做的操作保存成 Workflow，例如查看账单、整理订单或采集浏览记录。
+
+1. 打开「**任务 → 配置任务**」，选择已有任务编辑，或在「新建任务」中选择「图新建」 / 「JSON」。点击任务列表条目的非开关区域，也可直接进入对应配置。
+2. 选择场景，设置任务名称和描述，再编排 GUI 任务、明确的点击 / 滑动动作、截图总结、条件分支和循环。
+3. 写清楚任务目标与停止条件，例如：**“打开支付宝，查看最近 3 条账单，整理商户、金额和日期。”**
+4. 保存后返回任务列表，开启需要执行的条目并运行，也可在配置页单独运行任务。
+
+执行结果、截图和 daily-log 可在 Workflow 文件查看入口中查看。JSON 配置的步骤类型为 `gui_task`、`gui_action`、`tool`、`if`、`loop`，字段定义见 [WorkflowTypes.ets](entry/src/main/ets/utils/WorkflowTypes.ets)。
+
+### 3. 建立个人记忆库
+
+个人记忆来自你授权采集和提供的信息。可以从以下来源逐步建立：
+
+- **GUI 任务记录**：运行购物、外卖、聊天、出行等场景任务，保存结构化结果与摘要。
+- **相册与截图**：在「汇总 → 图库分析」中选择图片，结合 OCR、图文分析和检索向量整理内容。相关服务在「我的 → 数据采集」配置。
+- **日常聊天**：在聊天中提供自己的偏好、习惯或个人信息；同步时以你明确表达或确认的信息为依据提取记忆。
+
+采集完成后，在「**汇总**」点击「**同步**」，将记录整理为可查询的记忆。聊天同步会处理最近 7 天内尚未处理的消息；汇总页可按场景查看来源与详情，首页展示生成的个人画像。
+
+随后可以在聊天中提问，例如“我最近买过什么？”或“我有哪些饮食偏好？”。个人画像也会作为 Agent 的背景信息，帮助它理解你的需求。
+
+记录与记忆索引保存在 App 沙箱中；使用云端分析服务时，相应文本或图片会发送给配置的服务。采集与服务配置可按需选择。图库流程和存储说明见 [采集流程](docs/gallery/collection-flow.md)与[存储格式](docs/gallery/storage-format.md)。
+
+### 4. 碰一碰分享个人画像
+
+ClawMate 接入鸿蒙 Share Kit 的一碰分享能力，可以将生成的个人画像分享给另一台手机上的 ClawMate。
+
+1. 先完成记忆同步，建立自己的个人画像。
+2. 在支持系统一碰分享的两台设备上打开 ClawMate，按系统引导碰一碰并确认分享。
+3. 接收方可在聊天中查看收到的画像，并结合自己的画像分析共同偏好与相似之处。
+
+分享内容为个人画像摘要；仅在双方同意时使用。此功能依赖设备和系统的一碰分享能力，开发包还需配置匹配的应用身份与签名。
+
+### 5. 端侧模型推理部署
+
+本地推理由 MNN / HiAI 驱动，支持本地聊天与视觉 Agent。
+
+1. 进入「**我的 → 模型与智能体 → 本地模型下载**」，使用预设的 ModelScope 仓库或填写兼容的模型仓库地址，下载完整模型。
+2. 在「**本地模型**」中选择下载的模型及运行方式。
+3. 在「**聊天**」页切换到「**本地**」，加载模型后开始推理；GUI 控制方式仍沿用任务页的选择。
+
+| 运行方式 | 行为 | 部署要求 |
+| --- | --- | --- |
+| 全 CPU | 本地模型各模块使用 CPU | 完整的 MNN 模型、权重、tokenizer 与配置 |
+| 在线 NPU | 首次编译 NPU 图，后续复用缓存 | 支持对应 HiAI / NPU 能力的设备与模型 |
+| 离线 OM | 加载模型目录 `om/` 下的预编译图 | 图文件与设备芯片、输入 shape 和引擎版本匹配 |
+
+离线 OM 只替代配置为 NPU 的视觉分块，仍需保留 MNN 权重、CPU 分块和视觉 pre/post 等完整文件。缺少图文件或设备 / shape 不兼容时会明确报错。自导出模型需要与当前原生引擎接口匹配，提示词配置见 [本地模型提示词加载说明](docs/local_mnn/prompt-loading.md)。
+
+### 6. 主动服务：主动提醒 + 猜你喜欢
+
+在完成记忆同步和个人画像生成后，首页提供两类服务：
+
+- **为你提醒**：根据记录整理待办和后续事项，支持查看详情、切换未完成 / 全部，以及标记完成。
+- **猜你喜欢**：结合近期记录与个人偏好生成建议，支持「换一批」，查看推荐理由和可用的来源信息，并将适合执行的建议下发为 Agent 任务。
+
+当前提醒和推荐主要在首页卡片中呈现。记忆持续更新后，可重新生成推荐，让服务跟随你的实际生活变化。
+
+## 调试与常见问题
+
+- **手机自控连接失败**：确认 Wi-Fi、无线调试和当前 IP / 端口；重新开启无线调试后检查端口是否变化，并完成系统授权。长任务还可能受系统后台运行额度限制。
+- **查看执行日志**：在「我的」开启「**Debug**」，再查看聊天日志或「手机 HDC」日志；后者支持复制和清空。关闭 Debug 后，这两类日志不显示，也不记录。
+- **模型输出异常或加载失败**：检查模型文件完整性及引擎版本；NPU 模式还需核对芯片和图文件。可用同一输入对比 CPU 与 NPU 输出定位问题。
+- **需要电脑控制**：在任务页切换为「电脑控制」，用 PC 的 HDC 连接手机，启动 `entry/src/main/python/hdc_server.py`，并在「我的」配置 PC HDC Server 地址。它与手机自控使用独立的连接配置。
+
+## 项目结构
+
+```text
+AppScope/                     应用身份、版本与资源
+entry/src/main/ets/            ArkTS 页面、Agent、记忆管理与手机 HDC
+entry/src/main/cpp/            MNN / HiAI 原生推理桥
+entry/libs/arm64-v8a/          ARM64 原生库
+entry/src/main/python/         可选的 PC HDC 后端与模型文件服务
+entry/src/test/                单元测试
+docs/                         专题文档
+```
+
+更多集成说明：[华为账号登录](docs/huawei-account-login-debug-guide.md) · [小艺个人记忆 A2A](docs/xiaoyi-a2a-integration.md)。
+
+欢迎通过 Issue 反馈使用问题，通过 Pull Request 改进功能与文档。调试问题请附上应用版本、设备 / 系统版本、复现步骤及必要日志，分享前移除个人信息和密钥。

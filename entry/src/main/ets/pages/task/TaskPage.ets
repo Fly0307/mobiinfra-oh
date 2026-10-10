@@ -153,7 +153,8 @@ export struct TaskPage {
   @State breakOperatorDraft: string = '==';
   @State breakRightDraft: string = '';
   @State runningTaskId: string = '';
-  @State configViewOpen: boolean = false;
+  @Link @Watch('onConfigViewChanged') configViewOpen: boolean;
+  @State private focusedConfigTaskId: string = '';
   @State batchRunning: boolean = false;
   @State batchRunStatusText: string = '';
   @State fileStatsText: string = '正在统计 workflow 文件...';
@@ -172,6 +173,8 @@ export struct TaskPage {
   private pendingStructureSelectionPath: string = '';
   private pendingTemplateInsertKeys: string[] = [];
   private cardContextSaveTimerIds: Record<string, number> = {};
+  private pendingConfigTaskId: string = '';
+  private configScrollTimerId: number = -1;
 
   aboutToAppear(): void {
     let ctx = getContext(this) as common.UIAbilityContext;
@@ -187,6 +190,7 @@ export struct TaskPage {
   }
 
   aboutToDisappear(): void {
+    this.cancelConfigTaskScroll();
     if (this.filesDir.length > 0) {
       this.flushTaskContextDrafts();
     }
@@ -497,14 +501,59 @@ export struct TaskPage {
     }
   }
 
-  private openConfigView(): void {
+  private openConfigView(taskId: string = ''): void {
+    if (this.isTaskExecutionBusy()) { return; }
     this.reloadTasks();
+    this.cancelConfigTaskScroll();
+    this.focusedConfigTaskId = '';
+    if (taskId.length > 0) {
+      let task = this.findTask(taskId);
+      if (task === null) {
+        showToastSafely('任务已不存在，请刷新后重试', 1800);
+        return;
+      }
+      this.taskScene = task.sceneId;
+      this.focusedConfigTaskId = task.id;
+      this.pendingConfigTaskId = task.id;
+    }
+    this.pageScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
     this.configViewOpen = true;
   }
 
   private closeConfigView(): void {
-    this.reloadTasks();
     this.configViewOpen = false;
+  }
+
+  private onConfigViewChanged(): void {
+    if (!this.configViewOpen) {
+      // The header button and the system Back key share the same cleanup/save path.
+      this.cancelConfigTaskScroll();
+      this.focusedConfigTaskId = '';
+      this.reloadTasks();
+      this.pageScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+    }
+  }
+
+  private cancelConfigTaskScroll(): void {
+    this.pendingConfigTaskId = '';
+    if (this.configScrollTimerId >= 0) {
+      clearTimeout(this.configScrollTimerId);
+      this.configScrollTimerId = -1;
+    }
+  }
+
+  private scrollToConfigTask(taskId: string, area: Area): void {
+    if (!this.configViewOpen || this.pendingConfigTaskId !== taskId) { return; }
+    let top = parseFloat(String(area.position.y));
+    if (!Number.isFinite(top)) { return; }
+    if (this.configScrollTimerId >= 0) { clearTimeout(this.configScrollTimerId); }
+    // Wait until the new card layout has updated Scroll's content bounds.
+    this.configScrollTimerId = setTimeout((): void => {
+      this.configScrollTimerId = -1;
+      if (!this.configViewOpen || this.pendingConfigTaskId !== taskId) { return; }
+      this.pendingConfigTaskId = '';
+      this.pageScroller.scrollTo({ xOffset: 0, yOffset: Math.max(0, top - APP_HEADER_CONTENT_GAP), animation: false });
+    }, 0);
   }
 
   private batchRunButtonText(): string {
@@ -3634,32 +3683,41 @@ export struct TaskPage {
 
   @Builder SimpleTaskRow(task: WorkflowTask, scene: WorkflowSceneConfig) {
     Row() {
-      Text(task.icon)
-        .fontSize(12)
-        .fontColor(task.enabled ? scene.color : '#8E95A3')
-        .fontWeight(FontWeight.Bold)
-        .width(40)
-        .height(40)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
-        .borderRadius(12)
-      Column() {
-        Text(task.title)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#11182F')
-          .width('100%')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
-          .fontSize(11)
-          .fontColor(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3')
-          .margin({ top: 5 })
-          .maxLines(1)
+      // A separate tap region keeps switch interaction independent of navigation.
+      Row() {
+        Text(task.icon)
+          .fontSize(12)
+          .fontColor(task.enabled ? scene.color : '#8E95A3')
+          .fontWeight(FontWeight.Bold)
+          .width(40)
+          .height(40)
+          .textAlign(TextAlign.Center)
+          .backgroundColor(task.enabled ? '#F1F5FF' : '#F4F5F8')
+          .borderRadius(12)
+        Column() {
+          Text(task.title)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#11182F')
+            .width('100%')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.runningTaskId === task.id ? '执行中' : task.enabled ? '已开启' : '已关闭')
+            .fontSize(11)
+            .fontColor(this.runningTaskId === task.id ? '#276EF1' : task.enabled ? '#148F73' : '#8E95A3')
+            .margin({ top: 5 })
+            .maxLines(1)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .margin({ left: 12 })
       }
-      .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
-      .margin({ left: 12, right: 12 })
+      .constraintSize({ minHeight: 66 })
+      .padding({ left: 14, right: 12, top: 12, bottom: 12 })
+      .accessibilityGroup(true)
+      .accessibilityText('配置任务：' + task.title)
+      .onClick((): void => { this.openConfigView(task.id); })
       Toggle({ type: ToggleType.Switch, isOn: task.enabled })
         .selectedColor(scene.color)
         .width(44)
@@ -3669,7 +3727,7 @@ export struct TaskPage {
     }
     .width('100%')
     .constraintSize({ minHeight: 66 })
-    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .padding({ right: 14 })
     .backgroundColor(Color.White)
     .borderRadius(12)
     .border({ width: 1, color: this.runningTaskId === task.id ? scene.color : '#E8EDF5' })
@@ -3760,30 +3818,6 @@ export struct TaskPage {
     .borderRadius(14)
     .border({ width: 1, color: '#E3E8F1' })
     .margin({ top: 2, bottom: 18 })
-  }
-
-  @Builder ConfigHeaderPanel() {
-    Row() {
-      Button('返回任务')
-        .width(88)
-        .height(34)
-        .fontSize(12)
-        .fontColor('#4E5666')
-        .backgroundColor('#F2F5FA')
-        .borderRadius(10)
-        .onClick(() => { this.closeConfigView(); })
-      Blank()
-      Button('刷新')
-        .width(64)
-        .height(34)
-        .fontSize(12)
-        .fontColor(Color.White)
-        .backgroundColor('#4E5666')
-        .borderRadius(10)
-        .onClick(() => { this.reloadTasks(); })
-    }
-    .width('86%')
-    .margin({ top: 8 })
   }
 
   @Builder TaskContextPanel(task: WorkflowTask) {
@@ -3944,8 +3978,11 @@ export struct TaskPage {
     .padding(18)
     .backgroundColor(Color.White)
     .borderRadius(14)
+    .border({ width: this.focusedConfigTaskId === task.id ? 1.5 : 1,
+      color: this.focusedConfigTaskId === task.id ? '#276EF1' : '#E3E8F1' })
     .shadow({ radius: 10, color: '#0D000000', offsetX: 0, offsetY: 5 })
     .margin({ bottom: 16 })
+    .onAreaChange((_oldArea: Area, newArea: Area): void => { this.scrollToConfigTask(task.id, newArea); })
   }
 
   @Builder TaskSceneTab(scene: WorkflowSceneConfig) {
@@ -3960,6 +3997,8 @@ export struct TaskPage {
       .borderRadius(10)
       .margin({ left: scene.sceneId === 0 ? 0 : 10 })
       .onClick(() => {
+        this.cancelConfigTaskScroll();
+        this.focusedConfigTaskId = '';
         this.taskScene = scene.sceneId;
       })
   }
@@ -4034,7 +4073,6 @@ export struct TaskPage {
     .backgroundColor('#F8FAFD')
     .borderRadius(14)
     .border({ width: 1, color: '#E3E8F1' })
-    .margin({ top: 24 })
   }
 
   @Builder TaskSceneList() {
@@ -4254,14 +4292,19 @@ export struct TaskPage {
   }
 
   @Builder PageHeader() {
-    AppHeader({ title: this.configViewOpen ? '配置任务' : '自定义任务' })
+    AppHeader({
+      title: this.configViewOpen ? '配置任务' : '自定义任务',
+      showBackButton: this.configViewOpen,
+      onBackClick: (): void => { this.closeConfigView(); },
+      actionLabel: this.configViewOpen ? '刷新' : '',
+      onActionClick: (): void => { this.reloadTasks(); }
+    })
   }
 
   @Builder PageContent() {
     Scroll(this.pageScroller) {
       Column() {
         if (this.configViewOpen) {
-          this.ConfigHeaderPanel()
           this.CreatePanel()
           if (this.editorOpen && this.editingTaskId.length === 0) {
             this.EditorPanel()

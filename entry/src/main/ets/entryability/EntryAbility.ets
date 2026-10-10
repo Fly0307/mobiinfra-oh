@@ -146,6 +146,7 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppLogger.info('Ability', 'Ability onForeground');
+    AppStorage.setOrCreate('selfHdcSetupForegroundEpoch', (AppStorage.get<number>('selfHdcSetupForegroundEpoch') || 0) + 1);
     // Runs for both a cold launch and returning to the App; never blocks the first screen.
     SelfHdcTaskSettings.refreshLocalIp(this.context.filesDir, 'app-foreground').catch((error: Error): void => {
       AppLogger.warnCause('SelfHdc', 'Cannot refresh saved phone IP', error);

@@ -16,6 +16,7 @@ struct OpTest {
   @State running: boolean = false
   @State customConfig: string = '608,1024,1024,1,1,1,1,1,1,1'
   @State modelDir: string = ''
+  @State probeDir: string = ''
   @State visualSeqLen: string = '608'
   // LayerNorm A/B test custom shape (independent of visualSeqLen so the LN
   // can be debugged at smaller sizes without affecting the chunk test).
@@ -33,6 +34,7 @@ struct OpTest {
   aboutToAppear() {
     let ctx = getContext(this) as common.UIAbilityContext
     this.modelDir = ctx.filesDir + '/model'
+    this.probeDir = ctx.filesDir + '/w8a8_probe'
     try {
       const res: string = native.prepareCustomOpp(ctx.resourceManager, ctx.filesDir + '/custom_opp')
       if (res !== 'ok') {
@@ -58,6 +60,18 @@ struct OpTest {
     let p: Promise<string> = native.opTest(cfg)
     p.then((result: string) => {
       this.testResult = header + result
+      this.running = false
+    }).catch((e: Error) => {
+      this.testResult = 'Error: ' + e.message
+      this.running = false
+    })
+  }
+
+  private runFixedInputProbe() {
+    this.running = true
+    this.testResult = 'Running fixed-input chunk0 comparisons...\n'
+    native.opTest('w8a8_probe|' + this.probeDir).then((result: string) => {
+      this.testResult = result
       this.running = false
     }).catch((e: Error) => {
       this.testResult = 'Error: ' + e.message
@@ -216,6 +230,31 @@ struct OpTest {
       .width('90%')
       .justifyContent(FlexAlign.Start)
       .margin({ bottom: 12 })
+
+      Text('W8A8 chunk0 probe: unload the local model first')
+        .fontSize(12)
+        .fontColor('#666666')
+        .width('90%')
+        .margin({ bottom: 4 })
+      TextInput({ text: this.probeDir })
+        .width('90%')
+        .height(40)
+        .borderRadius(8)
+        .backgroundColor('#F0F0F0')
+        .margin({ bottom: 8 })
+        .enabled(!this.running)
+        .onChange((value: string) => { this.probeDir = value })
+      Button(this.running ? 'Running...' : 'Run W8A8 Fixed-input Probe')
+        .width('90%')
+        .height(48)
+        .backgroundColor(this.running ? '#BBBBBB' : '#00695C')
+        .borderRadius(10)
+        .fontSize(15)
+        .enabled(!this.running)
+        .margin({ bottom: 10 })
+        .onClick(() => {
+          this.runFixedInputProbe()
+        })
 
       // Preset test button
       Button(this.running ? 'Running...' : 'Run Preset Tests')

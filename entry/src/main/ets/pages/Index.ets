@@ -542,6 +542,7 @@ struct Index {
   @State @Watch('onChatAppearanceChanged') chatMode: string = CHAT_MODE_CLOUD_AGENT;
   @State collectionModule: number = 0;
   @State taskScene: number = 0;
+  @State private taskConfigViewOpen: boolean = false;
   @State settingsSectionId: number = SETTINGS_SECTION_NONE;
   @StorageLink('serverIp') serverIp: string = DEFAULT_ENDPOINT_CONFIG.modelDownloadServerUrl;
   @StorageLink('modelScopeMnnRepo') modelScopeMnnRepo: string = DEFAULT_MODELSCOPE_MNN_REPO;
@@ -673,7 +674,9 @@ struct Index {
   private activeAgentRunner: AgentLoopRunner | null = null;
   private activePhoneWorkflowBridge: PhoneHdcWorkflowBridge | null = null;
   private activePhoneRunSession: PhoneHdcRunSession | null = null;
-  private phoneSetupStartupChecked: boolean = false;
+  @StorageProp('selfHdcSetupForegroundEpoch') @Watch('showPhoneSetupForForeground')
+  private phoneSetupForegroundEpoch: number = 0;
+  private phoneSetupShownForegroundEpoch: number = -1;
   private cloudClient: CloudModelClient = new CloudModelClient();
   private profileShareCloudClient: CloudModelClient = new CloudModelClient();
   private profileKnockShareService: ProfileKnockShareService = new ProfileKnockShareService();
@@ -3032,6 +3035,14 @@ struct Index {
     this.startPcServerMonitor();
   }
 
+  onBackPress(): boolean {
+    if (this.currentTab === MainTabIndex.Task && this.taskConfigViewOpen) {
+      this.taskConfigViewOpen = false;
+      return true;
+    }
+    return false;
+  }
+
   onPageShow(): void {
     this.pageVisible = true;
     this.onCurrentTabChanged();
@@ -3040,10 +3051,15 @@ struct Index {
     this.startHomeRecommendationDateTimer();
     this.startPcServerMonitor();
     this.maybeShowSyncReminder();
-    if (!this.phoneSetupStartupChecked && this.filesDir.length > 0 &&
+    this.showPhoneSetupForForeground();
+  }
+
+  private showPhoneSetupForForeground(): void {
+    if (this.pageVisible && this.phoneSetupShownForegroundEpoch !== this.phoneSetupForegroundEpoch && this.filesDir.length > 0 &&
       !AgentExecutionController.isExecutionActive() && !SelfHdcTestRunner.shared().snapshot().running) {
-      this.phoneSetupStartupChecked = true;
-      SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'app-startup').catch((e: Error): void => {
+      this.phoneSetupShownForegroundEpoch = this.phoneSetupForegroundEpoch;
+      // Remind only while the saved HDC port is empty and the user has not opted out.
+      SelfHdcSetupGuard.ensure(this.getUIContext(), this.filesDir, 'app-open', false, true).catch((e: Error): void => {
         AppLogger.warnCause('SelfHdc', 'Startup setup check failed', e);
       });
     }
@@ -7509,6 +7525,7 @@ struct Index {
     TabContent() {
       TaskPage({
         taskScene: $taskScene,
+        configViewOpen: $taskConfigViewOpen,
         onEnsureDesktopCompanion: async (): Promise<boolean> => {
           return await this.ensureDesktopCompanionReminder();
         },

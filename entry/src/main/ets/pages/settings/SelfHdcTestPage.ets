@@ -9,7 +9,7 @@ import { DEBUG_ENABLED_STORAGE_KEY } from '../../utils/DebugSettings';
 import { selfHdcReadText } from '../../utils/selfhdc/SelfHdcFiles';
 import { SelfHdcTaskSettings } from '../../utils/selfhdc/SelfHdcTaskSettings';
 import { SelfHdcSetupGuard } from '../../utils/selfhdc/SelfHdcSetupGuard';
-import { PHONE_HDC_SETUP_GUIDE } from '../../utils/selfhdc/SelfHdcSetupPolicy';
+import { SelfHdcSetupGuide } from '../../components/SelfHdcSetupGuide';
 import {
   SelfHdcTestRunner, SelfHdcTestState
 } from '../../utils/selfhdc/SelfHdcTestRunner';
@@ -83,7 +83,7 @@ struct SelfHdcTestPage {
   }
 
   private async refreshIp(): Promise<void> {
-    if (this.refreshingIp) { return; }
+    if (this.refreshingIp || this.result.running) { return; }
     this.refreshingIp = true;
     try {
       await SelfHdcTaskSettings.refreshLocalIp((getContext(this) as common.UIAbilityContext).filesDir, 'phone-hdc-settings');
@@ -154,8 +154,7 @@ struct SelfHdcTestPage {
       Column() {
         Column() {
           this.SectionTitle('无线调试地址')
-          Text(PHONE_HDC_SETUP_GUIDE + '\n首次连接时，请手动允许系统调试授权弹窗。')
-            .fontSize(13).lineHeight(21).fontColor('#667085').width('100%').margin({ top: 10 })
+          SelfHdcSetupGuide().margin({ top: 12 })
           Text('本机 IPv4：' + this.localAddresses)
             .fontSize(12).fontColor('#667085').width('100%').margin({ top: 12 })
           Row({ space: 10 }) {
@@ -179,8 +178,6 @@ struct SelfHdcTestPage {
             .onClick(async (): Promise<void> => { await this.refreshIp(); })
           Text('修改即保存，任务页共用这里的设置。需使用回环或其他手动地址时，关闭自动更新。')
             .fontSize(12).lineHeight(19).fontColor('#7B8290').width('100%').margin({ top: 8 })
-          Text('请填写 HDC 调试连接端口；不要填写配对码端口或桌面服务端口。端口可能在重新开启无线调试后变化。')
-            .fontSize(12).lineHeight(19).fontColor('#7B8290').width('100%').margin({ top: 10 })
           Row({ space: 10 }) {
             Button('仅测试连接').layoutWeight(1).height(44).fontSize(14)
               .backgroundColor('#EEF1FF').fontColor('#4F68FF').enabled(!this.result.running && !this.refreshingIp)

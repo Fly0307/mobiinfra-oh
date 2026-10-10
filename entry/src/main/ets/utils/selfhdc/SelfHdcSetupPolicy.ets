@@ -2,13 +2,6 @@ import { parseSelfHdcEndpoint } from './SelfHdcPolicy';
 
 export interface SelfHdcSetupConnection { ip: string; port: string; autoIp: boolean; }
 
-export const PHONE_HDC_SETUP_GUIDE: string =
-  '开启开发者模式：\n' +
-  '1. 打开“设置 > 关于手机”。\n' +
-  '2. 连续快速点击“软件版本号”7次。\n' +
-  '3. 在设置中搜索“无线调试”，开启后记录 IP 地址和 HDC 连接端口。\n\n' +
-  '到“我的 > 手机 HDC”填写连接端口。IP 默认自动更新，也可关闭自动更新后手动填写。';
-
 // Only an explicit saved PC selection enables desktop control.
 export function selfHdcControlMode(mode: string | undefined): string { return mode === 'pc' ? 'pc' : 'phone'; }
 

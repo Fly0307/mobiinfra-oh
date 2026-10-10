@@ -10,6 +10,7 @@ export class SelfHdcTaskSettings implements SelfHdcSetupConnection {
   ip: string = '';
   port: string = '';
   autoIp: boolean = true;
+  skipSetupReminder: boolean = false;
   private static refreshing: Promise<SelfHdcTaskSettings> | null = null;
 
   static load(filesDir: string): SelfHdcTaskSettings {
@@ -21,6 +22,7 @@ export class SelfHdcTaskSettings implements SelfHdcSetupConnection {
       settings.ip = typeof saved.ip === 'string' ? saved.ip : '';
       settings.port = typeof saved.port === 'string' ? saved.port : '';
       settings.autoIp = typeof saved.autoIp === 'boolean' ? saved.autoIp : settings.ip !== '127.0.0.1';
+      settings.skipSetupReminder = saved.skipSetupReminder === true;
     } else {
       let latest = filesDir + '/self_hdc/latest.json';
       if (selfHdcExists(latest)) {
@@ -53,6 +55,12 @@ export class SelfHdcTaskSettings implements SelfHdcSetupConnection {
   static saveMode(filesDir: string, mode: string): void {
     let settings = SelfHdcTaskSettings.load(filesDir);
     settings.mode = selfHdcControlMode(mode);
+    SelfHdcTaskSettings.save(filesDir, settings);
+  }
+
+  static saveSetupReminderChoice(filesDir: string, skipReminder: boolean): void {
+    let settings = SelfHdcTaskSettings.load(filesDir);
+    settings.skipSetupReminder = skipReminder;
     SelfHdcTaskSettings.save(filesDir, settings);
   }
 
